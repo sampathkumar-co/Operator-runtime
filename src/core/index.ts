@@ -10,3 +10,4 @@ export * from './task-store.ts';
 export * from './audit.ts';
 export * from './device-identity.ts';
 export * from './device-registry.ts';
+export * from './session-token.ts';
