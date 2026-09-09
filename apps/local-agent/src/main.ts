@@ -24,14 +24,15 @@ const runtime = createRuntime({
   cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT,
   browserAutoLaunch: process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0',
   browserPath: process.env.OPERATOR_BROWSER_PATH,
-  browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR
+  browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
+  windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH
 });
 
 const agent = createLocalAgentServer({
   runtime,
   token,
   permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact'],
+    allowedCapabilities: ['computer.inspect', 'project.inspect', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
     allowExternalWrites: false,
     allowSystemChanges: false,
@@ -45,9 +46,12 @@ const bound = await agent.listen(host, port);
 console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
 
+let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, async () => {
-    await agent.close();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await Promise.allSettled([agent.close(), runtime.close()]);
     process.exit(0);
   });
 }
