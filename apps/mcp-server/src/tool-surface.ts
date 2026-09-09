@@ -11,5 +11,5 @@ export const TOOL_SURFACE = [
   { name: 'browser.navigate', risk: 'read', description: 'Navigate an existing/new Chromium tab directly through CDP and verify the resulting destination.' },
   { name: 'browser.interact', risk: 'external', description: 'Semantically click, type, or select a browser control and verify element/page state.' },
   { name: 'app.inspect', risk: 'read', description: 'Wait for and inspect a bounded Windows UIA tree, with optional scoped events and opt-in bounded top-level Win32 window/process metadata.' },
-  { name: 'app.operate', risk: 'external', description: 'Wait for and operate a Windows control through Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns and verify semantic state.' }
+  { name: 'app.operate', risk: 'external', description: 'Wait for and operate a Windows control through Invoke, Value, Focus, SelectionItem, ExpandCollapse, bounded Scroll, or verified semantic window activation.' }
 ] as const;
