@@ -22,7 +22,7 @@ const MAX_OBSERVE_MS = 5_000;
 const MAX_WAIT_MS = 10_000;
 const DEFAULT_MAX_WINDOWS = 50;
 const MAX_WINDOWS = 200;
-const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll'] as const;
+const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'] as const;
 const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
 
 type SidecarError = { code: string; message: string; retryable?: boolean };
@@ -205,7 +205,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         ? await this.#client.call('inspect', normalizeInspectInput(action.input))
         : await this.#client.call('operate', normalizeOperateInput(action.input));
       const postcondition = action.capability === 'app.operate'
-        ? evidence('postcondition', 'pass', 'Windows UIA operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
+        ? evidence('postcondition', 'pass', 'Windows UIA/Win32 operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
         : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree, optional scoped events, and opt-in top-level window metadata instead of screenshots or process internals.', {
             observeMs: normalizeObserveMs(action.input.observeMs),
             waitMs: normalizeWaitMs(action.input.waitMs),
@@ -218,7 +218,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         provider: this.name,
         output,
         evidence: [
-          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : 'Operated Windows control through a UI Automation control pattern.', {}),
+          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : 'Operated Windows control through a verified UI Automation or semantic Win32 operation.', {}),
           postcondition
         ],
         durationMs: Math.round(performance.now() - started)
