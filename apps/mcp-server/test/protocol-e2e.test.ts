@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   'git.diff',
   'git.status',
   'git.write',
+  'project.command',
   'project.inspect',
   'terminal.execute'
 ];
@@ -107,13 +108,47 @@ function parseInspectorJson(stdout: string): Record<string, unknown> {
 
 test('official MCP client and Inspector traverse the real local-agent boundary while risky actions remain approval-gated', async (t) => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-e2e-'));
+  const authorityRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-authority-'));
   t.after(() => fs.rm(testRoot, { recursive: true, force: true }));
+  t.after(() => fs.rm(authorityRoot, { recursive: true, force: true }));
+
   execFileSync('git', ['init', '-b', 'main'], { cwd: testRoot, stdio: 'ignore' });
   execFileSync('git', ['config', 'user.name', 'Operator CI'], { cwd: testRoot });
   execFileSync('git', ['config', 'user.email', 'operator-ci@example.invalid'], { cwd: testRoot });
   await fs.writeFile(path.join(testRoot, 'project.txt'), 'base\n');
   execFileSync('git', ['add', 'project.txt'], { cwd: testRoot });
   execFileSync('git', ['commit', '-m', 'base'], { cwd: testRoot, stdio: 'ignore' });
+
+  const externalMarker = path.join(testRoot, 'external-command-ran.marker');
+  const commandRegistryPath = path.join(authorityRoot, 'project-commands.json');
+  await fs.writeFile(commandRegistryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root: testRoot,
+      commands: [
+        {
+          id: 'trusted-read',
+          title: 'Trusted read command',
+          kind: 'test',
+          executable: 'node',
+          args: ['-e', "process.stdout.write('trusted-command-ok')"],
+          cwd: '.',
+          timeoutMs: 5000,
+          risk: 'read'
+        },
+        {
+          id: 'trusted-external',
+          title: 'Approval-gated external command',
+          kind: 'custom',
+          executable: 'node',
+          args: ['-e', `require('fs').writeFileSync(${JSON.stringify(externalMarker)}, 'ran')`],
+          cwd: '.',
+          timeoutMs: 5000,
+          risk: 'external'
+        }
+      ]
+    }]
+  }, null, 2));
 
   const agentPort = await reserveLoopbackPort();
   const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
@@ -126,7 +161,8 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       OPERATOR_AGENT_PORT: String(agentPort),
       OPERATOR_AGENT_TOKEN: TOKEN,
       OPERATOR_ALLOWED_ROOTS: testRoot,
-      OPERATOR_ALLOWED_EXECUTABLES: '',
+      OPERATOR_ALLOWED_EXECUTABLES: 'node',
+      OPERATOR_PROJECT_COMMAND_REGISTRY: commandRegistryPath,
       OPERATOR_BROWSER_AUTO_LAUNCH: '0',
       OPERATOR_CDP_ENDPOINT: 'http://127.0.0.1:1'
     },
@@ -174,6 +210,9 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const gitWriteTool = tools.tools.find((tool) => tool.name === 'git.write');
   assert.equal(gitWriteTool?.annotations?.destructiveHint, false);
   assert.equal(gitWriteTool?.annotations?.readOnlyHint, false);
+  const projectCommandTool = tools.tools.find((tool) => tool.name === 'project.command');
+  assert.equal(projectCommandTool?.annotations?.readOnlyHint, false);
+  assert.equal(projectCommandTool?.annotations?.openWorldHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -187,6 +226,40 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const systemOutput = structured?.output as Record<string, unknown> | undefined;
   assert.equal(typeof systemOutput?.platform, 'string');
   assert.equal(typeof systemOutput?.arch, 'string');
+
+  const commandInspection = await client.callTool({
+    name: 'project.command',
+    arguments: { operation: 'inspect', path: testRoot }
+  });
+  assert.notEqual(commandInspection.isError, true);
+  const commandInspectionStructured = commandInspection.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(commandInspectionStructured?.provider, 'project.command.trusted');
+  const commandInspectionOutput = commandInspectionStructured?.output as Record<string, unknown> | undefined;
+  const trustedCommands = Array.isArray(commandInspectionOutput?.commands) ? commandInspectionOutput.commands as Array<Record<string, unknown>> : [];
+  assert.deepEqual(trustedCommands.map((command) => String(command.id)).sort(), ['trusted-external', 'trusted-read']);
+
+  const trustedRead = await client.callTool({
+    name: 'project.command',
+    arguments: { operation: 'run', path: testRoot, commandId: 'trusted-read', expectedRisk: 'read' }
+  });
+  assert.notEqual(trustedRead.isError, true);
+  const trustedReadStructured = trustedRead.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(trustedReadStructured?.provider, 'project.command.trusted');
+  const trustedReadOutput = trustedReadStructured?.output as Record<string, unknown> | undefined;
+  const trustedExecution = trustedReadOutput?.execution as Record<string, unknown> | undefined;
+  assert.equal(trustedExecution?.stdout, 'trusted-command-ok');
+  assert.equal(trustedExecution?.exitCode, 0);
+
+  const trustedExternalBlocked = await client.callTool({
+    name: 'project.command',
+    arguments: { operation: 'run', path: testRoot, commandId: 'trusted-external', expectedRisk: 'external' }
+  });
+  assert.equal(trustedExternalBlocked.isError, true);
+  const trustedExternalStructured = trustedExternalBlocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(trustedExternalStructured?.provider, 'policy');
+  const trustedExternalError = trustedExternalStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(trustedExternalError?.code, 'APPROVAL_REQUIRED');
+  await assert.rejects(fs.access(externalMarker));
 
   await fs.writeFile(path.join(testRoot, 'project.txt'), 'checkpoint state\n');
   const checkpointCreated = await client.callTool({
