@@ -9,5 +9,7 @@ export const TOOL_SURFACE = [
   { name: 'terminal.execute', risk: 'write', description: 'Execute an allowlisted executable with an argv array and no command shell.' },
   { name: 'browser.inspect', risk: 'read', description: 'Inspect Chromium tabs or a bounded semantic page snapshot through loopback CDP.' },
   { name: 'browser.navigate', risk: 'read', description: 'Navigate an existing/new Chromium tab directly through CDP and verify the resulting destination.' },
-  { name: 'browser.interact', risk: 'external', description: 'Semantically click, type, or select a browser control and verify element/page state.' }
+  { name: 'browser.interact', risk: 'external', description: 'Semantically click, type, or select a browser control and verify element/page state.' },
+  { name: 'app.inspect', risk: 'read', description: 'Inspect a bounded Windows control tree through Microsoft UI Automation, without screenshots.' },
+  { name: 'app.operate', risk: 'external', description: 'Operate a Windows control through Invoke, Value, or Focus patterns and verify the resulting semantic state.' }
 ] as const;
