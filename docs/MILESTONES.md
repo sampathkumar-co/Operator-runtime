@@ -32,11 +32,12 @@ Acceptance gates:
 - [x] semantic element locate/click/type/select
 - [x] bounded console/runtime-exception/network-failure capture during actions
 - [x] credential-bearing and non-HTTP(S) URL rejection
-- [ ] internal tab focus/close primitives
-- [ ] download initiation and completion events
+- [x] internal tab focus/close primitives
+- [x] download initiation and completion events
 - [ ] iframe/shadow-DOM strategy
 - [ ] browser attach/launch discovery across Chrome + Edge profiles
-- [ ] MCP adapter dependencies installed and MCP Inspector test
+- [x] MCP adapter dependencies install + typecheck in GitHub CI
+- [ ] MCP Inspector end-to-end test
 - [ ] Secure MCP Tunnel test
 - [ ] real ChatGPT read workflow test
 

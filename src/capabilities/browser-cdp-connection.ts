@@ -20,6 +20,14 @@ type Pending = {
 
 type EventListener = (params: JsonMap) => void;
 
+export function assertLoopbackDebuggerUrl(raw: string): void {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new OperatorError('UNSAFE_CDP_WEBSOCKET', 'Invalid DevTools WebSocket URL.'); }
+  if (!['ws:', 'wss:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)) {
+    throw new OperatorError('UNSAFE_CDP_WEBSOCKET', 'DevTools WebSocket endpoint must be loopback-only.');
+  }
+}
+
 export class CdpConnection {
   readonly targetId: string;
   readonly url: string;
@@ -31,6 +39,7 @@ export class CdpConnection {
   #closed = false;
 
   constructor(targetId: string, url: string) {
+    assertLoopbackDebuggerUrl(url);
     this.targetId = targetId;
     this.url = url;
     this.#socket = new WebSocket(url);

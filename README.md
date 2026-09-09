@@ -23,25 +23,27 @@ Implemented and tested:
 - semantic browser click/type/select with postcondition evidence
 - bounded browser console/runtime/network diagnostics
 - internal verified tab lifecycle primitives without expanding the external tool surface
+- verified browser download completion via Browser-domain CDP events
+- loopback-only validation for discovered DevTools WebSocket endpoints
 - authenticated loopback local-agent HTTP boundary
 - redacting structured audit log
 - Ed25519 device identity and challenge signing
 - compact 11-tool MCP v2 surface and HTTP adapter source
 - GitHub Actions gates for core tests and network-backed MCP transport typecheck
 
-Current automated tests: **20/20 passing**.
+Current automated tests: **22/22 passing**.
 
 Not yet certified:
 
 - production relay / multi-device routing
 - OAuth and account service
 - Secure MCP Tunnel packaging
-- browser downloads/completion events, iframe/shadow-DOM hardening, and automatic browser discovery/launch
+- iframe/shadow-DOM hardening and automatic browser discovery/launch
 - Windows UI Automation kernel
 - vision fallback
 - application adapter SDK beyond Git
 - checkpoint/rollback orchestration
-- MCP server dependency install/typecheck in this isolated environment and end-to-end ChatGPT invocation
+- end-to-end MCP Inspector / ChatGPT invocation (GitHub CI dependency install + typecheck now passes)
 - companion UI / installer / code signing
 
 ## Repository layout

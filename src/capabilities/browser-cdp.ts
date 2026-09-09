@@ -1,7 +1,7 @@
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
-import { CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
+import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
 import {
   assertLoopbackEndpoint,
   collectDiagnostics,
@@ -32,10 +32,16 @@ const SCORE: CapabilityScore = {
 
 const MAX_TABS = 100;
 
+type DownloadTracker = {
+  done: Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>;
+  stop(): void;
+};
+
 export class BrowserCdpProvider implements CapabilityProvider {
   readonly name = 'browser.cdp';
   #endpoint: URL;
   #sessions = new CdpSessionManager();
+  #browserSession?: CdpConnection;
 
   constructor(endpoint = 'http://127.0.0.1:9222') {
     this.#endpoint = new URL(endpoint);
@@ -62,7 +68,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
     }
   }
 
-  close(): void { this.#sessions.closeAll(); }
+  close(): void {
+    this.#sessions.closeAll();
+    this.#browserSession?.close();
+    this.#browserSession = undefined;
+  }
 
   async #inspect(action: ActionRequest, started: number): Promise<ActionResult> {
     const tabs = await this.#listTargets();
@@ -208,8 +218,14 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
     const diagnostics = await collectDiagnostics(session);
+    const expectDownload = action.input.expectDownload === true;
+    let download: DownloadTracker | undefined;
     try {
       await session.send('Runtime.enable');
+      if (expectDownload) {
+        if (operation !== 'click') throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload is only valid for click operations.');
+        download = await this.#prepareDownload(Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000));
+      }
       const before = await pageIdentity(session);
       const expression = `(${interactionFunction.toString()})(${JSON.stringify({ operation, target: targetSpec, value: action.input.value ?? null })})`;
       const result = await session.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true });
@@ -222,20 +238,77 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
       await settleAfterInteraction(session);
       const after = await pageIdentity(session);
+      const downloadResult = download ? await download.done : undefined;
+      if (downloadResult?.state === 'canceled') {
+        throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
+      }
+      const evidenceItems = [
+        evidence('browser_interaction', 'pass', `Semantic browser ${operation} executed through CDP.`, { targetId, matched: (value as JsonMap).matched }),
+        evidence('postcondition', 'pass', 'Element state was re-read after the interaction.', { after: (value as JsonMap).after, pageUrl: after.url })
+      ];
+      if (downloadResult) evidenceItems.push(evidence('download_complete', 'pass', 'Browser emitted a completed download event.', downloadResult));
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { targetId, operation, matched: (value as JsonMap).matched, before, after, diagnostics: diagnostics.snapshot() },
-        evidence: [
-          evidence('browser_interaction', 'pass', `Semantic browser ${operation} executed through CDP.`, { targetId, matched: (value as JsonMap).matched }),
-          evidence('postcondition', 'pass', 'Element state was re-read after the interaction.', { after: (value as JsonMap).after, pageUrl: after.url })
-        ],
+        output: { targetId, operation, matched: (value as JsonMap).matched, before, after, ...(downloadResult ? { download: downloadResult } : {}), diagnostics: diagnostics.snapshot() },
+        evidence: evidenceItems,
         durationMs: Math.round(performance.now() - started)
       };
     } finally {
       diagnostics.stop();
+      download?.stop();
     }
+  }
+
+  async #browserConnection(): Promise<CdpConnection> {
+    if (this.#browserSession && !this.#browserSession.closed) return this.#browserSession;
+    const response = await fetch(new URL('/json/version', this.#endpoint), { signal: AbortSignal.timeout(3_000) });
+    if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status} while discovering browser endpoint.`, { retryable: true });
+    const version = await response.json() as Record<string, unknown>;
+    const ws = typeof version.webSocketDebuggerUrl === 'string' ? version.webSocketDebuggerUrl : '';
+    if (!ws) throw new OperatorError('CDP_BROWSER_TARGET_UNAVAILABLE', 'Browser does not expose a browser-level DevTools WebSocket endpoint.', { retryable: true });
+    this.#browserSession = new CdpConnection('browser', ws);
+    return this.#browserSession;
+  }
+
+  async #prepareDownload(timeoutMs: number): Promise<DownloadTracker> {
+    const browser = await this.#browserConnection();
+    await browser.send('Browser.setDownloadBehavior', { behavior: 'default', eventsEnabled: true });
+    let activeGuid: string | undefined;
+    let meta: { url?: string; suggestedFilename?: string } = {};
+    let settled = false;
+    let resolveDone!: (value: { guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }) => void;
+    let rejectDone!: (error: Error) => void;
+    const done = new Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+    const timer = setTimeout(() => {
+      if (!settled) rejectDone(new OperatorError('BROWSER_DOWNLOAD_TIMEOUT', `No completed download event arrived within ${timeoutMs}ms.`, { retryable: true }));
+    }, timeoutMs);
+    const offBegin = browser.on('Browser.downloadWillBegin', (params) => {
+      if (activeGuid) return;
+      activeGuid = typeof params.guid === 'string' ? params.guid : undefined;
+      meta = {
+        url: typeof params.url === 'string' ? params.url.slice(0, 2000) : undefined,
+        suggestedFilename: typeof params.suggestedFilename === 'string' ? params.suggestedFilename.slice(0, 500) : undefined
+      };
+    });
+    const offProgress = browser.on('Browser.downloadProgress', (params) => {
+      const guid = typeof params.guid === 'string' ? params.guid : '';
+      const state = typeof params.state === 'string' ? params.state : '';
+      if (!guid || (activeGuid && guid !== activeGuid) || !['completed', 'canceled'].includes(state)) return;
+      activeGuid = activeGuid ?? guid;
+      settled = true;
+      clearTimeout(timer);
+      resolveDone({
+        guid,
+        state,
+        ...meta,
+        receivedBytes: typeof params.receivedBytes === 'number' ? params.receivedBytes : undefined,
+        totalBytes: typeof params.totalBytes === 'number' ? params.totalBytes : undefined,
+        filePath: typeof params.filePath === 'string' ? params.filePath.slice(0, 2000) : undefined
+      });
+    });
+    return { done, stop: () => { clearTimeout(timer); offBegin(); offProgress(); } };
   }
 
   async #listTargets(): Promise<CdpTarget[]> {
