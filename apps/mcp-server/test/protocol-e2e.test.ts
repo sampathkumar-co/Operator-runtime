@@ -21,6 +21,7 @@ const EXPECTED_TOOLS = [
   'git.checkpoint',
   'git.diff',
   'git.status',
+  'git.write',
   'project.inspect',
   'terminal.execute'
 ];
@@ -170,6 +171,9 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(inspectTool?.annotations?.readOnlyHint, true);
   const checkpointTool = tools.tools.find((tool) => tool.name === 'git.checkpoint');
   assert.equal(checkpointTool?.annotations?.destructiveHint, true);
+  const gitWriteTool = tools.tools.find((tool) => tool.name === 'git.write');
+  assert.equal(gitWriteTool?.annotations?.destructiveHint, false);
+  assert.equal(gitWriteTool?.annotations?.readOnlyHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -223,6 +227,48 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const restoreBlockedError = restoreBlockedStructured?.error as Record<string, unknown> | undefined;
   assert.equal(restoreBlockedError?.code, 'APPROVAL_REQUIRED');
   assert.equal(await fs.readFile(path.join(testRoot, 'project.txt'), 'utf8'), 'new work after checkpoint\n');
+
+  const staged = await client.callTool({
+    name: 'git.write',
+    arguments: {
+      operation: 'stage',
+      cwd: testRoot,
+      paths: ['project.txt'],
+      expectedCurrentFingerprint: currentFingerprint
+    }
+  });
+  assert.notEqual(staged.isError, true);
+  const stagedStructured = staged.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(stagedStructured?.provider, 'git.write.native');
+  assert.equal(stagedStructured?.ok, true);
+  assert.equal(execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: testRoot, encoding: 'utf8' }).trim(), 'project.txt');
+
+  const stagedStateResult = await client.callTool({
+    name: 'git.checkpoint',
+    arguments: { operation: 'inspect', cwd: testRoot }
+  });
+  assert.notEqual(stagedStateResult.isError, true);
+  const stagedStateStructured = stagedStateResult.structuredContent as Record<string, unknown> | undefined;
+  const stagedInspectOutput = stagedStateStructured?.output as Record<string, unknown> | undefined;
+  const stagedCurrent = stagedInspectOutput?.current as Record<string, unknown> | undefined;
+  const stagedFingerprint = String(stagedCurrent?.fingerprint ?? '');
+  assert.match(stagedFingerprint, /^[0-9a-f]{64}$/i);
+
+  const committed = await client.callTool({
+    name: 'git.write',
+    arguments: {
+      operation: 'commit',
+      cwd: testRoot,
+      message: 'test: MCP structured Git write',
+      expectedCurrentFingerprint: stagedFingerprint
+    }
+  });
+  assert.notEqual(committed.isError, true);
+  const committedStructured = committed.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(committedStructured?.ok, true);
+  assert.equal(committedStructured?.provider, 'git.write.native');
+  assert.equal(execFileSync('git', ['log', '-1', '--pretty=%s'], { cwd: testRoot, encoding: 'utf8' }).trim(), 'test: MCP structured Git write');
+  assert.equal(execFileSync('git', ['status', '--porcelain=v1'], { cwd: testRoot, encoding: 'utf8' }).trim(), '');
 
   const browserBlocked = await client.callTool({
     name: 'browser.interact',
