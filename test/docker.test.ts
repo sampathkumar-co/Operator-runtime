@@ -8,8 +8,9 @@ import { DockerProvider } from '../src/capabilities/docker.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  return dir;
+  const canonical = await fs.realpath(dir);
+  t.after(() => fs.rm(canonical, { recursive: true, force: true }));
+  return canonical;
 }
 
 type FakeContainer = {
