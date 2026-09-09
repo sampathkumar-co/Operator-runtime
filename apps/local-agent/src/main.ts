@@ -21,7 +21,10 @@ if (!token || token.length < 32) {
 const runtime = createRuntime({
   allowedRoots,
   allowedExecutables,
-  cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT
+  cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT,
+  browserAutoLaunch: process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0',
+  browserPath: process.env.OPERATOR_BROWSER_PATH,
+  browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR
 });
 
 const agent = createLocalAgentServer({
