@@ -10,6 +10,7 @@ export * from './project-command.ts';
 export * from './project-transaction.ts';
 export * from './docker.ts';
 export * from './postgres.ts';
+export * from './vscode.ts';
 export * from './browser-cdp.ts';
 export * from './browser-managed.ts';
 export * from './windows-uia.ts';
