@@ -78,7 +78,7 @@ function createServer(): McpServer {
 
   server.registerTool('git.diff', {
     title: 'Git diff',
-    description: 'Read a repository diff using Git directly, optionally scoped to paths.',
+    description: 'Read a bounded Git diff using Git directly, optionally scoped to paths.',
     inputSchema: z.object({ cwd: z.string().min(1), paths: z.array(z.string()).max(100).default([]) }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ cwd, paths }) => invoke('git.diff', 'read', { cwd, paths }, cwd));
@@ -165,9 +165,9 @@ function createServer(): McpServer {
 
   server.registerTool('app.operate', {
     title: 'Operate Windows application control',
-    description: 'Wait up to 10 seconds for one uniquely matched Windows control, then operate it through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns. Ambiguous selectors fail immediately and state is re-read after every action. This action may cause external side effects and remains approval-gated locally.',
+    description: 'Wait up to 10 seconds for one uniquely matched Windows control, then operate it through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, bounded Scroll, or verified semantic window activation. Window activation never accepts a raw HWND; it resolves the selector first and verifies the resulting foreground window. Ambiguous selectors fail immediately. This action may cause external side effects and remains approval-gated locally.',
     inputSchema: z.object({
-      operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll']),
+      operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']),
       selector: appSelector,
       value: z.string().max(65536).optional(),
       horizontalAmount: scrollAmount.optional(),
