@@ -59,7 +59,7 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             "service": "operator-windows-uia",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": 1,
-            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll"]
+            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait"]
         })),
         "inspect" => {
             let params: InspectParams = match serde_json::from_value(request.params) {
@@ -97,7 +97,8 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
 }
 
 fn classify_code(message: &str) -> &'static str {
-    if message.contains("ambiguous") { "UIA_AMBIGUOUS_SELECTOR" }
+    if message.contains("Timed out waiting") { "UIA_WAIT_TIMEOUT" }
+    else if message.contains("ambiguous") { "UIA_AMBIGUOUS_SELECTOR" }
     else if message.contains("No UI Automation element matched") { "UIA_ELEMENT_NOT_FOUND" }
     else if message.contains("does not support") { "UIA_PATTERN_UNAVAILABLE" }
     else if message.contains("read-only") { "UIA_READ_ONLY" }
@@ -107,7 +108,10 @@ fn classify_code(message: &str) -> &'static str {
 }
 
 fn is_retryable(message: &str) -> bool {
-    message.contains("Could not access") || message.contains("initialization") || message.contains("SetFocus failed")
+    message.contains("Timed out waiting")
+        || message.contains("Could not access")
+        || message.contains("initialization")
+        || message.contains("SetFocus failed")
 }
 
 #[cfg(test)]
@@ -118,8 +122,10 @@ mod tests {
     fn semantic_failures_are_classified() {
         assert_eq!(classify_code("UIA selector is ambiguous; narrow it"), "UIA_AMBIGUOUS_SELECTOR");
         assert_eq!(classify_code("No UI Automation element matched the semantic selector"), "UIA_ELEMENT_NOT_FOUND");
+        assert_eq!(classify_code("Timed out waiting 5000 ms for a unique UI Automation element"), "UIA_WAIT_TIMEOUT");
         assert_eq!(classify_code("Matched element does not support InvokePattern"), "UIA_PATTERN_UNAVAILABLE");
         assert_eq!(classify_code("Value postcondition failed: x"), "UIA_POSTCONDITION_FAILED");
+        assert!(is_retryable("Timed out waiting 5000 ms for a unique UI Automation element"));
         assert!(!is_retryable("Matched element does not support InvokePattern"));
     }
 }
