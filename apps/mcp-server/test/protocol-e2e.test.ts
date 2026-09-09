@@ -15,6 +15,8 @@ const EXPECTED_TOOLS = [
   'browser.interact',
   'browser.navigate',
   'computer.inspect',
+  'docker.inspect',
+  'docker.manage',
   'file.list',
   'file.read',
   'file.write',
@@ -245,6 +247,12 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const projectTransactionTool = tools.tools.find((tool) => tool.name === 'project.transaction');
   assert.equal(projectTransactionTool?.annotations?.destructiveHint, true);
   assert.equal(projectTransactionTool?.annotations?.openWorldHint, false);
+  const dockerInspectTool = tools.tools.find((tool) => tool.name === 'docker.inspect');
+  assert.equal(dockerInspectTool?.annotations?.readOnlyHint, true);
+  const dockerManageTool = tools.tools.find((tool) => tool.name === 'docker.manage');
+  assert.equal(dockerManageTool?.annotations?.readOnlyHint, false);
+  assert.equal(dockerManageTool?.annotations?.destructiveHint, false);
+  assert.equal(dockerManageTool?.annotations?.openWorldHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -303,6 +311,21 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(transactionBlockedStructured?.provider, 'policy');
   const transactionBlockedError = transactionBlockedStructured?.error as Record<string, unknown> | undefined;
   assert.equal(transactionBlockedError?.code, 'APPROVAL_REQUIRED');
+
+  const dockerManageBlocked = await client.callTool({
+    name: 'docker.manage',
+    arguments: {
+      path: testRoot,
+      operation: 'restart',
+      services: ['web'],
+      expectedCurrentFingerprint: '0'.repeat(64)
+    }
+  });
+  assert.equal(dockerManageBlocked.isError, true);
+  const dockerManageBlockedStructured = dockerManageBlocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(dockerManageBlockedStructured?.provider, 'policy');
+  const dockerManageBlockedError = dockerManageBlockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(dockerManageBlockedError?.code, 'APPROVAL_REQUIRED');
 
   const falseGreen = await client.callTool({
     name: 'project.command',
