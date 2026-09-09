@@ -18,6 +18,7 @@ use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 use crate::protocol::{InspectParams, OperateParams, Selector};
 
 const MAX_EVENTS: usize = 200;
+const NOT_FOUND: &str = "No UI Automation element matched the semantic selector";
 
 #[derive(Debug, Serialize, Clone)]
 pub struct PatternSupport {
@@ -70,6 +71,7 @@ pub struct InspectResult {
     pub truncated: bool,
     pub max_nodes: usize,
     pub max_depth: usize,
+    pub waited_ms: u64,
     pub observed_ms: u64,
     pub events: Vec<UiEvent>,
     pub events_truncated: bool,
@@ -92,13 +94,17 @@ impl UiaEngine {
     pub fn inspect(&self, params: InspectParams) -> Result<InspectResult, String> {
         let (max_nodes, max_depth) = params.limits();
         let observe_ms = params.observe_ms();
-        let start = if let Some(selector) = params.selector.as_ref() {
+        let wait_ms = params.wait_ms();
+        let (start, waited_ms) = if let Some(selector) = params.selector.as_ref() {
             selector.validate()?;
-            self.find_unique(selector)?
+            self.find_unique_with_wait(selector, wait_ms)?
         } else {
-            self.automation
-                .get_root_element()
-                .map_err(|e| format!("Could not access UI Automation desktop root: {e}"))?
+            (
+                self.automation
+                    .get_root_element()
+                    .map_err(|e| format!("Could not access UI Automation desktop root: {e}"))?,
+                0,
+            )
         };
         let event_root = start.clone();
 
@@ -137,6 +143,7 @@ impl UiaEngine {
             truncated,
             max_nodes,
             max_depth,
+            waited_ms,
             observed_ms: observe_ms,
             events,
             events_truncated,
@@ -145,7 +152,8 @@ impl UiaEngine {
 
     pub fn operate(&self, params: OperateParams) -> Result<Value, String> {
         params.validate()?;
-        let element = self.find_unique(&params.selector)?;
+        let wait_ms = params.wait_ms();
+        let (element, waited_ms) = self.find_unique_with_wait(&params.selector, wait_ms)?;
         let before = self.summarize(&element, 0);
 
         match params.operation.as_str() {
@@ -157,6 +165,7 @@ impl UiaEngine {
                 let after = self.summarize(&element, 0);
                 Ok(json!({
                     "operation": "invoke",
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": { "element_reachable": true }
@@ -178,6 +187,7 @@ impl UiaEngine {
                 let after = self.summarize(&element, 0);
                 Ok(json!({
                     "operation": "set_value",
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": { "expected_value": value, "actual_value": actual, "verified": true }
@@ -197,6 +207,7 @@ impl UiaEngine {
                 let after = self.summarize(&focused, 0);
                 Ok(json!({
                     "operation": "focus",
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": { "focused": true, "verified": true }
@@ -214,6 +225,7 @@ impl UiaEngine {
                 let after = self.summarize(&element, 0);
                 Ok(json!({
                     "operation": "select",
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": { "selected": true, "verified": true }
@@ -237,6 +249,7 @@ impl UiaEngine {
                 let after = self.summarize(&element, 0);
                 Ok(json!({
                     "operation": params.operation,
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": { "expected_state": expected, "actual_state": actual, "verified": true }
@@ -267,6 +280,7 @@ impl UiaEngine {
                 let after = self.summarize(&element, 0);
                 Ok(json!({
                     "operation": "scroll",
+                    "waited_ms": waited_ms,
                     "before": before,
                     "after": after,
                     "postcondition": {
@@ -361,6 +375,28 @@ impl UiaEngine {
         Ok((snapshot, was_truncated))
     }
 
+    fn find_unique_with_wait(&self, selector: &Selector, wait_ms: u64) -> Result<(UIElement, u64), String> {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(wait_ms);
+        loop {
+            match self.find_unique(selector) {
+                Ok(element) => {
+                    let waited_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                    return Ok((element, waited_ms));
+                }
+                Err(error) if error == NOT_FOUND && wait_ms > 0 => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(format!("Timed out waiting {wait_ms} ms for a unique UI Automation element matching the semantic selector"));
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    thread::sleep(remaining.min(Duration::from_millis(100)));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn find_unique(&self, selector: &Selector) -> Result<UIElement, String> {
         let root = self.automation
             .get_root_element()
@@ -392,7 +428,7 @@ impl UiaEngine {
             }
         }
 
-        matches.pop().ok_or_else(|| "No UI Automation element matched the semantic selector".into())
+        matches.pop().ok_or_else(|| NOT_FOUND.into())
     }
 
     fn matches_selector(&self, element: &UIElement, selector: &Selector) -> bool {
