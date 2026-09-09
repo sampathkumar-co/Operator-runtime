@@ -2,13 +2,13 @@ import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore }
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
+import { inspectOopifFrames, performSemanticInteraction } from './browser-cdp-frames.ts';
 import {
   assertLoopbackEndpoint,
   collectDiagnostics,
   compactTab,
   failure,
   inspectPage,
-  interactionFunction,
   normalizeTargetSpec,
   pageIdentity,
   requirePageTarget,
@@ -90,15 +90,19 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
-    const page = await inspectPage(session);
+    const [mainPage, frames] = await Promise.all([
+      inspectPage(session),
+      inspectOopifFrames(session)
+    ]);
+    const page = { ...mainPage, frames };
     return {
       ok: true,
       capability: action.capability,
       provider: this.name,
       output: { target: compactTab(target), page },
       evidence: [
-        evidence('browser_state', 'pass', 'Semantic page state inspected through CDP.', { targetId }),
-        evidence('data_minimization', 'pass', 'Returned a bounded accessibility/DOM summary instead of raw page HTML.', { accessibilityNodes: page.accessibility.length })
+        evidence('browser_state', 'pass', 'Semantic page state inspected through CDP across the main document, open shadow roots, same-origin frames, and bounded attached cross-origin frame targets.', { targetId, oopifFrames: frames.length }),
+        evidence('data_minimization', 'pass', 'Returned bounded accessibility/DOM summaries instead of raw page HTML.', { accessibilityNodes: page.accessibility.length, oopifFrames: frames.length })
       ],
       durationMs: Math.round(performance.now() - started)
     };
@@ -227,14 +231,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
         download = await this.#prepareDownload(Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000));
       }
       const before = await pageIdentity(session);
-      const expression = `(${interactionFunction.toString()})(${JSON.stringify({ operation, target: targetSpec, value: action.input.value ?? null })})`;
-      const result = await session.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true });
-      const value = unwrapRuntimeValue(result);
-      if (!value || typeof value !== 'object' || (value as JsonMap).ok !== true) {
-        const message = value && typeof value === 'object' && typeof (value as JsonMap).error === 'string'
-          ? String((value as JsonMap).error)
-          : 'Browser interaction did not complete.';
-        throw new OperatorError('BROWSER_ELEMENT_NOT_FOUND', message, { retryable: false, details: { target: targetSpec } });
+      const interaction = await performSemanticInteraction(session, {
+        operation,
+        target: targetSpec,
+        value: action.input.value ?? null
+      });
+      const value = interaction.value;
+      if (value.ok !== true) {
+        const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
+        throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
       await settleAfterInteraction(session);
       const after = await pageIdentity(session);
@@ -243,15 +248,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
       const evidenceItems = [
-        evidence('browser_interaction', 'pass', `Semantic browser ${operation} executed through CDP.`, { targetId, matched: (value as JsonMap).matched }),
-        evidence('postcondition', 'pass', 'Element state was re-read after the interaction.', { after: (value as JsonMap).after, pageUrl: after.url })
+        evidence('browser_interaction', 'pass', `Semantic browser ${operation} executed through CDP after a unique cross-context locate preflight.`, { targetId, matched: value.matched, frame: interaction.frame }),
+        evidence('postcondition', 'pass', 'Element state was re-read after the interaction.', { after: value.after, pageUrl: after.url, frame: interaction.frame })
       ];
       if (downloadResult) evidenceItems.push(evidence('download_complete', 'pass', 'Browser emitted a completed download event.', downloadResult));
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { targetId, operation, matched: (value as JsonMap).matched, before, after, ...(downloadResult ? { download: downloadResult } : {}), diagnostics: diagnostics.snapshot() },
+        output: { targetId, operation, matched: value.matched, ...(interaction.frame ? { frame: interaction.frame } : {}), before, after, ...(downloadResult ? { download: downloadResult } : {}), diagnostics: diagnostics.snapshot() },
         evidence: evidenceItems,
         durationMs: Math.round(performance.now() - started)
       };
