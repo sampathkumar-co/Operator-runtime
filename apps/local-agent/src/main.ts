@@ -7,6 +7,7 @@ import { TaskStore } from '../../../src/core/task-store.ts';
 import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
+import { LocalPrivacyDataStore } from './privacy-data.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -36,6 +37,7 @@ const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
+const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 
 const runtime = createRuntime({
@@ -63,6 +65,7 @@ const agent = createLocalAgentServer({
   tasks,
   deviceIdentity,
   deviceRegistry,
+  privacy,
   settings: {
     recoveryConfigured: Boolean(recoveryToken),
     browserAutoLaunch,
