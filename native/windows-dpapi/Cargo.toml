@@ -1,0 +1,13 @@
+[package]
+name = "operator-windows-dpapi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+description = "Minimal DPAPI CurrentUser secret protection helper for Operator"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
