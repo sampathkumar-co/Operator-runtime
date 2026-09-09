@@ -59,15 +59,17 @@ MCP certification is stronger than source/type checks: GitHub CI pins a compatib
 
 Fallback is bounded and semantic: the native sidecar remains alive when UIA initialization fails, exact Win32 PID/title/class discovery and activation remain available where explicitly requested, and matched controls that lack modern Invoke/Value patterns can fall back to LegacyIAccessible default-action/value APIs. UIA-only selector fields are never approximated, arbitrary HWND input is not exposed, and unsupported operations still fail closed. This path is covered by Windows compile/tests and Clippy in CI.
 
-## M3 — development adapter suite — STARTED
+## M3 — development adapter suite — IN PROGRESS
 
-- [ ] Git write/checkpoint/restore
+- [x] Git write/checkpoint/restore
 - [ ] VS Code adapter
 - [ ] Docker adapter
 - [ ] PostgreSQL structured client
 - [ ] project command registry
 - [ ] build/test artifact validators
 - [ ] checkpoint/rollback engine
+
+Git development operations are now end-to-end certified through the 15-tool MCP surface. `git.checkpoint` stores separate index/worktree trees without moving HEAD, requires a fresh SHA-256 repository fingerprint for restore, creates automatic recovery checkpoints, rejects moved HEAD/stale state, and preserves staged/unstaged/untracked distinctions. `git.write` exposes only stage/unstage/commit, requires the same fresh-state precondition, creates a checkpoint before every write, rejects pathspec magic/root escapes, disables repository hooks and commit signing, and verifies commit parent/tree postconditions. Repository-local clean/smudge/process filters are fail-closed before checkpoint operations; an adversarial test proves a configured executable filter never runs. Core tests plus the real local-agent/MCP/Inspector stack certify stage and commit behavior.
 
 ## M4 — relay + multi-device
 
