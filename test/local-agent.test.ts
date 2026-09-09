@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { AuditLog } from '../src/core/audit.ts';
 import { EmergencyStopStore } from '../apps/local-agent/src/emergency-stop.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
@@ -123,4 +124,68 @@ test('emergency stop blocks all execution, survives server restart, and requires
   });
   assert.equal(resumed.status, 200);
   assert.equal((await resumed.json() as any).ok, true);
+});
+
+test('activity feed records bounded execution metadata without echoing action inputs and permissions are inspectable', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-activity-root-'));
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-activity-state-'));
+  t.after(() => Promise.all([
+    fs.rm(root, { recursive: true, force: true }),
+    fs.rm(state, { recursive: true, force: true })
+  ]));
+  const token = 't'.repeat(64);
+  const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const permissions = {
+    allowedCapabilities: ['computer.inspect', 'file.*'],
+    allowedRoots: [root],
+    allowExternalWrites: false,
+    allowSystemChanges: false,
+    allowDestructive: false
+  };
+  const agent = createLocalAgentServer({ runtime, token, permissions, audit: new AuditLog(state) });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const auth = { authorization: `Bearer ${token}` };
+  const secretValue = 'super-sensitive-input-value-never-log-me';
+
+  const executed = await fetch(`${base}/v1/execute`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      action: {
+        id: 'activity-1',
+        capability: 'computer.inspect',
+        risk: 'read',
+        input: { password: secretValue, arbitrary: secretValue },
+        provenance: { kind: 'chatgpt' },
+        taskId: 'task-activity'
+      }
+    })
+  });
+  assert.equal(executed.status, 200);
+
+  const activity = await fetch(`${base}/v1/activity?limit=10`, { headers: auth });
+  assert.equal(activity.status, 200);
+  const activityBody = await activity.json() as any;
+  assert.equal(activityBody.configured, true);
+  assert.equal(activityBody.events.length, 1);
+  assert.equal(activityBody.events[0].capability, 'computer.inspect');
+  assert.equal(activityBody.events[0].taskId, 'task-activity');
+  assert.equal(activityBody.events[0].details.actionId, 'activity-1');
+  assert.equal(JSON.stringify(activityBody).includes(secretValue), false);
+
+  const persisted = await fs.readFile(path.join(state, 'audit.ndjson'), 'utf8');
+  assert.equal(persisted.includes(secretValue), false);
+  assert.equal(persisted.includes('activity-1'), true);
+
+  const permissionsResponse = await fetch(`${base}/v1/permissions`, { headers: auth });
+  assert.equal(permissionsResponse.status, 200);
+  const permissionsBody = await permissionsResponse.json() as any;
+  assert.deepEqual(permissionsBody.permissions.allowedCapabilities, permissions.allowedCapabilities);
+  assert.deepEqual(permissionsBody.permissions.allowedRoots, [root]);
+  assert.equal(permissionsBody.permissions.allowDestructive, false);
+
+  const unauthenticatedActivity = await fetch(`${base}/v1/activity`);
+  assert.equal(unauthenticatedActivity.status, 401);
 });
