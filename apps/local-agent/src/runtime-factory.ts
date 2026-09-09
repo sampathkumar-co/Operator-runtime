@@ -1,10 +1,11 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
 
 export function createRuntime(config: {
   allowedRoots: string[];
   allowedExecutables: string[];
   projectCommandRegistryPath?: string;
+  dockerExecutable?: string;
   cdpEndpoint?: string;
   browserAutoLaunch?: boolean;
   browserPath?: string;
@@ -24,6 +25,10 @@ export function createRuntime(config: {
       allowedRoots: config.allowedRoots,
       allowedExecutables: config.allowedExecutables,
       registryPath: config.projectCommandRegistryPath
+    }))
+    .register(new DockerProvider({
+      allowedRoots: config.allowedRoots,
+      dockerExecutable: config.dockerExecutable
     }))
     .register(new GitProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitCheckpointProvider({ allowedRoots: config.allowedRoots }))
