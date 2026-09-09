@@ -20,6 +20,18 @@ jobs:
           node-version: '22.22.1'
       - run: npm run check
 
+  security-red-team:
+    name: Security red-team suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Cross-layer adversarial boundary tests
+        run: npm run test:red-team
+
   mcp-transport:
     name: MCP v2 client + Inspector E2E
     runs-on: ubuntu-latest
