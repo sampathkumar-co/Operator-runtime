@@ -1,10 +1,13 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, ProcessProvider, ProjectInspectProvider, SystemInspectProvider, BrowserCdpProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, ProcessProvider, ProjectInspectProvider, SystemInspectProvider, ManagedBrowserProvider } from '../../../src/capabilities/index.ts';
 
 export function createRuntime(config: {
   allowedRoots: string[];
   allowedExecutables: string[];
   cdpEndpoint?: string;
+  browserAutoLaunch?: boolean;
+  browserPath?: string;
+  browserDataDir?: string;
 }): OperatorRuntime {
   return new OperatorRuntime()
     .register(new SystemInspectProvider())
@@ -12,5 +15,10 @@ export function createRuntime(config: {
     .register(new ProjectInspectProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitProvider({ allowedRoots: config.allowedRoots }))
     .register(new ProcessProvider({ allowedRoots: config.allowedRoots, allowedExecutables: config.allowedExecutables }))
-    .register(new BrowserCdpProvider(config.cdpEndpoint));
+    .register(new ManagedBrowserProvider({
+      endpoint: config.cdpEndpoint,
+      autoLaunch: config.browserAutoLaunch,
+      executablePath: config.browserPath,
+      dataDir: config.browserDataDir
+    }));
 }
