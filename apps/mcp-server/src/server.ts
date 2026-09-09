@@ -114,6 +114,27 @@ function createServer(): McpServer {
     return invoke('git.checkpoint.restore', 'destructive', { cwd, checkpointId, expectedCurrentFingerprint }, cwd);
   });
 
+  server.registerTool('git.write', {
+    title: 'Apply structured Git write',
+    description: 'Stage, unstage, or commit local repository changes through a closed Git operation set. Every operation requires a fresh repository fingerprint and creates a non-mutating recovery checkpoint first. Pathspec magic and escaping paths are rejected. Commits disable repository hooks and GPG signing and verify the resulting parent/tree.',
+    inputSchema: z.object({
+      operation: z.enum(['stage', 'unstage', 'commit']),
+      cwd: z.string().min(1),
+      paths: z.array(z.string().min(1).max(1000)).max(200).default([]),
+      all: z.boolean().default(false),
+      message: z.string().min(1).max(4000).optional(),
+      expectedCurrentFingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, cwd, paths, all, message, expectedCurrentFingerprint }) => invoke('git.write', 'write', {
+    operation,
+    cwd,
+    paths,
+    all,
+    message,
+    expectedCurrentFingerprint
+  }, cwd));
+
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
     description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
