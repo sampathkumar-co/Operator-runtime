@@ -1,0 +1,131 @@
+name: Windows Production Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Four-part MSIX version, for example 0.1.0.0
+        required: true
+        type: string
+      update_base_uri:
+        description: Final credential-free HTTPS directory that will host the MSIX and Operator.appinstaller
+        required: true
+        type: string
+      timestamp_uri:
+        description: HTTPS RFC 3161 timestamp server
+        required: true
+        type: string
+      identity_name:
+        description: Stable MSIX package identity name
+        required: true
+        default: Operator.Runtime
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-sign-verify:
+    name: Build, timestamp-sign and verify Windows release
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      PFX_BASE64: ${{ secrets.OPERATOR_WINDOWS_SIGNING_PFX_BASE64 }}
+      PFX_PASSWORD: ${{ secrets.OPERATOR_WINDOWS_SIGNING_PFX_PASSWORD }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      UPDATE_BASE_URI: ${{ inputs.update_base_uri }}
+      TIMESTAMP_URI: ${{ inputs.timestamp_uri }}
+      IDENTITY_NAME: ${{ inputs.identity_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Validate release inputs and materialize signing certificate
+        id: certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'version must be a four-part MSIX version' }
+          foreach ($pair in @(@('update_base_uri', $env:UPDATE_BASE_URI), @('timestamp_uri', $env:TIMESTAMP_URI))) {
+            $uri = [Uri]$pair[1]
+            if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or $uri.UserInfo) { throw "$($pair[0]) must be a credential-free absolute HTTPS URI" }
+          }
+          if (-not $env:PFX_BASE64) { throw 'OPERATOR_WINDOWS_SIGNING_PFX_BASE64 secret is required' }
+          if (-not $env:PFX_PASSWORD) { throw 'OPERATOR_WINDOWS_SIGNING_PFX_PASSWORD secret is required' }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'operator-production-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_BASE64))
+          $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfxPath, $env:PFX_PASSWORD, $flags)
+          try {
+            if (-not $cert.HasPrivateKey) { throw 'Signing certificate does not contain a private key' }
+            if (-not $cert.Subject) { throw 'Signing certificate has no subject' }
+            "publisher=$($cert.Subject)" >> $env:GITHUB_OUTPUT
+            "pfx_path=$pfxPath" >> $env:GITHUB_OUTPUT
+            Write-Host "[operator-release] certificate subject $($cert.Subject)"
+            Write-Host "[operator-release] certificate expires $($cert.NotAfter.ToUniversalTime().ToString('o'))"
+          } finally { $cert.Dispose() }
+
+      - name: Clippy release launcher
+        shell: pwsh
+        run: cargo clippy --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build package with certificate-matching publisher
+        shell: pwsh
+        run: |
+          ./packaging/windows/build-release.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -Publisher '${{ steps.certificate.outputs.publisher }}' `
+            -IdentityName $env:IDENTITY_NAME `
+            -UpdateBaseUri $env:UPDATE_BASE_URI
+
+      - name: Timestamp-sign and verify package
+        shell: pwsh
+        run: |
+          $msix = "artifacts/windows-release/Operator-$env:RELEASE_VERSION-x64.msix"
+          ./packaging/windows/sign-release.ps1 `
+            -MsixPath $msix `
+            -PfxPath '${{ steps.certificate.outputs.pfx_path }}' `
+            -PfxPassword $env:PFX_PASSWORD `
+            -TimestampUri $env:TIMESTAMP_URI
+
+      - name: Verify final release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msix = Resolve-Path "artifacts/windows-release/Operator-$env:RELEASE_VERSION-x64.msix"
+          $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
+          if ($meta.signed -ne $true) { throw 'final package metadata is not marked signed' }
+          if ($meta.timestamped -ne $true) { throw 'production release must be timestamped' }
+          if ($meta.signerSubject -ne '${{ steps.certificate.outputs.publisher }}') { throw 'metadata signer subject mismatch' }
+          if ($meta.publisher -ne '${{ steps.certificate.outputs.publisher }}') { throw 'metadata publisher mismatch' }
+          if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'signed MSIX SHA-256 mismatch' }
+          [xml]$installer = Get-Content artifacts/windows-release/Operator.appinstaller -Raw
+          if ($installer.AppInstaller.MainPackage.Publisher -ne '${{ steps.certificate.outputs.publisher }}') { throw 'App Installer publisher mismatch' }
+          if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must be HTTPS' }
+
+      - name: Remove local signing material
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath '${{ steps.certificate.outputs.pfx_path }}' -Force -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-windows-production-${{ inputs.version }}
+          path: |
+            artifacts/windows-release/Operator-${{ inputs.version }}-x64.msix
+            artifacts/windows-release/Operator.appinstaller
+            artifacts/windows-release/release-metadata.json
+          if-no-files-found: error
+          retention-days: 14
