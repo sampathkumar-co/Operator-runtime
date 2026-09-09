@@ -59,7 +59,7 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             "service": "operator-windows-uia",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": 1,
-            "capabilities": ["inspect", "invoke", "set_value", "focus"]
+            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll"]
         })),
         "inspect" => {
             let params: InspectParams = match serde_json::from_value(request.params) {
