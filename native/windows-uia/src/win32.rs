@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::io;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const PROCESS_PATH_CAPACITY: usize = 1024;
 const CLASS_NAME_CAPACITY: usize = 256;
+const MAX_WINDOWS: usize = 200;
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -54,7 +57,7 @@ struct EnumState {
 }
 
 pub fn discover_windows(max_windows: usize) -> Result<WindowDiscovery, String> {
-    let max_windows = max_windows.clamp(1, 200);
+    let max_windows = max_windows.clamp(1, MAX_WINDOWS);
     let foreground = unsafe { GetForegroundWindow() };
     let mut state = EnumState {
         windows: Vec::new(),
@@ -76,34 +79,77 @@ pub fn discover_windows(max_windows: usize) -> Result<WindowDiscovery, String> {
     })
 }
 
+pub fn discover_matching_windows(
+    process_id: Option<u32>,
+    title: Option<&str>,
+    class_name: Option<&str>,
+    max_windows: usize,
+) -> Result<WindowDiscovery, String> {
+    validate_fallback_selector(process_id, title, class_name)?;
+    let discovery = discover_windows(MAX_WINDOWS)?;
+    let mut windows = filter_windows(discovery.windows, process_id, title, class_name);
+    let max_windows = max_windows.clamp(1, MAX_WINDOWS);
+    let truncated = windows.len() > max_windows;
+    windows.truncate(max_windows);
+    Ok(WindowDiscovery { windows, truncated, max_windows })
+}
+
+pub fn wait_for_unique_window(
+    process_id: Option<u32>,
+    title: Option<&str>,
+    class_name: Option<&str>,
+    wait_ms: u64,
+) -> Result<(WindowSummary, u64), String> {
+    validate_fallback_selector(process_id, title, class_name)?;
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(wait_ms);
+
+    loop {
+        let discovery = discover_windows(MAX_WINDOWS)?;
+        let mut matches = filter_windows(discovery.windows, process_id, title, class_name);
+        match matches.len() {
+            1 => {
+                let waited_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                return Ok((matches.pop().expect("length checked"), waited_ms));
+            }
+            count if count > 1 => {
+                return Err("Win32 fallback selector is ambiguous; add process_id, name/title, or class_name".into());
+            }
+            _ if wait_ms == 0 || Instant::now() >= deadline => {
+                if wait_ms > 0 {
+                    return Err(format!("Timed out waiting {wait_ms} ms for a unique top-level Win32 window matching the semantic selector"));
+                }
+                return Err("No top-level Win32 window matched the semantic selector".into());
+            }
+            _ => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(100)));
+            }
+        }
+    }
+}
+
 pub fn activate_matching_window(
     process_id: u32,
     title: &str,
     class_name: &str,
 ) -> Result<(WindowSummary, WindowSummary), String> {
-    if process_id == 0 {
-        return Err("Window activation requires a resolved nonzero process id".into());
-    }
+    activate_unique_window(
+        Some(process_id),
+        (!title.is_empty()).then_some(title),
+        (!class_name.is_empty()).then_some(class_name),
+        0,
+    )
+    .map(|(before, after, _)| (before, after))
+}
 
-    let discovery = discover_windows(200)?;
-    let mut matches: Vec<WindowSummary> = discovery
-        .windows
-        .into_iter()
-        .filter(|window| {
-            window.process_id == process_id
-                && (title.is_empty() || window.title == title)
-                && (class_name.is_empty() || window.class_name == class_name)
-        })
-        .collect();
-
-    if matches.is_empty() {
-        return Err("No top-level Win32 window matched the resolved UI Automation element".into());
-    }
-    if matches.len() > 1 {
-        return Err("Resolved UI Automation element maps to multiple Win32 windows; narrow the selector".into());
-    }
-
-    let before = matches.pop().expect("length checked");
+pub fn activate_unique_window(
+    process_id: Option<u32>,
+    title: Option<&str>,
+    class_name: Option<&str>,
+    wait_ms: u64,
+) -> Result<(WindowSummary, WindowSummary, u64), String> {
+    let (before, waited_ms) = wait_for_unique_window(process_id, title, class_name, wait_ms)?;
     let hwnd = parse_window_id(&before.window_id)?;
     let accepted = unsafe { SetForegroundWindow(hwnd) };
     if accepted == 0 {
@@ -116,7 +162,37 @@ pub fn activate_matching_window(
 
     let mut after = before.clone();
     after.foreground = true;
-    Ok((before, after))
+    Ok((before, after, waited_ms))
+}
+
+fn validate_fallback_selector(
+    process_id: Option<u32>,
+    title: Option<&str>,
+    class_name: Option<&str>,
+) -> Result<(), String> {
+    if process_id.unwrap_or(0) == 0
+        && title.is_none_or(str::is_empty)
+        && class_name.is_none_or(str::is_empty)
+    {
+        return Err("Win32 fallback requires process_id, name/title, or class_name".into());
+    }
+    Ok(())
+}
+
+fn filter_windows(
+    windows: Vec<WindowSummary>,
+    process_id: Option<u32>,
+    title: Option<&str>,
+    class_name: Option<&str>,
+) -> Vec<WindowSummary> {
+    windows
+        .into_iter()
+        .filter(|window| {
+            process_id.is_none_or(|expected| window.process_id == expected)
+                && title.is_none_or(|expected| window.title == expected)
+                && class_name.is_none_or(|expected| window.class_name == expected)
+        })
+        .collect()
 }
 
 unsafe extern "system" fn enum_window(hwnd: isize, lparam: isize) -> i32 {
@@ -231,7 +307,19 @@ fn truncate(value: String, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{basename, parse_window_id};
+    use super::{basename, filter_windows, parse_window_id, validate_fallback_selector, WindowSummary};
+
+    fn window(pid: u32, title: &str, class_name: &str) -> WindowSummary {
+        WindowSummary {
+            window_id: "0x2A".into(),
+            process_id: pid,
+            process_name: Some("app.exe".into()),
+            title: title.into(),
+            class_name: class_name.into(),
+            visible: true,
+            foreground: false,
+        }
+    }
 
     #[test]
     fn process_path_is_reduced_to_basename() {
@@ -245,5 +333,20 @@ mod tests {
         assert_eq!(parse_window_id("0x2A").unwrap(), 42);
         assert!(parse_window_id("42").is_err());
         assert!(parse_window_id("0xnothex").is_err());
+    }
+
+    #[test]
+    fn fallback_matching_is_exact_and_semantic() {
+        let windows = vec![window(10, "Editor", "Main"), window(20, "Editor", "Other")];
+        let matched = filter_windows(windows, Some(10), Some("Editor"), Some("Main"));
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].process_id, 10);
+    }
+
+    #[test]
+    fn fallback_requires_a_win32_verifiable_selector() {
+        assert!(validate_fallback_selector(None, None, None).is_err());
+        assert!(validate_fallback_selector(Some(42), None, None).is_ok());
+        assert!(validate_fallback_selector(None, Some("Editor"), None).is_ok());
     }
 }
