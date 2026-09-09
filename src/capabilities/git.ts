@@ -5,11 +5,13 @@ const SCORE: CapabilityScore = {
   reliability: 0.99,
   latency: 0.98,
   determinism: 0.99,
-  security: 0.96,
+  security: 0.97,
   reversibility: 0.92,
   informationQuality: 0.99,
   interactionCost: 0.01
 };
+
+const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false'];
 
 export class GitProvider implements CapabilityProvider {
   readonly name = 'git.native';
@@ -28,10 +30,10 @@ export class GitProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const cwd = String(action.input.cwd ?? '');
     const args = action.capability === 'git.status'
-      ? ['status', '--porcelain=v2', '--branch']
+      ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v2', '--branch']
       : action.capability === 'git.diff'
-        ? ['diff', '--no-ext-diff', '--', ...(Array.isArray(action.input.paths) ? action.input.paths.map(String) : [])]
-        : ['rev-parse', '--show-toplevel'];
+        ? [...SAFE_GIT_PREFIX, 'diff', '--no-ext-diff', '--no-textconv', '--', ...(Array.isArray(action.input.paths) ? action.input.paths.map(String) : [])]
+        : [...SAFE_GIT_PREFIX, 'rev-parse', '--show-toplevel'];
 
     const result = await this.#process.execute({
       ...action,
