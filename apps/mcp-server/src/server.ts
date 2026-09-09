@@ -142,14 +142,15 @@ function createServer(): McpServer {
 
   server.registerTool('app.inspect', {
     title: 'Inspect Windows application controls',
-    description: 'Inspect a bounded Microsoft UI Automation control tree. This returns semantic controls, supported patterns, selection/expand state and scroll state rather than pixels.',
+    description: 'Inspect a bounded Microsoft UI Automation control tree and optionally observe selector-scoped UIA property/structure changes for up to 5 seconds. Returns semantic controls and events rather than pixels.',
     inputSchema: z.object({
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
-      maxDepth: z.number().int().min(1).max(12).default(6)
+      maxDepth: z.number().int().min(1).max(12).default(6),
+      observeMs: z.number().int().min(0).max(5000).default(0)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ selector, maxNodes, maxDepth }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth }));
+  }, async ({ selector, maxNodes, maxDepth, observeMs }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs }));
 
   server.registerTool('app.operate', {
     title: 'Operate Windows application control',
