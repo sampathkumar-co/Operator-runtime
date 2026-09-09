@@ -92,3 +92,59 @@ jobs:
         run: cargo test --manifest-path native/windows-uia/Cargo.toml
       - name: Clippy UIA sidecar
         run: cargo clippy --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
+
+  windows-release-package:
+    name: Windows unsigned MSIX packaging
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Clippy release launcher
+        shell: pwsh
+        run: cargo clippy --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
+      - name: Build unsigned MSIX and App Installer metadata
+        shell: pwsh
+        run: ./packaging/windows/build-release.ps1 -Version 0.1.0.0 -UpdateBaseUri https://updates.example.invalid/operator
+      - name: Unpack and validate release payload
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'makeappx.exe missing' }
+          $msix = Resolve-Path artifacts/windows-release/Operator-0.1.0.0-x64.msix
+          & $sdk.FullName unpack /p $msix /d artifacts/windows-release/unpacked /o
+          if ($LASTEXITCODE -ne 0) { throw 'MakeAppx unpack failed' }
+          $required = @(
+            'Operator.exe',
+            'runtime/node.exe',
+            'native/operator-windows-uia.exe',
+            'app/package.json',
+            'app/apps/local-agent/src/main.ts',
+            'app/src/core/runtime.ts',
+            'AppxManifest.xml'
+          )
+          foreach ($relative in $required) {
+            if (-not (Test-Path (Join-Path 'artifacts/windows-release/unpacked' $relative) -PathType Leaf)) { throw "Missing packaged file: $relative" }
+          }
+          $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
+          if ($meta.signed -ne $false) { throw 'CI package must remain explicitly unsigned' }
+          if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'release metadata hash mismatch' }
+          [xml]$installer = Get-Content artifacts/windows-release/Operator.appinstaller -Raw
+          if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must use HTTPS' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-windows-unsigned-msix
+          path: |
+            artifacts/windows-release/Operator-0.1.0.0-x64.msix
+            artifacts/windows-release/Operator.appinstaller
+            artifacts/windows-release/release-metadata.json
+          if-no-files-found: error
+          retention-days: 7
