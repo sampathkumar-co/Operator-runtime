@@ -20,6 +20,11 @@ fn run() -> Result<(), String> {
     require_file(&entry, "Operator local-agent entrypoint")?;
     require_file(&uia, "Operator Windows UIA sidecar")?;
 
+    if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--self-test")) {
+        println!("operator-launcher-self-test:ok");
+        return Ok(());
+    }
+
     if env::var_os("OPERATOR_WINDOWS_UIA_PATH").is_none() {
         env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
     }
