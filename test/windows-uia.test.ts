@@ -58,3 +58,21 @@ test('scroll requires a bounded semantic amount before sidecar launch', async ()
   assert.equal(arbitrary.error?.code, 'INVALID_UIA_SCROLL_AMOUNT');
   provider.close();
 });
+
+test('activate_window is a closed semantic operation rather than a raw-handle API', async () => {
+  const provider = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
+  const result = await provider.execute({
+    id: 'activate-window',
+    capability: 'app.operate',
+    risk: 'external',
+    provenance,
+    input: {
+      operation: 'activate_window',
+      selector: { automationId: 'main-window' },
+      windowId: '0xDEADBEEF'
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'UIA_SIDECAR_START_FAILED');
+  provider.close();
+});
