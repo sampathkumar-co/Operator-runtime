@@ -24,6 +24,7 @@ const EXPECTED_TOOLS = [
   'git.write',
   'project.command',
   'project.inspect',
+  'project.transaction',
   'terminal.execute'
 ];
 
@@ -241,6 +242,9 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const projectCommandTool = tools.tools.find((tool) => tool.name === 'project.command');
   assert.equal(projectCommandTool?.annotations?.readOnlyHint, false);
   assert.equal(projectCommandTool?.annotations?.openWorldHint, false);
+  const projectTransactionTool = tools.tools.find((tool) => tool.name === 'project.transaction');
+  assert.equal(projectTransactionTool?.annotations?.destructiveHint, true);
+  assert.equal(projectTransactionTool?.annotations?.openWorldHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -289,6 +293,16 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const trustedBuildValidation = trustedBuildOutput?.validation as Record<string, unknown> | undefined;
   assert.equal(trustedBuildValidation?.passed, true);
   assert.equal(JSON.parse(await fs.readFile(path.join(testRoot, 'build', 'output.json'), 'utf8')).ok, true);
+
+  const transactionBlocked = await client.callTool({
+    name: 'project.transaction',
+    arguments: { path: testRoot, commandId: 'trusted-build', expectedRisk: 'write' }
+  });
+  assert.equal(transactionBlocked.isError, true);
+  const transactionBlockedStructured = transactionBlocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(transactionBlockedStructured?.provider, 'policy');
+  const transactionBlockedError = transactionBlockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(transactionBlockedError?.code, 'APPROVAL_REQUIRED');
 
   const falseGreen = await client.callTool({
     name: 'project.command',
