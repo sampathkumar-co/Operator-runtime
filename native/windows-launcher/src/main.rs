@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn main() {
@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn require_file(path: &PathBuf, label: &str) -> Result<(), String> {
+fn require_file(path: &Path, label: &str) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("{label} is missing at {}", path.display()));
     }
