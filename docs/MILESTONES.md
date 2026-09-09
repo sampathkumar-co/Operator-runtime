@@ -112,8 +112,8 @@ The relay authority maintains a durable monotonic per-device delivery queue with
 - [ ] code signing
 - [x] privacy/data controls
 - [ ] submission assets
-- [ ] red-team suite
-- [ ] performance benchmark suite
+- [x] red-team suite
+- [x] performance benchmark suite
 - [ ] final platform-matrix revalidation
 
 The emergency execution stop is enforced centrally by the local-agent HTTP boundary before `runtime.execute`, persists atomically outside project roots by default, survives process restarts, reports only a boolean through public health, and blocks all capabilities with HTTP 423 while engaged. Engaging uses the normal authenticated local-agent channel, but API recovery can require a separate recovery token; the ordinary agent token cannot clear the stop. CI proves engage → blocked execution → restart → still blocked → wrong recovery denied → separate recovery token clear → execution resumes.
@@ -121,3 +121,7 @@ The emergency execution stop is enforced centrally by the local-agent HTTP bound
 The companion backend exposes authenticated, bounded, read-only Devices, Tasks, Permissions, Activity and Settings surfaces from the authoritative local state stores. Devices never returns private key material or PEM blobs; Tasks returns bounded Task Capsule summaries; Settings exposes only non-secret configuration flags/counts. Activity is backed by the redacting audit log and records execution outcome metadata only—never action input payloads. CI injects a secret into action input and proves that value is absent from both the Activity API response and persisted audit storage.
 
 Privacy controls inventory only known Operator-owned state categories. Generic deletion is limited to Activity, Task history and transient session state, requires both normal local-agent authentication and the separate recovery credential, and refuses symlinked state trees before deletion. Device identity and pairing state are intentionally non-deletable through this generic API and require a dedicated reset flow. CI proves the ordinary agent token cannot erase history, category-specific deletion leaves device identity intact, and a symlinked task directory cannot cause deletion outside the protected Operator state directory.
+
+The dedicated red-team CI gate attacks instruction-provenance escalation, approved-action path bypass, emergency-stop query bypass, recovery-token substitution, privacy path traversal, key-material exposure, relay capability-scope forgery and raw account-principal persistence. The canonical relay scope-forgery case is rejected by Ed25519 signature verification, and the full adversarial suite is green alongside the normal Core/MCP/Relay/Windows gates.
+
+The dedicated performance gate uses intentionally wide anti-regression ceilings rather than brittle microbenchmarks. Initial hosted-runner baselines are approximately 50,000 policy authorizations in 104 ms, 250 redacting audit append/tail operations in 82 ms, 150 durable relay enqueue/ACK operations in 192 ms, and 25 authenticated local-agent inspect round trips in 66 ms. The gate also asserts bounded state-file sizes so pathological growth fails even if raw latency remains low.
