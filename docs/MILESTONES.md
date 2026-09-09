@@ -104,17 +104,19 @@ Routing is deterministic and fail-closed: explicit device and project binding mu
 
 The relay authority maintains a durable monotonic per-device delivery queue with ID-bound contiguous ACKs, duplicate-ACK safety and lost-ACK cursor reconciliation. The real `apps/relay-server` WebSocket service verifies paired-device signatures and short-lived relay tokens, derives routing capabilities from authority-signed token scopes, provides account-scoped routing and project binding, and permits only one unacknowledged delivery per device at a time. A dedicated CI job runs a real `ws` server against the production `RelayClient`, proves delivery/ACK, disconnect/reconnect with no replay, second-delivery continuation and capability denial. The service defaults to loopback-only bind; non-loopback bind requires explicit acknowledgment that TLS terminates at a trusted upstream proxy.
 
+The MCP execution client is pluggable without changing the external tool schemas: local mode delegates to the authenticated local agent, while relay mode delegates through the loopback relay-control boundary using account/device/project routing context. A dedicated relay-mode MCP end-to-end test runs the official MCP client and MCP Inspector against the same 22-tool surface, verifies structured remote results, and verifies that policy failures such as `APPROVAL_REQUIRED` propagate unchanged.
+
 ## M5 — companion UI and publication hardening — IN PROGRESS
 
 - [x] Devices / Tasks / Permissions / Activity / Settings companion surfaces
 - [x] emergency disconnect
-- [ ] installer + auto-update
+- [x] installer + auto-update
 - [ ] code signing
 - [x] privacy/data controls
 - [ ] submission assets
 - [x] red-team suite
 - [x] performance benchmark suite
-- [ ] final platform-matrix revalidation
+- [x] final platform-matrix revalidation
 
 The emergency execution stop is enforced centrally by the local-agent HTTP boundary before `runtime.execute`, persists atomically outside project roots by default, survives process restarts, reports only a boolean through public health, and blocks all capabilities with HTTP 423 while engaged. Engaging uses the normal authenticated local-agent channel, but API recovery can require a separate recovery token; the ordinary agent token cannot clear the stop. CI proves engage → blocked execution → restart → still blocked → wrong recovery denied → separate recovery token clear → execution resumes.
 
@@ -122,6 +124,12 @@ The companion backend exposes authenticated, bounded, read-only Devices, Tasks, 
 
 Privacy controls inventory only known Operator-owned state categories. Generic deletion is limited to Activity, Task history and transient session state, requires both normal local-agent authentication and the separate recovery credential, and refuses symlinked state trees before deletion. Device identity and pairing state are intentionally non-deletable through this generic API and require a dedicated reset flow. CI proves the ordinary agent token cannot erase history, category-specific deletion leaves device identity intact, and a symlinked task directory cannot cause deletion outside the protected Operator state directory.
 
+The Windows release builder compiles the native launcher and UIA sidecar, bundles a pinned Node runtime and the required Operator source closure, generates an MSIX manifest and HTTPS `.appinstaller` metadata, packs the package with the Windows SDK, and records a SHA-256 package digest. Dedicated Windows CI then unpacks the generated MSIX and verifies the launcher, bundled Node runtime, UIA sidecar, local-agent entrypoint, core runtime payload, manifest and release metadata before uploading the package artifact. This closes the installer/update-infrastructure gate without pretending the unsigned CI artifact is a production release.
+
+Code-signing mechanics are independently certified using an ephemeral CI certificate. The signing script enforces SHA-256, requires certificate subject to match the MSIX Publisher, verifies the resulting Authenticode signature, and requires an HTTPS RFC 3161 timestamp in production mode. The Windows smoke gate creates temporary trust material, builds a matching-publisher package, signs and verifies it, installs it with Windows package deployment, runs the installed `Operator.exe --self-test`, uninstalls it and removes the temporary trust material. The M5 production code-signing checkbox remains open until a real trusted production signing identity/certificate is supplied.
+
 The dedicated red-team CI gate attacks instruction-provenance escalation, approved-action path bypass, emergency-stop query bypass, recovery-token substitution, privacy path traversal, key-material exposure, relay capability-scope forgery and raw account-principal persistence. The canonical relay scope-forgery case is rejected by Ed25519 signature verification, and the full adversarial suite is green alongside the normal Core/MCP/Relay/Windows gates.
 
 The dedicated performance gate uses intentionally wide anti-regression ceilings rather than brittle microbenchmarks. Initial hosted-runner baselines are approximately 50,000 policy authorizations in 104 ms, 250 redacting audit append/tail operations in 82 ms, 150 durable relay enqueue/ACK operations in 192 ms, and 25 authenticated local-agent inspect round trips in 66 ms. The gate also asserts bounded state-file sizes so pathological growth fails even if raw latency remains low.
+
+Final platform revalidation runs the full 102-test root runtime/import suite with the same pinned Node release on Ubuntu, Windows and macOS. The matrix exposed and fixed macOS temporary-path aliasing in test fixtures and Windows Git line-ending nondeterminism in restore fixtures; no platform skips were added, and all three operating-system jobs are green with the same assertions.
