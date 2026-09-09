@@ -184,17 +184,25 @@ impl UiaEngine {
     }
 
     fn matches_selector(&self, element: &UIElement, selector: &Selector) -> bool {
-        if let Some(expected) = selector.name.as_deref() {
-            if element.get_name().unwrap_or_default() != expected { return false; }
+        if let Some(expected) = selector.name.as_deref()
+            && element.get_name().unwrap_or_default() != expected
+        {
+            return false;
         }
-        if let Some(expected) = selector.automation_id.as_deref() {
-            if element.get_automation_id().unwrap_or_default() != expected { return false; }
+        if let Some(expected) = selector.automation_id.as_deref()
+            && element.get_automation_id().unwrap_or_default() != expected
+        {
+            return false;
         }
-        if let Some(expected) = selector.class_name.as_deref() {
-            if element.get_classname().unwrap_or_default() != expected { return false; }
+        if let Some(expected) = selector.class_name.as_deref()
+            && element.get_classname().unwrap_or_default() != expected
+        {
+            return false;
         }
-        if let Some(expected) = selector.process_id {
-            if element.get_process_id().unwrap_or_default() != expected { return false; }
+        if let Some(expected) = selector.process_id
+            && element.get_process_id().unwrap_or_default() != expected
+        {
+            return false;
         }
         if let Some(expected) = selector.control_type.as_deref() {
             let actual = element.get_control_type().map(|value| format!("{value:?}")).unwrap_or_default();
