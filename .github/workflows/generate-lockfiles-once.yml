@@ -1,0 +1,36 @@
+name: Generate npm lockfiles once
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.event.head_commit.message == 'chore: trigger deterministic lockfile generation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Generate lockfiles without lifecycle scripts
+        run: |
+          npm --prefix apps/mcp-server install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server install --package-lock-only --ignore-scripts --no-audit --no-fund
+          test -f apps/mcp-server/package-lock.json
+          test -f apps/relay-server/package-lock.json
+      - name: Commit lockfiles and remove one-shot workflow
+        run: |
+          rm -f .lockfile-generation-trigger .github/workflows/generate-lockfiles-once.yml
+          git config user.name 'Operator CI'
+          git config user.email 'operator-ci@example.invalid'
+          git add -A
+          git diff --cached --stat
+          git commit -m 'chore: pin npm dependency lockfiles'
+          git push origin HEAD:main
