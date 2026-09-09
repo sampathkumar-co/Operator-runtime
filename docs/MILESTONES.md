@@ -34,12 +34,14 @@ Acceptance gates:
 - [x] credential-bearing and non-HTTP(S) URL rejection
 - [x] internal tab focus/close primitives
 - [x] download initiation and completion events
-- [ ] iframe/shadow-DOM strategy
-- [ ] browser attach/launch discovery across Chrome + Edge profiles
+- [x] iframe/shadow-DOM strategy
+- [x] browser attach/launch discovery across Chrome + Edge profiles
 - [x] MCP adapter dependencies install + typecheck in GitHub CI
 - [ ] MCP Inspector end-to-end test
 - [ ] Secure MCP Tunnel test
 - [ ] real ChatGPT read workflow test
+
+Browser semantics now traverse open shadow roots and same-origin iframes in-document, plus bounded cross-origin OOPIF sessions through flattened CDP child sessions. Interactions run a locate-only preflight across all contexts and reject ambiguous multi-context matches before any side effect. Browser lifecycle recovery checks configured and previously launched endpoints, discovers verified dynamic `DevToolsActivePort` endpoints from bounded Chrome/Edge data roots without reading profile databases, then launches an isolated Operator profile only when necessary.
 
 ## M2 — Windows semantic kernel — COMPLETE
 
