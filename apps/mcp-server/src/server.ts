@@ -142,33 +142,36 @@ function createServer(): McpServer {
 
   server.registerTool('app.inspect', {
     title: 'Inspect Windows application controls',
-    description: 'Inspect a bounded Microsoft UI Automation control tree and optionally observe selector-scoped UIA property/structure changes for up to 5 seconds. Returns semantic controls and events rather than pixels.',
+    description: 'Wait up to 10 seconds for a unique semantic selector, inspect a bounded Microsoft UI Automation control tree, and optionally observe selector-scoped property/structure changes for up to 5 seconds. Returns semantic controls and events rather than pixels.',
     inputSchema: z.object({
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
       maxDepth: z.number().int().min(1).max(12).default(6),
-      observeMs: z.number().int().min(0).max(5000).default(0)
+      observeMs: z.number().int().min(0).max(5000).default(0),
+      waitMs: z.number().int().min(0).max(10000).default(0)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ selector, maxNodes, maxDepth, observeMs }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs }));
+  }, async ({ selector, maxNodes, maxDepth, observeMs, waitMs }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs, waitMs }));
 
   server.registerTool('app.operate', {
     title: 'Operate Windows application control',
-    description: 'Operate one uniquely matched Windows control through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns. Ambiguous selectors fail and state is re-read after every action. This action may cause external side effects and remains approval-gated locally.',
+    description: 'Wait up to 10 seconds for one uniquely matched Windows control, then operate it through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns. Ambiguous selectors fail immediately and state is re-read after every action. This action may cause external side effects and remains approval-gated locally.',
     inputSchema: z.object({
       operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll']),
       selector: appSelector,
       value: z.string().max(65536).optional(),
       horizontalAmount: scrollAmount.optional(),
-      verticalAmount: scrollAmount.optional()
+      verticalAmount: scrollAmount.optional(),
+      waitMs: z.number().int().min(0).max(10000).default(0)
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  }, async ({ operation, selector, value, horizontalAmount, verticalAmount }) => invoke('app.operate', 'external', {
+  }, async ({ operation, selector, value, horizontalAmount, verticalAmount, waitMs }) => invoke('app.operate', 'external', {
     operation,
     selector,
     value,
     horizontalAmount,
-    verticalAmount
+    verticalAmount,
+    waitMs
   }));
 
   return server;
