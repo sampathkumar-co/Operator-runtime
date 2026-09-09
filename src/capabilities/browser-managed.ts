@@ -50,9 +50,9 @@ export function candidateBrowserPaths(platform: NodeJS.Platform, env: NodeJS.Pro
   if (platform === 'win32') {
     for (const root of [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA]) {
       if (!root) continue;
-      add(path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'));
-      add(path.join(root, 'Google', 'Chrome for Testing', 'Application', 'chrome.exe'));
-      add(path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+      add(path.win32.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+      add(path.win32.join(root, 'Google', 'Chrome for Testing', 'Application', 'chrome.exe'));
+      add(path.win32.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
     }
   } else if (platform === 'darwin') {
     add('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
@@ -71,36 +71,37 @@ export function candidateBrowserPaths(platform: NodeJS.Platform, env: NodeJS.Pro
 
 export function candidateBrowserDataDirs(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, homeDir: string): string[] {
   const values: string[] = [];
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
   const add = (value: string | undefined) => {
-    if (!value || !path.isAbsolute(value) || value === path.parse(value).root || values.includes(value)) return;
+    if (!value || !pathApi.isAbsolute(value) || value === pathApi.parse(value).root || values.includes(value)) return;
     values.push(value);
   };
 
   if (platform === 'win32') {
     const local = env.LOCALAPPDATA;
     if (local) {
-      add(path.join(local, 'Google', 'Chrome', 'User Data'));
-      add(path.join(local, 'Google', 'Chrome Beta', 'User Data'));
-      add(path.join(local, 'Google', 'Chrome SxS', 'User Data'));
-      add(path.join(local, 'Microsoft', 'Edge', 'User Data'));
-      add(path.join(local, 'Microsoft', 'Edge Beta', 'User Data'));
-      add(path.join(local, 'Microsoft', 'Edge Dev', 'User Data'));
+      add(pathApi.join(local, 'Google', 'Chrome', 'User Data'));
+      add(pathApi.join(local, 'Google', 'Chrome Beta', 'User Data'));
+      add(pathApi.join(local, 'Google', 'Chrome SxS', 'User Data'));
+      add(pathApi.join(local, 'Microsoft', 'Edge', 'User Data'));
+      add(pathApi.join(local, 'Microsoft', 'Edge Beta', 'User Data'));
+      add(pathApi.join(local, 'Microsoft', 'Edge Dev', 'User Data'));
     }
   } else if (platform === 'darwin') {
-    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome'));
-    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Beta'));
-    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Canary'));
-    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge'));
-    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Beta'));
-    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Dev'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Beta'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Canary'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Beta'));
+    add(pathApi.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Dev'));
   } else {
-    add(path.join(homeDir, '.config', 'google-chrome'));
-    add(path.join(homeDir, '.config', 'google-chrome-beta'));
-    add(path.join(homeDir, '.config', 'google-chrome-unstable'));
-    add(path.join(homeDir, '.config', 'chromium'));
-    add(path.join(homeDir, '.config', 'microsoft-edge'));
-    add(path.join(homeDir, '.config', 'microsoft-edge-beta'));
-    add(path.join(homeDir, '.config', 'microsoft-edge-dev'));
+    add(pathApi.join(homeDir, '.config', 'google-chrome'));
+    add(pathApi.join(homeDir, '.config', 'google-chrome-beta'));
+    add(pathApi.join(homeDir, '.config', 'google-chrome-unstable'));
+    add(pathApi.join(homeDir, '.config', 'chromium'));
+    add(pathApi.join(homeDir, '.config', 'microsoft-edge'));
+    add(pathApi.join(homeDir, '.config', 'microsoft-edge-beta'));
+    add(pathApi.join(homeDir, '.config', 'microsoft-edge-dev'));
   }
   return values;
 }
