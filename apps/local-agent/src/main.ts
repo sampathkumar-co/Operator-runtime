@@ -23,6 +23,8 @@ const runtime = createRuntime({
   allowedExecutables,
   projectCommandRegistryPath: process.env.OPERATOR_PROJECT_COMMAND_REGISTRY,
   dockerExecutable: process.env.OPERATOR_DOCKER_PATH,
+  postgresProfileRegistryPath: process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY,
+  psqlExecutable: process.env.OPERATOR_PSQL_PATH,
   cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT,
   browserAutoLaunch: process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0',
   browserPath: process.env.OPERATOR_BROWSER_PATH,
@@ -34,7 +36,7 @@ const agent = createLocalAgentServer({
   runtime,
   token,
   permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
     allowExternalWrites: false,
     allowSystemChanges: false,
