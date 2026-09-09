@@ -7,6 +7,7 @@ pub const HARD_MAX_NODES: usize = 1500;
 pub const DEFAULT_MAX_DEPTH: usize = 6;
 pub const HARD_MAX_DEPTH: usize = 12;
 pub const HARD_MAX_OBSERVE_MS: u64 = 5_000;
+pub const HARD_MAX_WAIT_MS: u64 = 10_000;
 
 const SCROLL_AMOUNTS: &[&str] = &[
     "large_decrement",
@@ -75,6 +76,8 @@ pub struct InspectParams {
     pub max_depth: Option<usize>,
     #[serde(default)]
     pub observe_ms: Option<u64>,
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
 }
 
 impl InspectParams {
@@ -88,6 +91,10 @@ impl InspectParams {
     pub fn observe_ms(&self) -> u64 {
         self.observe_ms.unwrap_or(0).min(HARD_MAX_OBSERVE_MS)
     }
+
+    pub fn wait_ms(&self) -> u64 {
+        self.wait_ms.unwrap_or(0).min(HARD_MAX_WAIT_MS)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,9 +107,15 @@ pub struct OperateParams {
     pub horizontal_amount: Option<String>,
     #[serde(default)]
     pub vertical_amount: Option<String>,
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
 }
 
 impl OperateParams {
+    pub fn wait_ms(&self) -> u64 {
+        self.wait_ms.unwrap_or(0).min(HARD_MAX_WAIT_MS)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.selector.validate()?;
         match self.operation.as_str() {
@@ -189,6 +202,7 @@ mod tests {
             value: None,
             horizontal_amount: None,
             vertical_amount: None,
+            wait_ms: None,
         }
     }
 
@@ -205,9 +219,19 @@ mod tests {
             max_nodes: Some(50_000),
             max_depth: Some(99),
             observe_ms: Some(50_000),
+            wait_ms: Some(50_000),
         };
         assert_eq!(params.limits(), (HARD_MAX_NODES, HARD_MAX_DEPTH));
         assert_eq!(params.observe_ms(), HARD_MAX_OBSERVE_MS);
+        assert_eq!(params.wait_ms(), HARD_MAX_WAIT_MS);
+    }
+
+    #[test]
+    fn operate_wait_is_clamped() {
+        let mut params = operate("invoke");
+        params.wait_ms = Some(99_999);
+        assert_eq!(params.wait_ms(), HARD_MAX_WAIT_MS);
+        assert!(params.validate().is_ok());
     }
 
     #[test]
