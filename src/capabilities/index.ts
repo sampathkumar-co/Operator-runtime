@@ -6,6 +6,7 @@ export * from './git-checkpoint.ts';
 export * from './git-write.ts';
 export * from './system.ts';
 export * from './project.ts';
+export * from './project-command.ts';
 export * from './browser-cdp.ts';
 export * from './browser-managed.ts';
 export * from './windows-uia.ts';
