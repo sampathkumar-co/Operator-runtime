@@ -93,6 +93,31 @@ jobs:
       - name: Clippy UIA sidecar
         run: cargo clippy --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
 
+  windows-dpapi:
+    name: Windows DPAPI device-key helper
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Compile and test DPAPI helper
+        shell: pwsh
+        run: cargo test --manifest-path native/windows-dpapi/Cargo.toml
+      - name: Clippy DPAPI helper
+        shell: pwsh
+        run: cargo clippy --manifest-path native/windows-dpapi/Cargo.toml --all-targets -- -D warnings
+      - name: Release DPAPI round-trip self-test
+        shell: pwsh
+        run: |
+          cargo build --manifest-path native/windows-dpapi/Cargo.toml --release
+          & ./native/windows-dpapi/target/release/operator-windows-dpapi.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI release helper self-test failed' }
+
   windows-release-package:
     name: Windows unsigned MSIX packaging
     runs-on: windows-latest
@@ -126,6 +151,7 @@ jobs:
             'Operator.exe',
             'runtime/node.exe',
             'native/operator-windows-uia.exe',
+            'native/operator-windows-dpapi.exe',
             'app/package.json',
             'app/apps/local-agent/src/main.ts',
             'app/src/core/runtime.ts',
@@ -134,6 +160,8 @@ jobs:
           foreach ($relative in $required) {
             if (-not (Test-Path (Join-Path 'artifacts/windows-release/unpacked' $relative) -PathType Leaf)) { throw "Missing packaged file: $relative" }
           }
+          & artifacts/windows-release/unpacked/native/operator-windows-dpapi.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged DPAPI helper self-test failed' }
           $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
           if ($meta.signed -ne $false) { throw 'CI package must remain explicitly unsigned' }
           if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'release metadata hash mismatch' }
