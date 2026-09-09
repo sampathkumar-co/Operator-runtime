@@ -90,8 +90,13 @@ async function attachOopifSessions(session: CdpConnection): Promise<FrameAttachm
   };
 }
 
-async function evaluate(session: CdpConnection, context: FrameContext, expression: string): Promise<JsonMap> {
-  const params = { expression, returnByValue: true, awaitPromise: true, userGesture: false };
+async function evaluate(
+  session: CdpConnection,
+  context: FrameContext,
+  expression: string,
+  userGesture = false
+): Promise<JsonMap> {
+  const params = { expression, returnByValue: true, awaitPromise: true, userGesture };
   return context.frame
     ? session.sendInSession(context.frame.sessionId, 'Runtime.evaluate', params)
     : session.send('Runtime.evaluate', params);
@@ -261,7 +266,7 @@ export async function performSemanticInteraction(
 
     const chosen = matches[0]!.context;
     const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)})`;
-    const value = unwrapRuntimeValue(await evaluate(session, chosen, expression));
+    const value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
     }
