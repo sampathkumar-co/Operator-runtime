@@ -79,21 +79,6 @@ pub fn discover_windows(max_windows: usize) -> Result<WindowDiscovery, String> {
     })
 }
 
-pub fn discover_matching_windows(
-    process_id: Option<u32>,
-    title: Option<&str>,
-    class_name: Option<&str>,
-    max_windows: usize,
-) -> Result<WindowDiscovery, String> {
-    validate_fallback_selector(process_id, title, class_name)?;
-    let discovery = discover_windows(MAX_WINDOWS)?;
-    let mut windows = filter_windows(discovery.windows, process_id, title, class_name);
-    let max_windows = max_windows.clamp(1, MAX_WINDOWS);
-    let truncated = windows.len() > max_windows;
-    windows.truncate(max_windows);
-    Ok(WindowDiscovery { windows, truncated, max_windows })
-}
-
 pub fn wait_for_unique_window(
     process_id: Option<u32>,
     title: Option<&str>,
