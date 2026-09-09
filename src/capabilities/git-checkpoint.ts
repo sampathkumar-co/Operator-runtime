@@ -12,7 +12,7 @@ const SCORE: CapabilityScore = {
   reliability: 0.99,
   latency: 0.92,
   determinism: 0.99,
-  security: 0.97,
+  security: 0.98,
   reversibility: 0.99,
   informationQuality: 0.99,
   interactionCost: 0.01
@@ -20,6 +20,7 @@ const SCORE: CapabilityScore = {
 
 const REF_PREFIX = 'refs/operator/checkpoints/';
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false'];
 
 type RepoState = {
   root: string;
@@ -96,6 +97,7 @@ export class GitCheckpointProvider implements CapabilityProvider {
           indexTree: checkpoint.indexTree,
           worktreeTree: checkpoint.worktreeTree
         }),
+        evidence('git_execution_boundary', 'pass', 'Repository-local clean/smudge/process filters were absent before Git materialized the checkpoint tree.'),
         evidence('postcondition', 'pass', 'Repository state fingerprint is unchanged after checkpoint creation.', { fingerprint: checkpoint.fingerprint })
       ],
       durationMs: Math.round(performance.now() - started)
@@ -233,6 +235,7 @@ export class GitCheckpointProvider implements CapabilityProvider {
     const requested = await this.#scope.resolveExisting(cwd);
     const rootResult = await runGit(requested, ['rev-parse', '--show-toplevel'], {});
     const root = await this.#scope.resolveExisting(rootResult.stdout.trim());
+    await assertNoRepoLocalContentFilters(root);
     const headResult = await runGit(root, ['rev-parse', '--verify', 'HEAD'], {}, true);
     const head = headResult.code === 0 ? headResult.stdout.trim() : undefined;
     const indexTree = (await runGit(root, ['write-tree'], {})).stdout.trim();
@@ -263,8 +266,9 @@ export class GitCheckpointProvider implements CapabilityProvider {
   }
 
   async #restoreState(root: string, state: Pick<RepoState, 'indexTree' | 'worktreeTree'>): Promise<void> {
+    await assertNoRepoLocalContentFilters(root);
     const current = await this.#captureState(root);
-    const diff = await runGit(root, ['diff', '--name-status', '-z', '--no-renames', state.worktreeTree, current.worktreeTree], {});
+    const diff = await runGit(root, ['diff', '--name-status', '-z', '--no-renames', '--no-ext-diff', '--no-textconv', state.worktreeTree, current.worktreeTree], {});
     for (const item of parseNameStatus(diff.stdout)) {
       const absolute = path.resolve(root, item.path);
       const relative = path.relative(root, absolute);
@@ -306,6 +310,18 @@ function parseNameStatus(raw: string): Array<{ status: string; path: string }> {
   return output;
 }
 
+async function assertNoRepoLocalContentFilters(root: string): Promise<void> {
+  const configured = await runGit(root, ['config', '--local', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], {}, true);
+  if (configured.code === 0 && configured.stdout.trim()) {
+    throw new OperatorError('GIT_LOCAL_FILTER_DENIED', 'Repository-local Git clean/smudge/process filters are disabled for checkpoint operations because they can execute arbitrary commands.', {
+      details: { keys: configured.stdout.split(/\r?\n/).filter(Boolean).slice(0, 50) }
+    });
+  }
+  if (![0, 1].includes(configured.code)) {
+    throw new OperatorError('GIT_CONFIG_INSPECTION_FAILED', configured.stderr.trim() || 'Unable to inspect repository-local Git filter configuration.');
+  }
+}
+
 async function snapshotWorktreeTree(root: string, head?: string): Promise<string> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-git-index-'));
   const indexPath = path.join(tempDir, 'index');
@@ -331,12 +347,13 @@ function checkpointIdentityEnv(): NodeJS.ProcessEnv {
 
 async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, allowNonZero = false): Promise<GitOutput> {
   return await new Promise((resolve, reject) => {
-    const child = spawn('git', args, {
+    const safeArgs = [...SAFE_GIT_PREFIX, ...args];
+    const child = spawn('git', safeArgs, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...extraEnv }
+      env: { ...process.env, GIT_PAGER: '', ...extraEnv }
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
