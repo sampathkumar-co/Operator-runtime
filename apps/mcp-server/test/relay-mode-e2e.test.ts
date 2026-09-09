@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -7,9 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
-import { RelayControlService } from '../../relay-server/src/control-service.ts';
 
 const CONTROL_TOKEN = 'relay-control-ci-0123456789abcdef0123456789';
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
@@ -35,6 +32,16 @@ async function reservePort(): Promise<number> {
   return port;
 }
 
+async function listen(server: http.Server): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('server did not expose port');
+  return address.port;
+}
+
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
@@ -54,6 +61,18 @@ async function waitForHealth(url: string, child: ChildProcess, stderr: () => str
     await new Promise((resolve) => setTimeout(resolve, 75));
   }
   throw new Error(`MCP relay-mode health timed out: ${stderr()}`);
+}
+
+async function readBody(req: http.IncomingMessage): Promise<any> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function send(res: http.ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.end(body);
 }
 
 async function runInspector(mcpUrl: string, home: string): Promise<Record<string, unknown>> {
@@ -83,47 +102,38 @@ async function runInspector(mcpUrl: string, home: string): Promise<Record<string
 }
 
 test('official MCP client and Inspector execute through relay control mode with unchanged tool schemas', async (t) => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-relay-mode-'));
-  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
-  const results = new RelayResultStore(stateDir);
-  let nextSeq = 1;
   const seen: Array<{ accountId: string; deviceId?: string; projectKey?: string; action: ActionRequest }> = [];
-
-  const fakeHub = {
-    async dispatch(input: any) {
-      const action = input?.payload?.action as ActionRequest;
-      assert.equal(input.accountId, ACCOUNT_ID);
-      assert.equal(input.explicitDeviceId, DEVICE_ID);
-      assert.equal(input.projectKey, PROJECT_KEY);
-      assert.deepEqual(input.requiredCapabilities, [action.capability]);
-      const seq = nextSeq++;
-      const id = crypto.randomUUID();
-      seen.push({ accountId: input.accountId, deviceId: input.explicitDeviceId, projectKey: input.projectKey, action });
-      const result: ActionResult = action.capability === 'browser.interact'
-        ? {
-            ok: false,
-            capability: action.capability,
-            provider: 'policy',
-            evidence: [{ kind: 'policy', status: 'fail', message: 'approval required', timestamp: new Date().toISOString() }],
-            error: { code: 'APPROVAL_REQUIRED', message: 'External action requires approval.', retryable: false },
-            durationMs: 1
-          }
-        : {
-            ok: true,
-            capability: action.capability,
-            provider: 'relay-ci-device',
-            output: { remote: true, deviceId: DEVICE_ID },
-            evidence: [{ kind: 'relay-ci', status: 'pass', message: 'remote result persisted', timestamp: new Date().toISOString() }],
-            durationMs: 2
-          };
-      await results.put(DEVICE_ID, seq, id, result as unknown as Record<string, unknown>);
-      return { route: { deviceId: DEVICE_ID, reason: 'explicit-device' }, delivery: { seq, id } };
-    }
-  };
-
-  const control = new RelayControlService({ hub: fakeHub as any, results, token: CONTROL_TOKEN });
-  const controlBound = await control.listen('127.0.0.1', 0);
-  t.after(() => control.close());
+  const control = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
+    if (req.method !== 'POST' || req.url !== '/v1/execute') return send(res, 404, { ok: false });
+    assert.equal(req.headers.authorization, `Bearer ${CONTROL_TOKEN}`);
+    const body = await readBody(req);
+    assert.equal(body.accountId, ACCOUNT_ID);
+    assert.equal(body.deviceId, DEVICE_ID);
+    assert.equal(body.projectKey, PROJECT_KEY);
+    const action = body.action as ActionRequest;
+    seen.push({ accountId: body.accountId, deviceId: body.deviceId, projectKey: body.projectKey, action });
+    const result: ActionResult = action.capability === 'browser.interact'
+      ? {
+          ok: false,
+          capability: action.capability,
+          provider: 'policy',
+          evidence: [{ kind: 'policy', status: 'fail', message: 'approval required', timestamp: new Date().toISOString() }],
+          error: { code: 'APPROVAL_REQUIRED', message: 'External action requires approval.', retryable: false },
+          durationMs: 1
+        }
+      : {
+          ok: true,
+          capability: action.capability,
+          provider: 'relay-ci-device',
+          output: { remote: true, deviceId: DEVICE_ID },
+          evidence: [{ kind: 'relay-ci', status: 'pass', message: 'remote result persisted', timestamp: new Date().toISOString() }],
+          durationMs: 2
+        };
+    return send(res, 200, result);
+  });
+  const controlPort = await listen(control);
+  t.after(() => new Promise<void>((resolve) => control.close(() => resolve())));
 
   const mcpPort = await reservePort();
   let stderr = '';
@@ -134,7 +144,7 @@ test('official MCP client and Inspector execute through relay control mode with 
       OPERATOR_EXECUTION_MODE: 'relay',
       OPERATOR_AGENT_TOKEN: CONTROL_TOKEN,
       OPERATOR_RELAY_CONTROL_TOKEN: CONTROL_TOKEN,
-      OPERATOR_RELAY_CONTROL_URL: `http://127.0.0.1:${controlBound.port}`,
+      OPERATOR_RELAY_CONTROL_URL: `http://127.0.0.1:${controlPort}`,
       OPERATOR_RELAY_ACCOUNT_ID: ACCOUNT_ID,
       OPERATOR_RELAY_DEVICE_ID: DEVICE_ID,
       OPERATOR_RELAY_PROJECT_KEY: PROJECT_KEY,
