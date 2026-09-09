@@ -279,6 +279,73 @@ function createServer(): McpServer {
     return invoke('postgres.inspect', 'read', { path, operation, profileId, schema, table, timeoutMs }, path);
   });
 
+  server.registerTool('vscode.inspect', {
+    title: 'Inspect Visual Studio Code',
+    description: 'Read bounded VS Code CLI version, process/status diagnostics, or installed extension identifiers/versions. This does not open a workspace and strips inherited VS Code IPC environment before invoking the CLI.',
+    inputSchema: z.object({ operation: z.enum(['version', 'status', 'extensions']).default('status') }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ operation }) => invoke('vscode.inspect', 'read', { operation }));
+
+  server.registerTool('vscode.open', {
+    title: 'Open authorized target in isolated VS Code',
+    description: 'Open an authorized folder/file, goto location, or two-file diff in a new Operator-isolated VS Code window with extensions disabled and a dedicated user-data directory outside project roots. The certified path never reuses an active user window and does not expose extension installation, VS Code chat, task/terminal execution, URL handling, or arbitrary CLI flags. This is locally system-change gated.',
+    inputSchema: z.object({
+      mode: z.enum(['folder', 'file', 'goto', 'diff']),
+      path: z.string().min(1).optional(),
+      leftPath: z.string().min(1).optional(),
+      rightPath: z.string().min(1).optional(),
+      line: z.number().int().min(1).max(1000000).optional(),
+      column: z.number().int().min(1).max(1000000).optional(),
+      timeoutMs: z.number().int().min(1000).max(60000).default(15000)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ mode, path, leftPath, rightPath, line, column, timeoutMs }) => {
+    if ((mode === 'folder' || mode === 'file' || mode === 'goto') && !path) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: `vscode.open ${mode} requires path.` }],
+        structuredContent: {
+          ok: false,
+          capability: 'vscode.open',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'VSCODE_PATH_REQUIRED', message: 'path is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    if (mode === 'goto' && line === undefined) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'vscode.open goto requires line.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'vscode.open',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'VSCODE_LINE_REQUIRED', message: 'line is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    if (mode === 'diff' && (!leftPath || !rightPath)) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'vscode.open diff requires leftPath and rightPath.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'vscode.open',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'VSCODE_DIFF_PATHS_REQUIRED', message: 'leftPath and rightPath are required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    const target = mode === 'diff' ? leftPath : path;
+    return invoke('vscode.open', 'system', { mode, path, leftPath, rightPath, line, column, timeoutMs }, target);
+  });
+
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
     description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
