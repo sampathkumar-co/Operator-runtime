@@ -124,9 +124,9 @@ export class RelayClient {
         this.#attempt = 0;
       } catch (error) {
         if (this.#stopped) break;
+        if (error instanceof OperatorError && !error.retryable) throw error;
         const delay = reconnectDelay(this.#attempt++, this.#random());
         await this.#sleep(delay);
-        if (error instanceof OperatorError && !error.retryable) throw error;
       }
     }
   }
@@ -166,42 +166,66 @@ export class RelayClient {
       nonce: crypto.randomBytes(24).toString('base64url')
     };
     const signature = await this.#identity.sign(canonicalBytes(helloPayload));
-    sendFrame(socket, { type: 'hello', payload: helloPayload, signature, sessionToken: token });
 
-    await new Promise<void>((resolve, reject) => {
+    const connectionDone = new Promise<void>((resolve, reject) => {
       let welcomed = false;
-      const onError = () => reject(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
-      const onClose = () => resolve();
-      const onMessage = (event: any) => {
-        void (async () => {
-          try {
-            const frame = parseServerFrame(event?.data);
-            if (!welcomed) {
-              if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-              this.#validateWelcome(frame, state);
-              welcomed = true;
-              this.#attempt = 0;
-              this.#lastPongAt = Date.now();
-              this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
-              return;
-            }
-            if (frame.type === 'pong') {
-              this.#lastPongAt = Date.now();
-              return;
-            }
-            if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
-            await this.#handleDelivery(socket, frame);
-          } catch (error) {
-            this.#clearHeartbeat();
-            try { socket.close(4002, 'protocol/recovery error'); } catch { /* noop */ }
-            reject(error instanceof OperatorError ? error : new OperatorError('RELAY_PROTOCOL_ERROR', String(error), { retryable: true }));
-          }
-        })();
+      let settled = false;
+      let messageQueue: Promise<void> = Promise.resolve();
+
+      const cleanup = () => {
+        socket.removeEventListener?.('message', onMessage);
+        socket.removeEventListener?.('error', onError);
+        socket.removeEventListener?.('close', onClose);
       };
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        this.#clearHeartbeat();
+        cleanup();
+        try { socket.close(4002, 'protocol/recovery error'); } catch { /* noop */ }
+        reject(error instanceof OperatorError ? error : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true }));
+      };
+      const onError = () => fail(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
+      const onClose = () => {
+        if (this.#stopped) succeed();
+        else fail(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
+      };
+      const processMessage = async (event: any) => {
+        const frame = parseServerFrame(event?.data);
+        if (!welcomed) {
+          if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
+          this.#validateWelcome(frame, state);
+          welcomed = true;
+          this.#attempt = 0;
+          this.#lastPongAt = Date.now();
+          this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
+          return;
+        }
+        if (frame.type === 'pong') {
+          this.#lastPongAt = Date.now();
+          return;
+        }
+        if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
+        await this.#handleDelivery(socket, frame);
+      };
+      const onMessage = (event: any) => {
+        messageQueue = messageQueue.then(() => processMessage(event));
+        void messageQueue.catch(fail);
+      };
+
       socket.addEventListener('message', onMessage);
       socket.addEventListener('error', onError);
       socket.addEventListener('close', onClose);
     });
+
+    sendFrame(socket, { type: 'hello', payload: helloPayload, signature, sessionToken: token });
+    await connectionDone;
     this.#clearHeartbeat();
     this.#socket = null;
   }
@@ -335,6 +359,12 @@ function validateDelivery(frame: DeliveryFrame): RelayDelivery {
 
 function validDeliveryId(value: string): string {
   if (!value || value.length > MAX_DELIVERY_ID || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay delivery ID is invalid.');
+  return value;
+}
+
+function validIso(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('RELAY_STATE_CORRUPT', 'Relay state timestamp is invalid.');
   return value;
 }
 
