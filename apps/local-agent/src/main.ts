@@ -21,6 +21,7 @@ if (!token || token.length < 32) {
 const runtime = createRuntime({
   allowedRoots,
   allowedExecutables,
+  projectCommandRegistryPath: process.env.OPERATOR_PROJECT_COMMAND_REGISTRY,
   cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT,
   browserAutoLaunch: process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0',
   browserPath: process.env.OPERATOR_BROWSER_PATH,
@@ -32,7 +33,7 @@ const agent = createLocalAgentServer({
   runtime,
   token,
   permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
     allowExternalWrites: false,
     allowSystemChanges: false,
