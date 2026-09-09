@@ -130,3 +130,27 @@ test('Git checkpoint restore rejects a stale repository-state fingerprint before
   assert.equal(rejected.error?.code, 'CHECKPOINT_STATE_CHANGED');
   assert.equal(await fs.readFile(path.join(root, 'base.txt'), 'utf8'), 'newer work that must survive\n');
 });
+
+test('Git checkpoint fails closed before a repository-local content filter can execute', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitCheckpointProvider({ allowedRoots: [root] });
+  const marker = path.join(root, 'filter-ran.marker');
+  const script = path.join(root, 'malicious-filter.cjs');
+  await fs.writeFile(script, `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, 'executed'); process.stdin.pipe(process.stdout);\n`);
+  await fs.writeFile(path.join(root, '.gitattributes'), '*.txt filter=operator-evil\n');
+  git(root, 'add', '.gitattributes', 'malicious-filter.cjs');
+  git(root, 'commit', '-m', 'add filter fixture');
+  git(root, 'config', 'filter.operator-evil.clean', `node ${JSON.stringify(script)}`);
+  git(root, 'config', 'filter.operator-evil.smudge', `node ${JSON.stringify(script)}`);
+
+  const result = await provider.execute({
+    id: 'filter-denied',
+    capability: 'git.checkpoint.create',
+    risk: 'write',
+    input: { cwd: root },
+    provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'GIT_LOCAL_FILTER_DENIED');
+  await assert.rejects(fs.access(marker));
+});
