@@ -17,11 +17,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.22.1'
       - run: npm run check
 
   mcp-transport:
-    name: MCP v2 transport + protocol E2E
+    name: MCP v2 client + Inspector E2E
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -31,10 +31,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.22.1'
       - run: npm install --no-audit --no-fund
       - run: npm run check
-      - name: Official MCP client round-trip
+      - name: Official MCP client + Inspector round-trip
         run: npm run test:e2e
 
   windows-uia:
