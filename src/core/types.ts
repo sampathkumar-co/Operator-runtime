@@ -72,4 +72,5 @@ export interface CapabilityProvider {
   supports(action: ActionRequest): boolean | Promise<boolean>;
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore>;
   execute(action: ActionRequest): Promise<ActionResult>;
+  close?(): void | Promise<void>;
 }
