@@ -83,25 +83,37 @@ The PostgreSQL adapter is read-only and structured. Trusted connection profiles 
 
 The VS Code adapter uses the official CLI through a closed operation set. Read-only inspection covers version, bounded status diagnostics, and installed extension IDs/versions. Project/file/goto/diff opens are locally system-change gated and always use a new Operator-isolated user-data directory outside all authorized project roots with extensions disabled. Inherited `VSCODE_*` IPC variables and `ELECTRON_RUN_AS_NODE` are removed so an invocation cannot silently reuse an existing user window. The certified adapter does not expose extension installation/removal, VS Code chat, tasks/terminal execution, URL handlers, arbitrary CLI flags, or reuse-window behavior. Provider isolation/path tests and the 22-tool MCP/Inspector policy-boundary test are green.
 
-## M4 — relay + multi-device — IN PROGRESS
+## M4 — relay + multi-device — COMPLETE
 
-- [ ] account/device registry
-- [ ] signed pairing challenge
-- [ ] outbound persistent connection
-- [ ] short-lived session tokens
-- [ ] rotation/revocation
-- [ ] device routing
-- [ ] project-to-device resolution
-- [ ] reconnect/resume
+- [x] account/device registry
+- [x] signed pairing challenge
+- [x] outbound persistent connection
+- [x] short-lived session tokens
+- [x] rotation/revocation
+- [x] device routing
+- [x] project-to-device resolution
+- [x] reconnect/resume
 
-## M5 — companion UI and publication hardening
+The multi-device trust chain uses persistent Ed25519 device identities, one-time signed pairing challenges, public-key/fingerprint conflict checks and persistent device revocation. Account identity is supplied by an upstream authentication layer; Operator stores only a SHA-256 principal hash plus generated account UUID and account-scoped device memberships, never raw issuer/subject identifiers.
 
-- Devices / Tasks / Permissions / Activity / Settings
-- emergency disconnect
-- installer + auto-update
-- code signing
-- privacy/data controls
-- submission assets
-- red-team suite
-- performance benchmark suite
-- final platform-matrix revalidation
+Relay sessions use Ed25519-signed short-lived tokens bound to issuer, subject device/fingerprint, audience and capability scopes. Token rotation revokes the old JTI and activates its replacement atomically in one state-file update. Issuer-side revocation is immediate; remote offline verification is correctly limited to signature/expiry knowledge until revocation state is synchronized.
+
+The outbound relay client requires `wss://` outside explicit loopback development, sends a signed device hello, uses bounded exponential reconnect with heartbeat monitoring, serializes inbound frames, persists a durable ACK cursor and writes a `processing` journal before handing a delivery to the local executor. A crash in the uncertain side-effect window therefore requires explicit recovery rather than blind replay.
+
+Routing is deterministic and fail-closed: explicit device and project binding must agree, a bound project never silently fails over to another machine, revoked/offline/stale/capability-mismatched devices are rejected, and multiple eligible unbound devices produce ambiguity rather than random selection. Project bindings use opaque logical keys and do not expose one machine's filesystem paths to another.
+
+The relay authority maintains a durable monotonic per-device delivery queue with ID-bound contiguous ACKs, duplicate-ACK safety and lost-ACK cursor reconciliation. The real `apps/relay-server` WebSocket service verifies paired-device signatures and short-lived relay tokens, derives routing capabilities from authority-signed token scopes, provides account-scoped routing and project binding, and permits only one unacknowledged delivery per device at a time. A dedicated CI job runs a real `ws` server against the production `RelayClient`, proves delivery/ACK, disconnect/reconnect with no replay, second-delivery continuation and capability denial. The service defaults to loopback-only bind; non-loopback bind requires explicit acknowledgment that TLS terminates at a trusted upstream proxy.
+
+## M5 — companion UI and publication hardening — IN PROGRESS
+
+- [ ] Devices / Tasks / Permissions / Activity / Settings companion surfaces
+- [x] emergency disconnect
+- [ ] installer + auto-update
+- [ ] code signing
+- [ ] privacy/data controls
+- [ ] submission assets
+- [ ] red-team suite
+- [ ] performance benchmark suite
+- [ ] final platform-matrix revalidation
+
+The emergency execution stop is enforced centrally by the local-agent HTTP boundary before `runtime.execute`, persists atomically outside project roots by default, survives process restarts, reports only a boolean through public health, and blocks all capabilities with HTTP 423 while engaged. Engaging uses the normal authenticated local-agent channel, but API recovery can require a separate recovery token; the ordinary agent token cannot clear the stop. CI proves engage → blocked execution → restart → still blocked → wrong recovery denied → separate recovery token clear → execution resumes.
