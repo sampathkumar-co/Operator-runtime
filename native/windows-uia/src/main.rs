@@ -9,6 +9,12 @@ use serde_json::{json, Value};
 use uia::UiaEngine;
 use win32::WindowDiscovery;
 
+struct Win32SelectorParts<'a> {
+    process_id: Option<u32>,
+    title: Option<&'a str>,
+    class_name: Option<&'a str>,
+}
+
 fn main() {
     let engine = UiaEngine::new();
     if let Err(error) = &engine {
@@ -239,12 +245,12 @@ fn activate_via_win32_selector(
     uia_available: bool,
     reason: &str,
 ) -> Response<Value> {
-    let (process_id, title, class_name) = match win32_selector(selector) {
+    let parts = match win32_selector(selector) {
         Ok(parts) => parts,
         Err(error) => return Response::failure(id, "WIN32_FALLBACK_UNSUPPORTED_SELECTOR", error, false),
     };
 
-    match win32::activate_unique_window(process_id, title, class_name, wait_ms) {
+    match win32::activate_unique_window(parts.process_id, parts.title, parts.class_name, wait_ms) {
         Ok((before, after, waited_ms)) => Response::success(id, json!({
             "operation": "activate_window",
             "waited_ms": waited_ms,
@@ -271,11 +277,11 @@ fn win32_fallback_inspect(
 
     let max_windows = params.max_windows();
     let (discovery, waited_ms) = if let Some(selector) = params.selector.as_ref() {
-        let (process_id, title, class_name) = win32_selector(selector)?;
+        let parts = win32_selector(selector)?;
         let (window, waited_ms) = win32::wait_for_unique_window(
-            process_id,
-            title,
-            class_name,
+            parts.process_id,
+            parts.title,
+            parts.class_name,
             params.wait_ms(),
         )?;
         (
@@ -307,15 +313,15 @@ fn win32_fallback_inspect(
     }))
 }
 
-fn win32_selector(selector: &Selector) -> Result<(Option<u32>, Option<&str>, Option<&str>), String> {
+fn win32_selector(selector: &Selector) -> Result<Win32SelectorParts<'_>, String> {
     if selector.automation_id.is_some() || selector.control_type.is_some() {
         return Err("Win32 fallback cannot verify automation_id or control_type; use process_id, name/title, and/or class_name".into());
     }
-    Ok((
-        selector.process_id,
-        selector.name.as_deref(),
-        selector.class_name.as_deref(),
-    ))
+    Ok(Win32SelectorParts {
+        process_id: selector.process_id,
+        title: selector.name.as_deref(),
+        class_name: selector.class_name.as_deref(),
+    })
 }
 
 fn attach_window_discovery(value: &mut Value, discovery: WindowDiscovery) {
@@ -398,9 +404,9 @@ mod tests {
             ..Default::default()
         };
         let parts = win32_selector(&selector).unwrap();
-        assert_eq!(parts.0, Some(42));
-        assert_eq!(parts.1, Some("Editor"));
-        assert_eq!(parts.2, Some("MainWindow"));
+        assert_eq!(parts.process_id, Some(42));
+        assert_eq!(parts.title, Some("Editor"));
+        assert_eq!(parts.class_name, Some("MainWindow"));
     }
 
     #[test]
