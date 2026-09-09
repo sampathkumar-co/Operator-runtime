@@ -47,6 +47,6 @@ jobs:
           rustc --version
           cargo --version
       - name: Compile and test UIA sidecar
-        run: cargo test --manifest-path native/windows-uia/Cargo.toml --locked=false
+        run: cargo test --manifest-path native/windows-uia/Cargo.toml
       - name: Clippy UIA sidecar
         run: cargo clippy --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
