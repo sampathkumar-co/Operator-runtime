@@ -172,10 +172,22 @@ test('tampering a relay session capability scope invalidates the Ed25519 signatu
     ttlMs: 60_000
   });
 
-  const [payloadPart, signaturePart] = issued.token.split('.');
-  const payload = JSON.parse(Buffer.from(payloadPart!, 'base64url').toString('utf8'));
-  payload.scopes = ['relay:connect', 'cap:file.read', 'cap:git.write'];
-  const forgedPayload = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const [, signaturePart] = issued.token.split('.');
+  const payload = issued.payload;
+  const forgedCanonical = {
+    version: 1,
+    purpose: 'operator-session-v1',
+    jti: payload.jti,
+    issuerDeviceId: payload.issuerDeviceId,
+    issuerFingerprint: payload.issuerFingerprint,
+    subjectDeviceId: payload.subjectDeviceId,
+    subjectFingerprint: payload.subjectFingerprint,
+    audience: payload.audience,
+    scopes: ['cap:file.read', 'cap:git.write', 'relay:connect'],
+    issuedAt: payload.issuedAt,
+    expiresAt: payload.expiresAt
+  };
+  const forgedPayload = Buffer.from(JSON.stringify(forgedCanonical), 'utf8').toString('base64url');
   await assert.rejects(
     peerSessions.verify(`${forgedPayload}.${signaturePart}`, {
       audience: 'operator-relay', requiredScopes: ['cap:git.write']
