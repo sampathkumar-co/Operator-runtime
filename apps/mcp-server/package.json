@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "start": "tsx src/server.ts",
-    "check": "tsc -p tsconfig.json"
+    "check": "tsc -p tsconfig.json",
+    "test:e2e": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/fastify": "^2.0.0",
@@ -19,6 +20,7 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "tsx": "^4.0.0",
     "typescript": "^6.0.0",
     "@types/node": "^22.0.0"
