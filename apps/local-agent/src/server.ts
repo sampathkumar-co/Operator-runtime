@@ -8,6 +8,7 @@ import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
+import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -61,6 +62,7 @@ export function createLocalAgentServer(options: {
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
+  privacy?: LocalPrivacyDataStore;
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
@@ -120,6 +122,35 @@ export function createLocalAgentServer(options: {
 
     if (pathname === '/v1/settings' && req.method === 'GET') {
       send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) } });
+      return;
+    }
+
+    if (pathname === '/v1/privacy' && req.method === 'GET') {
+      send(res, 200, { ok: true, categories: options.privacy ? await options.privacy.inventory() : [], configured: Boolean(options.privacy) });
+      return;
+    }
+
+    if (pathname.startsWith('/v1/privacy/') && req.method === 'DELETE') {
+      if (!options.privacy || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'PRIVACY_CONTROLS_NOT_CONFIGURED', message: 'Privacy deletion requires local privacy state and a separate recovery token.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      const category = decodeURIComponent(pathname.slice('/v1/privacy/'.length));
+      if (!['activity', 'tasks', 'session-state'].includes(category)) {
+        send(res, 400, { ok: false, error: { code: 'PRIVACY_CATEGORY_INVALID', message: 'Only activity, tasks, and session-state can be deleted through the generic privacy API.' } });
+        return;
+      }
+      try {
+        const removed = await options.privacy.purge(category as PrivacyCategory);
+        send(res, 200, { ok: true, removed, categories: await options.privacy.inventory() });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: 'PRIVACY_PURGE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
