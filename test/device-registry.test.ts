@@ -16,6 +16,13 @@ async function expectCode(promise: Promise<unknown>, code: string): Promise<void
   await assert.rejects(promise, (error: any) => error?.code === code);
 }
 
+function tamperSignature(signature: string): string {
+  const bytes = Buffer.from(signature, 'base64url');
+  assert.ok(bytes.length > 0);
+  bytes[0] ^= 0x01;
+  return bytes.toString('base64url');
+}
+
 test('two independent Ed25519 identities pair once and registry persists public material only', async (t) => {
   const issuerDir = await tempDir(t, 'operator-pair-issuer-');
   const peerDir = await tempDir(t, 'operator-pair-peer-');
@@ -54,8 +61,7 @@ test('pairing rejects tampered signatures, expires challenges, and rejects repla
 
   const challenge = await registry.issuePairingChallenge(issuer, { expectedPeerDeviceId: peer.deviceId, ttlMs: 30_000 });
   const valid = await answerPairingChallenge(challenge, peerStore);
-  const last = valid.signature.at(-1) ?? 'A';
-  const tampered = { ...valid, signature: `${valid.signature.slice(0, -1)}${last === 'A' ? 'B' : 'A'}` };
+  const tampered = { ...valid, signature: tamperSignature(valid.signature) };
   await expectCode(registry.completePairing(tampered), 'PAIRING_SIGNATURE_INVALID');
   assert.equal((await registry.listDevices()).length, 0);
 
