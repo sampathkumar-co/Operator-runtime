@@ -60,16 +60,21 @@ Assert-Exit 'windows launcher build'
 Write-Host '[operator-release] compiling Windows UIA sidecar'
 & cargo build --manifest-path (Join-Path $repo 'native\windows-uia\Cargo.toml') --release
 Assert-Exit 'windows UIA build'
+Write-Host '[operator-release] compiling Windows DPAPI helper'
+& cargo build --manifest-path (Join-Path $repo 'native\windows-dpapi\Cargo.toml') --release
+Assert-Exit 'windows DPAPI build'
 
 $launcher = Join-Path $repo 'native\windows-launcher\target\release\operator-windows-launcher.exe'
 $uia = Join-Path $repo 'native\windows-uia\target\release\operator-windows-uia.exe'
-foreach ($file in @($launcher, $uia, $NodeExe)) {
+$dpapi = Join-Path $repo 'native\windows-dpapi\target\release\operator-windows-dpapi.exe'
+foreach ($file in @($launcher, $uia, $dpapi, $NodeExe)) {
   if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required release file missing: $file" }
 }
 
 Copy-Item -LiteralPath $launcher -Destination (Join-Path $stage 'Operator.exe')
 Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $stage 'runtime\node.exe')
 Copy-Item -LiteralPath $uia -Destination (Join-Path $stage 'native\operator-windows-uia.exe')
+Copy-Item -LiteralPath $dpapi -Destination (Join-Path $stage 'native\operator-windows-dpapi.exe')
 Copy-Item -LiteralPath (Join-Path $repo 'package.json') -Destination (Join-Path $stage 'app\package.json')
 Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination (Join-Path $stage 'app\src') -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\apps\local-agent') | Out-Null
