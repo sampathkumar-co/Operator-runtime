@@ -15,10 +15,12 @@ fn run() -> Result<(), String> {
     let node = root.join("runtime").join("node.exe");
     let entry = root.join("app").join("apps").join("local-agent").join("src").join("main.ts");
     let uia = root.join("native").join("operator-windows-uia.exe");
+    let dpapi = root.join("native").join("operator-windows-dpapi.exe");
 
     require_file(&node, "bundled Node runtime")?;
     require_file(&entry, "Operator local-agent entrypoint")?;
     require_file(&uia, "Operator Windows UIA sidecar")?;
+    require_file(&dpapi, "Operator Windows DPAPI helper")?;
 
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--self-test")) {
         println!("operator-launcher-self-test:ok");
@@ -27,6 +29,9 @@ fn run() -> Result<(), String> {
 
     if env::var_os("OPERATOR_WINDOWS_UIA_PATH").is_none() {
         env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
+    }
+    if env::var_os("OPERATOR_WINDOWS_DPAPI_PATH").is_none() {
+        env::set_var("OPERATOR_WINDOWS_DPAPI_PATH", &dpapi);
     }
 
     let mut command = Command::new(&node);
