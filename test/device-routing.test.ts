@@ -39,19 +39,22 @@ async function fixture(t: test.TestContext) {
   const a = await registerPeer(registry, authorityPublic, aStore);
   const b = await registerPeer(registry, authorityPublic, bStore);
   const now = new Date('2026-09-09T15:00:00.000Z');
-  const routing = new DeviceRoutingStore(stateDir, registry, { clock: () => new Date(now) });
-  return { registry, routing, a, b, now: now.toISOString() };
+  const clock = () => new Date(now);
+  const routing = new DeviceRoutingStore(stateDir, registry, { clock });
+  return { stateDir, registry, routing, a, b, now: now.toISOString(), clock };
 }
 
 test('persisted project binding deterministically routes to its active online device', async (t) => {
-  const { registry, routing, a, b, now } = await fixture(t);
+  const { stateDir, registry, routing, a, b, now, clock } = await fixture(t);
   const bound = await routing.bindProject('oraphim-main', a.deviceId);
   assert.equal(bound.deviceId, a.deviceId);
 
-  const reloaded = new DeviceRoutingStore(path.dirname((registry as any).noop ?? path.join(os.tmpdir(), 'unused')), registry);
-  void reloaded; // persistence is asserted through a fresh store below using the same state directory from the file itself in another test.
+  const reloaded = new DeviceRoutingStore(stateDir, registry, { clock });
+  assert.deepEqual((await reloaded.listBindings()).map(({ projectKey, deviceId }) => ({ projectKey, deviceId })), [
+    { projectKey: 'oraphim-main', deviceId: a.deviceId }
+  ]);
 
-  const decision = await routing.resolve({ projectKey: 'oraphim-main', requiredCapabilities: ['file.read', 'git.write'] }, [
+  const decision = await reloaded.resolve({ projectKey: 'oraphim-main', requiredCapabilities: ['file.read', 'git.write'] }, [
     online(a.deviceId, 'session-a', now, ['file.read', 'git.write']),
     online(b.deviceId, 'session-b', now, ['file.read', 'git.write'])
   ]);
