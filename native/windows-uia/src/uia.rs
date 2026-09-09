@@ -1,14 +1,23 @@
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use uiautomation::events::{
+    CustomPropertyChangedEventHandlerFn, CustomStructureChangedEventHandlerFn,
+    UIPropertyChangedEventHandler, UIStructureChangeEventHandler,
+};
 use uiautomation::patterns::{
     UIExpandCollapsePattern, UIInvokePattern, UIScrollPattern, UISelectionItemPattern, UIValuePattern,
 };
-use uiautomation::types::ScrollAmount;
+use uiautomation::types::{ScrollAmount, TreeScope, UIProperty};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
 
 use crate::protocol::{InspectParams, OperateParams, Selector};
+
+const MAX_EVENTS: usize = 200;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct PatternSupport {
@@ -44,12 +53,26 @@ pub struct ElementSummary {
     pub scroll: Option<ScrollState>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct UiEvent {
+    pub elapsed_ms: u64,
+    pub kind: String,
+    pub name: String,
+    pub automation_id: String,
+    pub control_type: String,
+    pub process_id: u32,
+    pub detail: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InspectResult {
     pub elements: Vec<ElementSummary>,
     pub truncated: bool,
     pub max_nodes: usize,
     pub max_depth: usize,
+    pub observed_ms: u64,
+    pub events: Vec<UiEvent>,
+    pub events_truncated: bool,
 }
 
 pub struct UiaEngine {
@@ -68,6 +91,7 @@ impl UiaEngine {
 
     pub fn inspect(&self, params: InspectParams) -> Result<InspectResult, String> {
         let (max_nodes, max_depth) = params.limits();
+        let observe_ms = params.observe_ms();
         let start = if let Some(selector) = params.selector.as_ref() {
             selector.validate()?;
             self.find_unique(selector)?
@@ -76,6 +100,7 @@ impl UiaEngine {
                 .get_root_element()
                 .map_err(|e| format!("Could not access UI Automation desktop root: {e}"))?
         };
+        let event_root = start.clone();
 
         let mut queue = VecDeque::from([(start, 0usize)]);
         let mut elements = Vec::new();
@@ -101,7 +126,21 @@ impl UiaEngine {
             }
         }
 
-        Ok(InspectResult { elements, truncated, max_nodes, max_depth })
+        let (events, events_truncated) = if observe_ms > 0 {
+            self.observe_events(&event_root, observe_ms)?
+        } else {
+            (Vec::new(), false)
+        };
+
+        Ok(InspectResult {
+            elements,
+            truncated,
+            max_nodes,
+            max_depth,
+            observed_ms: observe_ms,
+            events,
+            events_truncated,
+        })
     }
 
     pub fn operate(&self, params: OperateParams) -> Result<Value, String> {
@@ -241,6 +280,87 @@ impl UiaEngine {
         }
     }
 
+    fn observe_events(&self, root: &UIElement, observe_ms: u64) -> Result<(Vec<UiEvent>, bool), String> {
+        let events = Arc::new(Mutex::new(Vec::<UiEvent>::new()));
+        let truncated = Arc::new(Mutex::new(false));
+        let started = Instant::now();
+
+        let property_events = Arc::clone(&events);
+        let property_truncated = Arc::clone(&truncated);
+        let property_handler: Box<CustomPropertyChangedEventHandlerFn> = Box::new(move |sender, property, value| {
+            push_event(
+                &property_events,
+                &property_truncated,
+                event_from_element(
+                    "property_changed",
+                    sender,
+                    format!("{property:?}={}", truncate(value.to_string(), 256)),
+                    started,
+                ),
+            );
+            Ok(())
+        });
+        let property_handler = UIPropertyChangedEventHandler::from(property_handler);
+
+        let structure_events = Arc::clone(&events);
+        let structure_truncated = Arc::clone(&truncated);
+        let structure_handler: Box<CustomStructureChangedEventHandlerFn> = Box::new(move |sender, change_type, runtime_id| {
+            let runtime = runtime_id
+                .map(|items| items.iter().take(16).map(i32::to_string).collect::<Vec<_>>().join(","))
+                .unwrap_or_default();
+            push_event(
+                &structure_events,
+                &structure_truncated,
+                event_from_element(
+                    "structure_changed",
+                    sender,
+                    format!("{change_type:?};runtime_id={runtime}"),
+                    started,
+                ),
+            );
+            Ok(())
+        });
+        let structure_handler = UIStructureChangeEventHandler::from(structure_handler);
+
+        let properties = [
+            UIProperty::Name,
+            UIProperty::ValueValue,
+            UIProperty::HasKeyboardFocus,
+            UIProperty::IsEnabled,
+            UIProperty::IsOffscreen,
+            UIProperty::ExpandCollapseExpandCollapseState,
+            UIProperty::SelectionItemIsSelected,
+            UIProperty::ScrollHorizontalScrollPercent,
+            UIProperty::ScrollVerticalScrollPercent,
+        ];
+
+        self.automation
+            .add_property_changed_event_handler(root, TreeScope::Subtree, None, &property_handler, &properties)
+            .map_err(|e| format!("Could not register bounded UIA property observer: {e}"))?;
+        if let Err(error) = self.automation
+            .add_structure_changed_event_handler(root, TreeScope::Subtree, None, &structure_handler)
+        {
+            let _ = self.automation.remove_property_changed_event_handler(root, &property_handler);
+            return Err(format!("Could not register bounded UIA structure observer: {error}"));
+        }
+
+        thread::sleep(Duration::from_millis(observe_ms));
+
+        let remove_structure = self.automation.remove_structure_changed_event_handler(root, &structure_handler);
+        let remove_property = self.automation.remove_property_changed_event_handler(root, &property_handler);
+        if let Err(error) = remove_structure.and(remove_property) {
+            let _ = self.automation.remove_all_event_handlers();
+            return Err(format!("Could not remove bounded UIA event observers: {error}"));
+        }
+
+        let snapshot = events.lock()
+            .map_err(|_| "UIA event buffer lock was poisoned".to_string())?
+            .clone();
+        let was_truncated = *truncated.lock()
+            .map_err(|_| "UIA event truncation lock was poisoned".to_string())?;
+        Ok((snapshot, was_truncated))
+    }
+
     fn find_unique(&self, selector: &Selector) -> Result<UIElement, String> {
         let root = self.automation
             .get_root_element()
@@ -346,6 +466,28 @@ impl UiaEngine {
     }
 }
 
+fn push_event(events: &Arc<Mutex<Vec<UiEvent>>>, truncated: &Arc<Mutex<bool>>, event: UiEvent) {
+    if let Ok(mut buffer) = events.lock() {
+        if buffer.len() < MAX_EVENTS {
+            buffer.push(event);
+        } else if let Ok(mut flag) = truncated.lock() {
+            *flag = true;
+        }
+    }
+}
+
+fn event_from_element(kind: &str, element: &UIElement, detail: String, started: Instant) -> UiEvent {
+    UiEvent {
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        kind: kind.into(),
+        name: truncate(element.get_name().unwrap_or_default(), 256),
+        automation_id: truncate(element.get_automation_id().unwrap_or_default(), 256),
+        control_type: element.get_control_type().map(|value| format!("{value:?}")).unwrap_or_else(|_| "Unknown".into()),
+        process_id: element.get_process_id().unwrap_or_default(),
+        detail: truncate(detail, 512),
+    }
+}
+
 fn parse_scroll_amount(value: Option<&str>) -> Result<ScrollAmount, String> {
     match value.unwrap_or("none") {
         "large_decrement" => Ok(ScrollAmount::LargeDecrement),
@@ -391,7 +533,7 @@ mod tests {
     fn scroll_amounts_are_closed_and_default_missing_axis_to_none() {
         assert_eq!(parse_scroll_amount(None).unwrap(), ScrollAmount::NoAmount);
         assert_eq!(parse_scroll_amount(Some("small_increment")).unwrap(), ScrollAmount::SmallIncrement);
-        assert!(parse_scroll_amount(Some("arbitrary")) .is_err());
+        assert!(parse_scroll_amount(Some("arbitrary")).is_err());
     }
 
     #[test]
