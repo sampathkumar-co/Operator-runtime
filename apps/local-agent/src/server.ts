@@ -4,9 +4,14 @@ import type { AddressInfo } from 'node:net';
 import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
+import type { TaskStore } from '../../../src/core/task-store.ts';
+import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
+import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+
+type CompanionSettings = Record<string, boolean | number | string | string[]>;
 
 function timingSafeTokenMatch(actual: string | undefined, expected: string): boolean {
   if (!actual?.startsWith('Bearer ')) return false;
@@ -52,6 +57,10 @@ export function createLocalAgentServer(options: {
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
   audit?: AuditLog;
+  tasks?: TaskStore;
+  deviceIdentity?: DeviceIdentityStore;
+  deviceRegistry?: DeviceRegistryStore;
+  settings?: CompanionSettings;
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
@@ -75,6 +84,42 @@ export function createLocalAgentServer(options: {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
       send(res, 200, { ok: true, events: options.audit ? await options.audit.tail(limit) : [], configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/tasks' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, tasks: options.tasks ? await options.tasks.list(limit) : [], configured: Boolean(options.tasks) });
+      return;
+    }
+
+    if (pathname === '/v1/devices' && req.method === 'GET') {
+      const local = options.deviceIdentity ? await options.deviceIdentity.loadOrCreate() : null;
+      const peers = options.deviceRegistry ? await options.deviceRegistry.listDevices() : [];
+      send(res, 200, {
+        ok: true,
+        local: local ? {
+          deviceId: local.deviceId,
+          deviceName: local.deviceName,
+          createdAt: local.createdAt,
+          fingerprint: local.fingerprint
+        } : null,
+        peers: peers.map((device) => ({
+          deviceId: device.deviceId,
+          deviceName: device.deviceName,
+          fingerprint: device.fingerprint,
+          status: device.status,
+          pairedAt: device.pairedAt,
+          revokedAt: device.revokedAt
+        })),
+        configured: Boolean(options.deviceIdentity)
+      });
+      return;
+    }
+
+    if (pathname === '/v1/settings' && req.method === 'GET') {
+      send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) } });
       return;
     }
 
