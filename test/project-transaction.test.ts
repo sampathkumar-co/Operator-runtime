@@ -19,6 +19,7 @@ async function setup(t: test.TestContext, commands: unknown[]): Promise<{ projec
   git(projectRoot, 'init', '-b', 'main');
   git(projectRoot, 'config', 'user.name', 'Operator CI');
   git(projectRoot, 'config', 'user.email', 'operator-ci@example.invalid');
+  git(projectRoot, 'config', 'core.autocrlf', 'false');
   await fs.writeFile(path.join(projectRoot, 'app.txt'), 'base\n');
   git(projectRoot, 'add', 'app.txt');
   git(projectRoot, 'commit', '-m', 'base');
