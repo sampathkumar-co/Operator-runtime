@@ -205,6 +205,80 @@ function createServer(): McpServer {
     timeoutMs
   }, path));
 
+  const postgresIdentifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/);
+  const postgresFilter = z.object({
+    column: postgresIdentifier,
+    op: z.enum(['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'ilike', 'is_null', 'not_null']),
+    value: z.string().max(100000).optional()
+  });
+  const postgresOrder = z.object({ column: postgresIdentifier, direction: z.enum(['asc', 'desc']) });
+
+  server.registerTool('postgres.query', {
+    title: 'Inspect or query trusted local PostgreSQL profile',
+    description: 'Inspect trusted PostgreSQL profiles or execute an Operator-constructed bounded read-only SELECT. Connection profiles live outside project roots and credentials are never returned to ChatGPT. Raw SQL, DSNs, passwords, DDL/DML, remote database hosts, and arbitrary psql arguments are not accepted.',
+    inputSchema: z.object({
+      operation: z.enum(['profiles', 'server', 'schemas', 'tables', 'columns', 'select']),
+      path: z.string().min(1),
+      profileId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/).optional(),
+      schema: postgresIdentifier.default('public'),
+      table: postgresIdentifier.optional(),
+      columns: z.array(postgresIdentifier).max(50).default([]),
+      filters: z.array(postgresFilter).max(20).default([]),
+      orderBy: z.array(postgresOrder).max(10).default([]),
+      limit: z.number().int().min(1).max(500).default(100),
+      offset: z.number().int().min(0).max(10000).default(0),
+      timeoutMs: z.number().int().min(100).max(30000).default(5000)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ operation, path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }) => {
+    if (operation === 'select') {
+      if (!profileId || !table) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'postgres.query select requires profileId and table.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'postgres.select',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'POSTGRES_SELECT_INPUT_REQUIRED', message: 'profileId and table are required.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      return invoke('postgres.select', 'read', { path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }, path);
+    }
+    if (operation !== 'profiles' && !profileId) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: `postgres.query ${operation} requires profileId from a fresh profiles inspection.` }],
+        structuredContent: {
+          ok: false,
+          capability: 'postgres.inspect',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'POSTGRES_PROFILE_ID_REQUIRED', message: 'profileId is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    if (operation === 'columns' && !table) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'postgres.query columns requires table.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'postgres.inspect',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'POSTGRES_TABLE_REQUIRED', message: 'table is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke('postgres.inspect', 'read', { path, operation, profileId, schema, table, timeoutMs }, path);
+  });
+
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
     description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
