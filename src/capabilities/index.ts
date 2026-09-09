@@ -5,3 +5,4 @@ export * from './git.ts';
 export * from './system.ts';
 export * from './project.ts';
 export * from './browser-cdp.ts';
+export * from './browser-managed.ts';
