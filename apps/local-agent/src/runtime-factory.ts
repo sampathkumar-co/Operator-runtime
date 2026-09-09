@@ -1,5 +1,5 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, ProcessProvider, ProjectInspectProvider, SystemInspectProvider, ManagedBrowserProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, ProcessProvider, ProjectInspectProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
 
 export function createRuntime(config: {
   allowedRoots: string[];
@@ -8,6 +8,7 @@ export function createRuntime(config: {
   browserAutoLaunch?: boolean;
   browserPath?: string;
   browserDataDir?: string;
+  windowsUiaPath?: string;
 }): OperatorRuntime {
   return new OperatorRuntime()
     .register(new SystemInspectProvider())
@@ -20,5 +21,6 @@ export function createRuntime(config: {
       autoLaunch: config.browserAutoLaunch,
       executablePath: config.browserPath,
       dataDir: config.browserDataDir
-    }));
+    }))
+    .register(new WindowsUiaProvider({ binaryPath: config.windowsUiaPath }));
 }
