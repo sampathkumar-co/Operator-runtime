@@ -8,6 +8,7 @@ import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
+import { LocalAgentRelayRunner } from './relay-agent.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -39,6 +40,10 @@ const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
+const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
+const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
+const relayTokenFile = path.resolve(process.env.OPERATOR_RELAY_SESSION_TOKEN_FILE?.trim() || path.join(stateDir, 'relay-session.token'));
+const relayAllowInsecureLoopback = process.env.OPERATOR_RELAY_ALLOW_INSECURE_LOOPBACK === '1';
 
 const runtime = createRuntime({
   allowedRoots,
@@ -56,6 +61,38 @@ const runtime = createRuntime({
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH
 });
 
+let relayRunner: LocalAgentRelayRunner | null = null;
+let relayRun: Promise<void> | null = null;
+let localAgentBaseUrl = '';
+let shuttingDown = false;
+
+function stopRelay(): void {
+  relayRunner?.stop();
+}
+
+function startRelay(): void {
+  if (!relayUrl || shuttingDown || relayRun) return;
+  relayRunner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl,
+    resultUrl: relayResultUrl,
+    sessionTokenFile: relayTokenFile,
+    identity: deviceIdentity,
+    localAgentBaseUrl,
+    agentToken: token,
+    allowLoopbackInsecure: relayAllowInsecureLoopback
+  });
+  const runner = relayRunner;
+  relayRun = runner.run()
+    .catch((error) => {
+      console.error(`[operator] relay connection stopped: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      if (relayRunner === runner) relayRunner = null;
+      relayRun = null;
+    });
+}
+
 const agent = createLocalAgentServer({
   runtime,
   token,
@@ -66,6 +103,11 @@ const agent = createLocalAgentServer({
   deviceIdentity,
   deviceRegistry,
   privacy,
+  onEmergencyStop: () => stopRelay(),
+  onEmergencyClear: () => {
+    try { startRelay(); }
+    catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
+  },
   settings: {
     recoveryConfigured: Boolean(recoveryToken),
     browserAutoLaunch,
@@ -76,6 +118,9 @@ const agent = createLocalAgentServer({
     postgresConfigured: Boolean(process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY),
     vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
+    relayConfigured: Boolean(relayUrl),
+    relayResultConfigured: Boolean(relayResultUrl),
+    relayTokenFileConfigured: Boolean(relayUrl),
     authorizedRootCount: allowedRoots.length,
     executableAllowlistCount: allowedExecutables.length
   },
@@ -91,17 +136,32 @@ const agent = createLocalAgentServer({
 const host = process.env.OPERATOR_AGENT_HOST ?? '127.0.0.1';
 const port = Number(process.env.OPERATOR_AGENT_PORT ?? 47100);
 const bound = await agent.listen(host, port);
+localAgentBaseUrl = `http://${loopbackAddressForBoundHost(bound.host)}:${bound.port}`;
 console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
 console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
+console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 
-let shuttingDown = false;
+if (relayUrl && !(await emergencyStop.status()).engaged) {
+  try { startRelay(); }
+  catch (error) { console.error(`[operator] relay startup failed: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await Promise.allSettled([agent.close(), runtime.close()]);
+    stopRelay();
+    await Promise.allSettled([relayRun, agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
     process.exit(0);
   });
+}
+
+function loopbackAddressForBoundHost(hostInput: string): string {
+  const host = hostInput.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === '::1' || host === '::') return '[::1]';
+  if (host === '0.0.0.0') return '127.0.0.1';
+  if (host === 'localhost' || host === '127.0.0.1') return host;
+  throw new Error('Relay integration requires the local agent to bind to loopback or a wildcard interface so it can re-enter through the local policy boundary.');
 }
