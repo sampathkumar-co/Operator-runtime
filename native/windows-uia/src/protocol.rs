@@ -129,7 +129,7 @@ impl OperateParams {
     pub fn validate(&self) -> Result<(), String> {
         self.selector.validate()?;
         match self.operation.as_str() {
-            "invoke" | "focus" | "select" | "expand" | "collapse" => {
+            "invoke" | "focus" | "select" | "expand" | "collapse" | "activate_window" => {
                 if self.value.is_some() || self.horizontal_amount.is_some() || self.vertical_amount.is_some() {
                     return Err(format!("{} does not accept value or scroll amounts", self.operation));
                 }
@@ -161,7 +161,7 @@ impl OperateParams {
                     }
                 }
             }
-            _ => return Err("operation must be invoke, set_value, focus, select, expand, collapse, or scroll".into()),
+            _ => return Err("operation must be invoke, set_value, focus, select, expand, collapse, scroll, or activate_window".into()),
         }
         Ok(())
     }
@@ -253,6 +253,7 @@ mod tests {
         assert!(operate("select").validate().is_ok());
         assert!(operate("expand").validate().is_ok());
         assert!(operate("collapse").validate().is_ok());
+        assert!(operate("activate_window").validate().is_ok());
         assert!(operate("run_javascript").validate().is_err());
     }
 
