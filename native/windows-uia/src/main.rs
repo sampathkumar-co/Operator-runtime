@@ -68,7 +68,11 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             };
             match engine.inspect(params) {
                 Ok(result) => Response::success(request.id, serde_json::to_value(result).unwrap_or(Value::Null)),
-                Err(error) => Response::failure(request.id, classify_code(&error), error, is_retryable(&error)),
+                Err(error) => {
+                    let code = classify_code(&error);
+                    let retryable = is_retryable(&error);
+                    Response::failure(request.id, code, error, retryable)
+                }
             }
         }
         "operate" => {
@@ -81,7 +85,11 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             }
             match engine.operate(params) {
                 Ok(result) => Response::success(request.id, result),
-                Err(error) => Response::failure(request.id, classify_code(&error), error, is_retryable(&error)),
+                Err(error) => {
+                    let code = classify_code(&error);
+                    let retryable = is_retryable(&error);
+                    Response::failure(request.id, code, error, retryable)
+                }
             }
         }
         _ => Response::failure(request.id, "METHOD_NOT_ALLOWED", "method must be health, inspect, or operate", false),
