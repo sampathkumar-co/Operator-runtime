@@ -138,9 +138,11 @@ function createServer(): McpServer {
     processId: z.number().int().positive().optional()
   }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
 
+  const scrollAmount = z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']);
+
   server.registerTool('app.inspect', {
     title: 'Inspect Windows application controls',
-    description: 'Inspect a bounded Microsoft UI Automation control tree. This returns semantic controls and supported patterns rather than pixels.',
+    description: 'Inspect a bounded Microsoft UI Automation control tree. This returns semantic controls, supported patterns, selection/expand state and scroll state rather than pixels.',
     inputSchema: z.object({
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
@@ -151,14 +153,22 @@ function createServer(): McpServer {
 
   server.registerTool('app.operate', {
     title: 'Operate Windows application control',
-    description: 'Operate one uniquely matched Windows control through Microsoft UI Automation Invoke, Value, or Focus patterns. Ambiguous selectors fail; state is re-read after the action. This action may cause external side effects and remains approval-gated locally.',
+    description: 'Operate one uniquely matched Windows control through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns. Ambiguous selectors fail and state is re-read after every action. This action may cause external side effects and remains approval-gated locally.',
     inputSchema: z.object({
-      operation: z.enum(['invoke', 'set_value', 'focus']),
+      operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll']),
       selector: appSelector,
-      value: z.string().max(65536).optional()
+      value: z.string().max(65536).optional(),
+      horizontalAmount: scrollAmount.optional(),
+      verticalAmount: scrollAmount.optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  }, async ({ operation, selector, value }) => invoke('app.operate', 'external', { operation, selector, value }));
+  }, async ({ operation, selector, value, horizontalAmount, verticalAmount }) => invoke('app.operate', 'external', {
+    operation,
+    selector,
+    value,
+    horizontalAmount,
+    verticalAmount
+  }));
 
   return server;
 }
