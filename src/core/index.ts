@@ -12,3 +12,4 @@ export * from './device-identity.ts';
 export * from './device-registry.ts';
 export * from './session-token.ts';
 export * from './relay-client.ts';
+export * from './device-routing.ts';
