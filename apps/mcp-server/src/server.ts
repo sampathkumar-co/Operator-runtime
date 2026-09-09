@@ -130,6 +130,36 @@ function createServer(): McpServer {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({ targetId, operation, target, value }) => invoke('browser.interact', 'external', { targetId, operation, target, value }, targetId));
 
+  const appSelector = z.object({
+    name: z.string().min(1).max(512).optional(),
+    automationId: z.string().min(1).max(512).optional(),
+    className: z.string().min(1).max(512).optional(),
+    controlType: z.string().min(1).max(128).optional(),
+    processId: z.number().int().positive().optional()
+  }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
+
+  server.registerTool('app.inspect', {
+    title: 'Inspect Windows application controls',
+    description: 'Inspect a bounded Microsoft UI Automation control tree. This returns semantic controls and supported patterns rather than pixels.',
+    inputSchema: z.object({
+      selector: appSelector.optional(),
+      maxNodes: z.number().int().min(1).max(1500).default(250),
+      maxDepth: z.number().int().min(1).max(12).default(6)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ selector, maxNodes, maxDepth }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth }));
+
+  server.registerTool('app.operate', {
+    title: 'Operate Windows application control',
+    description: 'Operate one uniquely matched Windows control through Microsoft UI Automation Invoke, Value, or Focus patterns. Ambiguous selectors fail; state is re-read after the action. This action may cause external side effects and remains approval-gated locally.',
+    inputSchema: z.object({
+      operation: z.enum(['invoke', 'set_value', 'focus']),
+      selector: appSelector,
+      value: z.string().max(65536).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, selector, value }) => invoke('app.operate', 'external', { operation, selector, value }));
+
   return server;
 }
 
