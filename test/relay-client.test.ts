@@ -49,10 +49,6 @@ async function stateDir(t: test.TestContext, prefix: string): Promise<string> {
   return dir;
 }
 
-async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 10));
-}
-
 test('relay sends signed outbound hello, processes one delivery, persists ACK cursor, and resumes from it', async (t) => {
   const state = await stateDir(t, 'operator-relay-basic-');
   const identity = new DeviceIdentityStore(state);
@@ -62,6 +58,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   let client!: RelayClient;
 
   const factory = () => {
+    const connectionNumber = sockets.length + 1;
     const socket = new FakeSocket();
     sockets.push(socket);
     socket.onSend = (frame) => {
@@ -70,9 +67,9 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
           const signatureOk = await identity.verify(Buffer.from(JSON.stringify(frame.payload), 'utf8'), frame.signature);
           assert.equal(signatureOk, true);
           assert.equal(frame.sessionToken, 'ephemeral-session-token');
-          assert.equal(frame.payload.resumeAfterSeq, sockets.length === 1 ? 0 : 1);
-          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${sockets.length}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000 });
-          if (sockets.length === 1) {
+          assert.equal(frame.payload.resumeAfterSeq, connectionNumber === 1 ? 0 : 1);
+          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000 });
+          if (connectionNumber === 1) {
             socket.server({ type: 'delivery', seq: 1, id: 'delivery-1', kind: 'task.dispatch', payload: { taskId: 't1' } });
           } else {
             client.stop();
@@ -167,11 +164,12 @@ test('handler uncertainty persists processing state and refuses blind replay wit
     allowLoopbackInsecureWs: true,
     identity,
     socketFactory: () => {
+      const connectionNumber = sockets.length + 1;
       const socket = new FakeSocket();
       sockets.push(socket);
       socket.onSend = (frame) => {
         if (frame.type !== 'hello') return;
-        socket.server({ type: 'welcome', protocol: 1, connectionId: `uncertain-${sockets.length}`, resumeFromSeq: 0, heartbeatMs: 60_000 });
+        socket.server({ type: 'welcome', protocol: 1, connectionId: `uncertain-${connectionNumber}`, resumeFromSeq: 0, heartbeatMs: 60_000 });
         socket.server({ type: 'delivery', seq: 1, id: 'maybe-ran', kind: 'task.dispatch', payload: {} });
       };
       queueMicrotask(() => socket.open());
