@@ -87,18 +87,49 @@ export class DeviceSessionTokenStore {
 
   async rotate(jtiInput: string, options: { ttlMs?: number } = {}): Promise<{ token: string; payload: DeviceSessionPayload }> {
     const jti = validUuid(jtiInput, 'jti');
-    const record = (await this.#read()).issued.find((candidate) => candidate.jti === jti);
-    if (!record) throw new OperatorError('SESSION_NOT_FOUND', 'Issued session was not found.');
-    if (record.status !== 'active') throw new OperatorError('SESSION_REVOKED', 'Issued session is revoked.');
-    if (Date.parse(record.expiresAt) <= this.#clock().getTime()) throw new OperatorError('SESSION_EXPIRED', 'Issued session has expired.');
-    const replacement = await this.issue({
-      subjectDeviceId: record.subjectDeviceId,
-      audience: record.audience,
-      scopes: record.scopes,
-      ttlMs: options.ttlMs
+    const snapshot = (await this.#read()).issued.find((candidate) => candidate.jti === jti);
+    if (!snapshot) throw new OperatorError('SESSION_NOT_FOUND', 'Issued session was not found.');
+    if (snapshot.status !== 'active') throw new OperatorError('SESSION_REVOKED', 'Issued session is revoked.');
+    const now = this.#clock();
+    if (Date.parse(snapshot.expiresAt) <= now.getTime()) throw new OperatorError('SESSION_EXPIRED', 'Issued session has expired.');
+
+    const local = await this.#identity.loadOrCreate();
+    const peer = await this.#activePeer(snapshot.subjectDeviceId);
+    const ttlMs = boundedTtl(options.ttlMs ?? 5 * 60_000);
+    const payload: DeviceSessionPayload = {
+      version: 1,
+      purpose: PURPOSE,
+      jti: crypto.randomUUID(),
+      issuerDeviceId: local.deviceId,
+      issuerFingerprint: local.fingerprint,
+      subjectDeviceId: peer.deviceId,
+      subjectFingerprint: peer.fingerprint,
+      audience: snapshot.audience,
+      scopes: [...snapshot.scopes],
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + ttlMs).toISOString()
+    };
+    const payloadBytes = encodePayload(payload);
+    const signature = await this.#identity.sign(payloadBytes);
+    const token = `${payloadBytes.toString('base64url')}.${signature}`;
+    if (Buffer.byteLength(token, 'utf8') > MAX_TOKEN_BYTES) throw new OperatorError('SESSION_TOKEN_TOO_LARGE', 'Generated session token exceeded the bounded size.');
+
+    await this.#mutate((state) => {
+      prune(state, now.getTime());
+      const current = state.issued.find((candidate) => candidate.jti === jti);
+      if (!current) throw new OperatorError('SESSION_NOT_FOUND', 'Issued session was not found during rotation.');
+      if (current.status !== 'active') throw new OperatorError('SESSION_REVOKED', 'Issued session was revoked during rotation.');
+      if (Date.parse(current.expiresAt) <= now.getTime()) throw new OperatorError('SESSION_EXPIRED', 'Issued session expired during rotation.');
+      if (current.subjectDeviceId !== snapshot.subjectDeviceId || current.audience !== snapshot.audience || JSON.stringify(current.scopes) !== JSON.stringify(snapshot.scopes)) {
+        throw new OperatorError('SESSION_STATE_MISMATCH', 'Issued session changed during rotation.');
+      }
+      if (state.issued.length >= MAX_RECORDS) throw new OperatorError('SESSION_RECORD_LIMIT', `At most ${MAX_RECORDS} session records may be retained.`);
+      current.status = 'revoked';
+      current.revokedAt = now.toISOString();
+      current.revokedReason = `rotated:${payload.jti}`;
+      state.issued.push(recordFrom(payload));
     });
-    await this.revoke(jti, `rotated:${replacement.payload.jti}`);
-    return replacement;
+    return { token, payload };
   }
 
   async revoke(jtiInput: string, reasonInput?: string): Promise<IssuedSessionRecord> {
