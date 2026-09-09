@@ -10,6 +10,6 @@ export const TOOL_SURFACE = [
   { name: 'browser.inspect', risk: 'read', description: 'Inspect Chromium tabs or a bounded semantic page snapshot through loopback CDP.' },
   { name: 'browser.navigate', risk: 'read', description: 'Navigate an existing/new Chromium tab directly through CDP and verify the resulting destination.' },
   { name: 'browser.interact', risk: 'external', description: 'Semantically click, type, or select a browser control and verify element/page state.' },
-  { name: 'app.inspect', risk: 'read', description: 'Inspect a bounded Windows UIA control tree and optionally observe selector-scoped property/structure changes for up to five seconds, without screenshots.' },
-  { name: 'app.operate', risk: 'external', description: 'Operate a Windows control through Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns and verify semantic state.' }
+  { name: 'app.inspect', risk: 'read', description: 'Wait for and inspect a bounded Windows UIA control tree, with optional selector-scoped property/structure observation, without screenshots.' },
+  { name: 'app.operate', risk: 'external', description: 'Wait for and operate a Windows control through Invoke, Value, Focus, SelectionItem, ExpandCollapse, or bounded Scroll patterns and verify semantic state.' }
 ] as const;
