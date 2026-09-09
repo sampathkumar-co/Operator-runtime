@@ -24,6 +24,7 @@ const EXPECTED_TOOLS = [
   'git.diff',
   'git.status',
   'git.write',
+  'postgres.query',
   'project.command',
   'project.inspect',
   'project.transaction',
@@ -181,6 +182,21 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
     }]
   }, null, 2));
 
+  const postgresRegistryPath = path.join(authorityRoot, 'postgres-profiles.json');
+  await fs.writeFile(postgresRegistryPath, JSON.stringify({
+    version: 1,
+    profiles: [{
+      id: 'ci-local',
+      title: 'CI local PostgreSQL',
+      roots: [testRoot],
+      host: '127.0.0.1',
+      port: 5432,
+      database: 'operator_ci',
+      user: 'operator_ci',
+      sslMode: 'disable'
+    }]
+  }, null, 2));
+
   const agentPort = await reserveLoopbackPort();
   const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
   let agentStderr = '';
@@ -194,6 +210,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       OPERATOR_ALLOWED_ROOTS: testRoot,
       OPERATOR_ALLOWED_EXECUTABLES: 'node',
       OPERATOR_PROJECT_COMMAND_REGISTRY: commandRegistryPath,
+      OPERATOR_POSTGRES_PROFILE_REGISTRY: postgresRegistryPath,
       OPERATOR_BROWSER_AUTO_LAUNCH: '0',
       OPERATOR_CDP_ENDPOINT: 'http://127.0.0.1:1'
     },
@@ -253,6 +270,9 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(dockerManageTool?.annotations?.readOnlyHint, false);
   assert.equal(dockerManageTool?.annotations?.destructiveHint, false);
   assert.equal(dockerManageTool?.annotations?.openWorldHint, false);
+  const postgresTool = tools.tools.find((tool) => tool.name === 'postgres.query');
+  assert.equal(postgresTool?.annotations?.readOnlyHint, true);
+  assert.equal(postgresTool?.annotations?.openWorldHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -266,6 +286,22 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const systemOutput = structured?.output as Record<string, unknown> | undefined;
   assert.equal(typeof systemOutput?.platform, 'string');
   assert.equal(typeof systemOutput?.arch, 'string');
+
+  const postgresProfiles = await client.callTool({
+    name: 'postgres.query',
+    arguments: { operation: 'profiles', path: testRoot }
+  });
+  assert.notEqual(postgresProfiles.isError, true);
+  const postgresProfilesStructured = postgresProfiles.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(postgresProfilesStructured?.provider, 'postgres.psql.structured');
+  const postgresProfilesOutput = postgresProfilesStructured?.output as Record<string, unknown> | undefined;
+  const profiles = Array.isArray(postgresProfilesOutput?.profiles) ? postgresProfilesOutput.profiles as Array<Record<string, unknown>> : [];
+  assert.equal(profiles.length, 1);
+  assert.equal(profiles[0]?.id, 'ci-local');
+  assert.equal(profiles[0]?.database, 'operator_ci');
+  assert.equal(profiles[0]?.user, 'operator_ci');
+  assert.equal(profiles[0]?.endpoint, 'loopback');
+  assert.doesNotMatch(JSON.stringify(postgresProfilesOutput), /passwordEnv|password|dsn/i);
 
   const commandInspection = await client.callTool({
     name: 'project.command',
