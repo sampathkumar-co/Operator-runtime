@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
@@ -46,6 +47,7 @@ export class ReleaseUpdateVerifier {
   verifySignedManifest(input: SignedReleaseManifest, options: { channel: ReleaseChannel; currentVersion: string; now?: Date }): ReleaseManifest {
     const manifest = validateManifest(input.manifest);
     if (manifest.channel !== options.channel) throw new OperatorError('UPDATE_CHANNEL_MISMATCH', 'Release manifest channel does not match the configured update channel.');
+    if (manifest.channel === 'stable' && manifest.version.includes('-')) throw new OperatorError('UPDATE_CHANNEL_MISMATCH', 'Stable channel manifests cannot publish prerelease versions.');
     const current = validVersion(options.currentVersion);
     if (compareVersions(manifest.version, current) <= 0) throw new OperatorError('UPDATE_NOT_NEWER', 'Release manifest version is not newer than the installed version.');
     const now = options.now ?? new Date();
@@ -84,9 +86,27 @@ export class ReleaseUpdateVerifier {
     await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
     const extension = artifact.kind === 'msixbundle' ? '.msixbundle' : artifact.kind === 'msix' ? '.msix' : '.zip';
     const finalPath = path.join(stagingDir, `operator-${artifact.platform}-${artifact.arch}${extension}`);
+
+    try {
+      const existing = await fs.readFile(finalPath);
+      const existingSha = crypto.createHash('sha256').update(existing).digest('hex');
+      if (existing.byteLength === bytes.byteLength && existingSha === sha256) return { path: finalPath, sha256, sizeBytes: bytes.byteLength };
+      throw new OperatorError('UPDATE_STAGE_CONFLICT', 'A different artifact is already staged for this release target.');
+    } catch (error) {
+      if (error instanceof OperatorError) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+
     const temp = `${finalPath}.${crypto.randomUUID()}.tmp`;
     await fs.writeFile(temp, bytes, { mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, finalPath);
+    try {
+      await fs.copyFile(temp, finalPath, fsConstants.COPYFILE_EXCL);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new OperatorError('UPDATE_STAGE_CONFLICT', 'An update artifact appeared concurrently at the staging path.');
+      throw error;
+    } finally {
+      await fs.rm(temp, { force: true });
+    }
     return { path: finalPath, sha256, sizeBytes: bytes.byteLength };
   }
 }
@@ -164,20 +184,32 @@ function validVersion(value: string): string {
 }
 
 function compareVersions(aInput: string, bInput: string): number {
-  const a = validVersion(aInput);
-  const b = validVersion(bInput);
-  const parse = (v: string) => {
-    const [core, pre] = v.split('-', 2);
-    return { nums: core.split('.').map(Number), pre };
-  };
-  const aParts = parse(a); const bParts = parse(b);
+  const a = parseVersion(validVersion(aInput));
+  const b = parseVersion(validVersion(bInput));
   for (let i = 0; i < 3; i += 1) {
-    if (aParts.nums[i] !== bParts.nums[i]) return aParts.nums[i]! > bParts.nums[i]! ? 1 : -1;
+    if (a.nums[i] !== b.nums[i]) return a.nums[i]! > b.nums[i]! ? 1 : -1;
   }
-  if (aParts.pre === bParts.pre) return 0;
-  if (aParts.pre === undefined) return 1;
-  if (bParts.pre === undefined) return -1;
-  return aParts.pre.localeCompare(bParts.pre);
+  if (a.pre.length === 0 && b.pre.length === 0) return 0;
+  if (a.pre.length === 0) return 1;
+  if (b.pre.length === 0) return -1;
+  const length = Math.max(a.pre.length, b.pre.length);
+  for (let i = 0; i < length; i += 1) {
+    const left = a.pre[i]; const right = b.pre[i];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) return Number(left) > Number(right) ? 1 : -1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return left > right ? 1 : -1;
+  }
+  return 0;
+}
+
+function parseVersion(value: string): { nums: number[]; pre: string[] } {
+  const [core, prerelease] = value.split('-', 2);
+  return { nums: core.split('.').map(Number), pre: prerelease ? prerelease.split('.') : [] };
 }
 
 function validIso(value: string): string {
