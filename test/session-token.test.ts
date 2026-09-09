@@ -36,6 +36,13 @@ async function pairBoth(a: Device, b: Device): Promise<void> {
   await pair(b, a);
 }
 
+function tamperSignature(signature: string): string {
+  const bytes = Buffer.from(signature, 'base64url');
+  assert.ok(bytes.length > 0);
+  bytes[0] ^= 0x01;
+  return bytes.toString('base64url');
+}
+
 test('device session token is audience/scope/subject bound and verifiable by the paired peer', async (t) => {
   const a = await device('operator-session-a-', 'A');
   const b = await device('operator-session-b-', 'B');
@@ -94,7 +101,7 @@ test('session token rejects signature/payload tampering and expires under a boun
   const issued = await aSessions.issue({ subjectDeviceId: bPublic.deviceId, audience: 'relay', scopes: ['read'], ttlMs: 30_000 });
 
   const [payloadPart, signaturePart] = issued.token.split('.');
-  const tamperedSignature = `${signaturePart!.slice(0, -1)}${signaturePart!.endsWith('A') ? 'B' : 'A'}`;
+  const tamperedSignature = tamperSignature(signaturePart!);
   await assert.rejects(
     bSessions.verify(`${payloadPart}.${tamperedSignature}`, { audience: 'relay' }),
     (error: any) => error?.code === 'SESSION_SIGNATURE_INVALID'
