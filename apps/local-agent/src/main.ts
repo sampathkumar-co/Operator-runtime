@@ -1,6 +1,8 @@
+import os from 'node:os';
 import path from 'node:path';
 import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
+import { EmergencyStopStore } from './emergency-stop.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -17,6 +19,15 @@ if (!token || token.length < 32) {
   console.error('[operator] OPERATOR_AGENT_TOKEN must be set to a secret of at least 32 characters.');
   process.exit(2);
 }
+
+const recoveryToken = process.env.OPERATOR_RECOVERY_TOKEN;
+if (recoveryToken !== undefined && recoveryToken.length < 32) {
+  console.error('[operator] OPERATOR_RECOVERY_TOKEN must be at least 32 characters when set.');
+  process.exit(2);
+}
+
+const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
+const emergencyStop = new EmergencyStopStore(stateDir);
 
 const runtime = createRuntime({
   allowedRoots,
@@ -37,6 +48,8 @@ const runtime = createRuntime({
 const agent = createLocalAgentServer({
   runtime,
   token,
+  recoveryToken,
+  emergencyStop,
   permissions: {
     allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
@@ -51,6 +64,8 @@ const port = Number(process.env.OPERATOR_AGENT_PORT ?? 47100);
 const bound = await agent.listen(host, port);
 console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
+console.error(`[operator] emergency stop state: ${stateDir}`);
+console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 
 let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
