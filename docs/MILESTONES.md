@@ -24,7 +24,7 @@ Acceptance gates:
 
 M0 transport certification runs the official MCP v2 client through the real Operator HTTP MCP server and real authenticated local agent. Native inspection returns structured evidence while risky actions must be stopped by the local policy layer before execution when approval is absent.
 
-## M1 — browser kernel + secure ChatGPT dev loop — CURRENT
+## M1 — browser kernel + secure ChatGPT dev loop — EXTERNAL GATES PENDING
 
 - [x] persistent CDP target session manager
 - [x] connect to existing Chrome/Edge through configured loopback CDP
@@ -59,12 +59,12 @@ MCP certification is stronger than source/type checks: GitHub CI pins a compatib
 
 Fallback is bounded and semantic: the native sidecar remains alive when UIA initialization fails, exact Win32 PID/title/class discovery and activation remain available where explicitly requested, and matched controls that lack modern Invoke/Value patterns can fall back to LegacyIAccessible default-action/value APIs. UIA-only selector fields are never approximated, arbitrary HWND input is not exposed, and unsupported operations still fail closed. This path is covered by Windows compile/tests and Clippy in CI.
 
-## M3 — development adapter suite — IN PROGRESS
+## M3 — development adapter suite — COMPLETE
 
 - [x] Git write/checkpoint/restore
-- [ ] VS Code adapter
+- [x] VS Code adapter
 - [x] Docker adapter
-- [ ] PostgreSQL structured client
+- [x] PostgreSQL structured client
 - [x] project command registry
 - [x] build/test artifact validators
 - [x] checkpoint/rollback engine
@@ -77,18 +77,22 @@ Build/test artifact validators are integrated into the trusted-command path with
 
 The checkpoint/rollback engine is a Git-scoped transaction layer exposed as `project.transaction`. It is always classified destructive so local policy must approve rollback authority before execution. Once approved, Operator creates a non-mutating checkpoint, runs only a trusted local read/write command, validates process and artifact postconditions, and automatically restores the checkpoint if verification fails. Provider tests prove a tracked-file mutation from a zero-exit false-green command is restored to exact clean Git state. External commands are refused because their effects cannot be honestly compensated by Git. The MCP/Inspector stack independently proves the transaction remains blocked with `APPROVAL_REQUIRED` when destructive approval is absent.
 
-The Docker adapter is end-to-end certified through the 19-tool MCP surface. `docker.inspect` accepts only local Unix-socket, Windows named-pipe, or loopback TCP Docker contexts and returns bounded daemon/container metadata without commands, environments, mounts, or arbitrary labels. Project-scoped inspection and lifecycle management do not parse repository Compose YAML; they discover already-created Compose containers from Docker-owned labels and match the recorded working directory to an authorized root. `docker.manage` exposes only start/stop/restart for named existing services, requires a fresh SHA-256 state fingerprint, re-inspects postconditions, scrubs ambient Docker context/host environment, disables automatic Compose `.env` loading, and is locally system-change gated. Builds, pulls, run/exec, down, and volume deletion remain outside this certified slice.
+The Docker adapter is end-to-end certified through the MCP surface. `docker.inspect` accepts only local Unix-socket, Windows named-pipe, or loopback TCP Docker contexts and returns bounded daemon/container metadata without commands, environments, mounts, or arbitrary labels. Project-scoped inspection and lifecycle management do not parse repository Compose YAML; they discover already-created Compose containers from Docker-owned labels and match the recorded working directory to an authorized root. `docker.manage` exposes only start/stop/restart for named existing services, requires a fresh SHA-256 state fingerprint, re-inspects postconditions, scrubs ambient Docker context/host environment, disables automatic Compose `.env` loading, and is locally system-change gated. Builds, pulls, run/exec, down, and volume deletion remain outside this certified slice.
 
-## M4 — relay + multi-device
+The PostgreSQL adapter is read-only and structured. Trusted connection profiles live outside project roots; profile discovery never returns passwords, password environment names, or raw DSNs. Only local/loopback database endpoints are permitted in the certified slice. Operator constructs SELECT/metadata SQL itself, validates identifiers, passes filter values through psql quoted-variable interpolation, disables ambient PostgreSQL connection variables and `.pgpass` fallback, and enforces server-side read-only transactions plus statement/lock timeouts and bounded output. Injection/profile-isolation tests and the real MCP profile-discovery path are green.
 
-- account/device registry
-- signed pairing challenge
-- outbound persistent connection
-- short-lived session tokens
-- rotation/revocation
-- device routing
-- project-to-device resolution
-- reconnect/resume
+The VS Code adapter uses the official CLI through a closed operation set. Read-only inspection covers version, bounded status diagnostics, and installed extension IDs/versions. Project/file/goto/diff opens are locally system-change gated and always use a new Operator-isolated user-data directory outside all authorized project roots with extensions disabled. Inherited `VSCODE_*` IPC variables and `ELECTRON_RUN_AS_NODE` are removed so an invocation cannot silently reuse an existing user window. The certified adapter does not expose extension installation/removal, VS Code chat, tasks/terminal execution, URL handlers, arbitrary CLI flags, or reuse-window behavior. Provider isolation/path tests and the 22-tool MCP/Inspector policy-boundary test are green.
+
+## M4 — relay + multi-device — IN PROGRESS
+
+- [ ] account/device registry
+- [ ] signed pairing challenge
+- [ ] outbound persistent connection
+- [ ] short-lived session tokens
+- [ ] rotation/revocation
+- [ ] device routing
+- [ ] project-to-device resolution
+- [ ] reconnect/resume
 
 ## M5 — companion UI and publication hardening
 
