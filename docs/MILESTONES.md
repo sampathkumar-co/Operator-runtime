@@ -63,7 +63,7 @@ Fallback is bounded and semantic: the native sidecar remains alive when UIA init
 
 - [x] Git write/checkpoint/restore
 - [ ] VS Code adapter
-- [ ] Docker adapter
+- [x] Docker adapter
 - [ ] PostgreSQL structured client
 - [x] project command registry
 - [x] build/test artifact validators
@@ -75,7 +75,9 @@ Trusted project commands are end-to-end certified through the MCP surface. Repos
 
 Build/test artifact validators are integrated into the trusted-command path without expanding the MCP tool surface. The external registry may declare bounded project-relative artifacts with file/directory/JSON type, minimum size and optional `mustChange` requirements. Operator snapshots artifacts before execution, rejects symlink/escape tricks, verifies artifact type/size/change after execution, and parses bounded JSON reports. A zero process exit is not considered verified when artifact postconditions fail; CI proves both a successful changed JSON build artifact and a deliberate zero-exit stale-artifact false green through the real MCP/local-agent stack.
 
-The checkpoint/rollback engine is a Git-scoped transaction layer exposed as `project.transaction`. It is always classified destructive so local policy must approve rollback authority before execution. Once approved, Operator creates a non-mutating checkpoint, runs only a trusted local read/write command, validates process and artifact postconditions, and automatically restores the checkpoint if verification fails. Provider tests prove a tracked-file mutation from a zero-exit false-green command is restored to exact clean Git state. External commands are refused because their effects cannot be honestly compensated by Git. The 17-tool MCP/Inspector stack independently proves the transaction remains blocked with `APPROVAL_REQUIRED` when destructive approval is absent.
+The checkpoint/rollback engine is a Git-scoped transaction layer exposed as `project.transaction`. It is always classified destructive so local policy must approve rollback authority before execution. Once approved, Operator creates a non-mutating checkpoint, runs only a trusted local read/write command, validates process and artifact postconditions, and automatically restores the checkpoint if verification fails. Provider tests prove a tracked-file mutation from a zero-exit false-green command is restored to exact clean Git state. External commands are refused because their effects cannot be honestly compensated by Git. The MCP/Inspector stack independently proves the transaction remains blocked with `APPROVAL_REQUIRED` when destructive approval is absent.
+
+The Docker adapter is end-to-end certified through the 19-tool MCP surface. `docker.inspect` accepts only local Unix-socket, Windows named-pipe, or loopback TCP Docker contexts and returns bounded daemon/container metadata without commands, environments, mounts, or arbitrary labels. Project-scoped inspection and lifecycle management do not parse repository Compose YAML; they discover already-created Compose containers from Docker-owned labels and match the recorded working directory to an authorized root. `docker.manage` exposes only start/stop/restart for named existing services, requires a fresh SHA-256 state fingerprint, re-inspects postconditions, scrubs ambient Docker context/host environment, disables automatic Compose `.env` loading, and is locally system-change gated. Builds, pulls, run/exec, down, and volume deletion remain outside this certified slice.
 
 ## M4 — relay + multi-device
 
