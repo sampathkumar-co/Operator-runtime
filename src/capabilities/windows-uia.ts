@@ -18,6 +18,8 @@ const SCORE: CapabilityScore = {
 
 const MAX_RESPONSE_LINE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
+const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll'] as const;
+const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
 
 type SidecarError = { code: string; message: string; retryable?: boolean };
 type SidecarResponse = { id: string; ok: boolean; result?: unknown; error?: SidecarError };
@@ -251,14 +253,29 @@ function normalizeInspectInput(input: Record<string, unknown>) {
   };
 }
 
+function normalizeScrollAmount(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !(SCROLL_AMOUNTS as readonly string[]).includes(value)) {
+    throw new OperatorError('INVALID_UIA_SCROLL_AMOUNT', `${field} must be one of ${SCROLL_AMOUNTS.join(', ')}.`);
+  }
+  return value;
+}
+
 function normalizeOperateInput(input: Record<string, unknown>) {
   const operation = String(input.operation ?? '');
-  if (!['invoke', 'set_value', 'focus'].includes(operation)) {
-    throw new OperatorError('INVALID_UIA_OPERATION', 'operation must be invoke, set_value, or focus.');
+  if (!(UIA_OPERATIONS as readonly string[]).includes(operation)) {
+    throw new OperatorError('INVALID_UIA_OPERATION', `operation must be ${UIA_OPERATIONS.join(', ')}.`);
+  }
+  const horizontalAmount = normalizeScrollAmount(input.horizontalAmount, 'horizontalAmount');
+  const verticalAmount = normalizeScrollAmount(input.verticalAmount, 'verticalAmount');
+  if (operation === 'scroll' && horizontalAmount === undefined && verticalAmount === undefined) {
+    throw new OperatorError('INVALID_UIA_SCROLL_AMOUNT', 'scroll requires horizontalAmount or verticalAmount.');
   }
   return {
     operation,
     selector: normalizeSelector(input.selector),
-    value: input.value === undefined ? undefined : String(input.value)
+    value: input.value === undefined ? undefined : String(input.value),
+    horizontal_amount: horizontalAmount,
+    vertical_amount: verticalAmount
   };
 }
