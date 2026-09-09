@@ -73,6 +73,21 @@ function createServer(): McpServer {
     return invoke('project.command.run', expectedRisk, { path, commandId, expectedRisk }, path);
   });
 
+  server.registerTool('project.transaction', {
+    title: 'Run approved trusted command with automatic Git rollback',
+    description: 'Run a trusted local read/write project command inside a Git-scoped transaction. Operator creates a non-mutating checkpoint before execution, verifies command/artifact postconditions, and restores the checkpoint if verification fails. External commands are refused because their effects are not locally reversible. Rollback covers the Git index and non-ignored working-tree state captured by git.checkpoint, so this capability is always destructive-policy gated.',
+    inputSchema: z.object({
+      path: z.string().min(1),
+      commandId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+      expectedRisk: z.enum(['read', 'write'])
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ path, commandId, expectedRisk }) => invoke('project.transaction.run', 'destructive', {
+    path,
+    commandId,
+    expectedRisk
+  }, path));
+
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
