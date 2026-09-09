@@ -29,11 +29,12 @@ async function pairedFixture(t: test.TestContext) {
 }
 
 test('account registry hashes upstream auth principal and persists no raw subject or issuer', async (t) => {
-  const { stateDir, accounts } = await pairedFixture(t);
+  const { stateDir, devices, accounts } = await pairedFixture(t);
   const principal = { issuer: 'https://login.example.invalid/tenant', subject: 'user-sensitive-subject-12345' };
   const first = await accounts.resolveOrCreateAccount(principal);
-  const second = await new AccountDeviceRegistry(stateDir, (accounts as any).devices ?? (() => { throw new Error('unused'); }) as any).getAccount(principal).catch(() => null);
-  void second;
+  const reloaded = new AccountDeviceRegistry(stateDir, devices);
+  const second = await reloaded.getAccount(principal);
+  assert.equal(second?.accountId, first.accountId);
   assert.match(first.accountId, /^[0-9a-f-]{36}$/i);
   assert.equal(first.principalHash.length, 43);
   const persisted = await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8');
