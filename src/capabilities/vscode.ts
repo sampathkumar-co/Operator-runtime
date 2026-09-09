@@ -144,6 +144,13 @@ export class VsCodeProvider implements CapabilityProvider {
   }
 
   async #assertDataDirOutsideProjects(): Promise<void> {
+    const lexicalDataDir = path.resolve(this.#dataDir);
+    for (const configuredRoot of this.#allowedRoots) {
+      const lexicalRoot = path.resolve(configuredRoot);
+      if (inside(lexicalDataDir, lexicalRoot)) {
+        throw new OperatorError('VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED', 'Operator VS Code user-data directory must live outside all authorized project roots.');
+      }
+    }
     await fs.mkdir(path.dirname(this.#dataDir), { recursive: true, mode: 0o700 });
     const parent = await fs.realpath(path.dirname(this.#dataDir));
     const resolvedDataDir = path.join(parent, path.basename(this.#dataDir));
