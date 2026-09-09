@@ -6,3 +6,4 @@ export * from './system.ts';
 export * from './project.ts';
 export * from './browser-cdp.ts';
 export * from './browser-managed.ts';
+export * from './windows-uia.ts';
