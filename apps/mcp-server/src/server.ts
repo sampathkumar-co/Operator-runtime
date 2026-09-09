@@ -179,6 +179,32 @@ function createServer(): McpServer {
     expectedCurrentFingerprint
   }, cwd));
 
+  server.registerTool('docker.inspect', {
+    title: 'Inspect local Docker state',
+    description: 'Inspect the local Docker daemon or Compose-created containers associated with an authorized project root. Remote Docker contexts are rejected. Project inspection uses Docker-owned container labels and does not parse repository Compose YAML, environment files, commands, mounts, or arbitrary labels.',
+    inputSchema: z.object({ path: z.string().min(1).optional() }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ path }) => invoke('docker.inspect', 'read', { path }, path));
+
+  server.registerTool('docker.manage', {
+    title: 'Manage existing local Compose service containers',
+    description: 'Start, stop, or restart already-created Compose service containers matched to an authorized project root. Requires a fresh fingerprint from docker.inspect, rejects remote Docker contexts, never parses Compose YAML, and never exposes build/pull/run/exec/down/volume-delete operations. This is locally system-change gated.',
+    inputSchema: z.object({
+      path: z.string().min(1),
+      operation: z.enum(['start', 'stop', 'restart']),
+      services: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/)).min(1).max(50),
+      expectedCurrentFingerprint: z.string().regex(/^[0-9a-f]{64}$/i),
+      timeoutMs: z.number().int().min(1000).max(300000).default(60000)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ path, operation, services, expectedCurrentFingerprint, timeoutMs }) => invoke('docker.manage', 'system', {
+    path,
+    operation,
+    services,
+    expectedCurrentFingerprint,
+    timeoutMs
+  }, path));
+
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
     description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
