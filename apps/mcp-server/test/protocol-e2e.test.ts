@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
@@ -28,6 +31,12 @@ type ObservedAction = {
   provenance?: { kind?: string };
 };
 
+type CommandResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+};
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -51,11 +60,13 @@ async function closeServer(server: http.Server): Promise<void> {
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.killed) return;
+  if (child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  child.kill('SIGTERM');
+  try { child.kill('SIGTERM'); } catch { return; }
   await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 2_000))]);
-  if (child.exitCode === null && !child.killed) child.kill('SIGKILL');
+  if (child.exitCode === null) {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
 }
 
 async function waitForHealth(url: string, child: ChildProcess, stderr: () => string): Promise<void> {
@@ -73,7 +84,38 @@ async function waitForHealth(url: string, child: ChildProcess, stderr: () => str
   throw new Error(`MCP server health did not become ready: ${stderr()}`);
 }
 
-test('official MCP v2 client initializes, lists Operator tools, and executes a read tool through the local agent', async (t) => {
+async function runCommand(executable: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 20_000): Promise<CommandResult> {
+  const child = spawn(executable, args, { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => { stdout = `${stdout}${chunk}`.slice(-128_000); });
+  child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-128_000); });
+  const completed = new Promise<CommandResult>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, stdout, stderr }));
+  });
+  const timedOut = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* noop */ }
+      reject(new Error(`${path.basename(executable)} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.once('exit', () => clearTimeout(timer));
+  });
+  return Promise.race([completed, timedOut]);
+}
+
+function parseInspectorJson(stdout: string): Record<string, unknown> {
+  const trimmed = stdout.trim();
+  try { return JSON.parse(trimmed) as Record<string, unknown>; } catch { /* try NDJSON/log-tolerant parsing below */ }
+  for (const line of trimmed.split(/\r?\n/).reverse()) {
+    try { return JSON.parse(line) as Record<string, unknown>; } catch { /* next */ }
+  }
+  throw new Error(`MCP Inspector did not emit JSON: ${trimmed.slice(-2_000)}`);
+}
+
+test('official MCP v2 client and Inspector certify Operator HTTP transport through the local-agent boundary', async (t) => {
   const observed: ObservedAction[] = [];
   const agent = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || req.url !== '/v1/execute') {
@@ -122,13 +164,14 @@ test('official MCP v2 client initializes, lists Operator tools, and executes a r
   child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-8_000); });
   t.after(() => stopChild(child));
 
+  const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
   await waitForHealth(`http://127.0.0.1:${mcpPort}/health`, child, () => stderr);
 
   const client = new Client(
     { name: 'operator-ci-client', version: '0.1.0' },
     { versionNegotiation: { mode: 'auto' } }
   );
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${mcpPort}/mcp`));
+  const transport = new StreamableHTTPClientTransport(new URL(mcpUrl));
   await client.connect(transport);
   t.after(() => client.close());
 
@@ -153,4 +196,23 @@ test('official MCP v2 client initializes, lists Operator tools, and executes a r
   assert.equal(observed[0]?.risk, 'read');
   assert.deepEqual(observed[0]?.input, {});
   assert.equal(observed[0]?.provenance?.kind, 'chatgpt');
+
+  const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-inspector-'));
+  t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
+  const inspectorBinary = path.join(
+    process.cwd(),
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'mcp-inspector.cmd' : 'mcp-inspector'
+  );
+  const inspector = await runCommand(inspectorBinary, [
+    '--cli',
+    '--server-url', mcpUrl,
+    '--transport', 'http',
+    '--method', 'tools/list'
+  ], { ...process.env, HOME: inspectorHome });
+  assert.equal(inspector.code, 0, `MCP Inspector failed: ${inspector.stderr}`);
+  const inspectorResult = parseInspectorJson(inspector.stdout);
+  const inspectorTools = Array.isArray(inspectorResult.tools) ? inspectorResult.tools as Array<Record<string, unknown>> : [];
+  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), EXPECTED_TOOLS);
 });
