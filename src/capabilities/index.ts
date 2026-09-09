@@ -3,6 +3,7 @@ export * from './filesystem.ts';
 export * from './process.ts';
 export * from './git.ts';
 export * from './git-checkpoint.ts';
+export * from './git-write.ts';
 export * from './system.ts';
 export * from './project.ts';
 export * from './browser-cdp.ts';
