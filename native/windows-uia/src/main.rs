@@ -60,7 +60,7 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             "service": "operator-windows-uia",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": 1,
-            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait", "window_discovery"]
+            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait", "window_discovery", "activate_window"]
         })),
         "inspect" => {
             let params: InspectParams = match serde_json::from_value(request.params) {
@@ -101,6 +101,50 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             if let Err(error) = params.validate() {
                 return Response::failure(request.id, "INVALID_PARAMS", error, false);
             }
+
+            if params.operation == "activate_window" {
+                let wait_ms = params.wait_ms();
+                let inspect_params = InspectParams {
+                    selector: Some(params.selector.clone()),
+                    max_nodes: Some(1),
+                    max_depth: Some(1),
+                    observe_ms: Some(0),
+                    wait_ms: Some(wait_ms),
+                    include_windows: false,
+                    max_windows: None,
+                };
+                let resolved = match engine.inspect(inspect_params) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let code = classify_code(&error);
+                        let retryable = is_retryable(&error);
+                        return Response::failure(request.id, code, error, retryable);
+                    }
+                };
+                let Some(element) = resolved.elements.first() else {
+                    return Response::failure(
+                        request.id,
+                        "UIA_ELEMENT_NOT_FOUND",
+                        "Resolved UI Automation selector returned no element summary",
+                        true,
+                    );
+                };
+                return match win32::activate_matching_window(
+                    element.process_id,
+                    &element.name,
+                    &element.class_name,
+                ) {
+                    Ok((before, after)) => Response::success(request.id, json!({
+                        "operation": "activate_window",
+                        "waited_ms": resolved.waited_ms,
+                        "before": before,
+                        "after": after,
+                        "postcondition": { "foreground": true, "verified": true }
+                    })),
+                    Err(error) => Response::failure(request.id, "WIN32_ACTIVATION_FAILED", error, true),
+                };
+            }
+
             match engine.operate(params) {
                 Ok(result) => Response::success(request.id, result),
                 Err(error) => {
