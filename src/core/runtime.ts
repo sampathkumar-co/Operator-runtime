@@ -68,4 +68,8 @@ export class OperatorRuntime {
       durationMs: Math.round(performance.now() - start)
     };
   }
+
+  async close(): Promise<void> {
+    await this.router.closeAll();
+  }
 }
