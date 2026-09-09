@@ -1,6 +1,9 @@
 import os from 'node:os';
 import path from 'node:path';
 import { AuditLog } from '../../../src/core/audit.ts';
+import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
+import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
+import { TaskStore } from '../../../src/core/task-store.ts';
 import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
@@ -30,6 +33,10 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const emergencyStop = new EmergencyStopStore(stateDir);
 const audit = new AuditLog(stateDir);
+const tasks = new TaskStore(stateDir);
+const deviceIdentity = new DeviceIdentityStore(stateDir);
+const deviceRegistry = new DeviceRegistryStore(stateDir);
+const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 
 const runtime = createRuntime({
   allowedRoots,
@@ -41,7 +48,7 @@ const runtime = createRuntime({
   vscodeExecutable: process.env.OPERATOR_VSCODE_PATH,
   vscodeDataDir: process.env.OPERATOR_VSCODE_DATA_DIR,
   cdpEndpoint: process.env.OPERATOR_CDP_ENDPOINT,
-  browserAutoLaunch: process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0',
+  browserAutoLaunch,
   browserPath: process.env.OPERATOR_BROWSER_PATH,
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH
@@ -53,6 +60,22 @@ const agent = createLocalAgentServer({
   recoveryToken,
   emergencyStop,
   audit,
+  tasks,
+  deviceIdentity,
+  deviceRegistry,
+  settings: {
+    recoveryConfigured: Boolean(recoveryToken),
+    browserAutoLaunch,
+    cdpEndpointConfigured: Boolean(process.env.OPERATOR_CDP_ENDPOINT),
+    browserPathConfigured: Boolean(process.env.OPERATOR_BROWSER_PATH),
+    projectCommandRegistryConfigured: Boolean(process.env.OPERATOR_PROJECT_COMMAND_REGISTRY),
+    dockerConfigured: Boolean(process.env.OPERATOR_DOCKER_PATH),
+    postgresConfigured: Boolean(process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY),
+    vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
+    windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
+    authorizedRootCount: allowedRoots.length,
+    executableAllowlistCount: allowedExecutables.length
+  },
   permissions: {
     allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
