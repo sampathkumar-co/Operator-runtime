@@ -83,6 +83,37 @@ function createServer(): McpServer {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ cwd, paths }) => invoke('git.diff', 'read', { cwd, paths }, cwd));
 
+  server.registerTool('git.checkpoint', {
+    title: 'Checkpoint or restore Git worktree state',
+    description: 'Create or inspect non-mutating Git checkpoints, or restore a checkpoint with a current-state fingerprint precondition. Checkpoints preserve separate index and working-tree trees, including ordinary untracked files. Restore refuses if HEAD moved, keeps an automatic recovery checkpoint, and is destructive-policy gated locally.',
+    inputSchema: z.object({
+      operation: z.enum(['create', 'inspect', 'restore']),
+      cwd: z.string().min(1),
+      label: z.string().max(160).optional(),
+      checkpointId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/).optional(),
+      expectedCurrentFingerprint: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, cwd, label, checkpointId, expectedCurrentFingerprint }) => {
+    if (operation === 'inspect') return invoke('git.checkpoint.inspect', 'read', { cwd }, cwd);
+    if (operation === 'create') return invoke('git.checkpoint.create', 'write', { cwd, label }, cwd);
+    if (!checkpointId || !expectedCurrentFingerprint) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'git.checkpoint.restore requires checkpointId and expectedCurrentFingerprint from a fresh inspect.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'git.checkpoint.restore',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'CHECKPOINT_RESTORE_INPUT_REQUIRED', message: 'checkpointId and expectedCurrentFingerprint are required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke('git.checkpoint.restore', 'destructive', { cwd, checkpointId, expectedCurrentFingerprint }, cwd);
+  });
+
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
     description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
