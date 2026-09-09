@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -18,6 +18,7 @@ const EXPECTED_TOOLS = [
   'file.list',
   'file.read',
   'file.write',
+  'git.checkpoint',
   'git.diff',
   'git.status',
   'project.inspect',
@@ -103,9 +104,15 @@ function parseInspectorJson(stdout: string): Record<string, unknown> {
   throw new Error(`MCP Inspector did not emit JSON: ${trimmed.slice(-2_000)}`);
 }
 
-test('official MCP client and Inspector traverse the real local-agent boundary while external actions remain approval-gated', async (t) => {
+test('official MCP client and Inspector traverse the real local-agent boundary while risky actions remain approval-gated', async (t) => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-e2e-'));
   t.after(() => fs.rm(testRoot, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: testRoot, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Operator CI'], { cwd: testRoot });
+  execFileSync('git', ['config', 'user.email', 'operator-ci@example.invalid'], { cwd: testRoot });
+  await fs.writeFile(path.join(testRoot, 'project.txt'), 'base\n');
+  execFileSync('git', ['add', 'project.txt'], { cwd: testRoot });
+  execFileSync('git', ['commit', '-m', 'base'], { cwd: testRoot, stdio: 'ignore' });
 
   const agentPort = await reserveLoopbackPort();
   const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
@@ -161,6 +168,8 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), EXPECTED_TOOLS);
   const inspectTool = tools.tools.find((tool) => tool.name === 'computer.inspect');
   assert.equal(inspectTool?.annotations?.readOnlyHint, true);
+  const checkpointTool = tools.tools.find((tool) => tool.name === 'git.checkpoint');
+  assert.equal(checkpointTool?.annotations?.destructiveHint, true);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -175,7 +184,47 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(typeof systemOutput?.platform, 'string');
   assert.equal(typeof systemOutput?.arch, 'string');
 
-  const blocked = await client.callTool({
+  await fs.writeFile(path.join(testRoot, 'project.txt'), 'checkpoint state\n');
+  const checkpointCreated = await client.callTool({
+    name: 'git.checkpoint',
+    arguments: { operation: 'create', cwd: testRoot, label: 'MCP E2E checkpoint' }
+  });
+  assert.notEqual(checkpointCreated.isError, true);
+  const checkpointCreatedStructured = checkpointCreated.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(checkpointCreatedStructured?.ok, true);
+  const checkpointOutput = checkpointCreatedStructured?.output as Record<string, unknown> | undefined;
+  const checkpointId = String(checkpointOutput?.id ?? '');
+  assert.match(checkpointId, /^[0-9a-f-]{36}$/i);
+
+  await fs.writeFile(path.join(testRoot, 'project.txt'), 'new work after checkpoint\n');
+  const checkpointInspected = await client.callTool({
+    name: 'git.checkpoint',
+    arguments: { operation: 'inspect', cwd: testRoot }
+  });
+  assert.notEqual(checkpointInspected.isError, true);
+  const checkpointInspectedStructured = checkpointInspected.structuredContent as Record<string, unknown> | undefined;
+  const inspectOutput = checkpointInspectedStructured?.output as Record<string, unknown> | undefined;
+  const currentState = inspectOutput?.current as Record<string, unknown> | undefined;
+  const currentFingerprint = String(currentState?.fingerprint ?? '');
+  assert.match(currentFingerprint, /^[0-9a-f]{64}$/i);
+
+  const restoreBlocked = await client.callTool({
+    name: 'git.checkpoint',
+    arguments: {
+      operation: 'restore',
+      cwd: testRoot,
+      checkpointId,
+      expectedCurrentFingerprint: currentFingerprint
+    }
+  });
+  assert.equal(restoreBlocked.isError, true);
+  const restoreBlockedStructured = restoreBlocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(restoreBlockedStructured?.provider, 'policy');
+  const restoreBlockedError = restoreBlockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(restoreBlockedError?.code, 'APPROVAL_REQUIRED');
+  assert.equal(await fs.readFile(path.join(testRoot, 'project.txt'), 'utf8'), 'new work after checkpoint\n');
+
+  const browserBlocked = await client.callTool({
     name: 'browser.interact',
     arguments: {
       targetId: 'policy-test-target',
@@ -183,13 +232,10 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       target: { role: 'button', name: 'Never execute' }
     }
   });
-  assert.equal(blocked.isError, true);
-  const blockedStructured = blocked.structuredContent as Record<string, unknown> | undefined;
-  assert.equal(blockedStructured?.ok, false);
-  assert.equal(blockedStructured?.provider, 'policy');
-  const blockedError = blockedStructured?.error as Record<string, unknown> | undefined;
-  assert.equal(blockedError?.code, 'APPROVAL_REQUIRED');
-  assert.match(blocked.content[0]?.type === 'text' ? blocked.content[0].text : '', /APPROVAL_REQUIRED/);
+  assert.equal(browserBlocked.isError, true);
+  const browserBlockedStructured = browserBlocked.structuredContent as Record<string, unknown> | undefined;
+  const browserBlockedError = browserBlockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(browserBlockedError?.code, 'APPROVAL_REQUIRED');
 
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
