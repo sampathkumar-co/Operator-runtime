@@ -142,16 +142,26 @@ function createServer(): McpServer {
 
   server.registerTool('app.inspect', {
     title: 'Inspect Windows application controls',
-    description: 'Wait up to 10 seconds for a unique semantic selector, inspect a bounded Microsoft UI Automation control tree, and optionally observe selector-scoped property/structure changes for up to 5 seconds. Returns semantic controls and events rather than pixels.',
+    description: 'Wait up to 10 seconds for a unique semantic selector, inspect a bounded Microsoft UI Automation control tree, optionally observe selector-scoped property/structure changes for up to 5 seconds, and optionally include up to 200 top-level Win32 windows with PID, executable basename, title/class and foreground state. No screenshots, process memory, command lines, or full executable paths are returned.',
     inputSchema: z.object({
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
       maxDepth: z.number().int().min(1).max(12).default(6),
       observeMs: z.number().int().min(0).max(5000).default(0),
-      waitMs: z.number().int().min(0).max(10000).default(0)
+      waitMs: z.number().int().min(0).max(10000).default(0),
+      includeWindows: z.boolean().default(false),
+      maxWindows: z.number().int().min(1).max(200).default(50)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ selector, maxNodes, maxDepth, observeMs, waitMs }) => invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs, waitMs }));
+  }, async ({ selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows }) => invoke('app.inspect', 'read', {
+    selector,
+    maxNodes,
+    maxDepth,
+    observeMs,
+    waitMs,
+    includeWindows,
+    maxWindows
+  }));
 
   server.registerTool('app.operate', {
     title: 'Operate Windows application control',
