@@ -32,6 +32,18 @@ jobs:
       - name: Cross-layer adversarial boundary tests
         run: npm run test:red-team
 
+  performance-regression:
+    name: Performance regression suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Bounded runtime performance budgets
+        run: npm run test:performance
+
   mcp-transport:
     name: MCP v2 client + Inspector E2E
     runs-on: ubuntu-latest
