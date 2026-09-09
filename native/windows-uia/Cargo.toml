@@ -9,7 +9,10 @@ description = "Native Windows UI Automation sidecar for Operator"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uiautomation = { version = "0.25.1", default-features = false, features = ["control", "event"] }
+# uiautomation 0.25.1 currently imports MouseButton from its input module while
+# compiling core/control. Keep input enabled for upstream build compatibility;
+# Operator's sidecar protocol exposes no keyboard or mouse operations.
+uiautomation = { version = "0.25.1", default-features = false, features = ["input", "control", "event"] }
 
 [profile.release]
 lto = "thin"
