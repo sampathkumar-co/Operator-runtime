@@ -57,6 +57,7 @@ export function createLocalAgentServer(options: {
   emergencyStop?: EmergencyStopStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
+  onEmergencyClear?: () => Promise<void> | void;
   audit?: AuditLog;
   tasks?: TaskStore;
   deviceIdentity?: DeviceIdentityStore;
@@ -212,6 +213,13 @@ export function createLocalAgentServer(options: {
         return;
       }
       const state = await options.emergencyStop.clear();
+      try {
+        await options.onEmergencyClear?.();
+      } catch (error) {
+        await options.emergencyStop.engage('relay recovery callback failed');
+        send(res, 503, { ok: false, error: { code: 'EMERGENCY_CLEAR_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
       await options.audit?.append({
         capability: 'agent.emergency-stop',
         result: 'success',
