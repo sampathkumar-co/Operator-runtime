@@ -1,5 +1,5 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
 
 export function createRuntime(config: {
   allowedRoots: string[];
@@ -8,6 +8,8 @@ export function createRuntime(config: {
   dockerExecutable?: string;
   postgresProfileRegistryPath?: string;
   psqlExecutable?: string;
+  vscodeExecutable?: string;
+  vscodeDataDir?: string;
   cdpEndpoint?: string;
   browserAutoLaunch?: boolean;
   browserPath?: string;
@@ -36,6 +38,11 @@ export function createRuntime(config: {
       allowedRoots: config.allowedRoots,
       registryPath: config.postgresProfileRegistryPath,
       psqlExecutable: config.psqlExecutable
+    }))
+    .register(new VsCodeProvider({
+      allowedRoots: config.allowedRoots,
+      codeExecutable: config.vscodeExecutable,
+      dataDir: config.vscodeDataDir
     }))
     .register(new GitProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitCheckpointProvider({ allowedRoots: config.allowedRoots }))
