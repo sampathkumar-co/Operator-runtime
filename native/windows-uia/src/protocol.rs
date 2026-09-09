@@ -7,6 +7,14 @@ pub const HARD_MAX_NODES: usize = 1500;
 pub const DEFAULT_MAX_DEPTH: usize = 6;
 pub const HARD_MAX_DEPTH: usize = 12;
 
+const SCROLL_AMOUNTS: &[&str] = &[
+    "large_decrement",
+    "small_decrement",
+    "none",
+    "large_increment",
+    "small_increment",
+];
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     pub id: String,
@@ -81,15 +89,19 @@ pub struct OperateParams {
     pub selector: Selector,
     #[serde(default)]
     pub value: Option<String>,
+    #[serde(default)]
+    pub horizontal_amount: Option<String>,
+    #[serde(default)]
+    pub vertical_amount: Option<String>,
 }
 
 impl OperateParams {
     pub fn validate(&self) -> Result<(), String> {
         self.selector.validate()?;
         match self.operation.as_str() {
-            "invoke" | "focus" => {
-                if self.value.is_some() {
-                    return Err(format!("{} does not accept value", self.operation));
+            "invoke" | "focus" | "select" | "expand" | "collapse" => {
+                if self.value.is_some() || self.horizontal_amount.is_some() || self.vertical_amount.is_some() {
+                    return Err(format!("{} does not accept value or scroll amounts", self.operation));
                 }
             }
             "set_value" => {
@@ -97,8 +109,29 @@ impl OperateParams {
                 if value.len() > 64 * 1024 {
                     return Err("value exceeds 64 KiB".into());
                 }
+                if self.horizontal_amount.is_some() || self.vertical_amount.is_some() {
+                    return Err("set_value does not accept scroll amounts".into());
+                }
             }
-            _ => return Err("operation must be invoke, set_value, or focus".into()),
+            "scroll" => {
+                if self.value.is_some() {
+                    return Err("scroll does not accept value".into());
+                }
+                if self.horizontal_amount.is_none() && self.vertical_amount.is_none() {
+                    return Err("scroll requires horizontal_amount or vertical_amount".into());
+                }
+                for (field, value) in [
+                    ("horizontal_amount", self.horizontal_amount.as_deref()),
+                    ("vertical_amount", self.vertical_amount.as_deref()),
+                ] {
+                    if let Some(value) = value
+                        && !SCROLL_AMOUNTS.contains(&value)
+                    {
+                        return Err(format!("{field} must be one of {}", SCROLL_AMOUNTS.join(", ")));
+                    }
+                }
+            }
+            _ => return Err("operation must be invoke, set_value, focus, select, expand, collapse, or scroll".into()),
         }
         Ok(())
     }
@@ -142,6 +175,16 @@ impl Response<Value> {
 mod tests {
     use super::*;
 
+    fn operate(operation: &str) -> OperateParams {
+        OperateParams {
+            operation: operation.into(),
+            selector: Selector { automation_id: Some("target".into()), ..Default::default() },
+            value: None,
+            horizontal_amount: None,
+            vertical_amount: None,
+        }
+    }
+
     #[test]
     fn selector_requires_a_semantic_property() {
         assert!(Selector::default().validate().is_err());
@@ -156,15 +199,30 @@ mod tests {
 
     #[test]
     fn operations_are_closed_not_scriptable() {
-        let selector = Selector { automation_id: Some("save".into()), ..Default::default() };
-        assert!(OperateParams { operation: "invoke".into(), selector: selector.clone(), value: None }.validate().is_ok());
-        assert!(OperateParams { operation: "run_javascript".into(), selector, value: None }.validate().is_err());
+        assert!(operate("invoke").validate().is_ok());
+        assert!(operate("select").validate().is_ok());
+        assert!(operate("expand").validate().is_ok());
+        assert!(operate("collapse").validate().is_ok());
+        assert!(operate("run_javascript").validate().is_err());
     }
 
     #[test]
     fn set_value_requires_value_and_caps_payload() {
-        let selector = Selector { name: Some("Email".into()), ..Default::default() };
-        assert!(OperateParams { operation: "set_value".into(), selector: selector.clone(), value: None }.validate().is_err());
-        assert!(OperateParams { operation: "set_value".into(), selector, value: Some("x".repeat(70_000)) }.validate().is_err());
+        let mut params = operate("set_value");
+        assert!(params.validate().is_err());
+        params.value = Some("x".repeat(70_000));
+        assert!(params.validate().is_err());
+        params.value = Some("hello".into());
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn scroll_requires_bounded_enum_amount() {
+        let mut params = operate("scroll");
+        assert!(params.validate().is_err());
+        params.vertical_amount = Some("small_increment".into());
+        assert!(params.validate().is_ok());
+        params.vertical_amount = Some("999999".into());
+        assert!(params.validate().is_err());
     }
 }
