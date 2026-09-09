@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { AuditLog } from '../../../src/core/audit.ts';
 import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
@@ -28,6 +29,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const emergencyStop = new EmergencyStopStore(stateDir);
+const audit = new AuditLog(stateDir);
 
 const runtime = createRuntime({
   allowedRoots,
@@ -50,6 +52,7 @@ const agent = createLocalAgentServer({
   token,
   recoveryToken,
   emergencyStop,
+  audit,
   permissions: {
     allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
@@ -64,7 +67,7 @@ const port = Number(process.env.OPERATOR_AGENT_PORT ?? 47100);
 const bound = await agent.listen(host, port);
 console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
-console.error(`[operator] emergency stop state: ${stateDir}`);
+console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 
 let shuttingDown = false;
