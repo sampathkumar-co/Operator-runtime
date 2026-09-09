@@ -18,6 +18,7 @@ const SCORE: CapabilityScore = {
 
 const MAX_RESPONSE_LINE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
+const MAX_OBSERVE_MS = 5_000;
 const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll'] as const;
 const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
 
@@ -202,7 +203,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
         : await this.#client.call('operate', normalizeOperateInput(action.input));
       const postcondition = action.capability === 'app.operate'
         ? evidence('postcondition', 'pass', 'Windows UIA operation returned verified semantic postcondition evidence.', { operation: action.input.operation })
-        : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree instead of a screenshot.', {});
+        : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree and optional scoped event observations instead of a screenshot.', { observeMs: normalizeObserveMs(action.input.observeMs) });
       return {
         ok: true,
         capability: action.capability,
@@ -245,11 +246,16 @@ function normalizeSelector(input: unknown) {
   };
 }
 
+function normalizeObserveMs(value: unknown): number {
+  return Number.isInteger(value) ? Math.min(Math.max(Number(value), 0), MAX_OBSERVE_MS) : 0;
+}
+
 function normalizeInspectInput(input: Record<string, unknown>) {
   return {
     selector: input.selector ? normalizeSelector(input.selector) : undefined,
     max_nodes: Number.isInteger(input.maxNodes) ? Number(input.maxNodes) : undefined,
-    max_depth: Number.isInteger(input.maxDepth) ? Number(input.maxDepth) : undefined
+    max_depth: Number.isInteger(input.maxDepth) ? Number(input.maxDepth) : undefined,
+    observe_ms: normalizeObserveMs(input.observeMs)
   };
 }
 
