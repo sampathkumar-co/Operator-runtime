@@ -116,11 +116,17 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   execFileSync('git', ['config', 'user.name', 'Operator CI'], { cwd: testRoot });
   execFileSync('git', ['config', 'user.email', 'operator-ci@example.invalid'], { cwd: testRoot });
   await fs.writeFile(path.join(testRoot, 'project.txt'), 'base\n');
-  execFileSync('git', ['add', 'project.txt'], { cwd: testRoot });
+  await fs.writeFile(path.join(testRoot, 'stale-validation.txt'), 'stale\n');
+  execFileSync('git', ['add', 'project.txt', 'stale-validation.txt'], { cwd: testRoot });
   execFileSync('git', ['commit', '-m', 'base'], { cwd: testRoot, stdio: 'ignore' });
 
   const externalMarker = path.join(testRoot, 'external-command-ran.marker');
   const commandRegistryPath = path.join(authorityRoot, 'project-commands.json');
+  const buildScript = [
+    "const fs=require('fs')",
+    "fs.mkdirSync('build',{recursive:true})",
+    "fs.writeFileSync('build/output.json',JSON.stringify({ok:true,source:'trusted-build'}))"
+  ].join(';');
   await fs.writeFile(commandRegistryPath, JSON.stringify({
     version: 1,
     projects: [{
@@ -135,6 +141,28 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
           cwd: '.',
           timeoutMs: 5000,
           risk: 'read'
+        },
+        {
+          id: 'trusted-build',
+          title: 'Verified trusted build',
+          kind: 'build',
+          executable: 'node',
+          args: ['-e', buildScript],
+          cwd: '.',
+          timeoutMs: 5000,
+          risk: 'write',
+          artifacts: [{ path: 'build/output.json', kind: 'json', minBytes: 2, mustChange: true }]
+        },
+        {
+          id: 'false-green',
+          title: 'False green validator test',
+          kind: 'build',
+          executable: 'node',
+          args: ['-e', "process.stdout.write('zero-exit-but-stale')"],
+          cwd: '.',
+          timeoutMs: 5000,
+          risk: 'read',
+          artifacts: [{ path: 'stale-validation.txt', kind: 'file', minBytes: 1, mustChange: true }]
         },
         {
           id: 'trusted-external',
@@ -236,7 +264,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(commandInspectionStructured?.provider, 'project.command.trusted');
   const commandInspectionOutput = commandInspectionStructured?.output as Record<string, unknown> | undefined;
   const trustedCommands = Array.isArray(commandInspectionOutput?.commands) ? commandInspectionOutput.commands as Array<Record<string, unknown>> : [];
-  assert.deepEqual(trustedCommands.map((command) => String(command.id)).sort(), ['trusted-external', 'trusted-read']);
+  assert.deepEqual(trustedCommands.map((command) => String(command.id)).sort(), ['false-green', 'trusted-build', 'trusted-external', 'trusted-read']);
 
   const trustedRead = await client.callTool({
     name: 'project.command',
@@ -249,6 +277,28 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const trustedExecution = trustedReadOutput?.execution as Record<string, unknown> | undefined;
   assert.equal(trustedExecution?.stdout, 'trusted-command-ok');
   assert.equal(trustedExecution?.exitCode, 0);
+
+  const trustedBuild = await client.callTool({
+    name: 'project.command',
+    arguments: { operation: 'run', path: testRoot, commandId: 'trusted-build', expectedRisk: 'write' }
+  });
+  assert.notEqual(trustedBuild.isError, true);
+  const trustedBuildStructured = trustedBuild.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(trustedBuildStructured?.provider, 'project.command.trusted');
+  const trustedBuildOutput = trustedBuildStructured?.output as Record<string, unknown> | undefined;
+  const trustedBuildValidation = trustedBuildOutput?.validation as Record<string, unknown> | undefined;
+  assert.equal(trustedBuildValidation?.passed, true);
+  assert.equal(JSON.parse(await fs.readFile(path.join(testRoot, 'build', 'output.json'), 'utf8')).ok, true);
+
+  const falseGreen = await client.callTool({
+    name: 'project.command',
+    arguments: { operation: 'run', path: testRoot, commandId: 'false-green', expectedRisk: 'read' }
+  });
+  assert.equal(falseGreen.isError, true);
+  const falseGreenStructured = falseGreen.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(falseGreenStructured?.provider, 'project.command.trusted');
+  const falseGreenError = falseGreenStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(falseGreenError?.code, 'ARTIFACT_VALIDATION_FAILED');
 
   const trustedExternalBlocked = await client.callTool({
     name: 'project.command',
@@ -341,7 +391,6 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(committedStructured?.ok, true);
   assert.equal(committedStructured?.provider, 'git.write.native');
   assert.equal(execFileSync('git', ['log', '-1', '--pretty=%s'], { cwd: testRoot, encoding: 'utf8' }).trim(), 'test: MCP structured Git write');
-  assert.equal(execFileSync('git', ['status', '--porcelain=v1'], { cwd: testRoot, encoding: 'utf8' }).trim(), '');
 
   const browserBlocked = await client.callTool({
     name: 'browser.interact',
