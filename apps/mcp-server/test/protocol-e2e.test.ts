@@ -24,13 +24,6 @@ const EXPECTED_TOOLS = [
   'terminal.execute'
 ];
 
-type ObservedAction = {
-  capability?: string;
-  risk?: string;
-  input?: Record<string, unknown>;
-  provenance?: { kind?: string };
-};
-
 type CommandResult = {
   code: number | null;
   stdout: string;
@@ -54,11 +47,6 @@ async function reserveLoopbackPort(): Promise<number> {
   return port;
 }
 
-async function closeServer(server: http.Server): Promise<void> {
-  if (!server.listening) return;
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-}
-
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
@@ -69,11 +57,11 @@ async function stopChild(child: ChildProcess): Promise<void> {
   }
 }
 
-async function waitForHealth(url: string, child: ChildProcess, stderr: () => string): Promise<void> {
-  const deadline = Date.now() + 10_000;
+async function waitForHealth(label: string, url: string, child: ChildProcess, stderr: () => string): Promise<void> {
+  const deadline = Date.now() + 12_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
-      throw new Error(`MCP server exited before health became ready (exit ${child.exitCode}): ${stderr()}`);
+      throw new Error(`${label} exited before health became ready (exit ${child.exitCode}): ${stderr()}`);
     }
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(500) });
@@ -81,7 +69,7 @@ async function waitForHealth(url: string, child: ChildProcess, stderr: () => str
     } catch { /* startup race */ }
     await new Promise((resolve) => setTimeout(resolve, 75));
   }
-  throw new Error(`MCP server health did not become ready: ${stderr()}`);
+  throw new Error(`${label} health did not become ready: ${stderr()}`);
 }
 
 async function runCommand(executable: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 20_000): Promise<CommandResult> {
@@ -115,41 +103,35 @@ function parseInspectorJson(stdout: string): Record<string, unknown> {
   throw new Error(`MCP Inspector did not emit JSON: ${trimmed.slice(-2_000)}`);
 }
 
-test('official MCP v2 client and Inspector certify Operator HTTP transport through the local-agent boundary', async (t) => {
-  const observed: ObservedAction[] = [];
-  const agent = http.createServer(async (req, res) => {
-    if (req.method !== 'POST' || req.url !== '/v1/execute') {
-      res.writeHead(404).end();
-      return;
-    }
-    if (req.headers.authorization !== `Bearer ${TOKEN}`) {
-      res.writeHead(401, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'bad token' } }));
-      return;
-    }
+test('official MCP client and Inspector traverse the real local-agent boundary while external actions remain approval-gated', async (t) => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-agent-e2e-'));
+  t.after(() => fs.rm(testRoot, { recursive: true, force: true }));
 
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { action?: ObservedAction };
-    const action = body.action ?? {};
-    observed.push(action);
-
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      ok: true,
-      capability: action.capability,
-      provider: 'fake.local-agent',
-      output: { os: 'ci-test', bounded: true },
-      evidence: [{ kind: 'fake_agent', status: 'pass', message: 'CI local-agent boundary reached.', details: {} }],
-      durationMs: 1
-    }));
+  const agentPort = await reserveLoopbackPort();
+  const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
+  let agentStderr = '';
+  const agent = spawn(process.execPath, ['--experimental-strip-types', agentEntry], {
+    cwd: testRoot,
+    env: {
+      ...process.env,
+      OPERATOR_AGENT_HOST: '127.0.0.1',
+      OPERATOR_AGENT_PORT: String(agentPort),
+      OPERATOR_AGENT_TOKEN: TOKEN,
+      OPERATOR_ALLOWED_ROOTS: testRoot,
+      OPERATOR_ALLOWED_EXECUTABLES: '',
+      OPERATOR_BROWSER_AUTO_LAUNCH: '0',
+      OPERATOR_CDP_ENDPOINT: 'http://127.0.0.1:1'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
   });
-  const agentPort = await listen(agent);
-  t.after(() => closeServer(agent));
+  agent.stderr?.setEncoding('utf8');
+  agent.stderr?.on('data', (chunk: string) => { agentStderr = `${agentStderr}${chunk}`.slice(-12_000); });
+  t.after(() => stopChild(agent));
+  await waitForHealth('local agent', `http://127.0.0.1:${agentPort}/health`, agent, () => agentStderr);
 
   const mcpPort = await reserveLoopbackPort();
-  let stderr = '';
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
+  let mcpStderr = '';
+  const mcp = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -160,12 +142,12 @@ test('official MCP v2 client and Inspector certify Operator HTTP transport throu
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  child.stderr?.setEncoding('utf8');
-  child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-8_000); });
-  t.after(() => stopChild(child));
+  mcp.stderr?.setEncoding('utf8');
+  mcp.stderr?.on('data', (chunk: string) => { mcpStderr = `${mcpStderr}${chunk}`.slice(-12_000); });
+  t.after(() => stopChild(mcp));
 
   const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
-  await waitForHealth(`http://127.0.0.1:${mcpPort}/health`, child, () => stderr);
+  await waitForHealth('MCP server', `http://127.0.0.1:${mcpPort}/health`, mcp, () => mcpStderr);
 
   const client = new Client(
     { name: 'operator-ci-client', version: '0.1.0' },
@@ -183,19 +165,31 @@ test('official MCP v2 client and Inspector certify Operator HTTP transport throu
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
   assert.equal(result.content[0]?.type, 'text');
-  assert.match(result.content[0]?.type === 'text' ? result.content[0].text : '', /computer\.inspect: VERIFIED via fake\.local-agent/);
+  assert.match(result.content[0]?.type === 'text' ? result.content[0].text : '', /computer\.inspect: VERIFIED via system\.native/);
 
   const structured = result.structuredContent as Record<string, unknown> | undefined;
   assert.equal(structured?.ok, true);
   assert.equal(structured?.capability, 'computer.inspect');
-  assert.equal(structured?.provider, 'fake.local-agent');
-  assert.deepEqual(structured?.output, { os: 'ci-test', bounded: true });
+  assert.equal(structured?.provider, 'system.native');
+  const systemOutput = structured?.output as Record<string, unknown> | undefined;
+  assert.equal(typeof systemOutput?.platform, 'string');
+  assert.equal(typeof systemOutput?.arch, 'string');
 
-  assert.equal(observed.length, 1);
-  assert.equal(observed[0]?.capability, 'computer.inspect');
-  assert.equal(observed[0]?.risk, 'read');
-  assert.deepEqual(observed[0]?.input, {});
-  assert.equal(observed[0]?.provenance?.kind, 'chatgpt');
+  const blocked = await client.callTool({
+    name: 'browser.interact',
+    arguments: {
+      targetId: 'policy-test-target',
+      operation: 'click',
+      target: { role: 'button', name: 'Never execute' }
+    }
+  });
+  assert.equal(blocked.isError, true);
+  const blockedStructured = blocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(blockedStructured?.ok, false);
+  assert.equal(blockedStructured?.provider, 'policy');
+  const blockedError = blockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(blockedError?.code, 'APPROVAL_REQUIRED');
+  assert.match(blocked.content[0]?.type === 'text' ? blocked.content[0].text : '', /APPROVAL_REQUIRED/);
 
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
