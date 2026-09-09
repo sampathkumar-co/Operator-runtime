@@ -28,7 +28,9 @@ const EXPECTED_TOOLS = [
   'project.command',
   'project.inspect',
   'project.transaction',
-  'terminal.execute'
+  'terminal.execute',
+  'vscode.inspect',
+  'vscode.open'
 ];
 
 type CommandResult = {
@@ -211,6 +213,8 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       OPERATOR_ALLOWED_EXECUTABLES: 'node',
       OPERATOR_PROJECT_COMMAND_REGISTRY: commandRegistryPath,
       OPERATOR_POSTGRES_PROFILE_REGISTRY: postgresRegistryPath,
+      OPERATOR_VSCODE_PATH: path.join(authorityRoot, 'missing-code-binary'),
+      OPERATOR_VSCODE_DATA_DIR: path.join(authorityRoot, 'vscode-safe'),
       OPERATOR_BROWSER_AUTO_LAUNCH: '0',
       OPERATOR_CDP_ENDPOINT: 'http://127.0.0.1:1'
     },
@@ -273,6 +277,11 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const postgresTool = tools.tools.find((tool) => tool.name === 'postgres.query');
   assert.equal(postgresTool?.annotations?.readOnlyHint, true);
   assert.equal(postgresTool?.annotations?.openWorldHint, false);
+  const vscodeInspectTool = tools.tools.find((tool) => tool.name === 'vscode.inspect');
+  assert.equal(vscodeInspectTool?.annotations?.readOnlyHint, true);
+  const vscodeOpenTool = tools.tools.find((tool) => tool.name === 'vscode.open');
+  assert.equal(vscodeOpenTool?.annotations?.readOnlyHint, false);
+  assert.equal(vscodeOpenTool?.annotations?.openWorldHint, false);
 
   const result = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(result.isError, true);
@@ -302,6 +311,17 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(profiles[0]?.user, 'operator_ci');
   assert.equal(profiles[0]?.endpoint, 'loopback');
   assert.doesNotMatch(JSON.stringify(postgresProfilesOutput), /passwordEnv|password|dsn/i);
+
+  const vscodeOpenBlocked = await client.callTool({
+    name: 'vscode.open',
+    arguments: { mode: 'folder', path: testRoot }
+  });
+  assert.equal(vscodeOpenBlocked.isError, true);
+  const vscodeOpenBlockedStructured = vscodeOpenBlocked.structuredContent as Record<string, unknown> | undefined;
+  assert.equal(vscodeOpenBlockedStructured?.provider, 'policy');
+  const vscodeOpenBlockedError = vscodeOpenBlockedStructured?.error as Record<string, unknown> | undefined;
+  assert.equal(vscodeOpenBlockedError?.code, 'APPROVAL_REQUIRED');
+  await assert.rejects(fs.access(path.join(authorityRoot, 'vscode-safe')));
 
   const commandInspection = await client.callTool({
     name: 'project.command',
