@@ -66,12 +66,14 @@ Fallback is bounded and semantic: the native sidecar remains alive when UIA init
 - [ ] Docker adapter
 - [ ] PostgreSQL structured client
 - [x] project command registry
-- [ ] build/test artifact validators
+- [x] build/test artifact validators
 - [ ] checkpoint/rollback engine
 
 Git development operations are end-to-end certified through the MCP surface. `git.checkpoint` stores separate index/worktree trees without moving HEAD, requires a fresh SHA-256 repository fingerprint for restore, creates automatic recovery checkpoints, rejects moved HEAD/stale state, and preserves staged/unstaged/untracked distinctions. `git.write` exposes only stage/unstage/commit, requires the same fresh-state precondition, creates a checkpoint before every write, rejects pathspec magic/root escapes, disables repository hooks and commit signing, and verifies commit parent/tree postconditions. Repository-local clean/smudge/process filters are fail-closed before checkpoint operations; an adversarial test proves a configured executable filter never runs.
 
 Trusted project commands are also end-to-end certified through the 16-tool MCP surface. Repository manifests and in-project registry files are observational only and cannot grant execution authority. Runnable commands come exclusively from a bounded Operator registry stored outside all authorized project roots; executable allowlists, cwd/argv/timeout bounds and exact risk binding are enforced. The action risk seen by local policy and the caller's expected risk must both match the trusted registry. CI proves a trusted read command executes shell-free and an external trusted command is blocked by `APPROVAL_REQUIRED` before its marker file can be created.
+
+Build/test artifact validators are integrated into the trusted-command path without expanding the MCP tool surface. The external registry may declare up to 50 bounded project-relative artifacts per command with file/directory/JSON type, minimum size and optional `mustChange` requirements. Operator snapshots artifacts before execution, rejects symlink/escape tricks, hashes ordinary files up to a bounded size, verifies artifact type/size/change after execution, and parses bounded JSON reports. A zero process exit is not considered verified when artifact postconditions fail; CI proves both a successful changed JSON build artifact and a deliberate zero-exit stale-artifact false green through the real MCP/local-agent stack.
 
 ## M4 — relay + multi-device
 
