@@ -10,7 +10,8 @@ use uiautomation::events::{
     UIPropertyChangedEventHandler, UIStructureChangeEventHandler,
 };
 use uiautomation::patterns::{
-    UIExpandCollapsePattern, UIInvokePattern, UIScrollPattern, UISelectionItemPattern, UIValuePattern,
+    UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollPattern,
+    UISelectionItemPattern, UIValuePattern,
 };
 use uiautomation::types::{ScrollAmount, TreeScope, UIProperty};
 use uiautomation::{UIAutomation, UIElement, UITreeWalker};
@@ -27,6 +28,7 @@ pub struct PatternSupport {
     pub selection_item: bool,
     pub expand_collapse: bool,
     pub scroll: bool,
+    pub legacy_iaccessible: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -157,41 +159,10 @@ impl UiaEngine {
         let before = self.summarize(&element, 0);
 
         match params.operation.as_str() {
-            "invoke" => {
-                let pattern: UIInvokePattern = element
-                    .get_pattern()
-                    .map_err(|_| "Matched element does not support InvokePattern".to_string())?;
-                pattern.invoke().map_err(|e| format!("InvokePattern failed: {e}"))?;
-                let after = self.summarize(&element, 0);
-                Ok(json!({
-                    "operation": "invoke",
-                    "waited_ms": waited_ms,
-                    "before": before,
-                    "after": after,
-                    "postcondition": { "element_reachable": true }
-                }))
-            }
+            "invoke" => self.invoke(&element, waited_ms, before),
             "set_value" => {
                 let value = params.value.as_deref().ok_or("set_value requires value")?;
-                let pattern: UIValuePattern = element
-                    .get_pattern()
-                    .map_err(|_| "Matched element does not support ValuePattern".to_string())?;
-                if pattern.is_readonly().map_err(|e| format!("Could not read ValuePattern read-only state: {e}"))? {
-                    return Err("Matched element ValuePattern is read-only".into());
-                }
-                pattern.set_value(value).map_err(|e| format!("ValuePattern SetValue failed: {e}"))?;
-                let actual = pattern.get_value().map_err(|e| format!("Could not verify ValuePattern value: {e}"))?;
-                if actual != value {
-                    return Err(format!("Value postcondition failed: expected {:?}, observed {:?}", value, actual));
-                }
-                let after = self.summarize(&element, 0);
-                Ok(json!({
-                    "operation": "set_value",
-                    "waited_ms": waited_ms,
-                    "before": before,
-                    "after": after,
-                    "postcondition": { "expected_value": value, "actual_value": actual, "verified": true }
-                }))
+                self.set_value(&element, waited_ms, before, value)
             }
             "focus" => {
                 element.set_focus().map_err(|e| format!("SetFocus failed: {e}"))?;
@@ -292,6 +263,91 @@ impl UiaEngine {
             }
             _ => Err("Unsupported UIA operation".into()),
         }
+    }
+
+    fn invoke(&self, element: &UIElement, waited_ms: u64, before: ElementSummary) -> Result<Value, String> {
+        if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+            pattern.invoke().map_err(|e| format!("InvokePattern failed: {e}"))?;
+            let after = self.summarize(element, 0);
+            return Ok(json!({
+                "operation": "invoke",
+                "waited_ms": waited_ms,
+                "fallback": false,
+                "before": before,
+                "after": after,
+                "postcondition": { "element_reachable": true }
+            }));
+        }
+
+        let legacy: UILegacyIAccessiblePattern = element
+            .get_pattern()
+            .map_err(|_| "Matched element supports neither InvokePattern nor LegacyIAccessiblePattern".to_string())?;
+        let default_action = legacy.get_default_action().unwrap_or_default();
+        legacy
+            .do_default_action()
+            .map_err(|e| format!("LegacyIAccessible DoDefaultAction fallback failed: {e}"))?;
+        let after = self.summarize(element, 0);
+        Ok(json!({
+            "operation": "invoke",
+            "waited_ms": waited_ms,
+            "fallback": true,
+            "fallback_provider": "legacy_iaccessible",
+            "default_action": truncate(default_action, 256),
+            "before": before,
+            "after": after,
+            "postcondition": { "element_reachable": true, "default_action_dispatched": true }
+        }))
+    }
+
+    fn set_value(
+        &self,
+        element: &UIElement,
+        waited_ms: u64,
+        before: ElementSummary,
+        value: &str,
+    ) -> Result<Value, String> {
+        if let Ok(pattern) = element.get_pattern::<UIValuePattern>() {
+            if pattern.is_readonly().map_err(|e| format!("Could not read ValuePattern read-only state: {e}"))? {
+                return Err("Matched element ValuePattern is read-only".into());
+            }
+            pattern.set_value(value).map_err(|e| format!("ValuePattern SetValue failed: {e}"))?;
+            let actual = pattern.get_value().map_err(|e| format!("Could not verify ValuePattern value: {e}"))?;
+            if actual != value {
+                return Err(format!("Value postcondition failed: expected {:?}, observed {:?}", value, actual));
+            }
+            let after = self.summarize(element, 0);
+            return Ok(json!({
+                "operation": "set_value",
+                "waited_ms": waited_ms,
+                "fallback": false,
+                "before": before,
+                "after": after,
+                "postcondition": { "expected_value": value, "actual_value": actual, "verified": true }
+            }));
+        }
+
+        let legacy: UILegacyIAccessiblePattern = element
+            .get_pattern()
+            .map_err(|_| "Matched element supports neither ValuePattern nor LegacyIAccessiblePattern".to_string())?;
+        legacy
+            .set_value(value)
+            .map_err(|e| format!("LegacyIAccessible SetValue fallback failed: {e}"))?;
+        let actual = legacy
+            .get_value()
+            .map_err(|e| format!("Could not verify LegacyIAccessible value fallback: {e}"))?;
+        if actual != value {
+            return Err(format!("Legacy value postcondition failed: expected {:?}, observed {:?}", value, actual));
+        }
+        let after = self.summarize(element, 0);
+        Ok(json!({
+            "operation": "set_value",
+            "waited_ms": waited_ms,
+            "fallback": true,
+            "fallback_provider": "legacy_iaccessible",
+            "before": before,
+            "after": after,
+            "postcondition": { "expected_value": value, "actual_value": actual, "verified": true }
+        }))
     }
 
     fn observe_events(&self, root: &UIElement, observe_ms: u64) -> Result<(Vec<UiEvent>, bool), String> {
@@ -465,6 +521,7 @@ impl UiaEngine {
         let selection_pattern = element.get_pattern::<UISelectionItemPattern>().ok();
         let expand_pattern = element.get_pattern::<UIExpandCollapsePattern>().ok();
         let scroll_pattern = element.get_pattern::<UIScrollPattern>().ok();
+        let legacy_iaccessible = element.get_pattern::<UILegacyIAccessiblePattern>().is_ok();
         let value = value_pattern
             .as_ref()
             .and_then(|pattern| pattern.get_value().ok())
@@ -493,6 +550,7 @@ impl UiaEngine {
                 selection_item: selection_pattern.is_some(),
                 expand_collapse: expand_pattern.is_some(),
                 scroll: scroll_pattern.is_some(),
+                legacy_iaccessible,
             },
             value,
             selected,
