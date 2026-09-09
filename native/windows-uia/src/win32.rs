@@ -16,6 +16,7 @@ unsafe extern "system" {
     fn GetWindowThreadProcessId(hwnd: isize, process_id: *mut u32) -> u32;
     fn IsWindowVisible(hwnd: isize) -> i32;
     fn GetForegroundWindow() -> isize;
+    fn SetForegroundWindow(hwnd: isize) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -73,6 +74,49 @@ pub fn discover_windows(max_windows: usize) -> Result<WindowDiscovery, String> {
         truncated: state.truncated,
         max_windows,
     })
+}
+
+pub fn activate_matching_window(
+    process_id: u32,
+    title: &str,
+    class_name: &str,
+) -> Result<(WindowSummary, WindowSummary), String> {
+    if process_id == 0 {
+        return Err("Window activation requires a resolved nonzero process id".into());
+    }
+
+    let discovery = discover_windows(200)?;
+    let mut matches: Vec<WindowSummary> = discovery
+        .windows
+        .into_iter()
+        .filter(|window| {
+            window.process_id == process_id
+                && (title.is_empty() || window.title == title)
+                && (class_name.is_empty() || window.class_name == class_name)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Err("No top-level Win32 window matched the resolved UI Automation element".into());
+    }
+    if matches.len() > 1 {
+        return Err("Resolved UI Automation element maps to multiple Win32 windows; narrow the selector".into());
+    }
+
+    let before = matches.pop().expect("length checked");
+    let hwnd = parse_window_id(&before.window_id)?;
+    let accepted = unsafe { SetForegroundWindow(hwnd) };
+    if accepted == 0 {
+        return Err("Win32 SetForegroundWindow rejected activation".into());
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground != hwnd {
+        return Err("Window activation postcondition failed: requested window is not foreground".into());
+    }
+
+    let mut after = before.clone();
+    after.foreground = true;
+    Ok((before, after))
 }
 
 unsafe extern "system" fn enum_window(hwnd: isize, lparam: isize) -> i32 {
@@ -164,6 +208,16 @@ fn process_basename(process_id: u32) -> Option<String> {
     basename(&full_path).map(|name| truncate(name.to_string(), 260))
 }
 
+fn parse_window_id(value: &str) -> Result<isize, String> {
+    let hex = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .ok_or_else(|| "Internal Win32 window id is not hexadecimal".to_string())?;
+    let raw = usize::from_str_radix(hex, 16)
+        .map_err(|_| "Internal Win32 window id could not be parsed".to_string())?;
+    Ok(raw as isize)
+}
+
 fn basename(path: &str) -> Option<&str> {
     path.rsplit(['\\', '/']).find(|part| !part.is_empty())
 }
@@ -177,12 +231,19 @@ fn truncate(value: String, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::basename;
+    use super::{basename, parse_window_id};
 
     #[test]
     fn process_path_is_reduced_to_basename() {
         assert_eq!(basename(r"C:\Program Files\Example\example.exe"), Some("example.exe"));
         assert_eq!(basename("C:/Apps/tool.exe"), Some("tool.exe"));
         assert_eq!(basename(""), None);
+    }
+
+    #[test]
+    fn internal_window_ids_are_strict_hex() {
+        assert_eq!(parse_window_id("0x2A").unwrap(), 42);
+        assert!(parse_window_id("42").is_err());
+        assert!(parse_window_id("0xnothex").is_err());
     }
 }
