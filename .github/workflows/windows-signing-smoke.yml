@@ -1,0 +1,99 @@
+name: Windows Signing Smoke
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-install-smoke:
+    name: Ephemeral MSIX sign/install smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Create ephemeral CI code-signing certificate
+        id: cert
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force artifacts/signing | Out-Null
+          $passwordText = 'operator-ci-ephemeral-pfx-password-2026'
+          $password = ConvertTo-SecureString -String $passwordText -Force -AsPlainText
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject 'CN=Operator CI Test' `
+            -KeyUsage DigitalSignature `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -KeyExportPolicy Exportable `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}') `
+            -FriendlyName 'Operator CI Ephemeral Signing'
+          Export-PfxCertificate -Cert $cert -FilePath artifacts/signing/operator-ci.pfx -Password $password | Out-Null
+          Export-Certificate -Cert $cert -FilePath artifacts/signing/operator-ci.cer | Out-Null
+          Import-Certificate -FilePath artifacts/signing/operator-ci.cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+          "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "publisher=$($cert.Subject)" >> $env:GITHUB_OUTPUT
+          "pfx_password=$passwordText" >> $env:GITHUB_OUTPUT
+      - name: Build package with matching publisher
+        shell: pwsh
+        run: |
+          ./packaging/windows/build-release.ps1 `
+            -Version 0.1.0.0 `
+            -Publisher '${{ steps.cert.outputs.publisher }}' `
+            -UpdateBaseUri https://updates.example.invalid/operator `
+            -OutputDir artifacts/windows-signing-smoke
+      - name: Sign and verify package
+        shell: pwsh
+        run: |
+          ./packaging/windows/sign-release.ps1 `
+            -MsixPath artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix `
+            -PfxPath artifacts/signing/operator-ci.pfx `
+            -PfxPassword '${{ steps.cert.outputs.pfx_password }}' `
+            -SkipTimestampForTest `
+            -MetadataPath artifacts/windows-signing-smoke/release-metadata.json
+          $meta = Get-Content artifacts/windows-signing-smoke/release-metadata.json -Raw | ConvertFrom-Json
+          if ($meta.signed -ne $true) { throw 'signed release metadata was not updated' }
+          if ($meta.signerSubject -ne '${{ steps.cert.outputs.publisher }}') { throw 'signer subject metadata mismatch' }
+          if ($meta.timestamped -ne $false) { throw 'ephemeral CI signing must be recorded as non-timestamped' }
+      - name: Install signed package and run packaged launcher self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msix = Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix
+          Add-AppxPackage -Path $msix
+          try {
+            $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
+            if (-not $package) { throw 'Operator.Runtime package was not registered' }
+            $launcher = Join-Path $package.InstallLocation 'Operator.exe'
+            if (-not (Test-Path $launcher -PathType Leaf)) { throw 'installed Operator.exe is missing' }
+            $output = & $launcher --self-test
+            if ($LASTEXITCODE -ne 0) { throw "packaged launcher self-test exited $LASTEXITCODE" }
+            if (($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test marker missing' }
+          } finally {
+            Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+          }
+      - name: Remove ephemeral trust material
+        if: always()
+        shell: pwsh
+        run: |
+          $thumb = '${{ steps.cert.outputs.thumbprint }}'
+          if ($thumb) {
+            Remove-Item "Cert:\CurrentUser\My\$thumb" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem 'Cert:\LocalMachine\TrustedPeople' | Where-Object Thumbprint -eq $thumb | Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item artifacts/signing -Recurse -Force -ErrorAction SilentlyContinue
