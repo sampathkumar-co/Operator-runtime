@@ -1,6 +1,6 @@
 # Milestones
 
-## M0 — execution kernel foundation
+## M0 — execution kernel foundation — COMPLETE
 
 Acceptance gates:
 
@@ -20,7 +20,9 @@ Acceptance gates:
 - [x] device identity signing
 - [x] security tests
 - [x] initial MCP v2 adapter source
-- [ ] MCP adapter dependencies installed and end-to-end tested
+- [x] MCP adapter dependencies installed and end-to-end tested
+
+M0 transport certification now runs the official MCP v2 client through the real Operator HTTP MCP server and real authenticated local agent. A native `computer.inspect` request must return structured evidence, while an external-risk `browser.interact` request must be stopped by the local policy layer with `APPROVAL_REQUIRED` before browser execution.
 
 ## M1 — browser kernel + secure ChatGPT dev loop — CURRENT
 
@@ -37,11 +39,13 @@ Acceptance gates:
 - [x] iframe/shadow-DOM strategy
 - [x] browser attach/launch discovery across Chrome + Edge profiles
 - [x] MCP adapter dependencies install + typecheck in GitHub CI
-- [ ] MCP Inspector end-to-end test
+- [x] MCP Inspector end-to-end test
 - [ ] Secure MCP Tunnel test
 - [ ] real ChatGPT read workflow test
 
-Browser semantics now traverse open shadow roots and same-origin iframes in-document, plus bounded cross-origin OOPIF sessions through flattened CDP child sessions. Interactions run a locate-only preflight across all contexts and reject ambiguous multi-context matches before any side effect. Browser lifecycle recovery checks configured and previously launched endpoints, discovers verified dynamic `DevToolsActivePort` endpoints from bounded Chrome/Edge data roots without reading profile databases, then launches an isolated Operator profile only when necessary.
+Browser semantics traverse open shadow roots and same-origin iframes in-document, plus bounded cross-origin OOPIF sessions through flattened CDP child sessions. Interactions run a locate-only preflight across all contexts and reject ambiguous multi-context matches before any side effect. Browser lifecycle recovery checks configured and previously launched endpoints, discovers verified dynamic `DevToolsActivePort` endpoints from bounded Chrome/Edge data roots without reading profile databases, then launches an isolated Operator profile only when necessary.
+
+MCP certification is stronger than source/type checks: GitHub CI pins a compatible Node 22 release, installs MCP Inspector 2.5.0, boots the real local agent and real MCP HTTP server, runs the official MCP client through initialize/listTools/callTool, and independently runs Inspector CLI `tools/list` against the same endpoint.
 
 ## M2 — Windows semantic kernel — COMPLETE
 
@@ -55,15 +59,15 @@ Browser semantics now traverse open shadow roots and same-origin iframes in-docu
 
 Fallback is bounded and semantic: the native sidecar remains alive when UIA initialization fails, exact Win32 PID/title/class discovery and activation remain available where explicitly requested, and matched controls that lack modern Invoke/Value patterns can fall back to LegacyIAccessible default-action/value APIs. UIA-only selector fields are never approximated, arbitrary HWND input is not exposed, and unsupported operations still fail closed. This path is covered by Windows compile/tests and Clippy in CI.
 
-## M3 — development adapter suite
+## M3 — development adapter suite — STARTED
 
-- Git write/checkpoint/restore
-- VS Code adapter
-- Docker adapter
-- PostgreSQL structured client
-- project command registry
-- build/test artifact validators
-- checkpoint/rollback engine
+- [ ] Git write/checkpoint/restore
+- [ ] VS Code adapter
+- [ ] Docker adapter
+- [ ] PostgreSQL structured client
+- [ ] project command registry
+- [ ] build/test artifact validators
+- [ ] checkpoint/rollback engine
 
 ## M4 — relay + multi-device
 
