@@ -174,88 +174,218 @@ export function failure(action: ActionRequest, provider: string, started: number
 
 function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-function semanticSnapshotFunction() {
+export function semanticSnapshotFunction() {
   const trim = (value: unknown, max = 180) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const deepQuery = (selector: string, max = 1000) => {
+    const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
+    const seenScopes = new Set<unknown>();
+    let scanned = 0;
+    const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      seenScopes.add(scope);
+      let elements: Element[] = [];
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      for (const element of elements) {
+        if (found.length >= max || scanned++ >= 5000) break;
+        try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector */ }
+        const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+        if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
+        if (element.tagName === 'IFRAME' && frameDepth < 4) {
+          try {
+            const frameDocument = (element as HTMLIFrameElement).contentDocument;
+            if (frameDocument?.documentElement) visit(frameDocument, frameDepth + 1, shadowDepth);
+          } catch { /* cross-origin frame: remain isolated */ }
+        }
+      }
+    };
+    visit(document, 0, 0);
+    return found;
+  };
+  const viewOf = (element: Element) => element.ownerDocument?.defaultView;
   const visible = (element: Element) => {
-    const style = getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+    const view = viewOf(element);
+    const style = view?.getComputedStyle?.(element);
+    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
+    if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
+    return !rect || (rect.width > 0 && rect.height > 0);
   };
   const accessibleName = (element: Element) => {
     const aria = element.getAttribute('aria-label');
     if (aria) return trim(aria);
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-      if (element.labels?.length) return trim(Array.from(element.labels).map((label) => label.textContent).join(' '));
-      return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id);
+    const labelledBy = element.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const root = element.getRootNode() as Document | ShadowRoot;
+      const labels = labelledBy.split(/\s+/).map((id) => (root as Document).getElementById?.(id)?.textContent ?? '').filter(Boolean);
+      if (labels.length) return trim(labels.join(' '));
     }
-    return trim(element.getAttribute('title') || element.textContent);
+    const control = element as Element & { labels?: ArrayLike<Element> | null; placeholder?: string; name?: string; id?: string };
+    if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
+    return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id || element.getAttribute('title') || element.textContent);
   };
-  const controls = Array.from(document.querySelectorAll('button,a[href],input,textarea,select,[role="button"],[role="link"],[role="textbox"],[role="combobox"],[role="checkbox"],[role="radio"],[role="tab"]'))
-    .filter(visible)
-    .slice(0, 120)
-    .map((element) => ({
+  const roleOf = (element: Element) => {
+    const explicit = trim(element.getAttribute('role')).toLowerCase();
+    if (explicit) return explicit;
+    const tag = element.tagName;
+    if (tag === 'A' && element.hasAttribute('href')) return 'link';
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'OPTION') return 'option';
+    if (tag === 'INPUT') {
+      const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return '';
+  };
+  const controls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[contenteditable="true"]', 160)
+    .filter(({ element }) => visible(element))
+    .map(({ element, context }) => ({
       tag: element.tagName.toLowerCase(),
-      role: trim(element.getAttribute('role') || ''),
+      role: roleOf(element),
       name: accessibleName(element),
-      type: element instanceof HTMLInputElement ? trim(element.type) : '',
-      href: element instanceof HTMLAnchorElement ? trim(element.href, 500) : ''
+      type: element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text') : '',
+      href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
+      context
     }))
-    .filter((item) => item.name || item.href);
-  const headings = Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]')).filter(visible).slice(0, 60).map((el) => trim(el.textContent)).filter(Boolean);
-  const forms = Array.from(document.forms).slice(0, 30).map((form) => ({
-    name: trim(form.getAttribute('aria-label') || form.getAttribute('name') || form.id),
-    action: trim(form.action, 500),
-    fields: Array.from(form.elements).slice(0, 60).map((field) => field instanceof Element ? accessibleName(field) : '').filter(Boolean)
-  }));
+    .filter((item) => item.name || item.href)
+    .slice(0, 120);
+  const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => trim(element.textContent)).filter(Boolean).slice(0, 60);
+  const forms = deepQuery('form', 30).map(({ element: form, context }) => {
+    const anyForm = form as HTMLFormElement;
+    return {
+      name: trim(form.getAttribute('aria-label') || form.getAttribute('name') || form.id),
+      action: trim(anyForm.action, 500),
+      fields: Array.from(anyForm.elements ?? []).slice(0, 60).map((field) => field instanceof Element ? accessibleName(field) : '').filter(Boolean),
+      context
+    };
+  });
   return { headings, controls, forms, textExcerpt: trim(document.body?.innerText, 1600) };
 }
 
 export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string }; value: unknown }) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const deepQuery = (selector: string, max = 1000) => {
+    const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
+    const seenScopes = new Set<unknown>();
+    let scanned = 0;
+    const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      seenScopes.add(scope);
+      let elements: Element[] = [];
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      for (const element of elements) {
+        if (found.length >= max || scanned++ >= 5000) break;
+        try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector */ }
+        const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+        if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
+        if (element.tagName === 'IFRAME' && frameDepth < 4) {
+          try {
+            const frameDocument = (element as HTMLIFrameElement).contentDocument;
+            if (frameDocument?.documentElement) visit(frameDocument, frameDepth + 1, shadowDepth);
+          } catch { /* cross-origin frame: remain isolated */ }
+        }
+      }
+    };
+    visit(document, 0, 0);
+    return found;
+  };
   const nameOf = (element: Element) => {
     const aria = element.getAttribute('aria-label');
     if (aria) return trim(aria);
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-      if (element.labels?.length) return trim(Array.from(element.labels).map((label) => label.textContent).join(' '));
-      return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id);
+    const labelledBy = element.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const root = element.getRootNode() as Document | ShadowRoot;
+      const labels = labelledBy.split(/\s+/).map((id) => (root as Document).getElementById?.(id)?.textContent ?? '').filter(Boolean);
+      if (labels.length) return trim(labels.join(' '));
     }
-    return trim(element.getAttribute('title') || element.textContent);
+    const control = element as Element & { labels?: ArrayLike<Element> | null };
+    if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
+    return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id || element.getAttribute('title') || element.textContent);
   };
-  const roleOf = (element: Element) => trim(element.getAttribute('role') || ({ A: 'link', BUTTON: 'button', INPUT: 'textbox', TEXTAREA: 'textbox', SELECT: 'combobox' } as Record<string, string>)[element.tagName] || '').toLowerCase();
-  const candidates = input.target.css
-    ? Array.from(document.querySelectorAll(input.target.css)).slice(0, 100)
-    : Array.from(document.querySelectorAll('button,a[href],input,textarea,select,[role],[contenteditable="true"]')).slice(0, 1000);
-  const element = candidates.find((candidate) => {
-    if (input.target.text && !trim(candidate.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
-    if (input.target.role && roleOf(candidate) !== input.target.role.toLowerCase()) return false;
-    if (input.target.name && nameOf(candidate).toLowerCase() !== input.target.name.toLowerCase()) return false;
+  const roleOf = (element: Element) => {
+    const explicit = trim(element.getAttribute('role')).toLowerCase();
+    if (explicit) return explicit;
+    const tag = element.tagName;
+    if (tag === 'A' && element.hasAttribute('href')) return 'link';
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'OPTION') return 'option';
+    if (tag === 'INPUT') {
+      const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return '';
+  };
+  const visible = (element: Element) => {
+    const view = element.ownerDocument?.defaultView;
+    const style = view?.getComputedStyle?.(element);
+    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
+    if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
+    return !rect || (rect.width > 0 && rect.height > 0);
+  };
+  const selector = input.target.css || 'button,a[href],input,textarea,select,option,summary,[role],[contenteditable="true"]';
+  const candidates = deepQuery(selector, 1000);
+  const match = candidates.find(({ element }) => {
+    if (!visible(element)) return false;
+    if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
+    if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
+    if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
     return true;
   });
-  if (!element) return { ok: false, error: 'No matching semantic element was found.' };
-  const before = { name: nameOf(element), role: roleOf(element), value: 'value' in element ? String((element as HTMLInputElement).value ?? '') : '' };
+  if (!match) return { ok: false, error: 'No matching semantic element was found.' };
+  const { element, context } = match;
+  const control = element as Element & {
+    value?: string;
+    disabled?: boolean;
+    isContentEditable?: boolean;
+    focus?: () => void;
+    click?: () => void;
+    dispatchEvent?: (event: Event) => boolean;
+  };
+  if (control.disabled === true || element.getAttribute('aria-disabled') === 'true') return { ok: false, error: 'Matched element is disabled.' };
+  const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };
+  const view = element.ownerDocument?.defaultView ?? window;
 
   if (input.operation === 'click') {
-    if (!(element instanceof HTMLElement)) return { ok: false, error: 'Matched element is not clickable.' };
-    element.focus();
-    element.click();
+    control.focus?.();
+    if (typeof control.click !== 'function') return { ok: false, error: 'Matched element is not clickable.' };
+    control.click();
   } else if (input.operation === 'type') {
-    if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLElement && element.isContentEditable)) {
-      return { ok: false, error: 'Matched element is not text-editable.' };
-    }
     const value = String(input.value ?? '');
-    element.focus();
-    if (element instanceof HTMLInputElement) Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(element, value);
-    else if (element instanceof HTMLTextAreaElement) Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(element, value);
-    else element.textContent = value;
-    element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
+    const tag = element.tagName;
+    if (!(tag === 'INPUT' || tag === 'TEXTAREA' || control.isContentEditable === true)) return { ok: false, error: 'Matched element is not text-editable.' };
+    control.focus?.();
+    if (tag === 'INPUT' || tag === 'TEXTAREA') {
+      const ctor = tag === 'INPUT' ? view.HTMLInputElement : view.HTMLTextAreaElement;
+      const descriptor = ctor ? Object.getOwnPropertyDescriptor(ctor.prototype, 'value') : undefined;
+      if (descriptor?.set) descriptor.set.call(element, value);
+      else control.value = value;
+    } else {
+      element.textContent = value;
+    }
+    const InputEventCtor = view.InputEvent ?? view.Event;
+    control.dispatchEvent?.(new InputEventCtor('input', { bubbles: true, ...(view.InputEvent ? { inputType: 'insertText', data: value } : {}) } as InputEventInit));
+    control.dispatchEvent?.(new view.Event('change', { bubbles: true }));
+    const actual = tag === 'INPUT' || tag === 'TEXTAREA' ? String(control.value ?? '') : trim(element.textContent);
+    if (actual !== value) return { ok: false, error: 'Text input postcondition failed.', expected: value, actual };
   } else if (input.operation === 'select') {
-    if (!(element instanceof HTMLSelectElement)) return { ok: false, error: 'Matched element is not a select control.' };
-    element.value = String(input.value ?? '');
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
+    if (element.tagName !== 'SELECT') return { ok: false, error: 'Matched element is not a select control.' };
+    const value = String(input.value ?? '');
+    control.value = value;
+    control.dispatchEvent?.(new view.Event('input', { bubbles: true }));
+    control.dispatchEvent?.(new view.Event('change', { bubbles: true }));
+    if (String(control.value ?? '') !== value) return { ok: false, error: 'Select postcondition failed.', expected: value, actual: String(control.value ?? '') };
   }
 
-  const after = { name: nameOf(element), role: roleOf(element), value: 'value' in element ? String((element as HTMLInputElement).value ?? '') : '' };
-  return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before }, after };
+  const after = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };
+  return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after };
 }
