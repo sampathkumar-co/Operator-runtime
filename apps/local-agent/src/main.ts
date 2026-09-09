@@ -33,7 +33,7 @@ const agent = createLocalAgentServer({
   runtime,
   token,
   permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
     allowedRoots,
     allowExternalWrites: false,
     allowSystemChanges: false,
