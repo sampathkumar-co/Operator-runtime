@@ -111,6 +111,11 @@ export class ProjectCommandProvider implements CapabilityProvider {
           details: { expectedRisk, registeredRisk: command.risk }
         });
       }
+      if (action.risk !== command.risk) {
+        throw new OperatorError('PROJECT_COMMAND_ACTION_RISK_MISMATCH', 'The action risk evaluated by local policy must exactly match the trusted registry risk.', {
+          details: { actionRisk: action.risk, registeredRisk: command.risk }
+        });
+      }
 
       const cwd = await resolveCommandCwd(projectRoot, command.cwd);
       const process = new ProcessProvider({
