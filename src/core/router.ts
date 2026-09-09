@@ -49,4 +49,9 @@ export class CapabilityRouter {
     }
     return ranked[0].provider;
   }
+
+  async closeAll(): Promise<void> {
+    const providers = [...this.#providers].reverse();
+    await Promise.allSettled(providers.map(async (provider) => provider.close?.()));
+  }
 }
