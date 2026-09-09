@@ -106,14 +106,18 @@ The relay authority maintains a durable monotonic per-device delivery queue with
 
 ## M5 — companion UI and publication hardening — IN PROGRESS
 
-- [ ] Devices / Tasks / Permissions / Activity / Settings companion surfaces
+- [x] Devices / Tasks / Permissions / Activity / Settings companion surfaces
 - [x] emergency disconnect
 - [ ] installer + auto-update
 - [ ] code signing
-- [ ] privacy/data controls
+- [x] privacy/data controls
 - [ ] submission assets
 - [ ] red-team suite
 - [ ] performance benchmark suite
 - [ ] final platform-matrix revalidation
 
 The emergency execution stop is enforced centrally by the local-agent HTTP boundary before `runtime.execute`, persists atomically outside project roots by default, survives process restarts, reports only a boolean through public health, and blocks all capabilities with HTTP 423 while engaged. Engaging uses the normal authenticated local-agent channel, but API recovery can require a separate recovery token; the ordinary agent token cannot clear the stop. CI proves engage → blocked execution → restart → still blocked → wrong recovery denied → separate recovery token clear → execution resumes.
+
+The companion backend exposes authenticated, bounded, read-only Devices, Tasks, Permissions, Activity and Settings surfaces from the authoritative local state stores. Devices never returns private key material or PEM blobs; Tasks returns bounded Task Capsule summaries; Settings exposes only non-secret configuration flags/counts. Activity is backed by the redacting audit log and records execution outcome metadata only—never action input payloads. CI injects a secret into action input and proves that value is absent from both the Activity API response and persisted audit storage.
+
+Privacy controls inventory only known Operator-owned state categories. Generic deletion is limited to Activity, Task history and transient session state, requires both normal local-agent authentication and the separate recovery credential, and refuses symlinked state trees before deletion. Device identity and pairing state are intentionally non-deletable through this generic API and require a dedicated reset flow. CI proves the ordinary agent token cannot erase history, category-specific deletion leaves device identity intact, and a symlinked task directory cannot cause deletion outside the protected Operator state directory.
