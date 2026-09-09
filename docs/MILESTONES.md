@@ -41,15 +41,17 @@ Acceptance gates:
 - [ ] Secure MCP Tunnel test
 - [ ] real ChatGPT read workflow test
 
-## M2 — Windows semantic kernel
+## M2 — Windows semantic kernel — IN PROGRESS
 
-- Win32 window/process discovery
-- UI Automation tree inspection
-- Invoke/Value/Selection/ExpandCollapse/Scroll patterns
-- focus/window activation
-- event subscriptions
-- semantic wait-for-control
-- fallback routing when UIA coverage fails
+- [x] Win32 window/process discovery
+- [x] UI Automation tree inspection
+- [x] Invoke/Value/Selection/ExpandCollapse/Scroll patterns
+- [x] focus/window activation
+- [x] event subscriptions
+- [x] semantic wait-for-control
+- [ ] fallback routing when UIA coverage fails
+
+The core runtime already supports ranked multi-provider retries, but M2 remains open until Windows has an actual bounded fallback path rather than only the UIA provider.
 
 ## M3 — development adapter suite
 
