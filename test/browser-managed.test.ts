@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
   ManagedBrowserProvider,
+  ManagedChromiumLauncher,
   buildManagedBrowserArgs,
+  candidateBrowserDataDirs,
   candidateBrowserPaths,
+  discoverDevToolsEndpoint,
   parseDevToolsActivePort,
   type BrowserEndpointLauncher
 } from '../src/capabilities/browser-managed.ts';
@@ -17,6 +22,13 @@ async function listen(t: any, handler: Parameters<typeof http.createServer>[0]):
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('bad address');
   return `http://127.0.0.1:${address.port}`;
+}
+
+function chromiumVersionResponse(req: http.IncomingMessage) {
+  return {
+    Browser: 'Chrome/Test',
+    webSocketDebuggerUrl: `ws://${req.headers.host}/devtools/browser/test-browser`
+  };
 }
 
 test('managed browser launch args always use an isolated non-default data directory', () => {
@@ -50,6 +62,61 @@ test('Windows browser discovery includes Chrome, Chrome for Testing, and Edge wi
   assert.equal(paths.some((item) => /User Data|Default/i.test(item)), false);
 });
 
+test('browser data-root discovery covers Chrome and Edge channels but never enumerates individual profiles', () => {
+  const dirs = candidateBrowserDataDirs('win32', {
+    LOCALAPPDATA: 'C:\\Users\\Test\\AppData\\Local'
+  }, 'C:\\Users\\Test');
+  assert.equal(dirs.some((item) => /Google\\Chrome\\User Data$/i.test(item)), true);
+  assert.equal(dirs.some((item) => /Microsoft\\Edge\\User Data$/i.test(item)), true);
+  assert.equal(dirs.some((item) => /Chrome Beta\\User Data$/i.test(item)), true);
+  assert.equal(dirs.some((item) => /Edge Dev\\User Data$/i.test(item)), true);
+  assert.equal(dirs.some((item) => /\\Default$|\\Profile \d+$/i.test(item)), false);
+});
+
+test('dynamic DevToolsActivePort discovery attaches only to a verified loopback Chromium endpoint', async (t) => {
+  const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-cdp-discovery-'));
+  t.after(() => fs.rm(profileDir, { recursive: true, force: true }));
+  const endpoint = await listen(t, (req, res) => {
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(chromiumVersionResponse(req)));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const port = Number(new URL(endpoint).port);
+  await fs.writeFile(path.join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/test-browser\n`);
+
+  assert.deepEqual(await discoverDevToolsEndpoint([profileDir]), {
+    endpoint,
+    dataDir: path.resolve(profileDir)
+  });
+
+  const launcher = new ManagedChromiumLauncher({
+    endpoint: 'http://127.0.0.1:1',
+    autoLaunch: false,
+    discoveryDataDirs: [profileDir]
+  });
+  t.after(() => launcher.close());
+  assert.equal(await launcher.ensureEndpoint(), endpoint);
+});
+
+test('dynamic endpoint discovery ignores a local service that merely returns HTTP 200', async (t) => {
+  const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-cdp-fake-'));
+  t.after(() => fs.rm(profileDir, { recursive: true, force: true }));
+  const endpoint = await listen(t, (req, res) => {
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ Browser: 'Not Chromium' }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const port = Number(new URL(endpoint).port);
+  await fs.writeFile(path.join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/fake\n`);
+  assert.equal(await discoverDevToolsEndpoint([profileDir]), undefined);
+});
+
 test('managed browser provider recovers a dead CDP endpoint through the launcher and retries once', async (t) => {
   const deadEndpoint = await listen(t, (req, res) => {
     if (req.url === '/json/list' || req.url === '/json/version') {
@@ -62,7 +129,7 @@ test('managed browser provider recovers a dead CDP endpoint through the launcher
   const healthyEndpoint = await listen(t, (req, res) => {
     if (req.url === '/json/version') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ Browser: 'Chrome/Test' }));
+      res.end(JSON.stringify(chromiumVersionResponse(req)));
       return;
     }
     if (req.url === '/json/list') {
