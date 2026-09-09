@@ -44,6 +44,35 @@ function createServer(): McpServer {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ path }) => invoke('project.inspect', 'read', { path }, path));
 
+  server.registerTool('project.command', {
+    title: 'Inspect or run trusted project command',
+    description: 'Inspect commands from the local Operator trusted-command registry, or run one through shell-free process execution. Repository manifests are observational only and cannot grant command authority. Run requires the caller to acknowledge the registry risk; that same risk is evaluated by the local policy engine before execution.',
+    inputSchema: z.object({
+      operation: z.enum(['inspect', 'run']),
+      path: z.string().min(1),
+      commandId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/).optional(),
+      expectedRisk: z.enum(['read', 'write', 'external']).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, path, commandId, expectedRisk }) => {
+    if (operation === 'inspect') return invoke('project.command.inspect', 'read', { path }, path);
+    if (!commandId || !expectedRisk) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'project.command.run requires commandId and expectedRisk from a fresh project.command inspect.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'project.command.run',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'PROJECT_COMMAND_INPUT_REQUIRED', message: 'commandId and expectedRisk are required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke('project.command.run', expectedRisk, { path, commandId, expectedRisk }, path);
+  });
+
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
