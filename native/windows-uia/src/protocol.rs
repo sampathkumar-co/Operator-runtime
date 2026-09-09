@@ -6,6 +6,7 @@ pub const DEFAULT_MAX_NODES: usize = 250;
 pub const HARD_MAX_NODES: usize = 1500;
 pub const DEFAULT_MAX_DEPTH: usize = 6;
 pub const HARD_MAX_DEPTH: usize = 12;
+pub const HARD_MAX_OBSERVE_MS: u64 = 5_000;
 
 const SCROLL_AMOUNTS: &[&str] = &[
     "large_decrement",
@@ -72,6 +73,8 @@ pub struct InspectParams {
     pub max_nodes: Option<usize>,
     #[serde(default)]
     pub max_depth: Option<usize>,
+    #[serde(default)]
+    pub observe_ms: Option<u64>,
 }
 
 impl InspectParams {
@@ -80,6 +83,10 @@ impl InspectParams {
             self.max_nodes.unwrap_or(DEFAULT_MAX_NODES).clamp(1, HARD_MAX_NODES),
             self.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).clamp(1, HARD_MAX_DEPTH),
         )
+    }
+
+    pub fn observe_ms(&self) -> u64 {
+        self.observe_ms.unwrap_or(0).min(HARD_MAX_OBSERVE_MS)
     }
 }
 
@@ -193,8 +200,14 @@ mod tests {
 
     #[test]
     fn inspect_limits_are_clamped() {
-        let params = InspectParams { selector: None, max_nodes: Some(50_000), max_depth: Some(99) };
+        let params = InspectParams {
+            selector: None,
+            max_nodes: Some(50_000),
+            max_depth: Some(99),
+            observe_ms: Some(50_000),
+        };
         assert_eq!(params.limits(), (HARD_MAX_NODES, HARD_MAX_DEPTH));
+        assert_eq!(params.observe_ms(), HARD_MAX_OBSERVE_MS);
     }
 
     #[test]
