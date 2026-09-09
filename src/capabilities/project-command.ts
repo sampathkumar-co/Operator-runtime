@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,7 +20,17 @@ const SCORE: CapabilityScore = {
 
 const MAX_REGISTRY_BYTES = 512 * 1024;
 const MAX_COMMANDS_PER_PROJECT = 100;
+const MAX_ARTIFACTS_PER_COMMAND = 50;
+const MAX_JSON_ARTIFACT_BYTES = 4 * 1024 * 1024;
+const MAX_HASH_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+
+type TrustedArtifact = {
+  path: string;
+  kind: 'file' | 'directory' | 'json';
+  minBytes: number;
+  mustChange: boolean;
+};
 
 type TrustedCommand = {
   id: string;
@@ -30,6 +41,7 @@ type TrustedCommand = {
   cwd: string;
   timeoutMs: number;
   risk: 'read' | 'write' | 'external';
+  artifacts: TrustedArtifact[];
 };
 
 type TrustedProject = {
@@ -40,6 +52,23 @@ type TrustedProject = {
 type Registry = {
   version: 1;
   projects: TrustedProject[];
+};
+
+type ArtifactSnapshot = {
+  path: string;
+  exists: boolean;
+  type?: 'file' | 'directory' | 'symlink' | 'other';
+  size?: number;
+  fingerprint?: string;
+};
+
+type ArtifactValidation = {
+  path: string;
+  kind: TrustedArtifact['kind'];
+  passed: boolean;
+  checks: Array<{ check: string; passed: boolean; detail: string }>;
+  before: ArtifactSnapshot;
+  after: ArtifactSnapshot;
 };
 
 export class ProjectCommandProvider implements CapabilityProvider {
@@ -78,7 +107,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
             projectRoot,
             registryConfigured: registry !== null,
             registryPath: this.#registryPath,
-            commands: project?.commands.map(({ id, title, kind, executable, args, cwd, timeoutMs, risk }) => ({
+            commands: project?.commands.map(({ id, title, kind, executable, args, cwd, timeoutMs, risk, artifacts }) => ({
               id,
               title,
               kind,
@@ -86,7 +115,8 @@ export class ProjectCommandProvider implements CapabilityProvider {
               args,
               cwd,
               timeoutMs,
-              risk
+              risk,
+              artifacts
             })) ?? []
           },
           evidence: [
@@ -118,6 +148,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
       }
 
       const cwd = await resolveCommandCwd(projectRoot, command.cwd);
+      const beforeArtifacts = await snapshotArtifacts(projectRoot, command.artifacts);
       const process = new ProcessProvider({
         allowedRoots: [projectRoot],
         allowedExecutables: [...this.#allowedExecutables]
@@ -135,22 +166,71 @@ export class ProjectCommandProvider implements CapabilityProvider {
         provenance: { kind: 'trusted_policy', source: `project-command:${command.id}` }
       });
 
+      const baseOutput = {
+        command: {
+          id: command.id,
+          title: command.title,
+          kind: command.kind,
+          executable: command.executable,
+          args: command.args,
+          cwd: command.cwd,
+          risk: command.risk,
+          artifacts: command.artifacts
+        },
+        execution: result.output
+      };
+
+      if (!result.ok) {
+        return {
+          ...result,
+          capability: action.capability,
+          provider: this.name,
+          output: {
+            ...baseOutput,
+            validation: {
+              configured: command.artifacts.length > 0,
+              passed: false,
+              skipped: true,
+              reason: 'command_failed',
+              artifacts: []
+            }
+          },
+          evidence: [
+            evidence('command_registry', 'pass', 'Executed an explicitly registered trusted project command through the shell-free process provider.', {
+              commandId: command.id,
+              executable: command.executable,
+              risk: command.risk,
+              cwd
+            }),
+            ...result.evidence
+          ]
+        };
+      }
+
+      const validations = await validateArtifacts(projectRoot, command.artifacts, beforeArtifacts);
+      const validationPassed = validations.every((item) => item.passed);
+      const validation = {
+        configured: command.artifacts.length > 0,
+        passed: validationPassed,
+        skipped: false,
+        artifacts: validations
+      };
+      const validationEvidence = command.artifacts.length === 0
+        ? evidence('artifact_validation', 'info', 'Trusted command has no declared artifact validators.', { commandId: command.id })
+        : evidence('artifact_validation', validationPassed ? 'pass' : 'fail', validationPassed
+          ? 'All trusted artifact postconditions passed.'
+          : 'One or more trusted artifact postconditions failed.', {
+          commandId: command.id,
+          artifactCount: validations.length,
+          failed: validations.filter((item) => !item.passed).map((item) => item.path)
+        });
+
       return {
         ...result,
+        ok: validationPassed,
         capability: action.capability,
         provider: this.name,
-        output: {
-          command: {
-            id: command.id,
-            title: command.title,
-            kind: command.kind,
-            executable: command.executable,
-            args: command.args,
-            cwd: command.cwd,
-            risk: command.risk
-          },
-          execution: result.output
-        },
+        output: { ...baseOutput, validation },
         evidence: [
           evidence('command_registry', 'pass', 'Executed an explicitly registered trusted project command through the shell-free process provider.', {
             commandId: command.id,
@@ -158,8 +238,14 @@ export class ProjectCommandProvider implements CapabilityProvider {
             risk: command.risk,
             cwd
           }),
-          ...result.evidence
-        ]
+          ...result.evidence,
+          validationEvidence
+        ],
+        error: validationPassed ? undefined : {
+          code: 'ARTIFACT_VALIDATION_FAILED',
+          message: 'Command exited successfully but trusted artifact validation failed.',
+          retryable: false
+        }
       };
     } catch (error) {
       const op = error instanceof OperatorError
@@ -251,11 +337,41 @@ function validateRegistry(input: unknown, allowedExecutables: Set<string>): Regi
         ? command.kind as TrustedCommand['kind']
         : undefined;
       const title = typeof command.title === 'string' ? command.title.trim().slice(0, 160) || undefined : undefined;
-      return { id, title, kind, executable, args, cwd, timeoutMs, risk: risk as TrustedCommand['risk'] };
+      const rawArtifacts = command.artifacts === undefined ? [] : command.artifacts;
+      if (!Array.isArray(rawArtifacts) || rawArtifacts.length > MAX_ARTIFACTS_PER_COMMAND) {
+        throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${id} artifacts must be an array of at most ${MAX_ARTIFACTS_PER_COMMAND}.`);
+      }
+      const artifacts = rawArtifacts.map((rawArtifact, artifactIndex): TrustedArtifact => validateArtifact(rawArtifact, id, artifactIndex));
+      return { id, title, kind, executable, args, cwd, timeoutMs, risk: risk as TrustedCommand['risk'], artifacts };
     });
     return { root: path.resolve(root), commands };
   });
   return { version: 1, projects };
+}
+
+function validateArtifact(input: unknown, commandId: string, index: number): TrustedArtifact {
+  if (!input || typeof input !== 'object') throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${commandId} artifact ${index} is invalid.`);
+  const raw = input as Record<string, unknown>;
+  const artifactPath = String(raw.path ?? '').trim();
+  if (!artifactPath || artifactPath.length > 1000 || artifactPath.includes('\0') || artifactPath.includes('\r') || artifactPath.includes('\n') || path.isAbsolute(artifactPath)) {
+    throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${commandId} artifact ${index} path must be a bounded relative path.`);
+  }
+  const normalized = path.normalize(artifactPath);
+  if (normalized === '..' || normalized.startsWith(`..${path.sep}`) || path.isAbsolute(normalized)) {
+    throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${commandId} artifact ${index} escapes the project root.`);
+  }
+  const kind = String(raw.kind ?? 'file');
+  if (!['file', 'directory', 'json'].includes(kind)) throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${commandId} artifact ${index} kind is invalid.`);
+  const minBytesValue = Number(raw.minBytes ?? (kind === 'directory' ? 0 : 1));
+  if (!Number.isSafeInteger(minBytesValue) || minBytesValue < 0 || minBytesValue > 1024 * 1024 * 1024) {
+    throw new OperatorError('COMMAND_REGISTRY_INVALID', `Command ${commandId} artifact ${index} minBytes is invalid.`);
+  }
+  return {
+    path: artifactPath,
+    kind: kind as TrustedArtifact['kind'],
+    minBytes: minBytesValue,
+    mustChange: raw.mustChange === true
+  };
 }
 
 function validateCommandId(value: string): string {
@@ -269,6 +385,99 @@ async function resolveCommandCwd(projectRoot: string, relativeCwd: string): Prom
   const stat = await fs.stat(absolute);
   if (!stat.isDirectory()) throw new OperatorError('COMMAND_CWD_INVALID', 'Registered command cwd is not an existing directory.');
   return absolute;
+}
+
+async function snapshotArtifacts(projectRoot: string, artifacts: TrustedArtifact[]): Promise<Map<string, ArtifactSnapshot>> {
+  const output = new Map<string, ArtifactSnapshot>();
+  for (const artifact of artifacts) output.set(artifact.path, await snapshotArtifact(projectRoot, artifact.path));
+  return output;
+}
+
+async function snapshotArtifact(projectRoot: string, relativePath: string): Promise<ArtifactSnapshot> {
+  const absolute = path.resolve(projectRoot, relativePath);
+  if (!isWithin(absolute, projectRoot)) throw new OperatorError('ARTIFACT_PATH_OUTSIDE_PROJECT', `Artifact ${relativePath} escapes the project root.`);
+  try {
+    const stat = await fs.lstat(absolute);
+    if (stat.isSymbolicLink()) return { path: relativePath, exists: true, type: 'symlink', size: stat.size };
+    if (stat.isDirectory()) {
+      const entries = (await fs.readdir(absolute)).sort();
+      const fingerprint = crypto.createHash('sha256').update(entries.join('\0')).digest('hex');
+      return { path: relativePath, exists: true, type: 'directory', size: entries.length, fingerprint };
+    }
+    if (stat.isFile()) {
+      const fingerprint = stat.size <= MAX_HASH_ARTIFACT_BYTES
+        ? crypto.createHash('sha256').update(await fs.readFile(absolute)).digest('hex')
+        : crypto.createHash('sha256').update(`${stat.size}\0${stat.mtimeMs}`).digest('hex');
+      return { path: relativePath, exists: true, type: 'file', size: stat.size, fingerprint };
+    }
+    return { path: relativePath, exists: true, type: 'other', size: stat.size };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path: relativePath, exists: false };
+    throw error;
+  }
+}
+
+async function validateArtifacts(
+  projectRoot: string,
+  artifacts: TrustedArtifact[],
+  before: Map<string, ArtifactSnapshot>
+): Promise<ArtifactValidation[]> {
+  const validations: ArtifactValidation[] = [];
+  for (const artifact of artifacts) {
+    const beforeSnapshot = before.get(artifact.path) ?? { path: artifact.path, exists: false };
+    const after = await snapshotArtifact(projectRoot, artifact.path);
+    const checks: ArtifactValidation['checks'] = [];
+    checks.push({ check: 'exists', passed: after.exists, detail: after.exists ? 'Artifact exists.' : 'Artifact is missing.' });
+
+    const expectedType = artifact.kind === 'directory' ? 'directory' : 'file';
+    const typePassed = after.exists && after.type === expectedType;
+    checks.push({ check: 'type', passed: typePassed, detail: typePassed
+      ? `Artifact type is ${expectedType}.`
+      : `Expected ${expectedType}; observed ${after.type ?? 'missing'}.` });
+
+    if (expectedType === 'file') {
+      const size = after.size ?? 0;
+      checks.push({ check: 'minBytes', passed: typePassed && size >= artifact.minBytes, detail: `Observed ${size} bytes; required at least ${artifact.minBytes}.` });
+    }
+
+    if (after.type === 'symlink') {
+      checks.push({ check: 'symlink', passed: false, detail: 'Artifact symlinks are not accepted for trusted validation.' });
+    }
+
+    if (artifact.mustChange) {
+      const changed = after.exists && (!beforeSnapshot.exists || after.type !== beforeSnapshot.type || after.fingerprint !== beforeSnapshot.fingerprint || after.size !== beforeSnapshot.size);
+      checks.push({ check: 'mustChange', passed: changed, detail: changed ? 'Artifact changed during this command run.' : 'Artifact did not change during this command run.' });
+    }
+
+    if (artifact.kind === 'json') {
+      let jsonPassed = false;
+      let detail = 'JSON artifact is unavailable.';
+      if (after.type === 'file') {
+        if ((after.size ?? 0) > MAX_JSON_ARTIFACT_BYTES) {
+          detail = `JSON artifact exceeds ${MAX_JSON_ARTIFACT_BYTES} byte parse limit.`;
+        } else {
+          try {
+            JSON.parse(await fs.readFile(path.resolve(projectRoot, artifact.path), 'utf8'));
+            jsonPassed = true;
+            detail = 'JSON artifact parsed successfully.';
+          } catch {
+            detail = 'JSON artifact is not valid JSON.';
+          }
+        }
+      }
+      checks.push({ check: 'json', passed: jsonPassed, detail });
+    }
+
+    validations.push({
+      path: artifact.path,
+      kind: artifact.kind,
+      passed: checks.every((check) => check.passed),
+      checks,
+      before: beforeSnapshot,
+      after
+    });
+  }
+  return validations;
 }
 
 function isWithin(candidate: string, root: string): boolean {
