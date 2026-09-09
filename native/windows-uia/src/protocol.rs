@@ -8,6 +8,8 @@ pub const DEFAULT_MAX_DEPTH: usize = 6;
 pub const HARD_MAX_DEPTH: usize = 12;
 pub const HARD_MAX_OBSERVE_MS: u64 = 5_000;
 pub const HARD_MAX_WAIT_MS: u64 = 10_000;
+pub const DEFAULT_MAX_WINDOWS: usize = 50;
+pub const HARD_MAX_WINDOWS: usize = 200;
 
 const SCROLL_AMOUNTS: &[&str] = &[
     "large_decrement",
@@ -78,6 +80,10 @@ pub struct InspectParams {
     pub observe_ms: Option<u64>,
     #[serde(default)]
     pub wait_ms: Option<u64>,
+    #[serde(default)]
+    pub include_windows: bool,
+    #[serde(default)]
+    pub max_windows: Option<usize>,
 }
 
 impl InspectParams {
@@ -94,6 +100,10 @@ impl InspectParams {
 
     pub fn wait_ms(&self) -> u64 {
         self.wait_ms.unwrap_or(0).min(HARD_MAX_WAIT_MS)
+    }
+
+    pub fn max_windows(&self) -> usize {
+        self.max_windows.unwrap_or(DEFAULT_MAX_WINDOWS).clamp(1, HARD_MAX_WINDOWS)
     }
 }
 
@@ -220,10 +230,13 @@ mod tests {
             max_depth: Some(99),
             observe_ms: Some(50_000),
             wait_ms: Some(50_000),
+            include_windows: true,
+            max_windows: Some(50_000),
         };
         assert_eq!(params.limits(), (HARD_MAX_NODES, HARD_MAX_DEPTH));
         assert_eq!(params.observe_ms(), HARD_MAX_OBSERVE_MS);
         assert_eq!(params.wait_ms(), HARD_MAX_WAIT_MS);
+        assert_eq!(params.max_windows(), HARD_MAX_WINDOWS);
     }
 
     #[test]
