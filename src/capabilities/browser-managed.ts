@@ -33,6 +33,7 @@ export type ManagedBrowserOptions = {
   autoLaunch?: boolean;
   executablePath?: string;
   dataDir?: string;
+  discoveryDataDirs?: string[];
   launchTimeoutMs?: number;
   launcher?: BrowserEndpointLauncher;
 };
@@ -68,6 +69,42 @@ export function candidateBrowserPaths(platform: NodeJS.Platform, env: NodeJS.Pro
   return values;
 }
 
+export function candidateBrowserDataDirs(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, homeDir: string): string[] {
+  const values: string[] = [];
+  const add = (value: string | undefined) => {
+    if (!value || !path.isAbsolute(value) || value === path.parse(value).root || values.includes(value)) return;
+    values.push(value);
+  };
+
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA;
+    if (local) {
+      add(path.join(local, 'Google', 'Chrome', 'User Data'));
+      add(path.join(local, 'Google', 'Chrome Beta', 'User Data'));
+      add(path.join(local, 'Google', 'Chrome SxS', 'User Data'));
+      add(path.join(local, 'Microsoft', 'Edge', 'User Data'));
+      add(path.join(local, 'Microsoft', 'Edge Beta', 'User Data'));
+      add(path.join(local, 'Microsoft', 'Edge Dev', 'User Data'));
+    }
+  } else if (platform === 'darwin') {
+    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome'));
+    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Beta'));
+    add(path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome Canary'));
+    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge'));
+    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Beta'));
+    add(path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge Dev'));
+  } else {
+    add(path.join(homeDir, '.config', 'google-chrome'));
+    add(path.join(homeDir, '.config', 'google-chrome-beta'));
+    add(path.join(homeDir, '.config', 'google-chrome-unstable'));
+    add(path.join(homeDir, '.config', 'chromium'));
+    add(path.join(homeDir, '.config', 'microsoft-edge'));
+    add(path.join(homeDir, '.config', 'microsoft-edge-beta'));
+    add(path.join(homeDir, '.config', 'microsoft-edge-dev'));
+  }
+  return values;
+}
+
 export function buildManagedBrowserArgs(dataDir: string): string[] {
   const resolved = path.resolve(dataDir);
   if (!path.isAbsolute(dataDir) || resolved === path.parse(resolved).root) {
@@ -95,14 +132,43 @@ export function parseDevToolsActivePort(raw: string): { port: number; browserPat
   return { port, browserPath, endpoint: `http://127.0.0.1:${port}` };
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
 async function endpointHealthy(endpoint: string): Promise<boolean> {
   let url: URL;
   try { url = new URL(endpoint); } catch { return false; }
   try { assertLoopbackEndpoint(url); } catch { return false; }
   try {
     const response = await fetch(new URL('/json/version', url), { signal: AbortSignal.timeout(1_500) });
-    return response.ok;
+    if (!response.ok) return false;
+    const payload = await response.json() as { Browser?: unknown; webSocketDebuggerUrl?: unknown };
+    if (typeof payload.Browser !== 'string' || !/(Chrome|Chromium|Edg)/i.test(payload.Browser)) return false;
+    if (typeof payload.webSocketDebuggerUrl !== 'string') return false;
+    const websocket = new URL(payload.webSocketDebuggerUrl);
+    if (websocket.protocol !== 'ws:' || !isLoopbackHost(websocket.hostname)) return false;
+    if (!/^\/devtools\/browser\/[A-Za-z0-9._:-]+$/.test(websocket.pathname)) return false;
+    if (websocket.port && url.port && websocket.port !== url.port) return false;
+    return true;
   } catch { return false; }
+}
+
+export async function discoverDevToolsEndpoint(dataDirs: string[]): Promise<{ endpoint: string; dataDir: string } | undefined> {
+  const seen = new Set<string>();
+  for (const candidate of dataDirs) {
+    if (!path.isAbsolute(candidate)) continue;
+    const dataDir = path.resolve(candidate);
+    if (dataDir === path.parse(dataDir).root || seen.has(dataDir)) continue;
+    seen.add(dataDir);
+    try {
+      const raw = await fs.readFile(path.join(dataDir, 'DevToolsActivePort'), 'utf8');
+      const parsed = parseDevToolsActivePort(raw);
+      if (await endpointHealthy(parsed.endpoint)) return { endpoint: parsed.endpoint, dataDir };
+    } catch { /* absent, stale, or malformed candidate; try the next bounded root */ }
+  }
+  return undefined;
 }
 
 export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
@@ -118,12 +184,19 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
     const configured = this.#options.endpoint ?? 'http://127.0.0.1:9222';
     if (await endpointHealthy(configured)) return configured;
     if (this.#launchedEndpoint && await endpointHealthy(this.#launchedEndpoint)) return this.#launchedEndpoint;
+
+    const discovered = await discoverDevToolsEndpoint(this.#discoveryDataDirs());
+    if (discovered) {
+      this.#launchedEndpoint = discovered.endpoint;
+      return discovered.endpoint;
+    }
+
     if (this.#options.autoLaunch === false) {
-      throw new OperatorError('BROWSER_ENDPOINT_UNAVAILABLE', 'Configured browser CDP endpoint is unavailable and managed auto-launch is disabled.', { retryable: true });
+      throw new OperatorError('BROWSER_ENDPOINT_UNAVAILABLE', 'No healthy configured or discoverable local Chromium CDP endpoint is available and managed auto-launch is disabled.', { retryable: true });
     }
 
     const executable = await this.#resolveExecutable();
-    const dataDir = path.resolve(this.#options.dataDir ?? path.join(os.homedir(), '.operator', 'browser-profile'));
+    const dataDir = this.#managedDataDir();
     const args = buildManagedBrowserArgs(dataDir);
     await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
     const portFile = path.join(dataDir, 'DevToolsActivePort');
@@ -164,6 +237,22 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
 
   close(): void {
     this.#terminateChild();
+  }
+
+  #managedDataDir(): string {
+    return path.resolve(this.#options.dataDir ?? path.join(os.homedir(), '.operator', 'browser-profile'));
+  }
+
+  #discoveryDataDirs(): string[] {
+    const values = [this.#managedDataDir()];
+    for (const candidate of this.#options.discoveryDataDirs ?? []) {
+      if (!path.isAbsolute(candidate)) {
+        throw new OperatorError('UNSAFE_BROWSER_DISCOVERY_DIR', 'Browser discovery data directories must be absolute paths.');
+      }
+      values.push(path.resolve(candidate));
+    }
+    values.push(...candidateBrowserDataDirs(process.platform, process.env, os.homedir()));
+    return values;
   }
 
   async #resolveExecutable(): Promise<string> {
@@ -227,7 +316,7 @@ export class ManagedBrowserProvider implements CapabilityProvider {
         ...retried,
         provider: this.name,
         evidence: [
-          evidence('browser_lifecycle', retried.ok ? 'pass' : 'fail', retried.ok ? 'Managed Chromium endpoint recovered and the browser action was retried.' : 'Managed Chromium endpoint was recovered but the browser action still failed.', { endpoint }),
+          evidence('browser_lifecycle', retried.ok ? 'pass' : 'fail', retried.ok ? 'A local Chromium endpoint was recovered or discovered and the browser action was retried.' : 'A local Chromium endpoint was recovered or discovered but the browser action still failed.', { endpoint }),
           ...retried.evidence
         ],
         durationMs: Math.round(performance.now() - started)
