@@ -1,5 +1,6 @@
 mod protocol;
 mod uia;
+mod win32;
 
 use std::io::{self, BufRead, Write};
 
@@ -59,15 +60,32 @@ fn handle_line(engine: &UiaEngine, line: &str) -> Response<Value> {
             "service": "operator-windows-uia",
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": 1,
-            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait"]
+            "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait", "window_discovery"]
         })),
         "inspect" => {
             let params: InspectParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
                 Err(error) => return Response::failure(request.id, "INVALID_PARAMS", format!("Invalid inspect params: {error}"), false),
             };
+            let include_windows = params.include_windows;
+            let max_windows = params.max_windows();
             match engine.inspect(params) {
-                Ok(result) => Response::success(request.id, serde_json::to_value(result).unwrap_or(Value::Null)),
+                Ok(result) => {
+                    let mut value = serde_json::to_value(result).unwrap_or(Value::Null);
+                    if include_windows {
+                        let discovery = match win32::discover_windows(max_windows) {
+                            Ok(discovery) => discovery,
+                            Err(error) => return Response::failure(request.id, "WIN32_DISCOVERY_FAILED", error, true),
+                        };
+                        if let Value::Object(object) = &mut value {
+                            object.insert(
+                                "window_discovery".into(),
+                                serde_json::to_value(discovery).unwrap_or(Value::Null),
+                            );
+                        }
+                    }
+                    Response::success(request.id, value)
+                }
                 Err(error) => {
                     let code = classify_code(&error);
                     let retryable = is_retryable(&error);
