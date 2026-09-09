@@ -37,6 +37,22 @@ jobs:
       - name: Official MCP client + Inspector round-trip
         run: npm run test:e2e
 
+  relay-transport:
+    name: Relay WebSocket E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/relay-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: npm install --no-audit --no-fund
+      - name: Real paired-device relay round-trip
+        run: npm test
+
   windows-uia:
     name: Windows UIA native sidecar
     runs-on: windows-latest
