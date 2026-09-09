@@ -16,6 +16,7 @@ async function createRepo(t: test.TestContext): Promise<string> {
   git(root, 'init', '-b', 'main');
   git(root, 'config', 'user.name', 'Operator CI');
   git(root, 'config', 'user.email', 'operator-ci@example.invalid');
+  git(root, 'config', 'core.autocrlf', 'false');
   await fs.writeFile(path.join(root, 'base.txt'), 'base\n');
   await fs.writeFile(path.join(root, 'staged.txt'), 'original staged\n');
   git(root, 'add', 'base.txt', 'staged.txt');
