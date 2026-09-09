@@ -20,6 +20,8 @@ const MAX_RESPONSE_LINE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const MAX_OBSERVE_MS = 5_000;
 const MAX_WAIT_MS = 10_000;
+const DEFAULT_MAX_WINDOWS = 50;
+const MAX_WINDOWS = 200;
 const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll'] as const;
 const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
 
@@ -204,14 +206,19 @@ export class WindowsUiaProvider implements CapabilityProvider {
         : await this.#client.call('operate', normalizeOperateInput(action.input));
       const postcondition = action.capability === 'app.operate'
         ? evidence('postcondition', 'pass', 'Windows UIA operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
-        : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree and optional scoped event observations instead of a screenshot.', { observeMs: normalizeObserveMs(action.input.observeMs), waitMs: normalizeWaitMs(action.input.waitMs) });
+        : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree, optional scoped events, and opt-in top-level window metadata instead of screenshots or process internals.', {
+            observeMs: normalizeObserveMs(action.input.observeMs),
+            waitMs: normalizeWaitMs(action.input.waitMs),
+            includeWindows: action.input.includeWindows === true,
+            maxWindows: normalizeMaxWindows(action.input.maxWindows)
+          });
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
         output,
         evidence: [
-          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation.' : 'Operated Windows control through a UI Automation control pattern.', {}),
+          evidence('windows_uia', 'pass', action.capability === 'app.inspect' ? 'Inspected Windows controls through Microsoft UI Automation and optional bounded Win32 discovery.' : 'Operated Windows control through a UI Automation control pattern.', {}),
           postcondition
         ],
         durationMs: Math.round(performance.now() - started)
@@ -255,13 +262,19 @@ function normalizeWaitMs(value: unknown): number {
   return Number.isInteger(value) ? Math.min(Math.max(Number(value), 0), MAX_WAIT_MS) : 0;
 }
 
+function normalizeMaxWindows(value: unknown): number {
+  return Number.isInteger(value) ? Math.min(Math.max(Number(value), 1), MAX_WINDOWS) : DEFAULT_MAX_WINDOWS;
+}
+
 function normalizeInspectInput(input: Record<string, unknown>) {
   return {
     selector: input.selector ? normalizeSelector(input.selector) : undefined,
     max_nodes: Number.isInteger(input.maxNodes) ? Number(input.maxNodes) : undefined,
     max_depth: Number.isInteger(input.maxDepth) ? Number(input.maxDepth) : undefined,
     observe_ms: normalizeObserveMs(input.observeMs),
-    wait_ms: normalizeWaitMs(input.waitMs)
+    wait_ms: normalizeWaitMs(input.waitMs),
+    include_windows: input.includeWindows === true,
+    max_windows: normalizeMaxWindows(input.maxWindows)
   };
 }
 
