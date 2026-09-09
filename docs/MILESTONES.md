@@ -41,7 +41,7 @@ Acceptance gates:
 - [ ] Secure MCP Tunnel test
 - [ ] real ChatGPT read workflow test
 
-## M2 — Windows semantic kernel — IN PROGRESS
+## M2 — Windows semantic kernel — COMPLETE
 
 - [x] Win32 window/process discovery
 - [x] UI Automation tree inspection
@@ -49,9 +49,9 @@ Acceptance gates:
 - [x] focus/window activation
 - [x] event subscriptions
 - [x] semantic wait-for-control
-- [ ] fallback routing when UIA coverage fails
+- [x] fallback routing when UIA coverage fails
 
-The core runtime already supports ranked multi-provider retries, but M2 remains open until Windows has an actual bounded fallback path rather than only the UIA provider.
+Fallback is bounded and semantic: the native sidecar remains alive when UIA initialization fails, exact Win32 PID/title/class discovery and activation remain available where explicitly requested, and matched controls that lack modern Invoke/Value patterns can fall back to LegacyIAccessible default-action/value APIs. UIA-only selector fields are never approximated, arbitrary HWND input is not exposed, and unsupported operations still fail closed. This path is covered by Windows compile/tests and Clippy in CI.
 
 ## M3 — development adapter suite
 
