@@ -45,9 +45,7 @@ export class TaskStore {
     await this.init();
     const taskId = validTaskId(taskIdInput);
     try {
-      const parsed = validateTaskCapsule(JSON.parse(await readDurableStateText(this.#file(taskId), TASK_OPTIONS)));
-      if (parsed.id !== taskId) throw new OperatorError('TASK_STATE_CORRUPT', 'Stored task ID does not match its state filename.');
-      return parsed;
+      return parseStoredTask(await readDurableStateText(this.#file(taskId), TASK_OPTIONS), taskId);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new OperatorError('TASK_NOT_FOUND', `Task ${taskId} was not found.`);
@@ -61,17 +59,18 @@ export class TaskStore {
     await this.init();
     const parsedLimit = Number(limitInput);
     const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(Math.trunc(parsedLimit), 1), MAX_LIST) : 100;
-    const entries = (await fs.readdir(this.#dir)).filter((name) => name.endsWith('.json')).slice(0, limit);
+    const entries = (await fs.readdir(this.#dir))
+      .filter((name) => name.endsWith('.json'))
+      .sort()
+      .slice(0, limit);
     const tasks: TaskCapsule[] = [];
     for (const name of entries) {
-      const candidateId = name.slice(0, -'.json'.length);
-      try {
-        const id = validTaskId(candidateId);
-        const task = validateTaskCapsule(JSON.parse(await readDurableStateText(path.join(this.#dir, name), TASK_OPTIONS)));
-        if (task.id === id) tasks.push(task);
-      } catch {
-        // Listing is best-effort. Corrupt/link-swapped entries are omitted; direct get() fails closed with detail.
-      }
+      const candidateId = storedTaskIdFromFilename(name);
+      const task = parseStoredTask(
+        await readDurableStateText(path.join(this.#dir, name), TASK_OPTIONS),
+        candidateId
+      );
+      tasks.push(task);
     }
     return tasks
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -86,6 +85,38 @@ export class TaskStore {
 
   #file(taskId: string): string {
     return path.join(this.#dir, `${validTaskId(taskId)}.json`);
+  }
+}
+
+function parseStoredTask(text: string, expectedTaskId: string): TaskCapsule {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(text);
+  } catch {
+    throw corrupt('Stored task capsule is not valid JSON.');
+  }
+
+  let task: TaskCapsule;
+  try {
+    task = validateTaskCapsule(decoded);
+  } catch (error) {
+    if (error instanceof OperatorError && error.code === 'INVALID_TASK_ID') {
+      throw corrupt('Stored task capsule contains an invalid task or node id.');
+    }
+    throw error;
+  }
+  if (task.id !== expectedTaskId) throw corrupt('Stored task ID does not match its state filename.');
+  return task;
+}
+
+function storedTaskIdFromFilename(name: string): string {
+  try {
+    return validTaskId(name.slice(0, -'.json'.length));
+  } catch (error) {
+    if (error instanceof OperatorError && error.code === 'INVALID_TASK_ID') {
+      throw corrupt('Task state directory contains a malformed task filename.');
+    }
+    throw error;
   }
 }
 
