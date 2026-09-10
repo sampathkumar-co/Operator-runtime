@@ -22,7 +22,7 @@ export class LocalPrivacyDataStore {
 
   async inventory(): Promise<PrivacyCategoryStatus[]> {
     return [
-      await this.#status('activity', ['audit.ndjson'], true),
+      await this.#status('activity', ['audit.ndjson', 'audit-head.json'], true),
       await this.#status('tasks', ['tasks'], true),
       await this.#status('session-state', ['relay-client.json', 'device-sessions.json'], true),
       await this.#status('device-identity', ['device-identity.json'], false),
@@ -34,7 +34,7 @@ export class LocalPrivacyDataStore {
     const before = (await this.inventory()).find((item) => item.category === category);
     if (!before) throw new Error('Unknown privacy category.');
     const targets = category === 'activity'
-      ? ['audit.ndjson']
+      ? ['audit.ndjson', 'audit-head.json']
       : category === 'tasks'
         ? ['tasks']
         : ['relay-client.json', 'device-sessions.json'];
