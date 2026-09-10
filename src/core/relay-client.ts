@@ -19,6 +19,7 @@ type JsonObject = Record<string, unknown>;
 
 export interface RelaySocketLike {
   readonly readyState: number;
+  readonly url?: string;
   send(data: string): void;
   close(code?: number, reason?: string): void;
   addEventListener(type: 'open' | 'message' | 'close' | 'error', listener: (event: any) => void): void;
@@ -158,6 +159,10 @@ export class RelayClient {
     const socket = this.#socketFactory(this.#url);
     this.#socket = socket;
     await waitForOpen(socket, this.#connectTimeoutMs);
+    if (typeof socket.url === 'string' && !sameRelayDestination(this.#url, socket.url)) {
+      try { socket.close(4003, 'destination changed'); } catch { /* mismatch is already authoritative */ }
+      throw new OperatorError('RELAY_SOCKET_DESTINATION_CHANGED', 'Opened relay WebSocket destination differs from the authorized endpoint.', { retryable: false });
+    }
     if (this.#stopped) return;
 
     const identity = await this.#identity.loadOrCreate();
@@ -335,6 +340,10 @@ export function reconnectDelay(attemptInput: number, randomInput = Math.random()
   const base = Math.min(MIN_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
   const jitter = 0.75 + random * 0.5;
   return Math.min(Math.max(Math.round(base * jitter), MIN_BACKOFF_MS), MAX_BACKOFF_MS);
+}
+
+function sameRelayDestination(expectedRaw: string, actualRaw: string): boolean {
+  try { return new URL(expectedRaw).toString() === new URL(actualRaw).toString(); } catch { return false; }
 }
 
 export function validateRelayUrl(urlInput: string, allowLoopbackInsecureWs = false): string {

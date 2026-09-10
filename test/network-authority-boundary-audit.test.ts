@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { LocalAgentClient, validateLoopbackAgentUrl } from '../apps/mcp-server/src/local-agent-client.ts';
+import { CdpConnection, assertLoopbackDebuggerUrl } from '../src/capabilities/browser-cdp-connection.ts';
+import { DeviceIdentityStore } from '../src/core/device-identity.ts';
+import { RelayClient, type RelaySocketLike } from '../src/core/relay-client.ts';
 
 async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
   const server = http.createServer(handler);
@@ -67,4 +71,69 @@ test('network authority fetches remain redirect-disabled', async () => {
     const count = source.split("redirect: 'error'").length - 1;
     assert.equal(count, expected, `${relative} must reject redirects at every network boundary`);
   }
+});
+
+test('CDP WebSocket URLs reject embedded credentials and fragments', () => {
+  assert.doesNotThrow(() => assertLoopbackDebuggerUrl('ws://127.0.0.1:9222/devtools/page/1'));
+  assert.throws(() => assertLoopbackDebuggerUrl('ws://user:pass@127.0.0.1:9222/devtools/page/1'));
+  assert.throws(() => assertLoopbackDebuggerUrl('ws://127.0.0.1:9222/devtools/page/1#hidden'));
+});
+
+class MismatchedRelaySocket implements RelaySocketLike {
+  readyState = 0;
+  readonly url = 'ws://127.0.0.1:9998/relay';
+  sent: string[] = [];
+  #listeners = new Map<string, Set<(event: any) => void>>();
+  addEventListener(type: 'open' | 'message' | 'close' | 'error', listener: (event: any) => void): void {
+    let set = this.#listeners.get(type);
+    if (!set) { set = new Set(); this.#listeners.set(type, set); }
+    set.add(listener);
+  }
+  removeEventListener(type: 'open' | 'message' | 'close' | 'error', listener: (event: any) => void): void {
+    this.#listeners.get(type)?.delete(listener);
+  }
+  open(): void { this.readyState = 1; for (const listener of this.#listeners.get('open') ?? []) listener({}); }
+  send(data: string): void { this.sent.push(data); }
+  close(): void { this.readyState = 3; }
+}
+
+test('relay refuses a changed opened WebSocket destination before sending the session token', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-destination-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const socket = new MismatchedRelaySocket();
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  const client = new RelayClient({
+    stateDir,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session-token-that-must-not-leave',
+    onDelivery: async () => {},
+    sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_SOCKET_DESTINATION_CHANGED');
+  assert.deepEqual(socket.sent, []);
+});
+
+test('CDP refuses a changed opened WebSocket destination before sending commands', async (t) => {
+  const OriginalWebSocket = globalThis.WebSocket;
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = 0;
+    url = 'ws://127.0.0.1:9333/devtools/page/other';
+    sent: string[] = [];
+    #listeners = new Map<string, Set<(event: any) => void>>();
+    constructor(_url: string) { queueMicrotask(() => { this.readyState = 1; this.#emit('open', {}); }); }
+    addEventListener(type: string, listener: (event: any) => void): void {
+      let set = this.#listeners.get(type); if (!set) { set = new Set(); this.#listeners.set(type, set); } set.add(listener);
+    }
+    send(data: string): void { this.sent.push(data); }
+    close(): void { this.readyState = 3; }
+    #emit(type: string, event: any): void { for (const listener of this.#listeners.get(type) ?? []) listener(event); }
+  }
+  (globalThis as any).WebSocket = FakeWebSocket;
+  t.after(() => { (globalThis as any).WebSocket = OriginalWebSocket; });
+  const connection = new CdpConnection('target-1', 'ws://127.0.0.1:9222/devtools/page/1');
+  await assert.rejects(() => connection.send('Runtime.enable'), (error: any) => error?.code === 'CDP_WEBSOCKET_DESTINATION_CHANGED');
 });

@@ -27,6 +27,13 @@ export function assertLoopbackDebuggerUrl(raw: string): void {
   if (!['ws:', 'wss:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)) {
     throw new OperatorError('UNSAFE_CDP_WEBSOCKET', 'DevTools WebSocket endpoint must be loopback-only.');
   }
+  if (url.username || url.password || url.hash) {
+    throw new OperatorError('UNSAFE_CDP_WEBSOCKET', 'DevTools WebSocket endpoint must not contain credentials or a fragment.');
+  }
+}
+
+function sameWebSocketDestination(expectedRaw: string, actualRaw: string): boolean {
+  try { return new URL(expectedRaw).toString() === new URL(actualRaw).toString(); } catch { return false; }
 }
 
 export class CdpConnection {
@@ -57,7 +64,15 @@ export class CdpConnection {
         try { this.#socket.close(); } catch { /* timeout is already authoritative */ }
         reject(new OperatorError('CDP_CONNECT_TIMEOUT', 'Timed out connecting to browser target.', { retryable: true }));
       }), 4_000);
-      this.#socket.addEventListener('open', () => finish(resolve), { once: true });
+      this.#socket.addEventListener('open', () => finish(() => {
+        if (!sameWebSocketDestination(url, this.#socket.url)) {
+          this.#closed = true;
+          try { this.#socket.close(); } catch { /* destination mismatch is already authoritative */ }
+          reject(new OperatorError('CDP_WEBSOCKET_DESTINATION_CHANGED', 'Opened DevTools WebSocket destination differs from the authorized endpoint.', { retryable: false }));
+          return;
+        }
+        resolve();
+      }), { once: true });
       this.#socket.addEventListener('error', () => finish(() => {
         this.#closed = true;
         try { this.#socket.close(); } catch { /* connection error is already authoritative */ }
