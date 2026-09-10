@@ -37,16 +37,16 @@ jobs:
       TIMESTAMP_URI: ${{ inputs.timestamp_uri }}
       IDENTITY_NAME: ${{ inputs.identity_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
 
       - name: Rust toolchain
         shell: pwsh
         run: |
-          rustup default stable
+          rustup default 1.98.0
           rustc --version
           cargo --version
 
@@ -78,7 +78,7 @@ jobs:
 
       - name: Clippy release launcher
         shell: pwsh
-        run: cargo clippy --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
 
       - name: Build package with certificate-matching publisher
         shell: pwsh
@@ -120,7 +120,7 @@ jobs:
         run: |
           Remove-Item -LiteralPath '${{ steps.certificate.outputs.pfx_path }}' -Force -ErrorAction SilentlyContinue
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: operator-windows-production-${{ inputs.version }}
           path: |
