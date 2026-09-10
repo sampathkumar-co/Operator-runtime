@@ -356,7 +356,7 @@ function createServer(): McpServer {
       timeoutMs: z.number().int().min(100).max(600000).default(30000)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'write', { executable, args, cwd, timeoutMs }, cwd));
+  }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, timeoutMs }, cwd));
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
