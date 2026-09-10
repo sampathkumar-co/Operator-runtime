@@ -11,6 +11,9 @@ const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const MIN_BACKOFF_MS = 250;
 const MAX_BACKOFF_MS = 30_000;
 const DEFAULT_HEARTBEAT_MS = 20_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const MIN_CONNECT_TIMEOUT_MS = 100;
+const MAX_CONNECT_TIMEOUT_MS = 60_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -84,6 +87,7 @@ export interface RelayClientOptions {
   random?: () => number;
   clock?: () => Date;
   sleep?: (ms: number) => Promise<void>;
+  connectTimeoutMs?: number;
 }
 
 export class RelayClient {
@@ -97,6 +101,7 @@ export class RelayClient {
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
+  #connectTimeoutMs: number;
   #stopped = false;
   #socket: RelaySocketLike | null = null;
   #attempt = 0;
@@ -114,6 +119,7 @@ export class RelayClient {
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#connectTimeoutMs = boundedConnectTimeout(options.connectTimeoutMs);
   }
 
   async run(): Promise<void> {
@@ -151,7 +157,7 @@ export class RelayClient {
 
     const socket = this.#socketFactory(this.#url);
     this.#socket = socket;
-    await waitForOpen(socket);
+    await waitForOpen(socket, this.#connectTimeoutMs);
     if (this.#stopped) return;
 
     const identity = await this.#identity.loadOrCreate();
@@ -314,8 +320,14 @@ export class RelayClient {
     const state = validateState(stateInput);
     await fs.mkdir(path.dirname(this.#stateFile), { recursive: true, mode: 0o700 });
     const temp = `${this.#stateFile}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, this.#stateFile);
+    let renamed = false;
+    try {
+      await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await fs.rename(temp, this.#stateFile);
+      renamed = true;
+    } finally {
+      if (!renamed) await fs.rm(temp, { force: true }).catch(() => undefined);
+    }
   }
 }
 
@@ -392,13 +404,26 @@ function boundedHeartbeat(value: unknown): number {
   return Math.min(Math.max(parsed, 5_000), 60_000);
 }
 
-function waitForOpen(socket: RelaySocketLike): Promise<void> {
+function waitForOpen(socket: RelaySocketLike, timeoutMs: number): Promise<void> {
   if (socket.readyState === 1) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const onOpen = () => { cleanup(); resolve(); };
-    const onError = () => { cleanup(); reject(new OperatorError('RELAY_CONNECT_FAILED', 'Relay socket failed before opening.', { retryable: true })); };
-    const onClose = () => { cleanup(); reject(new OperatorError('RELAY_CONNECT_FAILED', 'Relay socket closed before opening.', { retryable: true })); };
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onOpen = () => finish(resolve);
+    const onError = () => finish(() => reject(new OperatorError('RELAY_CONNECT_FAILED', 'Relay socket failed before opening.', { retryable: true })));
+    const onClose = () => finish(() => reject(new OperatorError('RELAY_CONNECT_FAILED', 'Relay socket closed before opening.', { retryable: true })));
+    const timer = setTimeout(() => finish(() => {
+      try { socket.close(4001, 'connect timeout'); } catch { /* timeout failure is already authoritative */ }
+      reject(new OperatorError('RELAY_CONNECT_TIMEOUT', `Relay socket did not open within ${timeoutMs}ms.`, { retryable: true }));
+    }), timeoutMs);
+    timer.unref();
     const cleanup = () => {
+      clearTimeout(timer);
       socket.removeEventListener?.('open', onOpen);
       socket.removeEventListener?.('error', onError);
       socket.removeEventListener?.('close', onClose);
@@ -407,6 +432,12 @@ function waitForOpen(socket: RelaySocketLike): Promise<void> {
     socket.addEventListener('error', onError);
     socket.addEventListener('close', onClose);
   });
+}
+
+function boundedConnectTimeout(value: unknown): number {
+  const parsed = Number(value ?? DEFAULT_CONNECT_TIMEOUT_MS);
+  if (!Number.isFinite(parsed)) return DEFAULT_CONNECT_TIMEOUT_MS;
+  return Math.min(Math.max(Math.trunc(parsed), MIN_CONNECT_TIMEOUT_MS), MAX_CONNECT_TIMEOUT_MS);
 }
 
 function canonicalBytes(value: JsonObject): Buffer {
