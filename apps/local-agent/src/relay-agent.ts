@@ -40,7 +40,7 @@ export class LocalAgentRelayRunner {
     this.#identity = options.identity;
     this.#outbox = new RelayResultStore(path.join(path.resolve(options.stateDir), 'relay-outbox'));
     this.#sessionTokenFile = path.resolve(options.sessionTokenFile);
-    this.#resultUrl = validateResultUrl(options.resultUrl ?? deriveResultUrl(options.relayUrl), Boolean(options.allowLoopbackInsecure));
+    this.#resultUrl = validateResultUrl(options.resultUrl ?? deriveResultUrl(options.relayUrl), options.relayUrl, Boolean(options.allowLoopbackInsecure));
     this.#localExecuteUrl = new URL('/v1/execute', ensureHttpBase(options.localAgentBaseUrl)).toString();
     this.#agentToken = options.agentToken;
     this.#client = new RelayClient({
@@ -202,13 +202,23 @@ function deriveResultUrl(relayUrlInput: string): string {
   return relay.toString();
 }
 
-function validateResultUrl(input: string, allowLoopbackInsecure: boolean): string {
+function validateResultUrl(input: string, relayUrlInput: string, allowLoopbackInsecure: boolean): string {
   let url: URL;
+  let relay: URL;
   try { url = new URL(input); } catch { throw new OperatorError('RELAY_RESULT_URL_INVALID', 'Relay result URL is invalid.'); }
-  if (url.username || url.password || url.hash) throw new OperatorError('RELAY_RESULT_URL_INVALID', 'Relay result URL must not contain credentials or a fragment.');
-  if (url.protocol === 'https:') return url.toString();
-  if (url.protocol === 'http:' && allowLoopbackInsecure && isLoopback(url.hostname)) return url.toString();
-  throw new OperatorError('RELAY_RESULT_TLS_REQUIRED', 'Relay results require HTTPS; insecure HTTP is allowed only for explicit loopback development.');
+  try { relay = new URL(relayUrlInput); } catch { throw new OperatorError('RELAY_URL_INVALID', 'Relay URL is invalid.'); }
+  if (url.username || url.password || url.hash || url.search) throw new OperatorError('RELAY_RESULT_URL_INVALID', 'Relay result URL must not contain credentials, a query, or a fragment.');
+  if (url.pathname !== '/v1/device-result') throw new OperatorError('RELAY_RESULT_URL_INVALID', 'Relay result URL must use the fixed /v1/device-result endpoint.');
+
+  const localOverride = allowLoopbackInsecure && isLoopback(url.hostname) && isLoopback(relay.hostname);
+  if (localOverride && ['http:', 'https:'].includes(url.protocol)) return url.toString();
+
+  const expected = new URL(deriveResultUrl(relayUrlInput));
+  if (url.protocol === 'https:' && expected.protocol === 'https:' && url.origin === expected.origin && url.pathname === expected.pathname) {
+    return url.toString();
+  }
+  if (url.protocol !== 'https:') throw new OperatorError('RELAY_RESULT_TLS_REQUIRED', 'Relay results require HTTPS; insecure HTTP is allowed only for explicit loopback development.');
+  throw new OperatorError('RELAY_RESULT_AUTHORITY_MISMATCH', 'Relay result URL must remain on the relay-authorized HTTPS origin.');
 }
 
 function ensureHttpBase(input: string): string {

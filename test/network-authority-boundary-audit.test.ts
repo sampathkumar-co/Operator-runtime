@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { LocalAgentClient, validateLoopbackAgentUrl } from '../apps/mcp-server/src/local-agent-client.ts';
+import { LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { CdpConnection, assertLoopbackDebuggerUrl } from '../src/capabilities/browser-cdp-connection.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayClient, type RelaySocketLike } from '../src/core/relay-client.ts';
@@ -136,4 +137,36 @@ test('CDP refuses a changed opened WebSocket destination before sending commands
   t.after(() => { (globalThis as any).WebSocket = OriginalWebSocket; });
   const connection = new CdpConnection('target-1', 'ws://127.0.0.1:9222/devtools/page/1');
   await assert.rejects(() => connection.send('Runtime.enable'), (error: any) => error?.code === 'CDP_WEBSOCKET_DESTINATION_CHANGED');
+});
+
+
+test('relay result bearer endpoint stays bound to relay authority outside explicit loopback development', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-result-authority-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const make = (relayUrl: string, resultUrl: string | undefined, allowLoopbackInsecure = false) => new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl,
+    resultUrl,
+    sessionTokenFile: path.join(stateDir, 'session.token'),
+    identity: new DeviceIdentityStore(stateDir, { platform: 'linux' }),
+    localAgentBaseUrl: 'http://127.0.0.1:47100',
+    agentToken: 'a'.repeat(32),
+    allowLoopbackInsecure
+  });
+
+  assert.doesNotThrow(() => make('wss://relay.example.test/device', 'https://relay.example.test/v1/device-result'));
+  for (const unsafe of [
+    'https://evil.example.test/v1/device-result',
+    'https://relay.example.test:444/v1/device-result',
+    'https://relay.example.test/other',
+    'https://relay.example.test/v1/device-result?next=elsewhere'
+  ]) {
+    assert.throws(() => make('wss://relay.example.test/device', unsafe));
+  }
+
+  assert.doesNotThrow(() => make(
+    'ws://127.0.0.1:8788/device',
+    'http://localhost:8789/v1/device-result',
+    true
+  ));
 });
