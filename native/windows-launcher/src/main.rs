@@ -1,5 +1,5 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn main() {
@@ -11,14 +11,24 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let exe = env::current_exe().map_err(|e| format!("cannot resolve launcher path: {e}"))?;
-    let root = exe.parent().ok_or_else(|| "launcher has no parent directory".to_string())?.to_path_buf();
+    let root = exe
+        .parent()
+        .ok_or_else(|| "launcher has no parent directory".to_string())?
+        .to_path_buf();
+    let invoke_cwd =
+        env::current_dir().map_err(|e| format!("cannot resolve invocation directory: {e}"))?;
     let node = root.join("runtime").join("node.exe");
-    let entry = root.join("app").join("apps").join("local-agent").join("src").join("main.ts");
+    let entry = root
+        .join("app")
+        .join("apps")
+        .join("local-agent")
+        .join("src")
+        .join("cli.ts");
     let uia = root.join("native").join("operator-windows-uia.exe");
     let dpapi = root.join("native").join("operator-windows-dpapi.exe");
 
     require_file(&node, "bundled Node runtime")?;
-    require_file(&entry, "Operator local-agent entrypoint")?;
+    require_file(&entry, "Operator CLI entrypoint")?;
     require_file(&uia, "Operator Windows UIA sidecar")?;
     require_file(&dpapi, "Operator Windows DPAPI helper")?;
 
@@ -27,12 +37,13 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    if env::var_os("OPERATOR_WINDOWS_UIA_PATH").is_none() {
-        env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
-    }
-    if env::var_os("OPERATOR_WINDOWS_DPAPI_PATH").is_none() {
-        env::set_var("OPERATOR_WINDOWS_DPAPI_PATH", &dpapi);
-    }
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA is required for packaged Operator state".to_string())?;
+    let state_dir = PathBuf::from(local_app_data).join("Operator");
+    env::set_var("OPERATOR_STATE_DIR", &state_dir);
+    env::set_var("OPERATOR_INVOKE_CWD", &invoke_cwd);
+    env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
+    env::set_var("OPERATOR_WINDOWS_DPAPI_PATH", &dpapi);
 
     let mut command = Command::new(&node);
     command
@@ -44,10 +55,12 @@ fn run() -> Result<(), String> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let status = command.status().map_err(|e| format!("failed to start bundled Node runtime: {e}"))?;
+    let status = command
+        .status()
+        .map_err(|e| format!("failed to start bundled Node runtime: {e}"))?;
     match status.code() {
         Some(code) => std::process::exit(code),
-        None => Err("Operator local agent terminated without an exit code".to_string()),
+        None => Err("Operator runtime terminated without an exit code".to_string()),
     }
 }
 

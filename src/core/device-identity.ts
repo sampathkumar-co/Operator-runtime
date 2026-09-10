@@ -236,7 +236,7 @@ export class DeviceIdentityStore {
   }
 }
 
-class WindowsDpapiProtector implements DeviceSecretProtector {
+export class WindowsDpapiProtector implements DeviceSecretProtector {
   readonly scheme = DPAPI_SCHEME;
   #executable: string;
 

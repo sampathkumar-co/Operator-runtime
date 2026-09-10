@@ -91,7 +91,19 @@ npm run test:performance
 
 The standard `npm run check` performs the root import/surface check and the full root runtime test suite.
 
-## Run the local agent
+## Windows one-command setup
+
+The packaged Windows release exposes the `operator` command. From the project folder you want to authorize, run:
+
+```powershell
+operator setup
+```
+
+That single setup command generates the local-agent and recovery secrets, protects them with Windows DPAPI CurrentUser, initializes the device identity, authorizes the invocation folder, and runs the packaged verification checks. It does not print plaintext secrets. It also starts the bundled local agent and MCP server and waits for both to become healthy before returning. `operator verify` remains available as an optional re-check/troubleshooting command rather than a mandatory setup step. After `operator setup` passes, connect Operator through the supported ChatGPT MCP transport.
+
+For development from source, the lower-level environment-variable flow remains available below.
+
+## Run the local agent from source
 
 Set a secret token of at least 32 characters and authorize only the roots you intend Operator to access.
 
@@ -124,12 +136,14 @@ The Windows release builder produces a self-contained MSIX payload containing:
 - `Operator.exe` native launcher
 - bundled `node.exe`
 - Operator runtime/source closure required by the local agent
+- bundled MCP server and locked production dependency graph
+- protected one-command bootstrap CLI and `operator.exe` execution alias
 - native Windows UIA sidecar
 - MSIX manifest/assets
 - HTTPS `.appinstaller` metadata
 - SHA-256 release metadata
 
-CI builds and unpacks the unsigned package, verifies its required payload and hash metadata, then separately builds a matching-publisher package with an ephemeral code-signing certificate, signs it, verifies it, installs it, runs the packaged launcher self-test, uninstalls it and removes temporary trust material.
+CI builds and unpacks the unsigned package, verifies its required payload and hash metadata, then separately builds a matching-publisher package with an ephemeral code-signing certificate, signs it, verifies it, installs it, runs the packaged launcher self-test plus the `setup -> verify -> agent/MCP health` onboarding smoke, uninstalls it and removes temporary trust material.
 
 ## Core rule
 

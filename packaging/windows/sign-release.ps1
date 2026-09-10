@@ -10,6 +10,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Write-Utf8NoBom([string]$Path, [string]$Value) {
+  [IO.File]::WriteAllText($Path, $Value, (New-Object Text.UTF8Encoding($false)))
+}
+
 function Assert-Exit([string]$Step) {
   if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
 }
@@ -63,7 +67,7 @@ if ($meta.PSObject.Properties.Name -contains 'signerSubject') { $meta.signerSubj
 if ($meta.PSObject.Properties.Name -contains 'timestamped') { $meta.timestamped = (-not $SkipTimestampForTest) } else { $meta | Add-Member -NotePropertyName timestamped -NotePropertyValue (-not $SkipTimestampForTest) }
 $meta.sha256 = (Get-FileHash -LiteralPath $msix -Algorithm SHA256).Hash.ToLowerInvariant()
 $meta.sizeBytes = (Get-Item -LiteralPath $msix).Length
-$meta | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $metadata -Encoding utf8NoBOM
+Write-Utf8NoBom $metadata ($meta | ConvertTo-Json -Depth 8)
 
 Write-Host "[operator-release] signed $msix"
 Write-Host "[operator-release] signer $subject"

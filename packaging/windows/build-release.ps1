@@ -14,6 +14,10 @@ function Assert-Exit([string]$Step) {
   if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Value) {
+  [IO.File]::WriteAllText($Path, $Value, (New-Object Text.UTF8Encoding($false)))
+}
+
 function Escape-Xml([string]$Value) {
   return [System.Security.SecurityElement]::Escape($Value)
 }
@@ -75,10 +79,25 @@ Copy-Item -LiteralPath $launcher -Destination (Join-Path $stage 'Operator.exe')
 Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $stage 'runtime\node.exe')
 Copy-Item -LiteralPath $uia -Destination (Join-Path $stage 'native\operator-windows-uia.exe')
 Copy-Item -LiteralPath $dpapi -Destination (Join-Path $stage 'native\operator-windows-dpapi.exe')
+
+$mcpDeps = Join-Path $OutputDir 'mcp-runtime-deps'
+New-Item -ItemType Directory -Force -Path $mcpDeps | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package.json') -Destination (Join-Path $mcpDeps 'package.json')
+Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package-lock.json') -Destination (Join-Path $mcpDeps 'package-lock.json')
+Write-Host '[operator-release] installing locked MCP production dependencies in isolated staging'
+& npm.cmd ci --ignore-scripts --omit=dev --prefix $mcpDeps
+Assert-Exit 'MCP production dependency install'
+
 Copy-Item -LiteralPath (Join-Path $repo 'package.json') -Destination (Join-Path $stage 'app\package.json')
 Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination (Join-Path $stage 'app\src') -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\apps\local-agent') | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'apps\local-agent\src') -Destination (Join-Path $stage 'app\apps\local-agent\src') -Recurse
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\apps\mcp-server') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\src') -Destination (Join-Path $stage 'app\apps\mcp-server\src') -Recurse
+Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package.json') -Destination (Join-Path $stage 'app\apps\mcp-server\package.json')
+Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package-lock.json') -Destination (Join-Path $stage 'app\apps\mcp-server\package-lock.json')
+Copy-Item -LiteralPath (Join-Path $mcpDeps 'node_modules') -Destination (Join-Path $stage 'app\apps\mcp-server\node_modules') -Recurse
+Remove-Item -LiteralPath $mcpDeps -Recurse -Force
 
 New-Logo (Join-Path $stage 'Assets\Square44x44Logo.png') 44
 New-Logo (Join-Path $stage 'Assets\Square150x150Logo.png') 150
@@ -91,8 +110,9 @@ $manifest = @"
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+         xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap uap10 rescap">
+         IgnorableNamespaces="uap uap5 uap10 rescap">
   <Identity Name="$identityXml" Publisher="$publisherXml" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Operator</DisplayName>
@@ -106,12 +126,19 @@ $manifest = @"
     <Application Id="Operator" Executable="Operator.exe" uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
       <uap:VisualElements DisplayName="Operator" Description="Operate authorized computers through semantic, policy-gated capabilities."
                           BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png" Square150x150Logo="Assets\Square150x150Logo.png" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias>
+            <uap5:ExecutionAlias Alias="operator.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
 </Package>
 "@
-Set-Content -LiteralPath (Join-Path $stage 'AppxManifest.xml') -Value $manifest -Encoding utf8NoBOM
+Write-Utf8NoBom (Join-Path $stage 'AppxManifest.xml') $manifest
 
 $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" -ErrorAction Stop | Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $makeAppx) { throw 'makeappx.exe was not found in the Windows SDK.' }
@@ -134,7 +161,7 @@ $appInstaller = @"
 </AppInstaller>
 "@
 $appInstallerPath = Join-Path $OutputDir 'Operator.appinstaller'
-Set-Content -LiteralPath $appInstallerPath -Value $appInstaller -Encoding utf8NoBOM
+Write-Utf8NoBom $appInstallerPath $appInstaller
 
 $hash = (Get-FileHash -LiteralPath $msixPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $size = (Get-Item -LiteralPath $msixPath).Length
@@ -151,7 +178,7 @@ $metadata = [ordered]@{
   publisher = $Publisher
   appInstaller = 'Operator.appinstaller'
 }
-$metadata | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDir 'release-metadata.json') -Encoding utf8NoBOM
+Write-Utf8NoBom (Join-Path $OutputDir 'release-metadata.json') ($metadata | ConvertTo-Json -Depth 5)
 
 Write-Host "[operator-release] built $msixPath"
 Write-Host "[operator-release] sha256 $hash"
