@@ -9,6 +9,9 @@ import { LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { CdpConnection, assertLoopbackDebuggerUrl } from '../src/capabilities/browser-cdp-connection.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayClient, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { requireLiteralLoopbackBindHost } from '../src/core/network-authority.ts';
+import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
+import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 
 async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
   const server = http.createServer(handler);
@@ -169,4 +172,40 @@ test('relay result bearer endpoint stays bound to relay authority outside explic
     'http://localhost:8789/v1/device-result',
     true
   ));
+});
+
+
+test('local control-plane bind hosts are literal loopback only', async (t) => {
+  assert.equal(requireLiteralLoopbackBindHost('127.0.0.1', 'test'), '127.0.0.1');
+  assert.equal(requireLiteralLoopbackBindHost('::1', 'test'), '::1');
+  assert.equal(requireLiteralLoopbackBindHost('[::1]', 'test'), '::1');
+  for (const unsafe of ['0.0.0.0', '::', 'localhost', '192.168.1.10', '10.0.0.4', 'example.test']) {
+    assert.throws(
+      () => requireLiteralLoopbackBindHost(unsafe, 'test'),
+      (error: any) => error?.code === 'UNSAFE_LOCAL_BIND_HOST'
+    );
+  }
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-local-bind-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const agent = createLocalAgentServer({
+    runtime,
+    token: 'b'.repeat(64),
+    permissions: { allowedCapabilities: ['computer.inspect'], allowedRoots: [root] }
+  });
+  t.after(() => agent.close());
+  await assert.rejects(
+    () => agent.listen('0.0.0.0', 0),
+    (error: any) => error?.code === 'UNSAFE_LOCAL_BIND_HOST'
+  );
+});
+
+test('MCP startup enforces the shared loopback bind authority guard', async () => {
+  const source = await fs.readFile(
+    path.resolve(import.meta.dirname, '../apps/mcp-server/src/server.ts'),
+    'utf8'
+  );
+  assert.match(source, /requireLiteralLoopbackBindHost\(process\.env\.OPERATOR_MCP_HOST/);
+  assert.doesNotMatch(source, /const host = process\.env\.OPERATOR_MCP_HOST \?\?/);
 });

@@ -101,7 +101,7 @@ export OPERATOR_ALLOWED_ROOTS='/path/to/project'
 npm run dev:agent
 ```
 
-The local agent binds to loopback by default. It is intentionally **not** an unrestricted public shell endpoint.
+The local agent is **loopback-only**: startup rejects wildcard, LAN, DNS-name, and other non-literal-loopback bind hosts. Remote ingress must go through the approved relay/Secure MCP Tunnel boundary; the agent is intentionally **not** a public shell endpoint.
 
 ## MCP development adapter
 

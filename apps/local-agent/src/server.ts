@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import { requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
@@ -319,12 +320,13 @@ export function createLocalAgentServer(options: {
   return {
     server,
     async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
+      const bindHost = requireLiteralLoopbackBindHost(host, 'Local agent');
       await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
-        server.listen(port, host, () => resolve());
+        server.listen(port, bindHost, () => resolve());
       });
       const address = server.address() as AddressInfo;
-      return { host, port: address.port };
+      return { host: bindHost, port: address.port };
     },
     async close(): Promise<void> {
       if (!server.listening) return;

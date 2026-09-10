@@ -5,6 +5,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
+import { requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN;
@@ -20,7 +21,7 @@ app.all('/mcp', (request, reply) => nodeHandler(request.raw, reply.raw, request.
 app.get('/health', async () => ({ ok: true, service: 'operator-mcp-server', version: '0.1.0' }));
 
 const port = Number(process.env.OPERATOR_MCP_PORT ?? 47200);
-const host = process.env.OPERATOR_MCP_HOST ?? '127.0.0.1';
+const host = requireLiteralLoopbackBindHost(process.env.OPERATOR_MCP_HOST ?? '127.0.0.1', 'MCP server');
 await app.listen({ host, port });
 console.error(`[operator] MCP server listening on http://${host}:${port}/mcp`);
 

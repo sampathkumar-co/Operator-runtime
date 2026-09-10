@@ -11,7 +11,7 @@ Operator is designed only for computers explicitly paired and authorized by thei
 - Process execution uses an executable + argv array with `shell: false`; executable names are allowlisted.
 - Repository-authored files cannot silently grant trusted project-command execution authority.
 - Observed content from websites, files, applications and terminal output cannot directly become an instruction authority.
-- The local HTTP boundary requires a bearer secret and defaults to loopback.
+- The local HTTP execution boundary and MCP server require literal loopback bind addresses; wildcard/LAN/DNS-name binds are rejected. Remote ingress must use the approved relay/tunnel boundary.
 - Risky external/destructive actions can fail closed with local approval requirements before the side effect occurs.
 - An emergency execution stop persists across process restart and can require separate recovery authority to clear.
 - Audit/activity events recursively redact common secret-bearing keys and do not echo raw action-input payloads.
