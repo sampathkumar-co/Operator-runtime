@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
-import { readDurableStateText } from '../core/durable-state.ts';
+import { readDurableStateBytes, readDurableStateText } from '../core/durable-state.ts';
 import { PathScope } from './path-scope.ts';
 import { ProcessProvider } from './process.ts';
 
@@ -29,6 +29,11 @@ const REGISTRY_OPTIONS = {
   maxBytes: MAX_REGISTRY_BYTES,
   errorCode: 'COMMAND_REGISTRY_INVALID',
   invalidMessage: 'Trusted command registry is invalid.'
+} as const;
+const ARTIFACT_FILE_OPTIONS = {
+  maxBytes: MAX_HASH_ARTIFACT_BYTES,
+  errorCode: 'ARTIFACT_FILE_INVALID',
+  invalidMessage: 'Trusted artifact file is invalid.'
 } as const;
 
 type TrustedArtifact = {
@@ -63,7 +68,7 @@ type Registry = {
 type ArtifactSnapshot = {
   path: string;
   exists: boolean;
-  type?: 'file' | 'directory' | 'symlink' | 'other';
+  type?: 'file' | 'directory' | 'symlink' | 'hardlink' | 'other';
   size?: number;
   fingerprint?: string;
 };
@@ -412,30 +417,55 @@ async function resolveCommandCwd(projectRoot: string, relativeCwd: string): Prom
 
 async function snapshotArtifacts(projectRoot: string, artifacts: TrustedArtifact[]): Promise<Map<string, ArtifactSnapshot>> {
   const output = new Map<string, ArtifactSnapshot>();
-  for (const artifact of artifacts) output.set(artifact.path, await snapshotArtifact(projectRoot, artifact.path));
+  for (const artifact of artifacts) {
+    const snapshot = await snapshotArtifact(projectRoot, artifact.path);
+    if (snapshot.type === 'symlink' || snapshot.type === 'hardlink') {
+      throw new OperatorError('ARTIFACT_FILE_INVALID', `Trusted artifact ${artifact.path} must not be a symbolic or hard link.`);
+    }
+    output.set(artifact.path, snapshot);
+  }
   return output;
 }
 
 async function snapshotArtifact(projectRoot: string, relativePath: string): Promise<ArtifactSnapshot> {
   const absolute = path.resolve(projectRoot, relativePath);
   if (!isWithin(absolute, projectRoot)) throw new OperatorError('ARTIFACT_PATH_OUTSIDE_PROJECT', `Artifact ${relativePath} escapes the project root.`);
+  const canonicalProjectRoot = await fs.realpath(projectRoot);
   try {
     const stat = await fs.lstat(absolute);
     if (stat.isSymbolicLink()) return { path: relativePath, exists: true, type: 'symlink', size: stat.size };
-    if (stat.isDirectory()) {
-      const entries = (await fs.readdir(absolute)).sort();
+
+    const canonical = await fs.realpath(absolute);
+    if (!isWithin(canonical, canonicalProjectRoot)) {
+      throw new OperatorError('ARTIFACT_PATH_OUTSIDE_PROJECT', `Artifact ${relativePath} resolves outside the project root.`);
+    }
+    const canonicalStat = await fs.lstat(canonical);
+    if (!sameFile(stat, canonicalStat)) {
+      throw new OperatorError('ARTIFACT_PATH_CHANGED', `Artifact ${relativePath} changed while its path was being resolved.`);
+    }
+
+    if (canonicalStat.isDirectory()) {
+      const entries = (await fs.readdir(canonical)).sort();
+      const current = await fs.realpath(absolute);
+      if (current !== canonical) throw new OperatorError('ARTIFACT_PATH_CHANGED', `Artifact ${relativePath} changed while it was being inspected.`);
       const fingerprint = crypto.createHash('sha256').update(entries.join('\0')).digest('hex');
       return { path: relativePath, exists: true, type: 'directory', size: entries.length, fingerprint };
     }
-    if (stat.isFile()) {
-      const fingerprint = stat.size <= MAX_HASH_ARTIFACT_BYTES
-        ? crypto.createHash('sha256').update(await fs.readFile(absolute)).digest('hex')
-        : crypto.createHash('sha256').update(`${stat.size}\0${stat.mtimeMs}`).digest('hex');
-      return { path: relativePath, exists: true, type: 'file', size: stat.size, fingerprint };
+    if (canonicalStat.isFile()) {
+      if (canonicalStat.nlink !== 1) return { path: relativePath, exists: true, type: 'hardlink', size: canonicalStat.size };
+      const fingerprint = canonicalStat.size <= MAX_HASH_ARTIFACT_BYTES
+        ? crypto.createHash('sha256').update(await readDurableStateBytes(canonical, ARTIFACT_FILE_OPTIONS)).digest('hex')
+        : crypto.createHash('sha256').update(`${canonicalStat.size}\0${canonicalStat.mtimeMs}`).digest('hex');
+      const current = await fs.realpath(absolute);
+      if (current !== canonical) throw new OperatorError('ARTIFACT_PATH_CHANGED', `Artifact ${relativePath} changed while it was being inspected.`);
+      return { path: relativePath, exists: true, type: 'file', size: canonicalStat.size, fingerprint };
     }
-    return { path: relativePath, exists: true, type: 'other', size: stat.size };
+    return { path: relativePath, exists: true, type: 'other', size: canonicalStat.size };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path: relativePath, exists: false };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      await assertNearestExistingParentInsideProject(absolute, canonicalProjectRoot, relativePath);
+      return { path: relativePath, exists: false };
+    }
     throw error;
   }
 }
@@ -466,6 +496,9 @@ async function validateArtifacts(
     if (after.type === 'symlink') {
       checks.push({ check: 'symlink', passed: false, detail: 'Artifact symlinks are not accepted for trusted validation.' });
     }
+    if (after.type === 'hardlink') {
+      checks.push({ check: 'hardlink', passed: false, detail: 'Hard-linked artifact files are not accepted for trusted validation.' });
+    }
 
     if (artifact.mustChange) {
       const changed = after.exists && (!beforeSnapshot.exists || after.type !== beforeSnapshot.type || after.fingerprint !== beforeSnapshot.fingerprint || after.size !== beforeSnapshot.size);
@@ -480,10 +513,11 @@ async function validateArtifacts(
           detail = `JSON artifact exceeds ${MAX_JSON_ARTIFACT_BYTES} byte parse limit.`;
         } else {
           try {
-            JSON.parse(await fs.readFile(path.resolve(projectRoot, artifact.path), 'utf8'));
+            JSON.parse(await readTrustedArtifactText(projectRoot, artifact.path, MAX_JSON_ARTIFACT_BYTES));
             jsonPassed = true;
             detail = 'JSON artifact parsed successfully.';
-          } catch {
+          } catch (error) {
+            if (error instanceof OperatorError) throw error;
             detail = 'JSON artifact is not valid JSON.';
           }
         }
@@ -501,6 +535,49 @@ async function validateArtifacts(
     });
   }
   return validations;
+}
+
+async function readTrustedArtifactText(projectRoot: string, relativePath: string, maxBytes: number): Promise<string> {
+  const absolute = path.resolve(projectRoot, relativePath);
+  const canonicalProjectRoot = await fs.realpath(projectRoot);
+  const stat = await fs.lstat(absolute);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new OperatorError('ARTIFACT_FILE_INVALID', `Trusted artifact ${relativePath} must be a single-link regular file.`);
+  }
+  const canonical = await fs.realpath(absolute);
+  if (!isWithin(canonical, canonicalProjectRoot)) {
+    throw new OperatorError('ARTIFACT_PATH_OUTSIDE_PROJECT', `Artifact ${relativePath} resolves outside the project root.`);
+  }
+  const raw = await readDurableStateBytes(canonical, {
+    maxBytes,
+    errorCode: 'ARTIFACT_FILE_INVALID',
+    invalidMessage: `Trusted artifact ${relativePath} is invalid.`
+  });
+  const current = await fs.realpath(absolute);
+  if (current !== canonical) throw new OperatorError('ARTIFACT_PATH_CHANGED', `Artifact ${relativePath} changed while it was being read.`);
+  return raw.toString('utf8');
+}
+
+async function assertNearestExistingParentInsideProject(absolute: string, canonicalProjectRoot: string, relativePath: string): Promise<void> {
+  let current = path.dirname(absolute);
+  while (true) {
+    try {
+      const canonical = await fs.realpath(current);
+      if (!isWithin(canonical, canonicalProjectRoot)) {
+        throw new OperatorError('ARTIFACT_PATH_OUTSIDE_PROJECT', `Artifact ${relativePath} has a parent directory outside the project root.`);
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+}
+
+function sameFile(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function isWithin(candidate: string, root: string): boolean {
