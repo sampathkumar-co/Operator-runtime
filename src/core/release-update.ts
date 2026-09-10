@@ -179,7 +179,17 @@ function validateArtifact(input: ReleaseArtifact): ReleaseArtifact {
 
 function validVersion(value: string): string {
   const text = String(value ?? '');
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.test(text) || text.length > 128) throw new OperatorError('UPDATE_VERSION_INVALID', 'Release version must be a bounded semantic version.');
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.test(text) || text.length > 128) {
+    throw new OperatorError('UPDATE_VERSION_INVALID', 'Release version must be a bounded semantic version.');
+  }
+  const prerelease = text.split('-', 2)[1];
+  if (prerelease) {
+    for (const identifier of prerelease.split('.')) {
+      if (/^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith('0')) {
+        throw new OperatorError('UPDATE_VERSION_INVALID', 'Numeric prerelease identifiers must not contain leading zeroes.');
+      }
+    }
+  }
   return text;
 }
 
@@ -200,16 +210,16 @@ function compareVersions(aInput: string, bInput: string): number {
     if (left === right) continue;
     const leftNumeric = /^\d+$/.test(left);
     const rightNumeric = /^\d+$/.test(right);
-    if (leftNumeric && rightNumeric) return Number(left) > Number(right) ? 1 : -1;
+    if (leftNumeric && rightNumeric) return BigInt(left) > BigInt(right) ? 1 : -1;
     if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
     return left > right ? 1 : -1;
   }
   return 0;
 }
 
-function parseVersion(value: string): { nums: number[]; pre: string[] } {
+function parseVersion(value: string): { nums: bigint[]; pre: string[] } {
   const [core, prerelease] = value.split('-', 2);
-  return { nums: core.split('.').map(Number), pre: prerelease ? prerelease.split('.') : [] };
+  return { nums: core.split('.').map((part) => BigInt(part)), pre: prerelease ? prerelease.split('.') : [] };
 }
 
 function validIso(value: string): string {
