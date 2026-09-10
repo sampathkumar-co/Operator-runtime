@@ -1,0 +1,134 @@
+name: Harden adapter boundaries once
+
+on: [push]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Patch adapter boundaries and self-delete
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          git_helper = '''function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+            const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
+            for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_CONFIG_HOME']) {
+              if (process.env[key] !== undefined) env[key] = process.env[key];
+            }
+            for (const [key, value] of Object.entries(extraEnv)) {
+              if (value !== undefined) env[key] = value;
+            }
+            return env;
+          }
+
+          '''.replace('          ', '')
+
+          for filename in ['src/capabilities/git-write.ts', 'src/capabilities/git-checkpoint.ts']:
+              p = Path(filename)
+              s = p.read_text()
+              old = "      env: { ...process.env, GIT_PAGER: '', ...extraEnv }"
+              if s.count(old) != 1:
+                  raise SystemExit(f'{filename}: Git env anchor mismatch {s.count(old)}')
+              marker = 'async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv'
+              if s.count(marker) != 1:
+                  raise SystemExit(f'{filename}: runGit marker mismatch {s.count(marker)}')
+              s = s.replace(marker, git_helper + marker, 1)
+              s = s.replace(old, '      env: gitEnvironment(extraEnv)', 1)
+              p.write_text(s)
+
+          p = Path('src/capabilities/vscode.ts')
+          s = p.read_text()
+          old = '''function safeEnvironment(): NodeJS.ProcessEnv {
+            const env: NodeJS.ProcessEnv = { ...process.env };
+            for (const key of Object.keys(env)) {
+              if (key.toUpperCase().startsWith('VSCODE_')) delete env[key];
+            }
+            delete env.ELECTRON_RUN_AS_NODE;
+            return env;
+          }'''.replace('          ', '')
+          new = '''function safeEnvironment(): NodeJS.ProcessEnv {
+            const env: NodeJS.ProcessEnv = {};
+            for (const key of [
+              'PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC',
+              'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME',
+              'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'SHELL',
+              'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA',
+              'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'DBUS_SESSION_BUS_ADDRESS'
+            ]) {
+              if (process.env[key] !== undefined) env[key] = process.env[key];
+            }
+            return env;
+          }'''.replace('          ', '')
+          if s.count(old) != 1:
+              raise SystemExit(f'VS Code env anchor mismatch {s.count(old)}')
+          old_timeout = "      const timeoutMs = Math.min(Math.max(Number(action.input.timeoutMs ?? 15_000), 1_000), 60_000);"
+          if s.count(old_timeout) != 1:
+              raise SystemExit('VS Code timeout anchor mismatch')
+          s = s.replace(old, new, 1).replace(old_timeout, "      const timeoutMs = boundedInteger(action.input.timeoutMs, 15_000, 1_000, 60_000);", 1)
+          marker = 'function boundedPositiveInt(input: unknown, min: number, max: number, label: string): number {'
+          helper = '''function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
+            const value = Number(input ?? fallback);
+            if (!Number.isFinite(value)) return fallback;
+            return Math.min(Math.max(Math.trunc(value), min), max);
+          }
+
+          '''.replace('          ', '')
+          if s.count(marker) != 1:
+              raise SystemExit('VS Code bounded helper marker mismatch')
+          p.write_text(s.replace(marker, helper + marker, 1))
+
+          p = Path('src/capabilities/docker.ts')
+          s = p.read_text()
+          old_timeout = "      const timeoutMs = Math.min(Math.max(Number(action.input.timeoutMs ?? 60_000), 1000), 5 * 60_000);"
+          new_timeout = "      const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);"
+          if s.count(old_timeout) != 1:
+              raise SystemExit('Docker timeout anchor mismatch')
+          old_npipe = "  if (/^npipe:\\/\\//i.test(host)) return true;"
+          new_npipe = "  if (/^npipe:\\/\\//i.test(host)) {\n    const pipePath = host.slice('npipe://'.length).replace(/\\\\/g, '/');\n    return /^(?:\\/\\/)?\\.\\/pipe\\/[A-Za-z0-9_.-]+$/i.test(pipePath);\n  }"
+          if s.count(old_npipe) != 1:
+              raise SystemExit(f'Docker npipe anchor mismatch {s.count(old_npipe)}')
+          marker = 'function validateServices(input: unknown): string[] {'
+          helper = '''function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
+            const value = Number(input ?? fallback);
+            if (!Number.isFinite(value)) return fallback;
+            return Math.min(Math.max(Math.trunc(value), min), max);
+          }
+
+          '''.replace('          ', '')
+          if s.count(marker) != 1:
+              raise SystemExit('Docker bounded helper marker mismatch')
+          s = s.replace(old_timeout, new_timeout, 1).replace(old_npipe, new_npipe, 1).replace(marker, helper + marker, 1)
+          p.write_text(s)
+
+          p = Path('src/capabilities/postgres.ts')
+          s = p.read_text()
+          replacements = [
+              ("      const limit = Math.min(Math.max(Number(action.input.limit ?? 100), 1), MAX_ROWS);", "      const limit = boundedInteger(action.input.limit, 100, 1, MAX_ROWS);"),
+              ("      const offset = Math.min(Math.max(Number(action.input.offset ?? 0), 0), 10_000);", "      const offset = boundedInteger(action.input.offset, 0, 0, 10_000);"),
+              ("function boundedTimeout(value: unknown): number {\n  return Math.min(Math.max(Number(value ?? 5000), 250), 10_000);\n}", "function boundedTimeout(value: unknown): number {\n  return boundedInteger(value, 5_000, 250, 10_000);\n}\n\nfunction boundedInteger(value: unknown, fallback: number, min: number, max: number): number {\n  const parsed = Number(value ?? fallback);\n  if (!Number.isFinite(parsed)) return fallback;\n  return Math.min(Math.max(Math.trunc(parsed), min), max);\n}")
+          ]
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f'Postgres anchor mismatch {s.count(old)}: {old[:60]}')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          rm .github/workflows/audit-adapter-boundaries-once.yml
+          git config user.name 'Operator CI'
+          git config user.email 'operator-ci@example.invalid'
+          git add -A
+          git diff --cached --check
+          git commit -m 'security: tighten adapter execution boundaries'
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
