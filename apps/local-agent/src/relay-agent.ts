@@ -1,6 +1,6 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
+import { readDurableStateText } from '../../../src/core/durable-state.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayClient, type RelayDelivery, type RelayRecoveryDecision } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
@@ -8,6 +8,11 @@ import type { ActionRequest } from '../../../src/core/types.ts';
 
 const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
+const RELAY_SESSION_TOKEN_OPTIONS = {
+  maxBytes: MAX_TOKEN_BYTES,
+  errorCode: 'RELAY_SESSION_TOKEN_FILE_INVALID',
+  invalidMessage: 'Relay session token file is invalid.'
+} as const;
 
 type JsonObject = Record<string, unknown>;
 
@@ -110,18 +115,35 @@ export class LocalAgentRelayRunner {
   }
 
   async #readSessionToken(): Promise<string> {
-    let stat;
-    try { stat = await fs.lstat(this.#sessionTokenFile); }
-    catch { throw new OperatorError('RELAY_SESSION_TOKEN_FILE_MISSING', 'Relay session token file is missing.', { retryable: true }); }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 16 || stat.size > MAX_TOKEN_BYTES) {
-      throw new OperatorError('RELAY_SESSION_TOKEN_FILE_INVALID', 'Relay session token file must be a bounded regular file, not a symlink.', { retryable: false });
-    }
-    const token = (await fs.readFile(this.#sessionTokenFile, 'utf8')).trim();
-    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) || Buffer.byteLength(token, 'utf8') > MAX_TOKEN_BYTES) {
-      throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token file does not contain a valid token.', { retryable: true });
-    }
-    return token;
+    return await readRelaySessionTokenFile(this.#sessionTokenFile);
   }
+}
+
+export async function readRelaySessionTokenFile(fileInput: string): Promise<string> {
+  const file = path.resolve(fileInput);
+  let raw: string;
+  try {
+    raw = await readDurableStateText(file, RELAY_SESSION_TOKEN_OPTIONS);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new OperatorError('RELAY_SESSION_TOKEN_FILE_MISSING', 'Relay session token file is missing.', { retryable: true });
+    }
+    if (error instanceof OperatorError) throw error;
+    throw new OperatorError('RELAY_SESSION_TOKEN_FILE_INVALID', 'Relay session token file could not be read.', {
+      retryable: false,
+      details: { cause: String(error) }
+    });
+  }
+
+  if (Buffer.byteLength(raw, 'utf8') < 16) {
+    throw new OperatorError('RELAY_SESSION_TOKEN_FILE_INVALID', 'Relay session token file is too small to contain a valid token.', { retryable: false });
+  }
+  const token = raw.trim();
+  const tokenBytes = Buffer.byteLength(token, 'utf8');
+  if (tokenBytes < 16 || tokenBytes > MAX_TOKEN_BYTES || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+    throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token file does not contain a valid token.', { retryable: true });
+  }
+  return token;
 }
 
 function validateRemoteAction(input: unknown): ActionRequest {
