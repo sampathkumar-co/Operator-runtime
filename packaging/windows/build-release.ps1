@@ -54,14 +54,14 @@ if (-not $NodeExe) { $NodeExe = (Get-Command node.exe -ErrorAction Stop).Source 
 $NodeExe = (Resolve-Path $NodeExe).Path
 if (-not (Test-Path -LiteralPath $NodeExe -PathType Leaf)) { throw 'NodeExe is not a file.' }
 
-Write-Host '[operator-release] compiling native launcher'
-& cargo build --manifest-path (Join-Path $repo 'native\windows-launcher\Cargo.toml') --release
+Write-Host '[operator-release] compiling native launcher from committed Cargo.lock'
+& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-launcher\Cargo.toml') --release
 Assert-Exit 'windows launcher build'
-Write-Host '[operator-release] compiling Windows UIA sidecar'
-& cargo build --manifest-path (Join-Path $repo 'native\windows-uia\Cargo.toml') --release
+Write-Host '[operator-release] compiling Windows UIA sidecar from committed Cargo.lock'
+& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-uia\Cargo.toml') --release
 Assert-Exit 'windows UIA build'
-Write-Host '[operator-release] compiling Windows DPAPI helper'
-& cargo build --manifest-path (Join-Path $repo 'native\windows-dpapi\Cargo.toml') --release
+Write-Host '[operator-release] compiling Windows DPAPI helper from committed Cargo.lock'
+& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-dpapi\Cargo.toml') --release
 Assert-Exit 'windows DPAPI build'
 
 $launcher = Join-Path $repo 'native\windows-launcher\target\release\operator-windows-launcher.exe'
