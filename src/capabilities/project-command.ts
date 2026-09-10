@@ -269,11 +269,19 @@ export class ProjectCommandProvider implements CapabilityProvider {
   }
 
   async #readRegistry(): Promise<Registry | null> {
+    let realRegistry: string;
+    try {
+      realRegistry = await fs.realpath(this.#registryPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+
     for (const root of this.#allowedRoots) {
-      if (isWithin(this.#registryPath, root)) {
-        throw new OperatorError('COMMAND_REGISTRY_INSIDE_PROJECT_DENIED', 'Trusted command registry must live outside all project-authorized roots so project files cannot rewrite execution authority.', {
-          details: { registryPath: this.#registryPath }
-        });
+      let realRoot = root;
+      try { realRoot = await fs.realpath(root); } catch { /* retain lexical root */ }
+      if (isWithin(this.#registryPath, root) || isWithin(realRegistry, realRoot)) {
+        throw new OperatorError('COMMAND_REGISTRY_INSIDE_PROJECT_DENIED', 'Trusted command registry must live outside all project-authorized roots so project files cannot rewrite execution authority.');
       }
     }
 
