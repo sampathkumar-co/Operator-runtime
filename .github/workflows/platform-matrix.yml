@@ -18,15 +18,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - name: Build real Windows DPAPI helper for identity tests
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          rustup default stable
+          rustup default 1.98.0
           cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
           $helper = (Resolve-Path native/windows-dpapi/target/release/operator-windows-dpapi.exe).Path
           "OPERATOR_WINDOWS_DPAPI_PATH=$helper" >> $env:GITHUB_ENV
