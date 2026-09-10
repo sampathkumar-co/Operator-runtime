@@ -135,9 +135,9 @@ jobs:
           rustc --version
           cargo --version
       - name: Compile and test UIA sidecar
-        run: cargo test --manifest-path native/windows-uia/Cargo.toml
+        run: cargo test --locked --manifest-path native/windows-uia/Cargo.toml
       - name: Clippy UIA sidecar
-        run: cargo clippy --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
 
   windows-dpapi:
     name: Windows DPAPI device-key helper
@@ -153,14 +153,14 @@ jobs:
           cargo --version
       - name: Compile and test DPAPI helper
         shell: pwsh
-        run: cargo test --manifest-path native/windows-dpapi/Cargo.toml
+        run: cargo test --locked --manifest-path native/windows-dpapi/Cargo.toml
       - name: Clippy DPAPI helper
         shell: pwsh
-        run: cargo clippy --manifest-path native/windows-dpapi/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/windows-dpapi/Cargo.toml --all-targets -- -D warnings
       - name: Release DPAPI round-trip self-test
         shell: pwsh
         run: |
-          cargo build --manifest-path native/windows-dpapi/Cargo.toml --release
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
           & ./native/windows-dpapi/target/release/operator-windows-dpapi.exe --self-test
           if ($LASTEXITCODE -ne 0) { throw 'DPAPI release helper self-test failed' }
 
@@ -181,7 +181,7 @@ jobs:
           cargo --version
       - name: Clippy release launcher
         shell: pwsh
-        run: cargo clippy --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
       - name: Build unsigned MSIX and App Installer metadata
         shell: pwsh
         run: ./packaging/windows/build-release.ps1 -Version 0.1.0.0 -UpdateBaseUri https://updates.example.invalid/operator
