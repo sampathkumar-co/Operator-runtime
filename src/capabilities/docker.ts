@@ -126,7 +126,7 @@ export class DockerProvider implements CapabilityProvider {
         });
       }
       const ids = [...new Set(selected.map((container) => container.id))].sort();
-      const timeoutMs = Math.min(Math.max(Number(action.input.timeoutMs ?? 60_000), 1000), 5 * 60_000);
+      const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);
       await this.#run(before.context, [operation, ...ids], timeoutMs);
 
       const after = await this.#inspectProject(before.root);
@@ -266,6 +266,12 @@ export class DockerProvider implements CapabilityProvider {
   }
 }
 
+function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
+  const value = Number(input ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
 function validateServices(input: unknown): string[] {
   if (!Array.isArray(input) || input.length === 0 || input.length > MAX_SERVICES) {
     throw new OperatorError('DOCKER_SERVICES_REQUIRED', `services must contain 1-${MAX_SERVICES} Compose service names.`);
@@ -332,7 +338,10 @@ function sameLocalPath(candidate: string, root: string): boolean {
 
 function isLocalDockerHost(host: string): boolean {
   if (/^unix:\/\/\//i.test(host)) return path.posix.isAbsolute(host.slice('unix://'.length));
-  if (/^npipe:\/\//i.test(host)) return true;
+  if (/^npipe:\/\//i.test(host)) {
+    const pipePath = host.slice('npipe://'.length).replace(/\\/g, '/');
+    return /^(?:\/\/)?\.\/pipe\/[A-Za-z0-9_.-]+$/i.test(pipePath);
+  }
   if (/^tcp:\/\//i.test(host)) {
     try {
       const url = new URL(`http://${host.slice('tcp://'.length)}`);

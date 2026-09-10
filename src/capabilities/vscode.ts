@@ -74,7 +74,7 @@ export class VsCodeProvider implements CapabilityProvider {
       }
 
       const mode = String(action.input.mode ?? 'folder');
-      const timeoutMs = Math.min(Math.max(Number(action.input.timeoutMs ?? 15_000), 1_000), 60_000);
+      const timeoutMs = boundedInteger(action.input.timeoutMs, 15_000, 1_000, 60_000);
       await fs.mkdir(this.#dataDir, { recursive: true, mode: 0o700 });
       const args = ['--new-window', '--disable-extensions', `--user-data-dir=${this.#dataDir}`];
       let targetSummary: Record<string, unknown>;
@@ -170,6 +170,12 @@ export class VsCodeProvider implements CapabilityProvider {
   }
 }
 
+function boundedInteger(input: unknown, fallback: number, min: number, max: number): number {
+  const value = Number(input ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
 function boundedPositiveInt(input: unknown, min: number, max: number, label: string): number {
   const value = Number(input);
   if (!Number.isInteger(value) || value < min || value > max) throw new OperatorError('VSCODE_POSITION_INVALID', `${label} must be an integer between ${min} and ${max}.`);
@@ -182,11 +188,16 @@ function inside(candidate: string, root: string): boolean {
 }
 
 function safeEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.toUpperCase().startsWith('VSCODE_')) delete env[key];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [
+    'PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC',
+    'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME',
+    'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'SHELL',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PROGRAMDATA', 'LOCALAPPDATA', 'APPDATA',
+    'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'DBUS_SESSION_BUS_ADDRESS'
+  ]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
   }
-  delete env.ELECTRON_RUN_AS_NODE;
   return env;
 }
 

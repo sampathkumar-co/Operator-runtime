@@ -224,6 +224,17 @@ function success(
   };
 }
 
+function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
+  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_CONFIG_HOME']) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, allowNonZero = false): Promise<GitOutput> {
   return await new Promise((resolve, reject) => {
     const child = spawn('git', [...SAFE_GIT_PREFIX, ...args], {
@@ -231,7 +242,7 @@ async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, 
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GIT_PAGER: '', ...extraEnv }
+      env: gitEnvironment(extraEnv)
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

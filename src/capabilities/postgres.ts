@@ -133,8 +133,8 @@ export class PostgresProvider implements CapabilityProvider {
       const columns = validateColumns(action.input.columns);
       const filters = validateFilters(action.input.filters);
       const orderBy = validateOrder(action.input.orderBy);
-      const limit = Math.min(Math.max(Number(action.input.limit ?? 100), 1), MAX_ROWS);
-      const offset = Math.min(Math.max(Number(action.input.offset ?? 0), 0), 10_000);
+      const limit = boundedInteger(action.input.limit, 100, 1, MAX_ROWS);
+      const offset = boundedInteger(action.input.offset, 0, 0, 10_000);
       const timeoutMs = boundedTimeout(action.input.timeoutMs);
       const built = buildSelect(schema, table, columns, filters, orderBy, limit, offset);
       const rows = await this.#query(profile, root, built.sql, built.variables, timeoutMs);
@@ -360,7 +360,13 @@ function identifier(value: string, label: string): string {
 }
 
 function boundedTimeout(value: unknown): number {
-  return Math.min(Math.max(Number(value ?? 5000), 250), 10_000);
+  return boundedInteger(value, 5_000, 250, 10_000);
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
 function isLocalPostgresHost(host: string): boolean {
