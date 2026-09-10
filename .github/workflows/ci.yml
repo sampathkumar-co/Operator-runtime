@@ -132,8 +132,10 @@ jobs:
       - name: Rust toolchain
         run: |
           rustup default 1.98.0
+          rustup component add clippy --toolchain 1.98.0
           rustc --version
           cargo --version
+          cargo clippy --version
       - name: Compile and test UIA sidecar
         run: cargo test --locked --manifest-path native/windows-uia/Cargo.toml
       - name: Clippy UIA sidecar
@@ -149,8 +151,10 @@ jobs:
         shell: pwsh
         run: |
           rustup default 1.98.0
+          rustup component add clippy --toolchain 1.98.0
           rustc --version
           cargo --version
+          cargo clippy --version
       - name: Compile and test DPAPI helper
         shell: pwsh
         run: cargo test --locked --manifest-path native/windows-dpapi/Cargo.toml
@@ -177,8 +181,10 @@ jobs:
         shell: pwsh
         run: |
           rustup default 1.98.0
+          rustup component add clippy --toolchain 1.98.0
           rustc --version
           cargo --version
+          cargo clippy --version
       - name: Clippy release launcher
         shell: pwsh
         run: cargo clippy --locked --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
