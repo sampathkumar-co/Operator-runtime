@@ -70,7 +70,7 @@ jobs:
           if ($meta.signed -ne $true) { throw 'signed release metadata was not updated' }
           if ($meta.signerSubject -ne '${{ steps.cert.outputs.publisher }}') { throw 'signer subject metadata mismatch' }
           if ($meta.timestamped -ne $false) { throw 'ephemeral CI signing must be recorded as non-timestamped' }
-      - name: Install signed package and run packaged launcher self-test
+      - name: Install signed package and run one-command onboarding smoke
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -84,7 +84,26 @@ jobs:
             $output = & $launcher --self-test
             if ($LASTEXITCODE -ne 0) { throw "packaged launcher self-test exited $LASTEXITCODE" }
             if (($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test marker missing' }
+
+            $state = Join-Path $env:LOCALAPPDATA 'Operator'
+            $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
+            & $launcher setup --root $root
+            if ($LASTEXITCODE -ne 0) { throw 'installed Operator setup failed' }
+            & $launcher verify
+            if ($LASTEXITCODE -ne 0) { throw 'installed Operator verify failed' }
+
+            $agent = Invoke-RestMethod -Uri 'http://127.0.0.1:47100/health' -TimeoutSec 2
+            $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
+            if (-not $agent.ok -or $agent.service -ne 'operator-local-agent') { throw 'installed local agent health check failed' }
+            if (-not $mcp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
           } finally {
+            if ($package) {
+              $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
+              Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
             Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
           }
       - name: Remove ephemeral trust material

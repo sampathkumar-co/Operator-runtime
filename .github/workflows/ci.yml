@@ -206,14 +206,30 @@ jobs:
             'native/operator-windows-dpapi.exe',
             'app/package.json',
             'app/apps/local-agent/src/main.ts',
+            'app/apps/local-agent/src/cli.ts',
+            'app/apps/local-agent/src/bootstrap-config.ts',
+            'app/apps/mcp-server/src/server.ts',
+            'app/apps/mcp-server/node_modules/fastify/package.json',
+            'app/apps/mcp-server/node_modules/@modelcontextprotocol/server/package.json',
             'app/src/core/runtime.ts',
             'AppxManifest.xml'
           )
           foreach ($relative in $required) {
             if (-not (Test-Path (Join-Path 'artifacts/windows-release/unpacked' $relative) -PathType Leaf)) { throw "Missing packaged file: $relative" }
           }
+          $manifestText = Get-Content artifacts/windows-release/unpacked/AppxManifest.xml -Raw
+          if ($manifestText -notmatch 'Alias="operator\.exe"') { throw 'Operator app execution alias is missing' }
           & artifacts/windows-release/unpacked/native/operator-windows-dpapi.exe --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Packaged DPAPI helper self-test failed' }
+          $bootstrapState = Join-Path $env:LOCALAPPDATA 'Operator'
+          $bootstrapRoot = Join-Path $env:RUNNER_TEMP 'operator-package-authorized-root'
+          New-Item -ItemType Directory -Force -Path $bootstrapRoot | Out-Null
+          Remove-Item -LiteralPath $bootstrapState -Recurse -Force -ErrorAction SilentlyContinue
+          & artifacts/windows-release/unpacked/Operator.exe setup --root $bootstrapRoot --no-start
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Operator setup failed' }
+          & artifacts/windows-release/unpacked/Operator.exe verify
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Operator verify failed' }
+          Remove-Item -LiteralPath $bootstrapState -Recurse -Force -ErrorAction SilentlyContinue
           $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
           if ($meta.signed -ne $false) { throw 'CI package must remain explicitly unsigned' }
           if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'release metadata hash mismatch' }
