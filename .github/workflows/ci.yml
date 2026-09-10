@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - run: npm run check
@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - name: Cross-layer adversarial boundary tests
@@ -37,8 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - name: Bounded runtime performance budgets
@@ -49,8 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - name: Reproduce locked dependency graphs without lifecycle scripts
@@ -83,7 +83,7 @@ jobs:
             if (!bom.metadata?.component?.name) throw new Error(`${file}: root component metadata missing`);
           }
           NODE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: operator-node-cyclonedx-sbom
           path: artifacts/sbom/*.cdx.json
@@ -98,8 +98,8 @@ jobs:
       run:
         working-directory: apps/mcp-server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - run: npm ci --ignore-scripts --no-audit --no-fund
@@ -115,8 +115,8 @@ jobs:
       run:
         working-directory: apps/relay-server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - run: npm ci --ignore-scripts --no-audit --no-fund
@@ -128,10 +128,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Rust toolchain
         run: |
-          rustup default stable
+          rustup default 1.98.0
           rustc --version
           cargo --version
       - name: Compile and test UIA sidecar
@@ -144,11 +144,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Rust toolchain
         shell: pwsh
         run: |
-          rustup default stable
+          rustup default 1.98.0
           rustc --version
           cargo --version
       - name: Compile and test DPAPI helper
@@ -169,14 +169,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
       - name: Rust toolchain
         shell: pwsh
         run: |
-          rustup default stable
+          rustup default 1.98.0
           rustc --version
           cargo --version
       - name: Clippy release launcher
@@ -213,7 +213,7 @@ jobs:
           if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'release metadata hash mismatch' }
           [xml]$installer = Get-Content artifacts/windows-release/Operator.appinstaller -Raw
           if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must use HTTPS' }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: operator-windows-unsigned-msix
           path: |
