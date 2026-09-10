@@ -44,7 +44,7 @@ export function sameDestination(actualRaw: string, expectedRaw: string): boolean
     const expected = new URL(expectedRaw);
     actual.hash = '';
     expected.hash = '';
-    return actual.origin === expected.origin && (actual.pathname === expected.pathname || actual.pathname.replace(/\/$/, '') === expected.pathname.replace(/\/$/, ''));
+    return actual.origin === expected.origin && actual.search === expected.search && (actual.pathname === expected.pathname || actual.pathname.replace(/\/$/, '') === expected.pathname.replace(/\/$/, ''));
   } catch { return false; }
 }
 

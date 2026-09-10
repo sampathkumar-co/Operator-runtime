@@ -1,6 +1,7 @@
 import { OperatorError } from '../core/errors.ts';
 
 const DEFAULT_TIMEOUT_MS = 8_000;
+const MAX_CDP_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 export type JsonMap = Record<string, unknown>;
 
@@ -44,20 +45,34 @@ export class CdpConnection {
     this.url = url;
     this.#socket = new WebSocket(url);
     this.#ready = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new OperatorError('CDP_CONNECT_TIMEOUT', 'Timed out connecting to browser target.', { retryable: true })), 4_000);
-      this.#socket.addEventListener('open', () => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        resolve();
-      }, { once: true });
-      this.#socket.addEventListener('error', () => {
-        clearTimeout(timeout);
+        callback();
+      };
+      const timeout = setTimeout(() => finish(() => {
+        this.#closed = true;
+        try { this.#socket.close(); } catch { /* timeout is already authoritative */ }
+        reject(new OperatorError('CDP_CONNECT_TIMEOUT', 'Timed out connecting to browser target.', { retryable: true }));
+      }), 4_000);
+      timeout.unref();
+      this.#socket.addEventListener('open', () => finish(resolve), { once: true });
+      this.#socket.addEventListener('error', () => finish(() => {
+        this.#closed = true;
+        try { this.#socket.close(); } catch { /* connection error is already authoritative */ }
         reject(new OperatorError('CDP_CONNECT_FAILED', 'Failed to connect to browser target.', { retryable: true }));
-      }, { once: true });
+      }), { once: true });
     });
 
     this.#socket.addEventListener('message', (event) => {
       try {
         const raw = typeof event.data === 'string' ? event.data : String(event.data);
+        if (Buffer.byteLength(raw, 'utf8') > MAX_CDP_MESSAGE_BYTES) {
+          this.close();
+          return;
+        }
         const message = JSON.parse(raw) as {
           id?: number;
           result?: JsonMap;
