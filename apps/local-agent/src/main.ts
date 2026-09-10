@@ -15,7 +15,15 @@ const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .filter(Boolean)
   .map((root) => path.resolve(root));
 
+// This allowlist is used only by commands explicitly declared in the trusted
+// Operator project-command registry outside project roots. Generic terminal
+// execution has a separate, empty-by-default allowlist below.
 const allowedExecutables = (process.env.OPERATOR_ALLOWED_EXECUTABLES ?? 'git,node,npm,npx,pnpm,python,python3')
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+
+const terminalAllowedExecutables = (process.env.OPERATOR_TERMINAL_ALLOWED_EXECUTABLES ?? '')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
@@ -48,6 +56,7 @@ const relayAllowInsecureLoopback = process.env.OPERATOR_RELAY_ALLOW_INSECURE_LOO
 const runtime = createRuntime({
   allowedRoots,
   allowedExecutables,
+  terminalAllowedExecutables,
   projectCommandRegistryPath: process.env.OPERATOR_PROJECT_COMMAND_REGISTRY,
   dockerExecutable: process.env.OPERATOR_DOCKER_PATH,
   postgresProfileRegistryPath: process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY,
@@ -122,7 +131,8 @@ const agent = createLocalAgentServer({
     relayResultConfigured: Boolean(relayResultUrl),
     relayTokenFileConfigured: Boolean(relayUrl),
     authorizedRootCount: allowedRoots.length,
-    executableAllowlistCount: allowedExecutables.length
+    projectExecutableAllowlistCount: allowedExecutables.length,
+    terminalExecutableAllowlistCount: terminalAllowedExecutables.length
   },
   permissions: {
     allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
@@ -141,6 +151,7 @@ console.error(`[operator] local agent listening on http://${bound.host}:${bound.
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
 console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
+console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 
 if (relayUrl && !(await emergencyStop.status()).engaged) {
