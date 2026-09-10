@@ -7,9 +7,9 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:red-team": "node --experimental-strip-types --test security/*.test.ts",
-    "test:performance": "node --experimental-strip-types --test performance/*.test.ts",
+    "test": "node --experimental-strip-types scripts/run-test-suite.ts test",
+    "test:red-team": "node --experimental-strip-types scripts/run-test-suite.ts security",
+    "test:performance": "node --experimental-strip-types scripts/run-test-suite.ts performance",
     "check": "node --experimental-strip-types scripts/check.ts && npm test",
     "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts"
   },
