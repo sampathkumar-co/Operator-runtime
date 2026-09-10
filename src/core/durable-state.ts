@@ -48,6 +48,67 @@ export async function readDurableStateText(file: string, options: DurableStateOp
   }
 }
 
+export async function appendDurableStateText(file: string, content: string, options: DurableStateOptions): Promise<void> {
+  validateOptions(options);
+  const byteLength = Buffer.byteLength(content, 'utf8');
+  if (byteLength < 1 || byteLength > options.maxBytes) throw invalid(options, 'Appended state content is empty or exceeds the bounded size.');
+
+  const directory = path.dirname(file);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+
+  let initial: Stats | null = null;
+  try {
+    initial = await fs.lstat(file);
+    assertStableRegular(initial, options);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const noFollow = process.platform === 'win32'
+    ? 0
+    : Number((fsConstants as unknown as Record<string, number>).O_NOFOLLOW ?? 0);
+  let handle;
+  let created = false;
+  try {
+    if (initial) {
+      handle = await fs.open(file, fsConstants.O_WRONLY | fsConstants.O_APPEND | noFollow);
+    } else {
+      handle = await fs.open(file, 'wx', 0o600);
+      created = true;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw invalid(options, 'Symbolic links are not permitted.');
+    throw error;
+  }
+
+  try {
+    const opened = await handle.stat();
+    assertStableRegular(opened, options);
+    if (initial && !sameFile(initial, opened)) throw invalid(options, 'State file changed while it was being opened for append.');
+
+    const current = await fs.lstat(file);
+    assertStableRegular(current, options);
+    if (!sameFile(opened, current)) throw invalid(options, 'State file path changed before append.');
+    if (opened.size + byteLength > options.maxBytes) throw invalid(options, 'State file would exceed the bounded size after append.');
+
+    await handle.writeFile(content, { encoding: 'utf8' });
+    await handle.sync();
+
+    const appended = await handle.stat();
+    assertStableRegular(appended, options);
+    if (!sameFile(opened, appended) || appended.size !== opened.size + byteLength) {
+      throw invalid(options, 'State append did not produce the expected file size.');
+    }
+    const committed = await fs.lstat(file);
+    assertStableRegular(committed, options);
+    if (!sameFile(appended, committed)) throw invalid(options, 'State file path changed during append.');
+  } finally {
+    await handle.close();
+  }
+
+  if (created && process.platform !== 'win32') await syncDirectory(directory);
+}
+
 export async function writeDurableStateText(file: string, content: string, options: DurableStateOptions): Promise<void> {
   validateOptions(options);
   const byteLength = Buffer.byteLength(content, 'utf8');
@@ -82,10 +143,7 @@ export async function writeDurableStateText(file: string, content: string, optio
     assertStableRegular(committed, options);
     if (committed.size !== byteLength) throw invalid(options, 'Committed state size did not match the serialized state.');
 
-    if (process.platform !== 'win32') {
-      const directoryHandle = await fs.open(directory, 'r');
-      try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
-    }
+    if (process.platform !== 'win32') await syncDirectory(directory);
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     if (!renamed) await fs.rm(temp, { force: true }).catch(() => undefined);
@@ -110,6 +168,11 @@ function assertStableRegular(stat: Stats, options: DurableStateOptions): void {
 
 function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await fs.open(directory, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 function validateOptions(options: DurableStateOptions): void {
