@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { safeChildEnvironment } from '../core/child-environment.ts';
 import { BrowserCdpProvider } from './browser-cdp.ts';
 import { assertLoopbackEndpoint } from './browser-cdp-page.ts';
 
@@ -206,7 +207,8 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
     const child = spawn(executable, args, {
       shell: false,
       stdio: 'ignore',
-      windowsHide: true
+      windowsHide: true,
+      env: safeChildEnvironment('desktop')
     });
     this.#child = child;
 

@@ -5,6 +5,7 @@ import readline from 'node:readline';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { safeChildEnvironment } from '../core/child-environment.ts';
 
 const SCORE: CapabilityScore = {
   reliability: 0.95,
@@ -115,7 +116,8 @@ class WindowsUiaSidecarClient {
     const child = spawn(this.#binaryPath, [], {
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      env: safeChildEnvironment('windows-native')
     });
     this.#process = child;
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { OperatorError } from './errors.ts';
+import { safeChildEnvironment } from './child-environment.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_IDENTITY_BYTES = 256 * 1024;
@@ -263,7 +264,8 @@ async function runSecretHelper(executable: string, operation: 'protect' | 'unpro
     const child = spawn(executable, [operation], {
       shell: false,
       windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: safeChildEnvironment('windows-native')
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
