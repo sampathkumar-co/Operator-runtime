@@ -1,13 +1,18 @@
 import crypto from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { createDurableStateBytes, readDurableStateBytes } from './durable-state.ts';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_ARTIFACTS = 32;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const PRODUCT = 'operator-runtime';
+const UPDATE_STAGE_OPTIONS = {
+  maxBytes: MAX_ARTIFACT_BYTES,
+  errorCode: 'UPDATE_STAGE_INVALID',
+  invalidMessage: 'Staged update artifact is invalid.'
+} as const;
 
 export type ReleaseChannel = 'stable' | 'beta';
 export type ReleaseArtifactKind = 'msix' | 'msixbundle' | 'zip';
@@ -82,13 +87,16 @@ export class ReleaseUpdateVerifier {
     if (sha256 !== artifact.sha256) throw new OperatorError('UPDATE_HASH_MISMATCH', 'Downloaded update hash does not match the signed release manifest.');
 
     const root = path.resolve(stateDir);
-    const stagingDir = path.join(root, 'updates', versionText);
+    const updatesDir = path.join(root, 'updates');
+    const stagingDir = path.join(updatesDir, versionText);
     await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
+    await assertRealUpdateDirectory(updatesDir);
+    await assertRealUpdateDirectory(stagingDir);
     const extension = artifact.kind === 'msixbundle' ? '.msixbundle' : artifact.kind === 'msix' ? '.msix' : '.zip';
     const finalPath = path.join(stagingDir, `operator-${artifact.platform}-${artifact.arch}${extension}`);
 
     try {
-      const existing = await fs.readFile(finalPath);
+      const existing = await readDurableStateBytes(finalPath, UPDATE_STAGE_OPTIONS);
       const existingSha = crypto.createHash('sha256').update(existing).digest('hex');
       if (existing.byteLength === bytes.byteLength && existingSha === sha256) return { path: finalPath, sha256, sizeBytes: bytes.byteLength };
       throw new OperatorError('UPDATE_STAGE_CONFLICT', 'A different artifact is already staged for this release target.');
@@ -97,15 +105,19 @@ export class ReleaseUpdateVerifier {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
 
-    const temp = `${finalPath}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, bytes, { mode: 0o600, flag: 'wx' });
     try {
-      await fs.copyFile(temp, finalPath, fsConstants.COPYFILE_EXCL);
+      await createDurableStateBytes(finalPath, bytes, UPDATE_STAGE_OPTIONS);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new OperatorError('UPDATE_STAGE_CONFLICT', 'An update artifact appeared concurrently at the staging path.');
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new OperatorError('UPDATE_STAGE_CONFLICT', 'An update artifact appeared concurrently at the staging path.');
+      }
       throw error;
-    } finally {
-      await fs.rm(temp, { force: true });
+    }
+
+    const committed = await readDurableStateBytes(finalPath, UPDATE_STAGE_OPTIONS);
+    const committedSha = crypto.createHash('sha256').update(committed).digest('hex');
+    if (committed.byteLength !== bytes.byteLength || committedSha !== sha256) {
+      throw new OperatorError('UPDATE_STAGE_INVALID', 'Staged update artifact failed post-write verification.');
     }
     return { path: finalPath, sha256, sizeBytes: bytes.byteLength };
   }
@@ -226,4 +238,11 @@ function validIso(value: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('UPDATE_TIME_INVALID', 'Release publication time must be an ISO timestamp.');
   return value;
+}
+
+async function assertRealUpdateDirectory(directory: string): Promise<void> {
+  const stat = await fs.lstat(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new OperatorError('UPDATE_STAGE_INVALID', 'Update staging directories must be real directories, not links or special files.');
+  }
 }
