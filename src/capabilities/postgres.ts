@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { readDurableStateText } from '../core/durable-state.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -23,6 +24,11 @@ const MAX_PROFILES = 50;
 const MAX_ROWS = 500;
 const MAX_COLUMNS = 50;
 const MAX_FILTERS = 20;
+const POSTGRES_REGISTRY_OPTIONS = {
+  maxBytes: MAX_REGISTRY_BYTES,
+  errorCode: 'POSTGRES_REGISTRY_INVALID',
+  invalidMessage: 'PostgreSQL profile registry is invalid.'
+} as const;
 
 type Profile = {
   id: string;
@@ -174,23 +180,34 @@ export class PostgresProvider implements CapabilityProvider {
   }
 
   async #readRegistry(): Promise<Registry | null> {
-    let stat;
-    try { stat = await fs.stat(this.#registryPath); } catch (error) {
+    let realRegistry: string;
+    try {
+      realRegistry = await fs.realpath(this.#registryPath);
+    } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
-    if (!stat.isFile()) throw new OperatorError('POSTGRES_REGISTRY_INVALID', 'PostgreSQL profile registry must be a regular file.');
-    if (stat.size > MAX_REGISTRY_BYTES) throw new OperatorError('POSTGRES_REGISTRY_TOO_LARGE', 'PostgreSQL profile registry exceeds 256 KiB.');
-    const realRegistry = await fs.realpath(this.#registryPath);
+
     for (const root of this.#allowedRoots) {
       let realRoot = root;
       try { realRoot = await fs.realpath(root); } catch { /* retain lexical root */ }
-      if (isWithin(realRegistry, realRoot)) {
+      if (isWithin(this.#registryPath, root) || isWithin(realRegistry, realRoot)) {
         throw new OperatorError('POSTGRES_REGISTRY_INSIDE_PROJECT_DENIED', 'Trusted PostgreSQL profile registry must live outside all authorized project roots.');
       }
     }
+
+    let raw: string;
+    try {
+      raw = await readDurableStateText(this.#registryPath, POSTGRES_REGISTRY_OPTIONS);
+    } catch (error) {
+      if (error instanceof OperatorError) throw error;
+      throw new OperatorError('POSTGRES_REGISTRY_INVALID', 'PostgreSQL profile registry could not be read.', {
+        details: { cause: String(error) }
+      });
+    }
+
     let parsed: unknown;
-    try { parsed = JSON.parse(await fs.readFile(realRegistry, 'utf8')); } catch {
+    try { parsed = JSON.parse(raw); } catch {
       throw new OperatorError('POSTGRES_REGISTRY_INVALID', 'PostgreSQL profile registry is not valid JSON.');
     }
     return validateRegistry(parsed);
