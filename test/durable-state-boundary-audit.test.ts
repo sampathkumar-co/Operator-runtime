@@ -88,6 +88,7 @@ test('all authority-bearing JSON stores use the durable state boundary', async (
     assert.match(source, /readDurableStateText/);
     assert.match(source, /writeDurableStateText/);
     assert.doesNotMatch(source, /fs\.stat\(this\.#(?:file|stateFile)\)/);
+    assert.doesNotMatch(source, /async #write\(state: [^)]+\)[\s\S]{0,120}const state = validateState\(state\)/);
   }
   const identity = await fs.readFile(path.join(root, 'src/core/device-identity.ts'), 'utf8');
   assert.match(identity, /readDurableStateText/);
