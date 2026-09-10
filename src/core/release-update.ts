@@ -89,9 +89,9 @@ export class ReleaseUpdateVerifier {
     const root = path.resolve(stateDir);
     const updatesDir = path.join(root, 'updates');
     const stagingDir = path.join(updatesDir, versionText);
-    await fs.mkdir(stagingDir, { recursive: true, mode: 0o700 });
-    await assertRealUpdateDirectory(updatesDir);
-    await assertRealUpdateDirectory(stagingDir);
+    await ensureRealUpdateDirectory(root, true);
+    await ensureRealUpdateDirectory(updatesDir);
+    await ensureRealUpdateDirectory(stagingDir);
     const extension = artifact.kind === 'msixbundle' ? '.msixbundle' : artifact.kind === 'msix' ? '.msix' : '.zip';
     const finalPath = path.join(stagingDir, `operator-${artifact.platform}-${artifact.arch}${extension}`);
 
@@ -240,7 +240,12 @@ function validIso(value: string): string {
   return value;
 }
 
-async function assertRealUpdateDirectory(directory: string): Promise<void> {
+async function ensureRealUpdateDirectory(directory: string, recursive = false): Promise<void> {
+  try {
+    await fs.mkdir(directory, { recursive, mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
   const stat = await fs.lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new OperatorError('UPDATE_STAGE_INVALID', 'Update staging directories must be real directories, not links or special files.');
