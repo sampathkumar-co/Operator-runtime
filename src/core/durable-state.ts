@@ -11,6 +11,10 @@ export interface DurableStateOptions {
 }
 
 export async function readDurableStateText(file: string, options: DurableStateOptions): Promise<string> {
+  return (await readDurableStateBytes(file, options)).toString('utf8');
+}
+
+export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);
   const initial = await fs.lstat(file);
   assertStableRegular(initial, options);
@@ -42,7 +46,7 @@ export async function readDurableStateText(file: string, options: DurableStateOp
     const current = await fs.lstat(file);
     assertStableRegular(current, options);
     if (!sameFile(afterRead, current)) throw invalid(options, 'State file path changed while it was being read.');
-    return bytes.toString('utf8');
+    return bytes;
   } finally {
     await handle.close();
   }
@@ -110,8 +114,13 @@ export async function appendDurableStateText(file: string, content: string, opti
 }
 
 export async function writeDurableStateText(file: string, content: string, options: DurableStateOptions): Promise<void> {
+  await writeDurableStateBytes(file, Buffer.from(content, 'utf8'), options);
+}
+
+export async function writeDurableStateBytes(file: string, content: Uint8Array, options: DurableStateOptions): Promise<void> {
   validateOptions(options);
-  const byteLength = Buffer.byteLength(content, 'utf8');
+  const bytes = Buffer.from(content);
+  const byteLength = bytes.byteLength;
   if (byteLength > options.maxBytes) throw invalid(options, 'Serialized state exceeds the bounded size.');
 
   const directory = path.dirname(file);
@@ -124,7 +133,7 @@ export async function writeDurableStateText(file: string, content: string, optio
   try {
     handle = await fs.open(temp, 'wx', 0o600);
     try {
-      await handle.writeFile(content, { encoding: 'utf8' });
+      await handle.writeFile(bytes);
       await handle.sync();
     } finally {
       await handle.close();
@@ -147,6 +156,64 @@ export async function writeDurableStateText(file: string, content: string, optio
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     if (!renamed) await fs.rm(temp, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function createDurableStateBytes(file: string, content: Uint8Array, options: DurableStateOptions): Promise<void> {
+  validateOptions(options);
+  const bytes = Buffer.from(content);
+  const byteLength = bytes.byteLength;
+  if (byteLength > options.maxBytes) throw invalid(options, 'Serialized state exceeds the bounded size.');
+
+  const directory = path.dirname(file);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  try {
+    const existing = await fs.lstat(file);
+    assertStableRegular(existing, options);
+    const exists = new Error('State file already exists.') as NodeJS.ErrnoException;
+    exists.code = 'EEXIST';
+    throw exists;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let handle;
+  let published = false;
+  try {
+    handle = await fs.open(temp, 'wx', 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+      handle = undefined;
+    }
+
+    const staged = await fs.lstat(temp);
+    assertStableRegular(staged, options);
+    if (staged.size !== byteLength) throw invalid(options, 'Staged state size did not match the serialized state.');
+
+    await fs.link(temp, file);
+    published = true;
+    await fs.rm(temp);
+
+    const committed = await fs.lstat(file);
+    assertStableRegular(committed, options);
+    if (committed.size !== byteLength) throw invalid(options, 'Committed state size did not match the serialized state.');
+
+    if (process.platform !== 'win32') await syncDirectory(directory);
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+    if (published) {
+      try {
+        const committed = await fs.lstat(file);
+        assertStableRegular(committed, options);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
   }
 }
 
