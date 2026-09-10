@@ -25,9 +25,14 @@ function fakeWindowsProtector(): DeviceSecretProtector {
   };
 }
 
-test('task capsules persist across store instances', async (t) => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-state-'));
+async function tempState(t: test.TestContext, prefix: string): Promise<string> {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(state, { recursive: true, force: true }));
+  return state;
+}
+
+test('task capsules persist across store instances', async (t) => {
+  const state = await tempState(t, 'operator-state-');
   const task = createTask({ userObjective: 'ship', interpretedObjective: 'ship safely', authorizedScope: ['repo'], prohibitedScope: [], successConditions: ['tests pass'] });
   await new TaskStore(state).put(task);
   const loaded = await new TaskStore(state).get(task.id);
@@ -35,18 +40,102 @@ test('task capsules persist across store instances', async (t) => {
   assert.equal(loaded.userObjective, 'ship');
 });
 
-test('audit log redacts secrets recursively', async (t) => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-audit-'));
-  t.after(() => fs.rm(state, { recursive: true, force: true }));
+test('audit log redacts secrets recursively and persists a verified hash-chain head', async (t) => {
+  const state = await tempState(t, 'operator-audit-');
   const log = new AuditLog(state);
-  await log.append({ capability: 'test', result: 'success', risk: 'read', details: { token: 'secret-value', nested: { password: 'bad' }, safe: 'ok' } });
+  const appended = await log.append({ capability: 'test', result: 'success', risk: 'read', details: { token: 'secret-value', nested: { password: 'bad' }, safe: 'ok' } });
   const [event] = await log.tail(1);
   assert.deepEqual(event.details, { token: '[REDACTED]', nested: { password: '[REDACTED]' }, safe: 'ok' });
+  assert.equal(event.chainVersion, 1);
+  assert.equal(event.previousHash, null);
+  assert.match(String(event.hash), /^[0-9a-f]{64}$/);
+  assert.equal(event.hash, appended.hash);
+  const integrity = await log.verifyIntegrity();
+  assert.deepEqual(integrity, { valid: true, count: 1, headHash: event.hash });
+  const head = JSON.parse(await fs.readFile(path.join(state, 'audit-head.json'), 'utf8')) as any;
+  assert.equal(head.count, 1);
+  assert.equal(head.headHash, event.hash);
+});
+
+test('audit chain detects modification of an earlier record', async (t) => {
+  const state = await tempState(t, 'operator-audit-tamper-');
+  const log = new AuditLog(state);
+  await log.append({ capability: 'one', result: 'success', risk: 'read' });
+  await log.append({ capability: 'two', result: 'success', risk: 'read' });
+  await log.append({ capability: 'three', result: 'success', risk: 'read' });
+
+  const file = path.join(state, 'audit.ndjson');
+  const records = (await fs.readFile(file, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+  records[1].capability = 'forged-two';
+  await fs.writeFile(file, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`);
+
+  await assert.rejects(
+    () => new AuditLog(state).tail(10),
+    (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED' && /hash verification failed/.test(error.message)
+  );
+});
+
+test('audit head detects tail truncation and refuses to bless the shorter chain', async (t) => {
+  const state = await tempState(t, 'operator-audit-truncate-');
+  const log = new AuditLog(state);
+  await log.append({ capability: 'one', result: 'success', risk: 'read' });
+  await log.append({ capability: 'two', result: 'success', risk: 'read' });
+
+  const file = path.join(state, 'audit.ndjson');
+  const [first] = (await fs.readFile(file, 'utf8')).trim().split('\n');
+  await fs.writeFile(file, `${first}\n`);
+
+  await assert.rejects(
+    () => new AuditLog(state).verifyIntegrity(),
+    (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED' && /head metadata disagree/.test(error.message)
+  );
+});
+
+test('audit head repairs only the one-record append-before-head crash window', async (t) => {
+  const state = await tempState(t, 'operator-audit-repair-');
+  const log = new AuditLog(state);
+  const first = await log.append({ capability: 'one', result: 'success', risk: 'read' });
+  const second = await log.append({ capability: 'two', result: 'success', risk: 'read' });
+
+  await fs.writeFile(path.join(state, 'audit-head.json'), `${JSON.stringify({
+    version: 1,
+    count: 1,
+    headHash: first.hash,
+    updatedAt: new Date().toISOString()
+  }, null, 2)}\n`);
+
+  const integrity = await new AuditLog(state).verifyIntegrity();
+  assert.deepEqual(integrity, { valid: true, count: 2, headHash: second.hash });
+  const repaired = JSON.parse(await fs.readFile(path.join(state, 'audit-head.json'), 'utf8')) as any;
+  assert.equal(repaired.count, 2);
+  assert.equal(repaired.headHash, second.hash);
+});
+
+test('legacy unchained audit records migrate atomically before the next append', async (t) => {
+  const state = await tempState(t, 'operator-audit-migrate-');
+  const legacy = [
+    { id: 'legacy-1', timestamp: '2026-09-01T00:00:00.000Z', capability: 'old.one', result: 'success', risk: 'read' },
+    { id: 'legacy-2', timestamp: '2026-09-01T00:01:00.000Z', capability: 'old.two', result: 'blocked', risk: 'external' }
+  ];
+  await fs.writeFile(path.join(state, 'audit.ndjson'), `${legacy.map((event) => JSON.stringify(event)).join('\n')}\n`, { mode: 0o600 });
+
+  const log = new AuditLog(state);
+  await log.append({ capability: 'new.three', result: 'success', risk: 'read' });
+  const events = await log.tail(10);
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.map((event) => event.capability), ['old.one', 'old.two', 'new.three']);
+  for (const event of events) {
+    assert.equal(event.chainVersion, 1);
+    assert.match(String(event.hash), /^[0-9a-f]{64}$/);
+  }
+  assert.equal(events[0].previousHash, null);
+  assert.equal(events[1].previousHash, events[0].hash);
+  assert.equal(events[2].previousHash, events[1].hash);
+  assert.deepEqual(await log.verifyIntegrity(), { valid: true, count: 3, headHash: events[2].hash });
 });
 
 test('device identity is stable and signs challenge payloads', async (t) => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-id-'));
-  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const state = await tempState(t, 'operator-id-');
   const store = new DeviceIdentityStore(state);
   const first = await store.loadOrCreate('Test-PC');
   const second = await store.loadOrCreate('Other-Name-Ignored');
@@ -58,8 +147,7 @@ test('device identity is stable and signs challenge payloads', async (t) => {
 });
 
 test('new Windows device identity persists DPAPI ciphertext and no private PEM', async (t) => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-id-win-protected-'));
-  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const state = await tempState(t, 'operator-id-win-protected-');
   const store = new DeviceIdentityStore(state, { platform: 'win32', secretProtector: fakeWindowsProtector() });
   const identity = await store.loadOrCreate('Protected-PC');
 
@@ -80,8 +168,7 @@ test('new Windows device identity persists DPAPI ciphertext and no private PEM',
 });
 
 test('legacy Windows plaintext identity migrates to DPAPI without rotating device identity', async (t) => {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-id-win-migrate-'));
-  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const state = await tempState(t, 'operator-id-win-migrate-');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const legacy = {
     version: 1,
