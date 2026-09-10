@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         run: |
           rustup default stable
-          cargo build --manifest-path native/windows-dpapi/Cargo.toml --release
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
           $helper = (Resolve-Path native/windows-dpapi/target/release/operator-windows-dpapi.exe).Path
           "OPERATOR_WINDOWS_DPAPI_PATH=$helper" >> $env:GITHUB_ENV
       - name: Import and full runtime test suite
