@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { readDurableStateText } from '../core/durable-state.ts';
 import { PathScope } from './path-scope.ts';
 import { ProcessProvider } from './process.ts';
 
@@ -24,6 +25,11 @@ const MAX_ARTIFACTS_PER_COMMAND = 50;
 const MAX_JSON_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_HASH_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const REGISTRY_OPTIONS = {
+  maxBytes: MAX_REGISTRY_BYTES,
+  errorCode: 'COMMAND_REGISTRY_INVALID',
+  invalidMessage: 'Trusted command registry is invalid.'
+} as const;
 
 type TrustedArtifact = {
   path: string;
@@ -106,7 +112,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
           output: {
             projectRoot,
             registryConfigured: registry !== null,
-            registryPath: this.#registryPath,
+            registryLocation: 'operator-local-config',
             commands: project?.commands.map(({ id, title, kind, executable, args, cwd, timeoutMs, risk, artifacts }) => ({
               id,
               title,
@@ -273,10 +279,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
 
     let raw: string;
     try {
-      const stat = await fs.stat(this.#registryPath);
-      if (!stat.isFile()) throw new OperatorError('COMMAND_REGISTRY_INVALID', 'Trusted command registry path is not a regular file.');
-      if (stat.size > MAX_REGISTRY_BYTES) throw new OperatorError('COMMAND_REGISTRY_TOO_LARGE', 'Trusted command registry exceeds 512 KiB.');
-      raw = await fs.readFile(this.#registryPath, 'utf8');
+      raw = await readDurableStateText(this.#registryPath, REGISTRY_OPTIONS);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
@@ -291,8 +294,20 @@ export class ProjectCommandProvider implements CapabilityProvider {
 
   async #matchProject(registry: Registry | null, requestedRoot: string): Promise<TrustedProject | undefined> {
     if (!registry) return undefined;
+    const canonicalAllowedRoots = await Promise.all(this.#allowedRoots.map(async (root) => {
+      try { return await fs.realpath(root); } catch { return root; }
+    }));
     for (const project of registry.projects) {
-      const canonical = await this.#scope.resolveExisting(project.root);
+      const plausiblyInScope = this.#allowedRoots.some((root) => isWithin(project.root, root))
+        || canonicalAllowedRoots.some((root) => isWithin(project.root, root));
+      if (!plausiblyInScope) continue;
+      let canonical: string;
+      try {
+        canonical = await this.#scope.resolveExisting(project.root);
+      } catch (error) {
+        if (error instanceof OperatorError && error.code === 'PATH_OUTSIDE_SCOPE') continue;
+        throw error;
+      }
       if (canonical === requestedRoot) return { ...project, root: canonical };
     }
     return undefined;
