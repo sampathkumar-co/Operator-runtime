@@ -159,6 +159,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const tabs = await this.#listTargets();
     const target = requireTarget(tabs, targetId);
     const response = await fetch(new URL(`/json/activate/${encodeURIComponent(targetId)}`, this.#endpoint), {
+      redirect: 'error',
       signal: AbortSignal.timeout(3_000)
     });
     if (!response.ok) throw new OperatorError('CDP_ACTIVATE_TAB_FAILED', `CDP returned HTTP ${response.status} while focusing a tab.`, { retryable: true });
@@ -186,6 +187,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     requireTarget(await this.#listTargets(), targetId);
     const response = await fetch(new URL(`/json/close/${encodeURIComponent(targetId)}`, this.#endpoint), {
+      redirect: 'error',
       signal: AbortSignal.timeout(3_000)
     });
     if (!response.ok) throw new OperatorError('CDP_CLOSE_TAB_FAILED', `CDP returned HTTP ${response.status} while closing a tab.`, { retryable: true });
@@ -268,7 +270,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
   async #browserConnection(): Promise<CdpConnection> {
     if (this.#browserSession && !this.#browserSession.closed) return this.#browserSession;
-    const response = await fetch(new URL('/json/version', this.#endpoint), { signal: AbortSignal.timeout(3_000) });
+    const response = await fetch(new URL('/json/version', this.#endpoint), { redirect: 'error', signal: AbortSignal.timeout(3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status} while discovering browser endpoint.`, { retryable: true });
     const version = await response.json() as Record<string, unknown>;
     const ws = typeof version.webSocketDebuggerUrl === 'string' ? version.webSocketDebuggerUrl : '';
@@ -317,7 +319,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #listTargets(): Promise<CdpTarget[]> {
-    const response = await fetch(new URL('/json/list', this.#endpoint), { signal: AbortSignal.timeout(3_000) });
+    const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: AbortSignal.timeout(3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
     const raw = await response.json() as Array<Record<string, unknown>>;
     return raw.slice(0, MAX_TABS).map((tab) => ({
@@ -332,7 +334,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   async #createTarget(url: string): Promise<CdpTarget> {
     const endpoint = new URL('/json/new', this.#endpoint);
     endpoint.search = url;
-    const response = await fetch(endpoint, { method: 'PUT', signal: AbortSignal.timeout(4_000) });
+    const response = await fetch(endpoint, { method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(4_000) });
     if (!response.ok) throw new OperatorError('CDP_CREATE_TAB_FAILED', `CDP returned HTTP ${response.status} while creating a tab.`, { retryable: true });
     const tab = await response.json() as Record<string, unknown>;
     const target: CdpTarget = {

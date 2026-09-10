@@ -37,12 +37,13 @@ class DirectLocalAgentClient implements Executor {
   #token: string;
 
   constructor(baseUrl: string, token: string) {
-    this.#url = new URL('/v1/execute', baseUrl);
+    this.#url = validateLoopbackAgentUrl(baseUrl);
     this.#token = token;
   }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const response = await fetch(this.#url, {
+      redirect: 'error',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -57,6 +58,15 @@ class DirectLocalAgentClient implements Executor {
   }
 }
 
+export function validateLoopbackAgentUrl(input: string): URL {
+  let base: URL;
+  try { base = new URL(input); } catch { throw new Error('OPERATOR_AGENT_URL is invalid.'); }
+  const host = base.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (base.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(host) || base.username || base.password || base.hash || base.search) {
+    throw new Error('OPERATOR_AGENT_URL must be credential-free loopback http:// without query or fragment.');
+  }
+  return new URL('/v1/execute', base);
+}
 function parseWait(value: string | undefined): number | undefined {
   if (value === undefined || value.trim() === '') return undefined;
   const parsed = Number(value);

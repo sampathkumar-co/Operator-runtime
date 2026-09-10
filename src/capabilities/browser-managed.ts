@@ -144,7 +144,7 @@ async function endpointHealthy(endpoint: string): Promise<boolean> {
   try { url = new URL(endpoint); } catch { return false; }
   try { assertLoopbackEndpoint(url); } catch { return false; }
   try {
-    const response = await fetch(new URL('/json/version', url), { signal: AbortSignal.timeout(1_500) });
+    const response = await fetch(new URL('/json/version', url), { redirect: 'error', signal: AbortSignal.timeout(1_500) });
     if (!response.ok) return false;
     const payload = await response.json() as { Browser?: unknown; webSocketDebuggerUrl?: unknown };
     if (typeof payload.Browser !== 'string' || !/(Chrome|Chromium|Edg)/i.test(payload.Browser)) return false;

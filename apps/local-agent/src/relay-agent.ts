@@ -79,6 +79,7 @@ export class LocalAgentRelayRunner {
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {
     const action = validateRemoteAction(payload.action);
     const response = await fetch(this.#localExecuteUrl, {
+      redirect: 'error',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -100,6 +101,7 @@ export class LocalAgentRelayRunner {
     let response: Response;
     try {
       response = await fetch(this.#resultUrl, {
+        redirect: 'error',
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ seq, deliveryId, result })

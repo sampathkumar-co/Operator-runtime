@@ -33,6 +33,7 @@ export class RelayAgentClient {
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const response = await fetch(this.#url, {
+      redirect: 'error',
       method: 'POST',
       headers: {
         'content-type': 'application/json',
