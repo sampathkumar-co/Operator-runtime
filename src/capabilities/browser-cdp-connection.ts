@@ -57,7 +57,6 @@ export class CdpConnection {
         try { this.#socket.close(); } catch { /* timeout is already authoritative */ }
         reject(new OperatorError('CDP_CONNECT_TIMEOUT', 'Timed out connecting to browser target.', { retryable: true }));
       }), 4_000);
-      timeout.unref();
       this.#socket.addEventListener('open', () => finish(resolve), { once: true });
       this.#socket.addEventListener('error', () => finish(() => {
         this.#closed = true;
