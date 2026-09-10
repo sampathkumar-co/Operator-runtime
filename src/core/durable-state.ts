@@ -234,6 +234,11 @@ function assertStableRegular(stat: Stats, options: DurableStateOptions): void {
 }
 
 function sameFile(left: Stats, right: Stats): boolean {
+  // Node 22 on Windows can report dev=0 for path stat/lstat while the same
+  // file opened by handle reports the NT volume serial as dev. The file index
+  // (ino) remains stable across both views, so use that as the fail-closed
+  // identity on Windows and keep the POSIX dev+ino pair elsewhere.
+  if (process.platform === 'win32') return left.ino !== 0 && right.ino !== 0 && left.ino === right.ino;
   return left.dev === right.dev && left.ino === right.ino;
 }
 
