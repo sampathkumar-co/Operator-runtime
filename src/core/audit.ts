@@ -1,20 +1,41 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
+import { appendDurableStateText, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const SECRET_KEY = /(token|password|secret|authorization|cookie|private.?key|api.?key)/i;
 const AUDIT_CHAIN_VERSION = 1 as const;
 const HASH_RE = /^[0-9a-f]{64}$/;
+const MAX_AUDIT_BYTES = 256 * 1024 * 1024;
+const MAX_AUDIT_HEAD_BYTES = 64 * 1024;
+const MAX_AUDIT_EVENT_BYTES = 256 * 1024;
+const MAX_REDACT_COLLECTION_ITEMS = 1000;
+const MAX_TAIL_EVENTS = 1000;
+const AUDIT_STATE_OPTIONS = {
+  maxBytes: MAX_AUDIT_BYTES,
+  errorCode: 'AUDIT_INTEGRITY_FAILED',
+  invalidMessage: 'Audit log file is invalid.'
+} as const;
+const AUDIT_HEAD_OPTIONS = {
+  maxBytes: MAX_AUDIT_HEAD_BYTES,
+  errorCode: 'AUDIT_INTEGRITY_FAILED',
+  invalidMessage: 'Audit head file is invalid.'
+} as const;
 
 function redact(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[TRUNCATED_DEPTH]';
-  if (Array.isArray(value)) return value.map((item) => redact(item, depth + 1));
+  if (Array.isArray(value)) {
+    const output = value.slice(0, MAX_REDACT_COLLECTION_ITEMS).map((item) => redact(item, depth + 1));
+    if (value.length > MAX_REDACT_COLLECTION_ITEMS) output.push(`[TRUNCATED_${value.length - MAX_REDACT_COLLECTION_ITEMS}_ITEMS]`);
+    return output;
+  }
   if (value && typeof value === 'object') {
     const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    for (const [key, child] of entries.slice(0, MAX_REDACT_COLLECTION_ITEMS)) {
       output[key] = SECRET_KEY.test(key) ? '[REDACTED]' : redact(child, depth + 1);
     }
+    if (entries.length > MAX_REDACT_COLLECTION_ITEMS) output.__operatorTruncatedEntries = entries.length - MAX_REDACT_COLLECTION_ITEMS;
     return output;
   }
   if (typeof value === 'string' && value.length > 16_384) return `${value.slice(0, 16_384)}…[TRUNCATED]`;
@@ -73,7 +94,6 @@ export class AuditLog {
   async append(event: AuditEvent): Promise<AuditEvent> {
     let appended!: AuditEvent;
     const operation = this.#queue.then(async () => {
-      await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
       const head = await this.#loadHead();
       const base = stripChain(redact({
         ...event,
@@ -81,7 +101,11 @@ export class AuditLog {
         timestamp: event.timestamp ?? new Date().toISOString()
       }) as AuditEvent);
       appended = chainEvent(base, head.headHash);
-      await fs.appendFile(this.#file, `${JSON.stringify(appended)}\n`, { encoding: 'utf8', mode: 0o600 });
+      const line = `${JSON.stringify(appended)}\n`;
+      if (Buffer.byteLength(line, 'utf8') > MAX_AUDIT_EVENT_BYTES) {
+        throw new OperatorError('AUDIT_EVENT_TOO_LARGE', `Audit event exceeds ${MAX_AUDIT_EVENT_BYTES} UTF-8 bytes after redaction.`);
+      }
+      await appendDurableStateText(this.#file, line, AUDIT_STATE_OPTIONS);
       const next = { count: head.count + 1, headHash: appended.hash! };
       try {
         await this.#writeHead(next);
@@ -99,7 +123,9 @@ export class AuditLog {
   async tail(limit = 100): Promise<AuditEvent[]> {
     await this.#queue;
     const verified = await this.#readAndVerify(true);
-    return verified.events.slice(-Math.max(1, Math.min(limit, 1000)));
+    const parsed = Number(limit);
+    const bounded = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), MAX_TAIL_EVENTS) : 100;
+    return verified.events.slice(-bounded);
   }
 
   async verifyIntegrity(): Promise<AuditIntegrityStatus> {
@@ -118,7 +144,7 @@ export class AuditLog {
   async #readAndVerify(reconcileAnchor: boolean): Promise<VerifiedAudit> {
     let text: string;
     try {
-      text = await fs.readFile(this.#file, 'utf8');
+      text = await readDurableStateText(this.#file, AUDIT_STATE_OPTIONS);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         const empty: VerifiedAudit = { events: [], count: 0, headHash: null };
@@ -177,7 +203,7 @@ export class AuditLog {
       previousHash = chained.hash!;
       return chained;
     });
-    await atomicWrite(this.#file, `${migrated.map((event) => JSON.stringify(event)).join('\n')}\n`);
+    await writeDurableStateText(this.#file, `${migrated.map((event) => JSON.stringify(event)).join('\n')}\n`, AUDIT_STATE_OPTIONS);
     await this.#writeHead({ count: migrated.length, headHash: previousHash });
     return migrated;
   }
@@ -185,7 +211,7 @@ export class AuditLog {
   async #reconcileAnchor(verified: VerifiedAudit): Promise<void> {
     let anchor: AuditHead | null = null;
     try {
-      anchor = JSON.parse(await fs.readFile(this.#headFile, 'utf8')) as AuditHead;
+      anchor = JSON.parse(await readDurableStateText(this.#headFile, AUDIT_HEAD_OPTIONS)) as AuditHead;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw integrityError('Audit head metadata is unreadable.');
     }
@@ -219,7 +245,7 @@ export class AuditLog {
       headHash: head.headHash,
       updatedAt: new Date().toISOString()
     };
-    await atomicWrite(this.#headFile, `${JSON.stringify(record, null, 2)}\n`);
+    await writeDurableStateText(this.#headFile, `${JSON.stringify(record, null, 2)}\n`, AUDIT_HEAD_OPTIONS);
   }
 }
 
@@ -266,15 +292,4 @@ function safeHashEqual(actual: string, expected: string): boolean {
 
 function integrityError(message: string): OperatorError {
   return new OperatorError('AUDIT_INTEGRITY_FAILED', message);
-}
-
-async function atomicWrite(target: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temp, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, target);
-  } finally {
-    await fs.rm(temp, { force: true }).catch(() => undefined);
-  }
 }
