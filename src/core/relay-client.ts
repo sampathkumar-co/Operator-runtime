@@ -421,7 +421,6 @@ function waitForOpen(socket: RelaySocketLike, timeoutMs: number): Promise<void> 
       try { socket.close(4001, 'connect timeout'); } catch { /* timeout failure is already authoritative */ }
       reject(new OperatorError('RELAY_CONNECT_TIMEOUT', `Relay socket did not open within ${timeoutMs}ms.`, { retryable: true }));
     }), timeoutMs);
-    timer.unref();
     const cleanup = () => {
       clearTimeout(timer);
       socket.removeEventListener?.('open', onOpen);
