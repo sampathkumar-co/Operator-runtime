@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_STREAMS = 10_000;
 const MAX_DELIVERIES_PER_STREAM = 10_000;
@@ -142,9 +142,12 @@ export class RelayDeliveryStore {
 
   async #read(): Promise<RelayDeliveryState> {
     try {
-      const stat = await fs.stat(this.#file);
-      if (!stat.isFile() || stat.size > 128 * 1024 * 1024) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state file is invalid.');
-      return validateState(JSON.parse(await fs.readFile(this.#file, 'utf8')));
+      const text = await readDurableStateText(this.#file, {
+        maxBytes: 128 * 1024 * 1024,
+        errorCode: 'RELAY_QUEUE_CORRUPT',
+        invalidMessage: 'Relay delivery state is invalid.'
+      });
+      return validateState(JSON.parse(text));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, streams: [] };
       if (error instanceof OperatorError) throw error;
@@ -154,10 +157,11 @@ export class RelayDeliveryStore {
 
   async #write(stateInput: RelayDeliveryState): Promise<void> {
     const state = validateState(stateInput);
-    await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
-    const temp = `${this.#file}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, this.#file);
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
+      maxBytes: 128 * 1024 * 1024,
+      errorCode: 'RELAY_QUEUE_CORRUPT',
+      invalidMessage: 'Relay delivery state is invalid.'
+    });
   }
 
   async #mutate<T>(mutator: (state: RelayDeliveryState) => T | Promise<T>): Promise<T> {

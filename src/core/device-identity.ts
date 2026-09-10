@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_IDENTITY_BYTES = 256 * 1024;
 const MAX_HELPER_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -169,10 +170,11 @@ export class DeviceIdentityStore {
   }
 
   async #readAndMigrate(): Promise<StoredIdentity> {
-    const raw = await fs.readFile(this.#file, 'utf8');
-    if (Buffer.byteLength(raw, 'utf8') > MAX_IDENTITY_BYTES) {
-      throw new OperatorError('DEVICE_IDENTITY_INVALID', 'Device identity file exceeds the allowed size.');
-    }
+    const raw = await readDurableStateText(this.#file, {
+      maxBytes: MAX_IDENTITY_BYTES,
+      errorCode: 'DEVICE_IDENTITY_INVALID',
+      invalidMessage: 'Device identity file is invalid.'
+    });
     let stored: StoredIdentity;
     try { stored = parseStoredIdentity(JSON.parse(raw)); }
     catch (error) {
@@ -394,14 +396,11 @@ async function writeExclusiveJson(file: string, value: StoredIdentity): Promise<
 }
 
 async function replaceJsonAtomic(file: string, value: StoredIdentity): Promise<void> {
-  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, file);
-  } catch (error) {
-    await fs.rm(temp, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  await writeDurableStateText(file, JSON.stringify(value, null, 2), {
+    maxBytes: MAX_IDENTITY_BYTES,
+    errorCode: 'DEVICE_IDENTITY_INVALID',
+    invalidMessage: 'Device identity file is invalid.'
+  });
 }
 
 function publicIdentity(stored: StoredIdentity): PublicDeviceIdentity {

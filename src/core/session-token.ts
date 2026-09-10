@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { DeviceRegistryStore, type RegisteredDevice } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const PURPOSE = 'operator-session-v1';
 const MAX_TOKEN_BYTES = 16 * 1024;
@@ -147,7 +147,8 @@ export class DeviceSessionTokenStore {
   }
 
   async listIssued(limit = 100): Promise<IssuedSessionRecord[]> {
-    const bounded = Math.min(Math.max(Number(limit), 1), 500);
+    const parsedLimit = Number(limit);
+    const bounded = Number.isFinite(parsedLimit) ? Math.min(Math.max(Math.trunc(parsedLimit), 1), 500) : 100;
     const state = await this.#read();
     return state.issued.slice(-bounded).reverse().map((record) => ({ ...record, scopes: [...record.scopes] }));
   }
@@ -198,10 +199,12 @@ export class DeviceSessionTokenStore {
 
   async #read(): Promise<SessionState> {
     try {
-      const stat = await fs.stat(this.#file);
-      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new OperatorError('SESSION_STATE_CORRUPT', 'Session registry file is invalid.');
-      const parsed = JSON.parse(await fs.readFile(this.#file, 'utf8')) as SessionState;
-      return validateState(parsed);
+      const text = await readDurableStateText(this.#file, {
+        maxBytes: 2 * 1024 * 1024,
+        errorCode: 'SESSION_STATE_CORRUPT',
+        invalidMessage: 'Session registry is invalid.'
+      });
+      return validateState(JSON.parse(text));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, issued: [] };
       if (error instanceof OperatorError) throw error;
@@ -210,10 +213,12 @@ export class DeviceSessionTokenStore {
   }
 
   async #write(state: SessionState): Promise<void> {
-    await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
-    const temp = `${this.#file}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, this.#file);
+    const state = validateState(state);
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
+      maxBytes: 2 * 1024 * 1024,
+      errorCode: 'SESSION_STATE_CORRUPT',
+      invalidMessage: 'Session registry is invalid.'
+    });
   }
 
   async #mutate<T>(mutator: (state: SessionState) => T | Promise<T>): Promise<T> {

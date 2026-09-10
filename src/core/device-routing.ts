@@ -1,8 +1,7 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceRegistryStore, type RegisteredDevice } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_BINDINGS = 4096;
 const MAX_ONLINE_DEVICES = 1000;
@@ -142,9 +141,12 @@ export class DeviceRoutingStore {
 
   async #read(): Promise<RoutingState> {
     try {
-      const stat = await fs.stat(this.#file);
-      if (!stat.isFile() || stat.size > 512 * 1024) throw new OperatorError('ROUTE_STATE_CORRUPT', 'Device routing state is invalid.');
-      return validateState(JSON.parse(await fs.readFile(this.#file, 'utf8')));
+      const text = await readDurableStateText(this.#file, {
+        maxBytes: 512 * 1024,
+        errorCode: 'ROUTE_STATE_CORRUPT',
+        invalidMessage: 'Device routing state is invalid.'
+      });
+      return validateState(JSON.parse(text));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, bindings: [] };
       if (error instanceof OperatorError) throw error;
@@ -154,10 +156,11 @@ export class DeviceRoutingStore {
 
   async #write(stateInput: RoutingState): Promise<void> {
     const state = validateState(stateInput);
-    await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
-    const temp = `${this.#file}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, this.#file);
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
+      maxBytes: 512 * 1024,
+      errorCode: 'ROUTE_STATE_CORRUPT',
+      invalidMessage: 'Device routing state is invalid.'
+    });
   }
 
   async #mutate<T>(mutator: (state: RoutingState) => T | Promise<T>): Promise<T> {

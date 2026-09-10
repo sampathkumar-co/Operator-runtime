@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceRegistryStore } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_ACCOUNTS = 100_000;
 const MAX_MEMBERSHIPS = 500_000;
@@ -166,9 +166,12 @@ export class AccountDeviceRegistry {
 
   async #read(): Promise<AccountDeviceState> {
     try {
-      const stat = await fs.stat(this.#file);
-      if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Account-device registry file is invalid.');
-      return validateState(JSON.parse(await fs.readFile(this.#file, 'utf8')));
+      const text = await readDurableStateText(this.#file, {
+        maxBytes: 32 * 1024 * 1024,
+        errorCode: 'ACCOUNT_STATE_CORRUPT',
+        invalidMessage: 'Account-device registry is invalid.'
+      });
+      return validateState(JSON.parse(text));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, accounts: [], memberships: [] };
       if (error instanceof OperatorError) throw error;
@@ -178,10 +181,11 @@ export class AccountDeviceRegistry {
 
   async #write(stateInput: AccountDeviceState): Promise<void> {
     const state = validateState(stateInput);
-    await fs.mkdir(path.dirname(this.#file), { recursive: true, mode: 0o700 });
-    const temp = `${this.#file}.${crypto.randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.rename(temp, this.#file);
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
+      maxBytes: 32 * 1024 * 1024,
+      errorCode: 'ACCOUNT_STATE_CORRUPT',
+      invalidMessage: 'Account-device registry is invalid.'
+    });
   }
 
   async #mutate<T>(mutator: (state: AccountDeviceState) => T | Promise<T>): Promise<T> {

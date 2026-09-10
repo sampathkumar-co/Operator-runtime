@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const PROTOCOL = 1;
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -306,9 +306,12 @@ export class RelayClient {
 
   async #readState(): Promise<RelayState> {
     try {
-      const stat = await fs.stat(this.#stateFile);
-      if (!stat.isFile() || stat.size > 64 * 1024) throw new OperatorError('RELAY_STATE_CORRUPT', 'Relay client state is invalid.');
-      return validateState(JSON.parse(await fs.readFile(this.#stateFile, 'utf8')));
+      const text = await readDurableStateText(this.#stateFile, {
+        maxBytes: 64 * 1024,
+        errorCode: 'RELAY_STATE_CORRUPT',
+        invalidMessage: 'Relay client state is invalid.'
+      });
+      return validateState(JSON.parse(text));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, lastAckedServerSeq: 0 };
       if (error instanceof OperatorError) throw error;
@@ -318,16 +321,11 @@ export class RelayClient {
 
   async #writeState(stateInput: RelayState): Promise<void> {
     const state = validateState(stateInput);
-    await fs.mkdir(path.dirname(this.#stateFile), { recursive: true, mode: 0o700 });
-    const temp = `${this.#stateFile}.${crypto.randomUUID()}.tmp`;
-    let renamed = false;
-    try {
-      await fs.writeFile(temp, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      await fs.rename(temp, this.#stateFile);
-      renamed = true;
-    } finally {
-      if (!renamed) await fs.rm(temp, { force: true }).catch(() => undefined);
-    }
+    await writeDurableStateText(this.#stateFile, JSON.stringify(state, null, 2), {
+      maxBytes: 64 * 1024,
+      errorCode: 'RELAY_STATE_CORRUPT',
+      invalidMessage: 'Relay client state is invalid.'
+    });
   }
 }
 
