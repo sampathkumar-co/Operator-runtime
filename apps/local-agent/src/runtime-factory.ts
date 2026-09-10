@@ -4,6 +4,7 @@ import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvide
 export function createRuntime(config: {
   allowedRoots: string[];
   allowedExecutables: string[];
+  terminalAllowedExecutables?: string[];
   projectCommandRegistryPath?: string;
   dockerExecutable?: string;
   postgresProfileRegistryPath?: string;
@@ -47,7 +48,11 @@ export function createRuntime(config: {
     .register(new GitProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitCheckpointProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitWriteProvider({ allowedRoots: config.allowedRoots }))
-    .register(new ProcessProvider({ allowedRoots: config.allowedRoots, allowedExecutables: config.allowedExecutables }))
+    .register(new ProcessProvider({
+      allowedRoots: config.allowedRoots,
+      allowedExecutables: config.terminalAllowedExecutables ?? [],
+      requiredRisk: 'destructive'
+    }))
     .register(new ManagedBrowserProvider({
       endpoint: config.cdpEndpoint,
       autoLaunch: config.browserAutoLaunch,
