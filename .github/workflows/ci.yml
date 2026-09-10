@@ -44,6 +44,52 @@ jobs:
       - name: Bounded runtime performance budgets
         run: npm run test:performance
 
+  node-supply-chain:
+    name: Node dependency audit + CycloneDX SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - name: Reproduce locked dependency graphs without lifecycle scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+      - name: Block high production and critical full-graph vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix apps/mcp-server audit --omit=dev --audit-level=high
+          npm --prefix apps/relay-server audit --omit=dev --audit-level=high
+          npm --prefix apps/mcp-server audit --audit-level=critical
+          npm --prefix apps/relay-server audit --audit-level=critical
+      - name: Generate and validate CycloneDX SBOMs from committed locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/sbom
+          (cd apps/mcp-server && npm sbom --package-lock-only --sbom-format cyclonedx > ../../artifacts/sbom/mcp-server.cdx.json)
+          (cd apps/relay-server && npm sbom --package-lock-only --sbom-format cyclonedx > ../../artifacts/sbom/relay-server.cdx.json)
+          node <<'NODE'
+          const fs = require('node:fs');
+          for (const file of ['artifacts/sbom/mcp-server.cdx.json', 'artifacts/sbom/relay-server.cdx.json']) {
+            const bom = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (bom.bomFormat !== 'CycloneDX') throw new Error(`${file}: not CycloneDX`);
+            if (!Array.isArray(bom.components)) throw new Error(`${file}: components missing`);
+            if (!bom.metadata?.component?.name) throw new Error(`${file}: root component metadata missing`);
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-node-cyclonedx-sbom
+          path: artifacts/sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
   mcp-transport:
     name: MCP v2 client + Inspector E2E
     runs-on: ubuntu-latest
@@ -56,7 +102,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: npm install --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
       - name: Official MCP client + Inspector round-trip
         run: npm run test:e2e
@@ -73,7 +119,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
-      - run: npm install --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Real paired-device relay round-trip
         run: npm test
 
