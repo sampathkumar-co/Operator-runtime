@@ -39,6 +39,41 @@ async function readJson(req: http.IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+const ACTION_RISKS = new Set(['read', 'write', 'external', 'system', 'destructive']);
+const PROVENANCE_KINDS = new Set(['user', 'chatgpt', 'trusted_policy', 'runtime', 'website', 'file', 'application', 'terminal']);
+
+function validateActionEnvelope(value: unknown): ActionRequest {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('action must be a JSON object.');
+  const raw = value as Record<string, unknown>;
+  const id = boundedString(raw.id, 'action.id', 256);
+  const capability = boundedString(raw.capability, 'action.capability', 128);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(capability)) throw new Error('action.capability contains unsupported characters.');
+  if (typeof raw.risk !== 'string' || !ACTION_RISKS.has(raw.risk)) throw new Error('action.risk is invalid.');
+  if (!raw.input || typeof raw.input !== 'object' || Array.isArray(raw.input)) throw new Error('action.input must be a JSON object.');
+  if (!raw.provenance || typeof raw.provenance !== 'object' || Array.isArray(raw.provenance)) throw new Error('action.provenance must be a JSON object.');
+  const provenanceRaw = raw.provenance as Record<string, unknown>;
+  if (typeof provenanceRaw.kind !== 'string' || !PROVENANCE_KINDS.has(provenanceRaw.kind)) throw new Error('action.provenance.kind is invalid.');
+  const source = provenanceRaw.source === undefined ? undefined : boundedString(provenanceRaw.source, 'action.provenance.source', 512);
+  const taskId = raw.taskId === undefined ? undefined : boundedString(raw.taskId, 'action.taskId', 256);
+  const target = raw.target === undefined ? undefined : boundedString(raw.target, 'action.target', 4096);
+  return {
+    id,
+    capability,
+    risk: raw.risk as ActionRequest['risk'],
+    input: raw.input as Record<string, unknown>,
+    provenance: { kind: provenanceRaw.kind as ActionRequest['provenance']['kind'], source },
+    taskId,
+    target
+  };
+}
+
+function boundedString(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\0')) {
+    throw new Error(`${field} must be a non-empty string of at most ${maxLength} characters without NUL bytes.`);
+  }
+  return value;
+}
+
 function send(res: http.ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -247,7 +282,7 @@ export function createLocalAgentServer(options: {
           send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
           return;
         }
-        const action = body.action;
+        const action = validateActionEnvelope(body.action);
         const result = await options.runtime.execute(action, options.permissions);
         await options.audit?.append({
           taskId: action.taskId,
@@ -274,6 +309,12 @@ export function createLocalAgentServer(options: {
 
     send(res, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
   });
+
+  // Keep malformed/slow clients from occupying the authenticated local boundary indefinitely.
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
 
   return {
     server,
