@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import type { RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
@@ -89,6 +90,7 @@ export class RelayControlService {
         send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message));
       }
     });
+    applyBoundedHttpServerPolicy(server);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, resolve);

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
+import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
@@ -312,10 +312,7 @@ export function createLocalAgentServer(options: {
   });
 
   // Keep malformed/slow clients from occupying the authenticated local boundary indefinitely.
-  server.headersTimeout = 10_000;
-  server.requestTimeout = 30_000;
-  server.keepAliveTimeout = 5_000;
-  server.maxRequestsPerSocket = 100;
+  applyBoundedHttpServerPolicy(server);
 
   return {
     server,

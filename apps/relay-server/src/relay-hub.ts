@@ -7,6 +7,7 @@ import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore, type DeviceRouteDecision, type OnlineDeviceDescriptor } from '../../../src/core/device-routing.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { RelayDeliveryStore, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 
@@ -79,12 +80,13 @@ export class RelayHub {
     const server = http.createServer((request, response) => {
       if (request.method === 'GET' && request.url === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1, onlineDevices: this.#connections.size }));
+        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1 }));
         return;
       }
       response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       response.end(JSON.stringify({ ok: false, error: 'not_found' }));
     });
+    applyBoundedHttpServerPolicy(server);
     const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES, perMessageDeflate: false });
     server.on('upgrade', (request, socket, head) => {
       let url: URL;

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -76,6 +77,7 @@ export class RelayResultService {
         send(response, status, { ok: false, error: { code: op.code, message: op.message } });
       }
     });
+    applyBoundedHttpServerPolicy(server);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, resolve);

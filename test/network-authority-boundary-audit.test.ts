@@ -9,7 +9,7 @@ import { LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { CdpConnection, assertLoopbackDebuggerUrl } from '../src/capabilities/browser-cdp-connection.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayClient, type RelaySocketLike } from '../src/core/relay-client.ts';
-import { requireLiteralLoopbackBindHost } from '../src/core/network-authority.ts';
+import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../src/core/network-authority.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 
@@ -208,4 +208,27 @@ test('MCP startup enforces the shared loopback bind authority guard', async () =
   );
   assert.match(source, /requireLiteralLoopbackBindHost\(process\.env\.OPERATOR_MCP_HOST/);
   assert.doesNotMatch(source, /const host = process\.env\.OPERATOR_MCP_HOST \?\?/);
+});
+
+test('shared HTTP ingress policy keeps request resources bounded', () => {
+  const server = http.createServer();
+  applyBoundedHttpServerPolicy(server);
+  assert.equal(server.headersTimeout, 10_000);
+  assert.equal(server.requestTimeout, 30_000);
+  assert.equal(server.keepAliveTimeout, 5_000);
+  assert.equal(server.maxRequestsPerSocket, 100);
+  assert.equal(server.maxHeadersCount, 64);
+});
+
+
+test('all relay HTTP entry points apply the shared bounded ingress policy', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  for (const relative of [
+    'apps/relay-server/src/relay-hub.ts',
+    'apps/relay-server/src/result-service.ts',
+    'apps/relay-server/src/control-service.ts'
+  ]) {
+    const source = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.match(source, /applyBoundedHttpServerPolicy\(server\)/, relative);
+  }
 });

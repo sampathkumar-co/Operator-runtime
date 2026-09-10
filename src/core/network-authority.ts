@@ -1,3 +1,4 @@
+import type { Server } from 'node:http';
 import { OperatorError } from './errors.ts';
 
 export function requireLiteralLoopbackBindHost(input: string, label = 'Local service'): string {
@@ -8,4 +9,12 @@ export function requireLiteralLoopbackBindHost(input: string, label = 'Local ser
     'UNSAFE_LOCAL_BIND_HOST',
     `${label} must bind to a literal loopback address (127.0.0.1 or ::1). Remote ingress must use the approved relay/tunnel boundary.`
   );
+}
+
+export function applyBoundedHttpServerPolicy(server: Server): void {
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 30_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxRequestsPerSocket = 100;
+  server.maxHeadersCount = 64;
 }
