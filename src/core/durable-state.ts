@@ -14,8 +14,23 @@ export async function readDurableStateText(file: string, options: DurableStateOp
   return (await readDurableStateBytes(file, options)).toString('utf8');
 }
 
+class DurableStateReadRace extends Error {}
+
 export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);
+  let lastRace: DurableStateReadRace | undefined;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await readDurableStateBytesOnce(file, options);
+    } catch (error) {
+      if (!(error instanceof DurableStateReadRace)) throw error;
+      lastRace = error;
+    }
+  }
+  throw invalid(options, lastRace?.message ?? 'State file changed while it was being read.');
+}
+
+async function readDurableStateBytesOnce(file: string, options: DurableStateOptions): Promise<Buffer> {
   const initial = await fs.lstat(file);
   assertStableRegular(initial, options);
 
@@ -26,26 +41,34 @@ export async function readDurableStateBytes(file: string, options: DurableStateO
   try {
     handle = await fs.open(file, fsConstants.O_RDONLY | noFollow);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw invalid(options, 'Symbolic links are not permitted.');
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') throw invalid(options, 'Symbolic links are not permitted.');
+    if (code === 'ENOENT') throw new DurableStateReadRace('State file changed while it was being opened.');
     throw error;
   }
 
   try {
     const opened = await handle.stat();
-    assertStableRegular(opened, options);
-    if (!sameFile(initial, opened)) throw invalid(options, 'State file changed while it was being opened.');
+    assertOpenedRegular(opened, options, 'State file changed while it was being opened.');
+    if (!sameFile(initial, opened)) throw new DurableStateReadRace('State file changed while it was being opened.');
 
     const bytes = await handle.readFile();
     if (bytes.byteLength > options.maxBytes) throw invalid(options, 'State file exceeds the bounded size.');
     const afterRead = await handle.stat();
-    assertStableRegular(afterRead, options);
+    assertOpenedRegular(afterRead, options, 'State file changed while it was being read.');
     if (!sameFile(opened, afterRead) || opened.size !== afterRead.size || opened.mtimeMs !== afterRead.mtimeMs || opened.ctimeMs !== afterRead.ctimeMs) {
-      throw invalid(options, 'State file changed while it was being read.');
+      throw new DurableStateReadRace('State file changed while it was being read.');
     }
 
-    const current = await fs.lstat(file);
+    let current: Stats;
+    try {
+      current = await fs.lstat(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new DurableStateReadRace('State file path changed while it was being read.');
+      throw error;
+    }
     assertStableRegular(current, options);
-    if (!sameFile(afterRead, current)) throw invalid(options, 'State file path changed while it was being read.');
+    if (!sameFile(afterRead, current)) throw new DurableStateReadRace('State file path changed while it was being read.');
     return bytes;
   } finally {
     await handle.close();
@@ -225,6 +248,13 @@ async function assertReplaceTarget(file: string, options: DurableStateOptions): 
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
+}
+
+function assertOpenedRegular(stat: Stats, options: DurableStateOptions, raceMessage: string): void {
+  if (!stat.isFile()) throw invalid(options, 'Opened state path must be a regular file.');
+  if (stat.nlink > 1) throw invalid(options, 'Hard-linked state files are not permitted.');
+  if (stat.nlink < 1) throw new DurableStateReadRace(raceMessage);
+  if (stat.size > options.maxBytes) throw invalid(options, 'State file exceeds the bounded size.');
 }
 
 function assertStableRegular(stat: Stats, options: DurableStateOptions): void {

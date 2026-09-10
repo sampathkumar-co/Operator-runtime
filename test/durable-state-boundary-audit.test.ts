@@ -94,3 +94,44 @@ test('all authority-bearing JSON stores use the durable state boundary', async (
   assert.match(identity, /readDurableStateText/);
   assert.match(identity, /writeDurableStateText/);
 });
+
+
+test('durable state read retries an atomic replacement race instead of treating an unlinked old inode as a hard link', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('deterministic open-then-replace race uses POSIX unlink semantics');
+    return;
+  }
+  const root = await tempDir(t, 'operator-durable-race-');
+  const file = path.join(root, 'state.json');
+  const original = '{"version":1,"value":"old"}\n';
+  const replacement = '{"version":1,"value":"new"}\n';
+  await writeDurableStateText(file, original, options);
+
+  const originalOpen = fs.open.bind(fs);
+  let injected = false;
+  (fs as any).open = async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (!injected && path.resolve(String(args[0])) === path.resolve(file) && typeof args[1] === 'number') {
+      injected = true;
+      await writeDurableStateText(file, replacement, options);
+    }
+    return handle;
+  };
+  t.after(() => { (fs as any).open = originalOpen; });
+
+  assert.equal(await readDurableStateText(file, options), replacement);
+  assert.equal(injected, true);
+});
+
+test('durable state still rejects a genuine hard-linked authority file', async (t) => {
+  const root = await tempDir(t, 'operator-durable-hardlink-');
+  const file = path.join(root, 'state.json');
+  const alias = path.join(root, 'alias.json');
+  await writeDurableStateText(file, '{"version":1}\n', options);
+  await fs.link(file, alias);
+
+  await assert.rejects(
+    () => readDurableStateText(file, options),
+    (error: any) => error?.code === 'TEST_STATE_INVALID' && /Hard-linked/.test(error.message)
+  );
+});
