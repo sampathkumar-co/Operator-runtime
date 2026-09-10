@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import fs, { type Stats } from 'node:fs/promises';
+import { constants as fsConstants, type Stats } from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 
