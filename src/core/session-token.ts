@@ -212,8 +212,8 @@ export class DeviceSessionTokenStore {
     }
   }
 
-  async #write(state: SessionState): Promise<void> {
-    const state = validateState(state);
+  async #write(stateInput: SessionState): Promise<void> {
+    const state = validateState(stateInput);
     await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
       maxBytes: 2 * 1024 * 1024,
       errorCode: 'SESSION_STATE_CORRUPT',

@@ -204,8 +204,8 @@ export class DeviceRegistryStore {
     }
   }
 
-  async #write(state: RegistryState): Promise<void> {
-    const state = validateState(state);
+  async #write(stateInput: RegistryState): Promise<void> {
+    const state = validateState(stateInput);
     await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
       maxBytes: 2 * 1024 * 1024,
       errorCode: 'DEVICE_REGISTRY_CORRUPT',
