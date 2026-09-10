@@ -1,0 +1,50 @@
+name: Generate Rust lockfiles once
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: "${{ github.event.head_commit.message == 'chore: trigger deterministic Rust lockfile generation' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rust toolchain
+        run: |
+          rustup default stable
+          rustc --version
+          cargo --version
+      - name: Generate native crate lockfiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in \
+            native/windows-uia/Cargo.toml \
+            native/windows-dpapi/Cargo.toml \
+            native/windows-launcher/Cargo.toml
+          do
+            cargo generate-lockfile --manifest-path "$manifest"
+            lock="$(dirname "$manifest")/Cargo.lock"
+            test -s "$lock"
+            grep -q '^version = 4$' "$lock"
+          done
+      - name: Commit deterministic Rust lockfiles and remove one-shot files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .cargo-lockfile-generation-trigger .github/workflows/generate-cargo-lockfiles-once.yml
+          git config user.name 'Operator CI'
+          git config user.email 'operator-ci@example.invalid'
+          git add -A
+          git diff --cached --stat
+          git commit -m 'chore: pin Rust dependency lockfiles'
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
