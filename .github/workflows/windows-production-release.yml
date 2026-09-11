@@ -27,7 +27,9 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   contents: write
+  pull-requests: read
 
 concurrency:
   group: operator-windows-production-release
@@ -52,6 +54,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.1'
+
+      - name: Require PR-certified green main commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-source.mjs
 
       - name: Rust toolchain
         shell: pwsh
