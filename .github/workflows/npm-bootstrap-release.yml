@@ -14,8 +14,10 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
+  pull-requests: read
 
 concurrency:
   group: operator-runtime-cli-production-publish
@@ -33,6 +35,11 @@ jobs:
         with:
           node-version: '22.22.1'
           registry-url: https://registry.npmjs.org
+
+      - name: Require PR-certified green main commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-source.mjs
 
       - name: Validate release inputs and bind npm version
         id: release_inputs
