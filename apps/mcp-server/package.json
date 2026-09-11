@@ -11,7 +11,8 @@
     "start": "tsx src/server.ts",
     "check": "tsc -p tsconfig.json",
     "test:e2e": "tsx --test test/*.test.ts",
-    "certify:local": "tsx scripts/live-cert-preflight.ts"
+    "certify:local": "tsx scripts/live-cert-preflight.ts",
+    "certify:tunnel": "tsx scripts/secure-tunnel-preflight.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/fastify": "^2.0.0",
