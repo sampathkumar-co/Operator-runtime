@@ -22,10 +22,11 @@ test('public-edge compose publishes backends only on host loopback and never pub
   assert.match(compose, /127\.0\.0\.1:\$\{OPERATOR_MCP_LOOPBACK_PORT:-47200\}:47200/);
   assert.match(compose, /127\.0\.0\.1:\$\{OPERATOR_RELAY_LOOPBACK_PORT:-8788\}:8788/);
   assert.match(compose, /127\.0\.0\.1:\$\{OPERATOR_RELAY_RESULT_LOOPBACK_PORT:-8789\}:8789/);
-  const ports = compose.match(/ports:\n([\s\S]*?)\n    volumes:/)?.[1] ?? '';
+  const ports = compose.match(/ports:\r?\n([\s\S]*?)\r?\n    volumes:/)?.[1] ?? '';
+  assert.ok(ports, 'compose ports block must be found');
   assert.doesNotMatch(ports, /8790/);
   assert.match(compose, /read_only: true/);
-  assert.match(compose, /cap_drop:\n\s+- ALL/);
+  assert.match(compose, /cap_drop:\r?\n\s+- ALL/);
   assert.match(compose, /no-new-privileges:true/);
   assert.doesNotMatch(compose, /privileged:\s*true|network_mode:\s*host/);
 });
