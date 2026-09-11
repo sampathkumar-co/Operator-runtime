@@ -15,6 +15,11 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+concurrency:
+  group: operator-runtime-cli-production-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -28,7 +33,9 @@ jobs:
         with:
           node-version: '22.22.1'
           registry-url: https://registry.npmjs.org
-      - name: Validate release inputs
+
+      - name: Validate release inputs and bind npm version
+        id: release_inputs
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
@@ -37,9 +44,13 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'release_version must be a four-part MSIX version' >&2; exit 1; }
           [[ "$NPM_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo 'invalid npm dist-tag' >&2; exit 1; }
+          PACKAGE_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('./packages/operator-runtime-cli/package.json','utf8')).version")
+          node --input-type=module -e "import { validatePackageReleaseVersion } from './packages/operator-runtime-cli/src/release.mjs'; validatePackageReleaseVersion(process.argv[1], process.argv[2]);" "$PACKAGE_VERSION" "$RELEASE_VERSION"
+          echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap security tests
         run: node --experimental-strip-types --test test/npx-bootstrap.test.ts
+
       - name: Validate publishable tarball
         shell: bash
         run: |
@@ -52,12 +63,14 @@ jobs:
             if (!files.has(required)) throw new Error(`missing npm payload file: ${required}`);
           }
           NODE
+
       - name: Require published timestamped production release
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
@@ -66,6 +79,7 @@ jobs:
           const version = process.env.RELEASE_VERSION;
           const repository = process.env.REPOSITORY;
           const token = process.env.GH_TOKEN;
+          const releaseCommit = process.env.RELEASE_COMMIT;
           const tag = `v${version}`;
           const headers = {
             accept: 'application/vnd.github+json',
@@ -78,6 +92,9 @@ jobs:
           const release = await releaseResponse.json();
           if (release.draft) throw new Error(`GitHub production release ${tag} is still a draft.`);
           if (release.prerelease) throw new Error(`GitHub production release ${tag} is marked prerelease.`);
+          if (release.target_commitish !== releaseCommit) {
+            throw new Error(`GitHub production release ${tag} targets ${release.target_commitish}, not this exact main commit ${releaseCommit}.`);
+          }
 
           const assets = new Map((release.assets ?? []).map((asset) => [asset.name, asset]));
           for (const name of [`Operator-${version}-x64.msix`, 'Operator.appinstaller', 'release-metadata.json']) {
@@ -98,6 +115,9 @@ jobs:
 
           const msixAsset = assets.get(taggedMetadata.artifact);
           if (Number(msixAsset.size) !== taggedMetadata.sizeBytes) throw new Error('GitHub MSIX asset size does not match signed release metadata.');
+          if (msixAsset.digest && msixAsset.digest !== `sha256:${taggedMetadata.sha256}`) {
+            throw new Error('GitHub MSIX asset digest does not match signed release metadata.');
+          }
 
           const trustedSigners = await loadTrustedSigners('./packages/operator-runtime-cli/trusted-signers.json');
           const matches = trustedSigners.filter((entry) =>
@@ -106,10 +126,23 @@ jobs:
           );
           if (matches.length !== 1) throw new Error('Published production release signer is not pinned exactly once by operator-runtime-cli.');
 
-          console.log(`npm publication gate: PASS (${tag}, timestamped signer pinned, latest release verified)`);
+          console.log(`npm publication gate: PASS (${tag}, exact commit, timestamped signer pinned, latest release verified)`);
           NODE
-      - name: Publish npm bootstrap
+
+      - name: Refuse duplicate npm package version
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.release_inputs.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          if npm view "operator-runtime-cli@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "operator-runtime-cli@$PACKAGE_VERSION is already published; refusing to overwrite or republish." >&2
+            exit 1
+          fi
+
+      - name: Publish npm bootstrap with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ inputs.npm_tag }}
-        run: npm publish ./packages/operator-runtime-cli --access public --tag "$NPM_TAG"
+          OPERATOR_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: npm publish ./packages/operator-runtime-cli --access public --tag "$NPM_TAG" --provenance
