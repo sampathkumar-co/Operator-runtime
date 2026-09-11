@@ -74,6 +74,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          node scripts/production-release-inputs.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'production release input validation failed' }
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'version must be a four-part MSIX version' }
           if ($env:IDENTITY_NAME -ne 'Operator.Runtime') { throw 'identity_name must remain Operator.Runtime for the public bootstrap.' }
           foreach ($pair in @(@('update_base_uri', $env:UPDATE_BASE_URI), @('timestamp_uri', $env:TIMESTAMP_URI))) {
