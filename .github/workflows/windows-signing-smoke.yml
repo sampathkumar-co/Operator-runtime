@@ -80,9 +80,12 @@ jobs:
           $msix = (Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix).Path
           $meta = (Resolve-Path artifacts/windows-signing-smoke/release-metadata.json).Path
           $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
+          $bootstrapLog = Join-Path $env:RUNNER_TEMP 'operator-bootstrap-smoke.log'
           try {
-            node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root
-            if ($LASTEXITCODE -ne 0) { throw 'npx bootstrap core smoke failed' }
+            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root *>&1 |
+              Tee-Object -FilePath $bootstrapLog
+            $bootstrapExit = $LASTEXITCODE
+            if ($bootstrapExit -ne 0) { throw "npx bootstrap core smoke failed with exit code $bootstrapExit" }
             $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
             if (-not $package) { throw 'Operator.Runtime package was not registered' }
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
@@ -100,6 +103,14 @@ jobs:
             Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
             Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
           }
+      - name: Upload bootstrap diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-bootstrap-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/operator-bootstrap-smoke.log
+          if-no-files-found: warn
+          retention-days: 3
       - name: Remove ephemeral trust material
         if: always()
         shell: pwsh
