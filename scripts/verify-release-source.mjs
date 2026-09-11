@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REQUIRED_RELEASE_WORKFLOWS = Object.freeze([
@@ -51,8 +52,8 @@ export function validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns 
   };
 }
 
-async function githubJson(path, token) {
-  const response = await fetch(`https://api.github.com${path}`, {
+async function githubJson(apiPath, token) {
+  const response = await fetch(`https://api.github.com${apiPath}`, {
     headers: {
       accept: 'application/vnd.github+json',
       authorization: `Bearer ${token}`,
@@ -60,7 +61,7 @@ async function githubJson(path, token) {
       'user-agent': 'operator-release-source-gate'
     }
   });
-  if (!response.ok) fail(`GitHub release-source query failed for ${path} (HTTP ${response.status}).`);
+  if (!response.ok) fail(`GitHub release-source query failed for ${apiPath} (HTTP ${response.status}).`);
   return response.json();
 }
 
@@ -75,7 +76,8 @@ export async function verifyReleaseSource({ repository, sha, token }) {
   return evidence;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === fileURLToPath(new URL(`file://${process.argv[1]}`))) {
+const isEntrypoint = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isEntrypoint) {
   if (process.env.GITHUB_REF !== 'refs/heads/main') fail('Production release must run from refs/heads/main.');
   await verifyReleaseSource({
     repository: process.env.GITHUB_REPOSITORY,
