@@ -19,6 +19,13 @@ jobs:
         with:
           node-version: '22.22.1'
       - run: npm run check
+      - name: Validate publishable npx bootstrap surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs --help
+          (cd packages/operator-runtime-cli && npm pack --dry-run --json) > /tmp/operator-runtime-cli-pack.json
+          node -e "const p=require('fs').readFileSync('/tmp/operator-runtime-cli-pack.json','utf8'); const j=JSON.parse(p)[0]; if (!j?.files?.some(f=>f.path==='bin/operator-runtime-cli.mjs')) process.exit(1)"
 
   security-red-team:
     name: Security red-team suite

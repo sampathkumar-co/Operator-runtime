@@ -48,6 +48,8 @@ jobs:
           Import-Certificate -FilePath artifacts/signing/operator-ci.cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
           "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
           "publisher=$($cert.Subject)" >> $env:GITHUB_OUTPUT
+          $fingerprintSha256 = $cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
+          "fingerprint_sha256=$fingerprintSha256" >> $env:GITHUB_OUTPUT
           "pfx_password=$passwordText" >> $env:GITHUB_OUTPUT
       - name: Build package with matching publisher
         shell: pwsh
@@ -69,31 +71,23 @@ jobs:
           $meta = Get-Content artifacts/windows-signing-smoke/release-metadata.json -Raw | ConvertFrom-Json
           if ($meta.signed -ne $true) { throw 'signed release metadata was not updated' }
           if ($meta.signerSubject -ne '${{ steps.cert.outputs.publisher }}') { throw 'signer subject metadata mismatch' }
+          if ($meta.signerCertificateSha256 -ne '${{ steps.cert.outputs.fingerprint_sha256 }}') { throw 'signer certificate fingerprint metadata mismatch' }
           if ($meta.timestamped -ne $false) { throw 'ephemeral CI signing must be recorded as non-timestamped' }
-      - name: Install signed package and run one-command onboarding smoke
+      - name: Install through npx bootstrap core and verify one-command readiness
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msix = Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix
-          Add-AppxPackage -Path $msix
+          $msix = (Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix).Path
+          $meta = (Resolve-Path artifacts/windows-signing-smoke/release-metadata.json).Path
+          $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
           try {
+            node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root
+            if ($LASTEXITCODE -ne 0) { throw 'npx bootstrap core smoke failed' }
             $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
             if (-not $package) { throw 'Operator.Runtime package was not registered' }
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
-            if (-not (Test-Path $launcher -PathType Leaf)) { throw 'installed Operator.exe is missing' }
             $output = & $launcher --self-test
-            if ($LASTEXITCODE -ne 0) { throw "packaged launcher self-test exited $LASTEXITCODE" }
-            if (($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test marker missing' }
-
-            $state = Join-Path $env:LOCALAPPDATA 'Operator'
-            $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
-            New-Item -ItemType Directory -Force -Path $root | Out-Null
-            Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
-            & $launcher setup --root $root
-            if ($LASTEXITCODE -ne 0) { throw 'installed Operator setup failed' }
-            & $launcher verify
-            if ($LASTEXITCODE -ne 0) { throw 'installed Operator verify failed' }
-
+            if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test failed' }
             $agent = Invoke-RestMethod -Uri 'http://127.0.0.1:47100/health' -TimeoutSec 2
             $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $agent.ok -or $agent.service -ne 'operator-local-agent') { throw 'installed local agent health check failed' }
