@@ -126,6 +126,7 @@ jobs:
           $msix = "artifacts/windows-release/Operator-$env:RELEASE_VERSION-x64.msix"
           ./packaging/windows/sign-release.ps1 `
             -MsixPath $msix `
+            -Provider Pfx `
             -PfxPath '${{ steps.certificate.outputs.pfx_path }}' `
             -PfxPassword $env:PFX_PASSWORD `
             -TimestampUri $env:TIMESTAMP_URI
