@@ -74,6 +74,7 @@ jobs:
           if ($meta.signerCertificateSha256 -ne '${{ steps.cert.outputs.fingerprint_sha256 }}') { throw 'signer certificate fingerprint metadata mismatch' }
           if ($meta.timestamped -ne $false) { throw 'ephemeral CI signing must be recorded as non-timestamped' }
       - name: Install through npx bootstrap core and verify one-command readiness
+        timeout-minutes: 4
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
