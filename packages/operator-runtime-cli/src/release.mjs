@@ -16,6 +16,26 @@ function fail(message) {
   throw new Error(message);
 }
 
+export function validatePackageReleaseVersion(packageVersionInput, releaseVersionInput) {
+  const packageVersion = String(packageVersionInput ?? '').trim();
+  if (!/^\d+\.\d+\.\d+$/.test(packageVersion)) {
+    fail('npm package version must be a stable three-part semantic version.');
+  }
+  const releaseVersion = String(releaseVersionInput ?? '').trim();
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(releaseVersion)) {
+    fail('Windows release version must be a four-part package version.');
+  }
+  const releaseParts = releaseVersion.split('.').map(Number);
+  if (releaseParts.some((part) => !Number.isSafeInteger(part) || part < 0 || part > 65_535)) {
+    fail('Windows release version components must be between 0 and 65535.');
+  }
+  const expectedPackageVersion = releaseParts.slice(0, 3).join('.');
+  if (packageVersion !== expectedPackageVersion) {
+    fail(`npm package version ${packageVersion} does not match Windows release ${releaseVersion}; expected ${expectedPackageVersion}.`);
+  }
+  return { packageVersion, releaseVersion };
+}
+
 function cleanHttpsUrl(input, label) {
   let url;
   try {
