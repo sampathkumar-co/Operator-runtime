@@ -20,7 +20,7 @@ async function temp(t: test.TestContext, prefix: string): Promise<string> {
 test('privacy inventory is bounded and purge requires recovery auth while protected identity remains untouched', async (t) => {
   const root = await temp(t, 'operator-privacy-root-');
   const state = await temp(t, 'operator-privacy-state-');
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Privacy PC');
   const audit = new AuditLog(state);
   await audit.append({ capability: 'file.read', result: 'success', risk: 'read', details: { actionId: 'privacy-test' } });

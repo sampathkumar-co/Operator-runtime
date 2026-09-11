@@ -26,8 +26,8 @@ async function pairDevice(authorityIdentity: DeviceIdentityStore, devices: Devic
 test('relay result service accepts only scoped results matching the first pending delivery and stores duplicates idempotently', async (t) => {
   const authorityState = await tempDir(t, 'operator-result-service-authority-');
   const deviceState = await tempDir(t, 'operator-result-service-device-');
-  const authorityIdentity = new DeviceIdentityStore(authorityState);
-  const deviceIdentity = new DeviceIdentityStore(deviceState);
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
   const devices = new DeviceRegistryStore(authorityState);
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);

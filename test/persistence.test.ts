@@ -136,7 +136,7 @@ test('legacy unchained audit records migrate atomically before the next append',
 
 test('device identity is stable and signs challenge payloads', async (t) => {
   const state = await tempState(t, 'operator-id-');
-  const store = new DeviceIdentityStore(state);
+  const store = new DeviceIdentityStore(state, { platform: 'linux' });
   const first = await store.loadOrCreate('Test-PC');
   const second = await store.loadOrCreate('Other-Name-Ignored');
   assert.equal(first.deviceId, second.deviceId);

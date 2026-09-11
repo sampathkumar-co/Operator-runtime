@@ -28,7 +28,7 @@ test('companion read APIs expose authoritative task/device/settings state withou
   });
   await tasks.put(task);
 
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   const local = await identity.loadOrCreate('Companion Test PC');
   const registry = new DeviceRegistryStore(state);
   const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });

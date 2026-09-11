@@ -33,7 +33,7 @@ class NeverOpeningSocket implements RelaySocketLike {
 test('relay connect timeout closes a socket that never opens and returns control to reconnect loop', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-timeout-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
-  const identity = new DeviceIdentityStore(stateDir);
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
   await identity.loadOrCreate('Timeout Test PC');
 
   const sockets: NeverOpeningSocket[] = [];

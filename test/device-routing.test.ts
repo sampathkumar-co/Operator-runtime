@@ -29,9 +29,9 @@ async function fixture(t: test.TestContext) {
   const aDir = await temp(t, 'operator-route-a-');
   const bDir = await temp(t, 'operator-route-b-');
   const stateDir = await temp(t, 'operator-route-state-');
-  const authority = new DeviceIdentityStore(authorityDir);
-  const aStore = new DeviceIdentityStore(aDir);
-  const bStore = new DeviceIdentityStore(bDir);
+  const authority = new DeviceIdentityStore(authorityDir, { platform: 'linux' });
+  const aStore = new DeviceIdentityStore(aDir, { platform: 'linux' });
+  const bStore = new DeviceIdentityStore(bDir, { platform: 'linux' });
   const authorityPublic = await authority.loadOrCreate('Authority');
   await aStore.loadOrCreate('Device A');
   await bStore.loadOrCreate('Device B');
