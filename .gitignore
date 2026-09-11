@@ -9,3 +9,5 @@ coverage/
 .DS_Store
 Thumbs.db
 native/*/target/
+
+deploy/public-edge/operator-edge.env

@@ -1,0 +1,11 @@
+.git
+.github
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+.operator
+native/*/target
+.env
+.env.*
+deploy/public-edge/operator-edge.env

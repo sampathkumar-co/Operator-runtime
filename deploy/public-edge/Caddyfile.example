@@ -1,0 +1,26 @@
+# Replace mcp.your-domain.tld with the same hostname used by OPERATOR_MCP_PUBLIC_URL.
+mcp.your-domain.tld {
+    @mcp path /mcp
+    handle @mcp {
+        reverse_proxy 127.0.0.1:47200 {
+            flush_interval -1
+        }
+    }
+
+    @oauth path /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server
+    handle @oauth {
+        reverse_proxy 127.0.0.1:47200
+    }
+
+    @device path /device
+    handle @device {
+        reverse_proxy 127.0.0.1:8788
+    }
+
+    @result path /v1/device-result
+    handle @result {
+        reverse_proxy 127.0.0.1:8789
+    }
+
+    respond 404
+}
