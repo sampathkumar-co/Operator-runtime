@@ -8,6 +8,7 @@ import {
   DEFAULT_MANIFEST_URL,
   downloadAndVerifyArtifact,
   resolveArtifactUrl,
+  validatePackageReleaseVersion,
   validateReleaseMetadata,
   validateTrustedSigners
 } from '../packages/operator-runtime-cli/src/release.mjs';
@@ -39,6 +40,13 @@ test('Windows PowerShell bootstrap child rebuilds its native module search path'
   assert.equal(env.KEEP, 'yes');
   assert.equal(Object.keys(env).some((key) => key.toLowerCase() === 'psmodulepath'), false);
   assert.equal(source.PSModulePath, 'C:\\Program Files\\PowerShell\\7\\Modules');
+});
+
+test('npm bootstrap package version is bound to the Windows production release line', () => {
+  assert.deepEqual(validatePackageReleaseVersion('1.2.3', '1.2.3.4'), { packageVersion: '1.2.3', releaseVersion: '1.2.3.4' });
+  assert.throws(() => validatePackageReleaseVersion('1.2.4', '1.2.3.4'), /does not match Windows release/);
+  assert.throws(() => validatePackageReleaseVersion('1.2.3-beta.1', '1.2.3.4'), /stable three-part semantic version/);
+  assert.throws(() => validatePackageReleaseVersion('1.2.3', '1.2.3.65536'), /between 0 and 65535/);
 });
 
 test('npx bootstrap validates production metadata and derives the release artifact URL', () => {
