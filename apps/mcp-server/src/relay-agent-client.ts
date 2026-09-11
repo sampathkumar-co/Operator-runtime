@@ -1,3 +1,4 @@
+import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
@@ -5,7 +6,8 @@ const MAX_TIMEOUT_MS = 10 * 60_000;
 export interface RelayAgentClientOptions {
   baseUrl: string;
   token: string;
-  accountId: string;
+  accountId?: string;
+  principal?: AccountPrincipal;
   deviceId?: string;
   projectKey?: string;
   waitMs?: number;
@@ -14,7 +16,8 @@ export interface RelayAgentClientOptions {
 export class RelayAgentClient {
   #url: URL;
   #token: string;
-  #accountId: string;
+  #accountId?: string;
+  #principal?: AccountPrincipal;
   #deviceId?: string;
   #projectKey?: string;
   #waitMs: number;
@@ -23,7 +26,9 @@ export class RelayAgentClient {
     this.#url = validateLoopbackControlUrl(options.baseUrl);
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#token = options.token;
-    this.#accountId = validUuid(options.accountId, 'OPERATOR_RELAY_ACCOUNT_ID');
+    if (Boolean(options.accountId) === Boolean(options.principal)) throw new Error('Relay execution requires exactly one accountId or verified principal.');
+    this.#accountId = options.accountId ? validUuid(options.accountId, 'OPERATOR_RELAY_ACCOUNT_ID') : undefined;
+    this.#principal = options.principal ? validPrincipal(options.principal) : undefined;
     this.#deviceId = options.deviceId ? validUuid(options.deviceId, 'OPERATOR_RELAY_DEVICE_ID') : undefined;
     this.#projectKey = options.projectKey ? validProjectKey(options.projectKey) : undefined;
     const waitMs = options.waitMs ?? MAX_TIMEOUT_MS;
@@ -40,7 +45,8 @@ export class RelayAgentClient {
         authorization: `Bearer ${this.#token}`
       },
       body: JSON.stringify({
-        accountId: this.#accountId,
+        ...(this.#accountId ? { accountId: this.#accountId } : {}),
+        ...(this.#principal ? { principal: this.#principal } : {}),
         ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
         ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
         action,
@@ -64,6 +70,14 @@ function validateLoopbackControlUrl(input: string): URL {
     throw new Error('Relay control URL must be credential-free loopback http://.');
   }
   return new URL('/v1/execute', base);
+}
+
+function validPrincipal(input: AccountPrincipal): AccountPrincipal {
+  const issuer = String(input?.issuer ?? '').trim();
+  const subject = String(input?.subject ?? '').trim();
+  if (!issuer || issuer.length > 1024 || /[\0\r\n]/.test(issuer)) throw new Error('Relay principal issuer is invalid.');
+  if (!subject || subject.length > 1024 || /[\0\r\n]/.test(subject)) throw new Error('Relay principal subject is invalid.');
+  return { issuer, subject };
 }
 
 function validUuid(value: string, name: string): string {

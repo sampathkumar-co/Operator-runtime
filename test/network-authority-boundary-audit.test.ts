@@ -201,13 +201,15 @@ test('local control-plane bind hosts are literal loopback only', async (t) => {
   );
 });
 
-test('MCP startup enforces the shared loopback bind authority guard', async () => {
-  const source = await fs.readFile(
-    path.resolve(import.meta.dirname, '../apps/mcp-server/src/server.ts'),
-    'utf8'
-  );
-  assert.match(source, /requireLiteralLoopbackBindHost\(process\.env\.OPERATOR_MCP_HOST/);
-  assert.doesNotMatch(source, /const host = process\.env\.OPERATOR_MCP_HOST \?\?/);
+test('MCP startup preserves the shared loopback guard behind explicit public-edge authority', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const serverSource = await fs.readFile(path.join(root, 'apps/mcp-server/src/server.ts'), 'utf8');
+  const edgeSource = await fs.readFile(path.join(root, 'apps/mcp-server/src/public-edge.ts'), 'utf8');
+  assert.match(serverSource, /resolveMcpBindHost\(process\.env, publicEdge\)/);
+  assert.match(edgeSource, /requireLiteralLoopbackBindHost\(env\.OPERATOR_MCP_HOST \?\? '127\.0\.0\.1'/);
+  assert.match(edgeSource, /OPERATOR_MCP_PUBLIC_BIND_ACK/);
+  assert.match(edgeSource, /TLS_TERMINATES_UPSTREAM/);
+  assert.doesNotMatch(serverSource, /const host = process\.env\.OPERATOR_MCP_HOST \?\?/);
 });
 
 test('shared HTTP ingress policy keeps request resources bounded', () => {
