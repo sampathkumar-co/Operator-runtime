@@ -95,3 +95,18 @@ Before public registration, verify:
 - two distinct upstream subjects resolve to distinct Operator accounts
 - relay control is unreachable from outside the host
 - no raw OAuth bearer token, OAuth subject, issuer, introspection secret or relay-control secret is logged or persisted as plaintext by Operator
+
+## Hardened VPS Compose bundle
+
+The repository includes `deploy/public-edge/` for the recommended single-host VPS layout. Relay delivery, relay results, relay control, and the MCP edge run in one non-root container so relay control can remain bound only to container loopback. The host publishes only MCP, device WebSocket, and result HTTP ports to `127.0.0.1`; port `8790` is never published.
+
+```bash
+cp deploy/public-edge/operator-edge.env.example deploy/public-edge/operator-edge.env
+chmod 600 deploy/public-edge/operator-edge.env
+# Replace every placeholder before starting.
+docker compose -f deploy/public-edge/compose.yml config --quiet
+docker compose -f deploy/public-edge/compose.yml up -d --build --wait
+docker compose -f deploy/public-edge/compose.yml ps
+```
+
+The container runs as the unprivileged `node` user with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a bounded PID limit, a small no-exec tmpfs, and one persistent relay-state volume. The image is pinned to the current certified Node 22 security baseline rather than a floating runtime tag.

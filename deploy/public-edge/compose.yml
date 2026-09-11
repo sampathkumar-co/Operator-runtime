@@ -1,0 +1,47 @@
+services:
+  operator-edge:
+    build:
+      context: ../..
+      dockerfile: deploy/public-edge/Dockerfile
+    image: operator-public-edge:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./operator-edge.env
+    environment:
+      OPERATOR_RELAY_STATE_DIR: /var/lib/operator-relay
+      OPERATOR_RELAY_HOST: 0.0.0.0
+      OPERATOR_RELAY_PORT: "8788"
+      OPERATOR_RELAY_RESULT_HOST: 0.0.0.0
+      OPERATOR_RELAY_RESULT_PORT: "8789"
+      OPERATOR_RELAY_CONTROL_PORT: "8790"
+      OPERATOR_RELAY_PUBLIC_BIND_ACK: TLS_TERMINATES_UPSTREAM
+      OPERATOR_EXECUTION_MODE: relay
+      OPERATOR_RELAY_CONTROL_URL: http://127.0.0.1:8790
+      OPERATOR_MCP_PUBLIC_EDGE: "1"
+      OPERATOR_MCP_PUBLIC_BIND_ACK: TLS_TERMINATES_UPSTREAM
+      OPERATOR_MCP_HOST: 0.0.0.0
+      OPERATOR_MCP_PORT: "47200"
+    ports:
+      - "127.0.0.1:${OPERATOR_MCP_LOOPBACK_PORT:-47200}:47200"
+      - "127.0.0.1:${OPERATOR_RELAY_LOOPBACK_PORT:-8788}:8788"
+      - "127.0.0.1:${OPERATOR_RELAY_RESULT_LOOPBACK_PORT:-8789}:8789"
+    volumes:
+      - operator_relay_state:/var/lib/operator-relay
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  operator_relay_state:

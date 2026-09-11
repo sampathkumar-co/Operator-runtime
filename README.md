@@ -73,6 +73,8 @@ native/
   windows-launcher/   Packaged Windows launcher
 packaging/
   windows/            MSIX build/sign/update scripts
+deploy/
+  public-edge/        Hardened VPS container/Compose templates for the OAuth MCP edge
 src/
   core/               Policy, routing, tasks, evidence, audit, identity, relay/update state
   capabilities/       Native/semantic execution providers
@@ -84,7 +86,7 @@ docs/                 Architecture, milestones and release notes
 
 ## Development checks
 
-Node 22.22.1 is pinned in CI for the current tested baseline.
+Node 22.23.2 is pinned in CI for the current tested baseline.
 
 ```bash
 npm run check
