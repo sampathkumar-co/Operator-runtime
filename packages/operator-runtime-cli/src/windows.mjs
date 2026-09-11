@@ -6,12 +6,21 @@ function psQuote(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
+export function windowsPowerShellEnvironment(sourceEnv = process.env) {
+  const env = { ...sourceEnv };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  }
+  return env;
+}
+
 async function runPowerShell(script) {
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   return await new Promise((resolve, reject) => {
     const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
       shell: false,
       windowsHide: true,
+      env: windowsPowerShellEnvironment(),
       stdio: ['ignore', 'pipe', 'pipe']
     });
     const stdout = [];

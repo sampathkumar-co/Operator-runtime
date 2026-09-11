@@ -11,7 +11,7 @@ import {
   validateReleaseMetadata,
   validateTrustedSigners
 } from '../packages/operator-runtime-cli/src/release.mjs';
-import { requireSignatureMatchesMetadata, requireTrustedSigner } from '../packages/operator-runtime-cli/src/windows.mjs';
+import { requireSignatureMatchesMetadata, requireTrustedSigner, windowsPowerShellEnvironment } from '../packages/operator-runtime-cli/src/windows.mjs';
 
 function metadata(overrides: Record<string, unknown> = {}) {
   return {
@@ -31,6 +31,15 @@ function metadata(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+test('Windows PowerShell bootstrap child rebuilds its native module search path', () => {
+  const source = { Path: 'C:\\Windows\\System32', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules', KEEP: 'yes' };
+  const env = windowsPowerShellEnvironment(source);
+  assert.equal(env.Path, source.Path);
+  assert.equal(env.KEEP, 'yes');
+  assert.equal(Object.keys(env).some((key) => key.toLowerCase() === 'psmodulepath'), false);
+  assert.equal(source.PSModulePath, 'C:\\Program Files\\PowerShell\\7\\Modules');
+});
 
 test('npx bootstrap validates production metadata and derives the release artifact URL', () => {
   const parsed = validateReleaseMetadata(metadata());
