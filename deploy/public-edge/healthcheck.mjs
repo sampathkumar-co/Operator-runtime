@@ -1,12 +1,9 @@
 import process from 'node:process';
+import { loopbackHttpStatus } from './http-probe.mjs';
 
 async function requireOk(url, headers = {}) {
-  const response = await fetch(url, {
-    redirect: 'error',
-    headers,
-    signal: AbortSignal.timeout(2_000)
-  });
-  if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
+  const status = await loopbackHttpStatus(url, { headers, timeoutMs: 2_000 });
+  if (status < 200 || status >= 300) throw new Error(`${url} returned HTTP ${status}`);
 }
 
 try {

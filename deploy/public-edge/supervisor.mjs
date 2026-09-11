@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { loopbackHttpStatus } from './http-probe.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
@@ -25,13 +26,9 @@ async function waitForHealth(url, options = {}) {
   let last = 'not ready';
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url, {
-        redirect: 'error',
-        headers: options.headers ?? {},
-        signal: AbortSignal.timeout(2_000)
-      });
-      if (response.ok) return;
-      last = `HTTP ${response.status}`;
+      const status = await loopbackHttpStatus(url, { headers: options.headers ?? {}, timeoutMs: 2_000 });
+      if (status >= 200 && status < 300) return;
+      last = `HTTP ${status}`;
     } catch (error) {
       last = error instanceof Error ? error.message : String(error);
     }

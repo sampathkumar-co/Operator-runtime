@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -38,6 +39,28 @@ test('public-edge supervisor shares loopback relay control and waits for both se
   const signalHandler = supervisor.indexOf("for (const signal of ['SIGTERM', 'SIGINT'])");
   const waitForChildExit = supervisor.indexOf('const firstExit = await Promise.race');
   assert.ok(signalHandler >= 0 && waitForChildExit > signalHandler, 'signal handlers must be installed before waiting on child exit');
+});
+
+test('loopback probe preserves the canonical Host header without permitting remote targets', async () => {
+  const { loopbackHttpStatus } = await import('../deploy/public-edge/http-probe.mjs');
+  let observedHost = '';
+  const server = createServer((request, response) => {
+    observedHost = request.headers.host ?? '';
+    response.writeHead(200).end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const status = await loopbackHttpStatus(`http://127.0.0.1:${address.port}/health`, {
+      headers: { host: 'edge.operator-runtime.dev' }
+    });
+    assert.equal(status, 200);
+    assert.equal(observedHost, 'edge.operator-runtime.dev');
+    await assert.rejects(() => loopbackHttpStatus('http://example.com/health'), /127\.0\.0\.1/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test('public-edge deployment templates contain routes but no committed credentials', () => {

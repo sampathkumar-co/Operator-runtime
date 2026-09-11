@@ -11,7 +11,7 @@ RUN npm ci --prefix apps/mcp-server --omit=dev --ignore-scripts --no-audit --no-
 COPY src ./src
 COPY apps/mcp-server/src ./apps/mcp-server/src
 COPY apps/relay-server/src ./apps/relay-server/src
-COPY deploy/public-edge/supervisor.mjs deploy/public-edge/healthcheck.mjs ./deploy/public-edge/
+COPY deploy/public-edge/supervisor.mjs deploy/public-edge/healthcheck.mjs deploy/public-edge/http-probe.mjs ./deploy/public-edge/
 
 RUN mkdir -p /var/lib/operator-relay \
  && chown -R node:node /var/lib/operator-relay /opt/operator
