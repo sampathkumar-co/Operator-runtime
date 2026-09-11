@@ -26,3 +26,6 @@ try {
 } finally {
   clearTimeout(watchdog);
 }
+
+// This CI-only harness has completed every assertion; do not keep the shell pipeline alive.
+process.exit(0);
