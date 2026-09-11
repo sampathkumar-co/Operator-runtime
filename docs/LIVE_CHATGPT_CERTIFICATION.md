@@ -25,7 +25,7 @@ Record these values in the certification receipt without including secrets:
 - Operator commit SHA
 - Windows package version
 - signed MSIX SHA-256
-- MCP tool-surface fingerprint/count
+- MCP tool-surface fingerprint/count from `npm run certify:local`
 - ChatGPT plan/workspace type used for the test
 - ChatGPT client surface (web/desktop)
 - device public identifier/display label
@@ -34,6 +34,19 @@ Record these values in the certification receipt without including secrets:
 - whether the test is read-only or includes write/modify capability
 
 Never record bearer tokens, relay-control credentials, OAuth tokens, private keys, PFX material or database passwords.
+
+## Local preflight ? required before opening the tunnel
+
+From `apps/mcp-server`, with the authenticated local agent and loopback MCP server running, execute:
+
+```bash
+npm run check
+npm run certify:local
+```
+
+The preflight must PASS before Gate A. Retain its secret-free JSON output with the release evidence. It verifies the loopback-only MCP endpoint, enumerates the canonical tool manifest, requires complete MCP safety annotations, computes a deterministic SHA-256 fingerprint over names/annotations/input schemas, and executes a real `computer.inspect` read probe through MCP. Tool-name drift or a missing annotation fails closed.
+
+The receipt intentionally records `secureMcpTunnel` and `realChatGPTReadWorkflow` as `NOT_RUN`; local automation must never claim those external gates.
 
 ## Gate A — transport connection
 
@@ -143,7 +156,7 @@ Device: <public demo label>
 Project key: <logical key>
 
 Transport: PASS/FAIL
-22-tool enumeration: PASS/FAIL
+Tool enumeration (<count>, SHA-256 <fingerprint>): PASS/FAIL
 Real read workflow: PASS/FAIL
 Local policy denial: PASS/FAIL/NOT AVAILABLE ON PLAN
 Verified mutation: PASS/FAIL/NOT AVAILABLE ON PLAN

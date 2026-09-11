@@ -6,32 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { TOOL_NAMES } from '../src/tool-surface.ts';
+import { runLocalCertificationPreflight } from '../scripts/live-cert-preflight.ts';
 
 const TOKEN = 'operator-ci-token-0123456789abcdef0123456789';
-const EXPECTED_TOOLS = [
-  'app.inspect',
-  'app.operate',
-  'browser.inspect',
-  'browser.interact',
-  'browser.navigate',
-  'computer.inspect',
-  'docker.inspect',
-  'docker.manage',
-  'file.list',
-  'file.read',
-  'file.write',
-  'git.checkpoint',
-  'git.diff',
-  'git.status',
-  'git.write',
-  'postgres.query',
-  'project.command',
-  'project.inspect',
-  'project.transaction',
-  'terminal.execute',
-  'vscode.inspect',
-  'vscode.open'
-];
 
 type CommandResult = {
   code: number | null;
@@ -203,7 +181,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
   let agentStderr = '';
   const agent = spawn(process.execPath, ['--experimental-strip-types', agentEntry], {
-    cwd: testRoot,
+    cwd: process.cwd(),
     env: {
       ...process.env,
       OPERATOR_AGENT_HOST: '127.0.0.1',
@@ -254,7 +232,18 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   t.after(() => client.close());
 
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), EXPECTED_TOOLS);
+  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
+
+  const preflightReceipt = await runLocalCertificationPreflight(mcpUrl);
+  const preflightMcp = preflightReceipt.mcp as Record<string, unknown>;
+  const preflightRead = preflightReceipt.readProbe as Record<string, unknown>;
+  const preflightExternal = preflightReceipt.externalGates as Record<string, unknown>;
+  assert.equal(preflightMcp.toolCount, TOOL_NAMES.length);
+  assert.match(String(preflightMcp.toolSurfaceSha256), /^[0-9a-f]{64}$/);
+  assert.equal(preflightRead.status, 'PASS');
+  assert.equal(preflightRead.tool, 'computer.inspect');
+  assert.equal(preflightExternal.secureMcpTunnel, 'NOT_RUN');
+  assert.equal(preflightExternal.realChatGPTReadWorkflow, 'NOT_RUN');
   const inspectTool = tools.tools.find((tool) => tool.name === 'computer.inspect');
   assert.equal(inspectTool?.annotations?.readOnlyHint, true);
   const checkpointTool = tools.tools.find((tool) => tool.name === 'git.checkpoint');
@@ -500,13 +489,18 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
 
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
-  const inspectorBinary = path.join(
+  const inspectorEntry = path.join(
     process.cwd(),
     'node_modules',
-    '.bin',
-    process.platform === 'win32' ? 'mcp-inspector.cmd' : 'mcp-inspector'
+    '@modelcontextprotocol',
+    'inspector',
+    'clients',
+    'launcher',
+    'build',
+    'index.js'
   );
-  const inspector = await runCommand(inspectorBinary, [
+  const inspector = await runCommand(process.execPath, [
+    inspectorEntry,
     '--cli',
     '--server-url', mcpUrl,
     '--transport', 'http',
@@ -515,5 +509,5 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(inspector.code, 0, `MCP Inspector failed: ${inspector.stderr}`);
   const inspectorResult = parseInspectorJson(inspector.stdout);
   const inspectorTools = Array.isArray(inspectorResult.tools) ? inspectorResult.tools as Array<Record<string, unknown>> : [];
-  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), EXPECTED_TOOLS);
+  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), TOOL_NAMES);
 });
