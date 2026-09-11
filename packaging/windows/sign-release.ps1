@@ -46,6 +46,9 @@ if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid)
   throw "Authenticode verification is not Valid: $($signature.Status) $($signature.StatusMessage)"
 }
 $subject = $signature.SignerCertificate.Subject
+$fingerprint = $signature.SignerCertificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
+$hasTimestamp = $null -ne $signature.TimeStamperCertificate
+if (-not $SkipTimestampForTest -and -not $hasTimestamp) { throw 'Production MSIX signature does not contain a verifiable timestamp.' }
 if (-not $subject) { throw 'Signed MSIX did not expose a signer subject.' }
 
 [xml]$manifest = & {
@@ -64,7 +67,8 @@ if ($publisher -ne $subject) { throw "MSIX manifest publisher '$publisher' does 
 $meta = Get-Content $metadata -Raw | ConvertFrom-Json
 $meta.signed = $true
 if ($meta.PSObject.Properties.Name -contains 'signerSubject') { $meta.signerSubject = $subject } else { $meta | Add-Member -NotePropertyName signerSubject -NotePropertyValue $subject }
-if ($meta.PSObject.Properties.Name -contains 'timestamped') { $meta.timestamped = (-not $SkipTimestampForTest) } else { $meta | Add-Member -NotePropertyName timestamped -NotePropertyValue (-not $SkipTimestampForTest) }
+if ($meta.PSObject.Properties.Name -contains 'signerCertificateSha256') { $meta.signerCertificateSha256 = $fingerprint } else { $meta | Add-Member -NotePropertyName signerCertificateSha256 -NotePropertyValue $fingerprint }
+if ($meta.PSObject.Properties.Name -contains 'timestamped') { $meta.timestamped = $hasTimestamp } else { $meta | Add-Member -NotePropertyName timestamped -NotePropertyValue $hasTimestamp }
 $meta.sha256 = (Get-FileHash -LiteralPath $msix -Algorithm SHA256).Hash.ToLowerInvariant()
 $meta.sizeBytes = (Get-Item -LiteralPath $msix).Length
 Write-Utf8NoBom $metadata ($meta | ConvertTo-Json -Depth 8)

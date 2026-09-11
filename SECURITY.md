@@ -56,13 +56,14 @@ The local audit hash chain is tamper-evident, not an external transparency servi
 
 The repository-owned hardening items listed in earlier revisions—dependency locking/SBOM scanning, tamper-evident Activity chaining and publication of the technical privacy/retention model—are now implemented and CI-covered. The following items still require real production credentials, infrastructure or platform-side evidence and cannot be honestly closed by repository CI alone:
 
-- production-trusted Windows code-signing identity/certificate and RFC 3161 timestamped final artifacts;
-- production HTTPS host for the signed MSIX and `.appinstaller` update feed;
-- supported Secure MCP Tunnel or other officially supported remote ChatGPT-to-MCP reachability;
+- production-trusted Windows code-signing identity/certificate, with its SHA-256 fingerprint pinned in `operator-runtime-cli`, and RFC 3161 timestamped final artifacts;
+- production HTTPS/GitHub Release publication for the signed MSIX, `release-metadata.json` and `.appinstaller`, followed by npm publication of the fail-closed bootstrap;
+- supported Secure MCP Tunnel (or then-current supported private transport) for private/live ChatGPT-to-MCP certification;
+- a stable public HTTPS MCP endpoint/proxy and authentication if public plugin distribution is targeted;
 - a real ChatGPT workflow against an explicitly paired physical device;
 - production upstream authentication/identity integration and deployment-specific privacy terms if a public multi-user relay service is operated.
 
-The existing ephemeral-certificate Windows signing/install smoke test proves signing, Publisher matching, installation and packaged self-test mechanics only; it is **not** production trust.
+The ephemeral-certificate Windows signing/install smoke test proves signing, Publisher/fingerprint binding, bootstrap-driven installation, package-integrity declaration and packaged runtime readiness only; its test certificate is injected into CI and is never shipped in the npm trust allowlist. It is **not** production trust.
 
 ## Prompt-injection boundary
 

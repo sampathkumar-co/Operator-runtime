@@ -1,0 +1,53 @@
+name: NPM Bootstrap Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: npm dist-tag for operator-runtime-cli
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    name: Publish operator-runtime-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.22.1'
+          registry-url: https://registry.npmjs.org
+      - name: Validate npm dist-tag
+        shell: bash
+        env:
+          NPM_TAG: ${{ inputs.npm_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$NPM_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo 'invalid npm dist-tag' >&2; exit 1; }
+
+      - name: Bootstrap security tests
+        run: node --experimental-strip-types --test test/npx-bootstrap.test.ts
+      - name: Validate publishable tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json ./packages/operator-runtime-cli > /tmp/operator-runtime-cli-pack.json
+          node <<'NODE'
+          const data = JSON.parse(require('fs').readFileSync('/tmp/operator-runtime-cli-pack.json', 'utf8'))[0];
+          const files = new Set((data.files || []).map((file) => file.path));
+          for (const required of ['bin/operator-runtime-cli.mjs','src/cli.mjs','src/release.mjs','src/windows.mjs','src/publish-check.mjs','trusted-signers.json']) {
+            if (!files.has(required)) throw new Error(`missing npm payload file: ${required}`);
+          }
+          NODE
+      - name: Publish npm bootstrap
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ inputs.npm_tag }}
+        run: npm publish ./packages/operator-runtime-cli --access public --tag "$NPM_TAG"

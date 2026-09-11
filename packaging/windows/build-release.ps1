@@ -119,6 +119,7 @@ $manifest = @"
     <PublisherDisplayName>Operator</PublisherDisplayName>
     <Description>Semantic execution runtime for user-authorized computers.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
+    <uap10:PackageIntegrity><uap10:Content Enforcement="on" /></uap10:PackageIntegrity>
   </Properties>
   <Resources><Resource Language="en-us" /></Resources>
   <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
@@ -171,6 +172,7 @@ $metadata = [ordered]@{
   version = $Version
   platform = 'win32'
   arch = 'x64'
+  identityName = $IdentityName
   artifact = $msixName
   sha256 = $hash
   sizeBytes = $size

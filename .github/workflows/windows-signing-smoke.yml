@@ -48,6 +48,8 @@ jobs:
           Import-Certificate -FilePath artifacts/signing/operator-ci.cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
           "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
           "publisher=$($cert.Subject)" >> $env:GITHUB_OUTPUT
+          $fingerprintSha256 = $cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
+          "fingerprint_sha256=$fingerprintSha256" >> $env:GITHUB_OUTPUT
           "pfx_password=$passwordText" >> $env:GITHUB_OUTPUT
       - name: Build package with matching publisher
         shell: pwsh
@@ -69,43 +71,76 @@ jobs:
           $meta = Get-Content artifacts/windows-signing-smoke/release-metadata.json -Raw | ConvertFrom-Json
           if ($meta.signed -ne $true) { throw 'signed release metadata was not updated' }
           if ($meta.signerSubject -ne '${{ steps.cert.outputs.publisher }}') { throw 'signer subject metadata mismatch' }
+          if ($meta.signerCertificateSha256 -ne '${{ steps.cert.outputs.fingerprint_sha256 }}') { throw 'signer certificate fingerprint metadata mismatch' }
           if ($meta.timestamped -ne $false) { throw 'ephemeral CI signing must be recorded as non-timestamped' }
-      - name: Install signed package and run one-command onboarding smoke
+      - name: Install through npx bootstrap core and verify one-command readiness
+        timeout-minutes: 4
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msix = Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix
-          Add-AppxPackage -Path $msix
+          $msix = (Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix).Path
+          $meta = (Resolve-Path artifacts/windows-signing-smoke/release-metadata.json).Path
+          $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
+          $bootstrapLog = Join-Path $env:RUNNER_TEMP 'operator-bootstrap-smoke.log'
+
+          function Write-BootstrapShellPhase([string]$Phase) {
+            $line = "[operator-bootstrap-shell-phase] $Phase"
+            Write-Host $line
+            Add-Content -LiteralPath $bootstrapLog -Value $line
+          }
+
           try {
+            Write-BootstrapShellPhase 'node-smoke:start'
+            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root
+            $bootstrapExit = $LASTEXITCODE
+            if ($bootstrapExit -ne 0) { throw "npx bootstrap core smoke failed with exit code $bootstrapExit" }
+            Write-BootstrapShellPhase 'node-smoke:ok'
+
+            Write-BootstrapShellPhase 'package-query:start'
             $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
             if (-not $package) { throw 'Operator.Runtime package was not registered' }
+            Write-BootstrapShellPhase 'package-query:ok'
+
+            Write-BootstrapShellPhase 'launcher-self-test:start'
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
-            if (-not (Test-Path $launcher -PathType Leaf)) { throw 'installed Operator.exe is missing' }
             $output = & $launcher --self-test
-            if ($LASTEXITCODE -ne 0) { throw "packaged launcher self-test exited $LASTEXITCODE" }
-            if (($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test marker missing' }
+            if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test failed' }
+            Write-BootstrapShellPhase 'launcher-self-test:ok'
 
-            $state = Join-Path $env:LOCALAPPDATA 'Operator'
-            $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
-            New-Item -ItemType Directory -Force -Path $root | Out-Null
-            Remove-Item -LiteralPath $state -Recurse -Force -ErrorAction SilentlyContinue
-            & $launcher setup --root $root
-            if ($LASTEXITCODE -ne 0) { throw 'installed Operator setup failed' }
-            & $launcher verify
-            if ($LASTEXITCODE -ne 0) { throw 'installed Operator verify failed' }
-
+            Write-BootstrapShellPhase 'health-agent:start'
             $agent = Invoke-RestMethod -Uri 'http://127.0.0.1:47100/health' -TimeoutSec 2
-            $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $agent.ok -or $agent.service -ne 'operator-local-agent') { throw 'installed local agent health check failed' }
+            Write-BootstrapShellPhase 'health-agent:ok'
+
+            Write-BootstrapShellPhase 'health-mcp:start'
+            $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $mcp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
+            Write-BootstrapShellPhase 'health-mcp:ok'
           } finally {
+            Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
             if ($package) {
               $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
               Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
             }
+            Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
+
+            Write-BootstrapShellPhase 'cleanup-state:start'
             Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
+            Write-BootstrapShellPhase 'cleanup-state:ok'
+
+            Write-BootstrapShellPhase 'cleanup-remove-msix:start'
             Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+            Write-BootstrapShellPhase 'cleanup-remove-msix:ok'
           }
+          Write-BootstrapShellPhase 'step:ok'
+      - name: Upload bootstrap diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-bootstrap-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/operator-bootstrap-smoke.log
+          if-no-files-found: warn
+          retention-days: 3
       - name: Remove ephemeral trust material
         if: always()
         shell: pwsh

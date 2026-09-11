@@ -43,15 +43,17 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - ephemeral-certificate Windows install/uninstall smoke certification
 - dedicated security red-team and performance-regression CI gates
 
-The root runtime suite currently contains **102 tests**. Additional independent gates cover the MCP transport, relay WebSocket path, native Windows UIA code, Windows MSIX packaging/sign-install mechanics, red-team cases, performance budgets and the cross-platform runtime matrix.
+The full root runtime/import suite is CI-gated alongside independent MCP transport, relay WebSocket, native Windows, MSIX packaging/sign-install, red-team, performance and cross-platform matrix checks. Exact test counts are intentionally not frozen in documentation because the suite grows with each hardened boundary.
 
 ## Remaining release gates
 
 These are deliberately not represented as complete until their real external dependencies exist:
 
-- production-trusted Windows code-signing identity/certificate and timestamped release signing
-- supported public HTTPS update host using the final release identity
-- Secure MCP Tunnel / supported public ChatGPT-to-MCP reachability test
+- production-trusted Windows code-signing identity/certificate, its SHA-256 fingerprint pinned in `operator-runtime-cli`, and RFC 3161 timestamped release signing
+- publication of the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location
+- publication of `operator-runtime-cli` to npm after the signer is pinned
+- supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
+- stable public HTTPS MCP endpoint/proxy plus authentication if public plugin distribution is targeted
 - real ChatGPT workflow against an explicitly paired physical device
 - final publication/submission artwork and marketplace/store metadata
 - upstream production account/auth integration, if public multi-user relay service is deployed
@@ -93,13 +95,15 @@ The standard `npm run check` performs the root import/surface check and the full
 
 ## Windows one-command setup
 
-The packaged Windows release exposes the `operator` command. From the project folder you want to authorize, run:
+For the public release, the primary onboarding command is:
 
 ```powershell
-operator setup
+npx operator-runtime-cli setup
 ```
 
-That single setup command generates the local-agent and recovery secrets, protects them with Windows DPAPI CurrentUser, initializes the device identity, authorizes the invocation folder, and runs the packaged verification checks. It does not print plaintext secrets. It also starts the bundled local agent and MCP server and waits for both to become healthy before returning. `operator verify` remains available as an optional re-check/troubleshooting command rather than a mandatory setup step. After `operator setup` passes, connect Operator through the supported ChatGPT MCP transport.
+The npm bootstrap verifies bounded HTTPS release metadata, exact package size and SHA-256, a timestamped Windows signature, the package identity, and a production certificate fingerprint pinned inside the npm package before Windows installation. It refuses downgrades below its locally pinned minimum version. It then installs Operator and invokes the packaged setup, which DPAPI-protects local secrets/device identity, authorizes the invocation folder, starts the bundled local agent and MCP server, and waits for readiness.
+
+If Operator is already installed, the equivalent local command is `operator setup`; `npx operator-runtime-cli verify` (or `operator verify`) is available for troubleshooting. Until a real production signer is pinned and the signed release plus npm package are published, the npm bootstrap intentionally fails closed instead of accepting test/unsigned builds.
 
 For development from source, the lower-level environment-variable flow remains available below.
 
@@ -127,7 +131,7 @@ npm run dev
 
 Local mode talks directly to the authenticated local agent. Relay mode preserves the same 22-tool MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-A real public ChatGPT deployment still requires a supported secure external reachability mechanism and the final production trust configuration; CI does not pretend those external gates are complete.
+A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path, while public plugin distribution separately requires a stable public HTTPS MCP endpoint/proxy and authentication. Repository CI does not pretend those external gates are complete.
 
 ## Windows package model
 
