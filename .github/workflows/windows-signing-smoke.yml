@@ -91,11 +91,8 @@ jobs:
 
           try {
             Write-BootstrapShellPhase 'node-smoke:start'
-            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root *>> $bootstrapLog
+            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root
             $bootstrapExit = $LASTEXITCODE
-            if (Test-Path -LiteralPath $bootstrapLog) {
-              Get-Content -LiteralPath $bootstrapLog | Write-Host
-            }
             if ($bootstrapExit -ne 0) { throw "npx bootstrap core smoke failed with exit code $bootstrapExit" }
             Write-BootstrapShellPhase 'node-smoke:ok'
 
