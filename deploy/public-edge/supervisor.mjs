@@ -15,10 +15,13 @@ function start(name, cwd, args) {
     stdio: 'inherit',
     windowsHide: true
   });
+  const exit = new Promise((resolve) => {
+    child.once('exit', (code, signal) => resolve({ name, code, signal }));
+  });
   child.once('error', (error) => {
     process.stderr.write(`[operator-edge] ${name} failed to start: ${error.message}\n`);
   });
-  return child;
+  return { name, child, exit };
 }
 
 async function waitForHealth(url, options = {}) {
@@ -46,10 +49,10 @@ function publicHostHeader() {
 async function terminate(children, signal) {
   if (shuttingDown.value) return;
   shuttingDown.value = true;
-  for (const child of children) {
+  for (const { child } of children) {
     if (!child.killed && child.exitCode === null) child.kill(signal);
   }
-  await Promise.all(children.map((child) => new Promise((resolve) => {
+  await Promise.all(children.map(({ child }) => new Promise((resolve) => {
     if (child.exitCode !== null) return resolve();
     const timer = setTimeout(() => {
       if (child.exitCode === null) child.kill('SIGKILL');
@@ -74,12 +77,9 @@ try {
   await waitForHealth('http://127.0.0.1:47200/health', { headers: { host: publicHostHeader() } });
   process.stdout.write(JSON.stringify({ service: 'operator-public-edge', status: 'ready' }) + '\n');
 
-  const firstExit = await Promise.race(children.map((child, index) => new Promise((resolve) => {
-    child.once('exit', (code, signal) => resolve({ index, code, signal }));
-  })));
+  const firstExit = await Promise.race(children.map(({ exit }) => exit));
   if (!shuttingDown.value) {
-    const failed = children[firstExit.index] === relay ? 'relay' : 'mcp';
-    process.stderr.write(`[operator-edge] ${failed} exited unexpectedly (code=${firstExit.code ?? 'null'}, signal=${firstExit.signal ?? 'null'}).\n`);
+    process.stderr.write(`[operator-edge] ${firstExit.name} exited unexpectedly (code=${firstExit.code ?? 'null'}, signal=${firstExit.signal ?? 'null'}).\n`);
     process.exitCode = firstExit.code && firstExit.code > 0 ? firstExit.code : 1;
     await terminate(children, 'SIGTERM');
   }

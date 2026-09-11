@@ -37,9 +37,15 @@ test('public-edge supervisor shares loopback relay control and waits for both se
   assert.match(supervisor, /127\.0\.0\.1:47200\/health/);
   assert.match(supervisor, /--experimental-strip-types', 'src\/main\.ts'/);
   assert.match(supervisor, /--experimental-strip-types', 'src\/server\.ts'/);
+  const exitPromise = supervisor.indexOf('const exit = new Promise');
+  const relayStart = supervisor.indexOf("const relay = start('relay'");
   const signalHandler = supervisor.indexOf("for (const signal of ['SIGTERM', 'SIGINT'])");
+  const mcpStart = supervisor.indexOf("const mcp = start('mcp'");
   const waitForChildExit = supervisor.indexOf('const firstExit = await Promise.race');
-  assert.ok(signalHandler >= 0 && waitForChildExit > signalHandler, 'signal handlers must be installed before waiting on child exit');
+  assert.ok(exitPromise >= 0 && exitPromise < relayStart, 'start() must register child exit before returning it');
+  assert.ok(signalHandler > relayStart && signalHandler < mcpStart, 'signal handlers must be installed before MCP startup waits');
+  assert.ok(waitForChildExit > mcpStart, 'supervisor must race the pre-registered child exit promises');
+  assert.match(supervisor, /Promise\.race\(children\.map\(\(\{ exit \}\) => exit\)\)/);
 });
 
 test('loopback probe preserves the canonical Host header without permitting remote targets', async () => {
