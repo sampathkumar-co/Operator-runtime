@@ -102,18 +102,30 @@ export async function bootstrapRemoteRelease({ root, manifestUrl = DEFAULT_MANIF
   }
 }
 
-export async function bootstrapLocalReleaseForCi({ root, metadataPath, artifactPath, trustedSigners }) {
+export async function bootstrapLocalReleaseForCi({ root, metadataPath, artifactPath, trustedSigners, onPhase = () => {} }) {
   assertSupportedWindows();
+  onPhase('authorize-root:start');
   const authorizedRoot = await assertRootDirectory(root);
+  onPhase('authorize-root:ok');
   const raw = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
   const metadata = validateReleaseMetadata(raw, { allowUntimestamped: true });
+  onPhase('verify-artifact:start');
   await verifyLocalArtifact(metadata, artifactPath);
+  onPhase('verify-artifact:ok');
+  onPhase('verify-authenticode:start');
   const signature = await verifyAuthenticode(artifactPath);
   requireSignatureMatchesMetadata(signature, metadata);
   requireTrustedSigner(signature, trustedSigners);
+  onPhase('verify-authenticode:ok');
+  onPhase('install-msix:start');
   const installed = await installVerifiedMsix(artifactPath, metadata, signature);
+  onPhase('install-msix:ok');
+  onPhase('operator-setup:start');
   await runOperatorSetup(installed, authorizedRoot);
+  onPhase('operator-setup:ok');
+  onPhase('operator-verify:start');
   await runOperatorVerify(installed);
+  onPhase('operator-verify:ok');
   return { metadata, signature, installed, authorizedRoot };
 }
 
