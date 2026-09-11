@@ -16,7 +16,8 @@ The transport adapter intentionally contains no machine-execution policy; it onl
 7. Execute read-only tools and verify structured evidence reaches the client intact.
 8. Verify `browser.interact` and other externally mutating actions remain policy/approval gated locally.
 9. Run `npm run certify:local` and retain the secret-free tool-count/fingerprint/read-probe receipt.
-10. Run a Secure MCP Tunnel test from ChatGPT developer mode and confirm the connected tool names match the local receipt.
-11. Run a real ChatGPT read workflow against a paired test device.
+10. With the reviewed official tunnel-client binary, export the real Platform tunnel ID and runtime key only into the local process environment, run `npm run certify:tunnel`, and retain the secret-free PASS receipt.
+11. While that tunnel runtime is live, connect it from an eligible ChatGPT developer-mode workspace and confirm the connected tool names match the local receipt.
+12. Run a real ChatGPT read workflow against a paired test device.
 
 A source-level implementation is **not** considered transport-certified until these gates pass.
