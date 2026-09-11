@@ -82,28 +82,60 @@ jobs:
           $meta = (Resolve-Path artifacts/windows-signing-smoke/release-metadata.json).Path
           $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
           $bootstrapLog = Join-Path $env:RUNNER_TEMP 'operator-bootstrap-smoke.log'
+
+          function Write-BootstrapShellPhase([string]$Phase) {
+            $line = "[operator-bootstrap-shell-phase] $Phase"
+            Write-Host $line
+            Add-Content -LiteralPath $bootstrapLog -Value $line
+          }
+
           try {
-            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root *>&1 |
-              Tee-Object -FilePath $bootstrapLog
+            Write-BootstrapShellPhase 'node-smoke:start'
+            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root *>> $bootstrapLog
             $bootstrapExit = $LASTEXITCODE
+            if (Test-Path -LiteralPath $bootstrapLog) {
+              Get-Content -LiteralPath $bootstrapLog | Write-Host
+            }
             if ($bootstrapExit -ne 0) { throw "npx bootstrap core smoke failed with exit code $bootstrapExit" }
+            Write-BootstrapShellPhase 'node-smoke:ok'
+
+            Write-BootstrapShellPhase 'package-query:start'
             $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
             if (-not $package) { throw 'Operator.Runtime package was not registered' }
+            Write-BootstrapShellPhase 'package-query:ok'
+
+            Write-BootstrapShellPhase 'launcher-self-test:start'
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
             $output = & $launcher --self-test
             if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'packaged launcher self-test failed' }
+            Write-BootstrapShellPhase 'launcher-self-test:ok'
+
+            Write-BootstrapShellPhase 'health-agent:start'
             $agent = Invoke-RestMethod -Uri 'http://127.0.0.1:47100/health' -TimeoutSec 2
-            $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $agent.ok -or $agent.service -ne 'operator-local-agent') { throw 'installed local agent health check failed' }
+            Write-BootstrapShellPhase 'health-agent:ok'
+
+            Write-BootstrapShellPhase 'health-mcp:start'
+            $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $mcp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
+            Write-BootstrapShellPhase 'health-mcp:ok'
           } finally {
+            Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
             if ($package) {
               $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
               Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
             }
+            Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
+
+            Write-BootstrapShellPhase 'cleanup-state:start'
             Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
+            Write-BootstrapShellPhase 'cleanup-state:ok'
+
+            Write-BootstrapShellPhase 'cleanup-remove-msix:start'
             Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+            Write-BootstrapShellPhase 'cleanup-remove-msix:ok'
           }
+          Write-BootstrapShellPhase 'step:ok'
       - name: Upload bootstrap diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
