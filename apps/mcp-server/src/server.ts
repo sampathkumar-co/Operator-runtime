@@ -1,31 +1,107 @@
 import crypto from 'node:crypto';
 import { createMcpFastifyApp } from '@modelcontextprotocol/fastify';
-import { toNodeHandler } from '@modelcontextprotocol/node';
-import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
+import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
+import {
+  bearerAuthChallengeResponse,
+  createMcpHandler,
+  getOAuthProtectedResourceMetadataUrl,
+  hostHeaderValidationResponse,
+  McpServer,
+  oauthMetadataResponse,
+  originValidationResponse,
+  verifyBearerToken,
+  type AuthInfo
+} from '@modelcontextprotocol/server';
+import type { FastifyReply } from 'fastify';
 import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
+import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
-import { requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
-const agentToken = process.env.OPERATOR_AGENT_TOKEN;
-if (!agentToken || agentToken.length < 32) {
+const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
+const executionMode = (process.env.OPERATOR_EXECUTION_MODE ?? 'local').trim().toLowerCase();
+const publicEdge = readPublicMcpEdgeConfig();
+if (executionMode === 'local' && agentToken.length < 32) {
   throw new Error('OPERATOR_AGENT_TOKEN must be set and match the local agent token.');
 }
-const agent = new LocalAgentClient(agentUrl, agentToken);
+if (publicEdge && (process.env.OPERATOR_RELAY_CONTROL_TOKEN?.trim().length ?? 0) < 32) {
+  throw new Error('Public MCP edge requires OPERATOR_RELAY_CONTROL_TOKEN with at least 32 characters.');
+}
+const port = Number(process.env.OPERATOR_MCP_PORT ?? 47200);
+if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('OPERATOR_MCP_PORT must be an integer between 1 and 65535.');
+const host = resolveMcpBindHost(process.env, publicEdge);
 
-const handler = createMcpHandler(() => createServer());
+const handler = createMcpHandler(({ authInfo }) => {
+  const principal = publicEdge ? principalFromAuthInfo(authInfo, publicEdge.publicUrl) : undefined;
+  return createServer(new LocalAgentClient(agentUrl, agentToken, principal));
+});
 const nodeHandler = toNodeHandler(handler);
-const app = createMcpFastifyApp();
-app.all('/mcp', (request, reply) => nodeHandler(request.raw, reply.raw, request.body));
+const app = createMcpFastifyApp(publicEdge
+  ? { host, allowedHosts: publicEdge.allowedHostnames, allowedOrigins: publicEdge.allowedHostnames }
+  : { host });
+
+if (publicEdge) {
+  const metadataPaths = ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server'];
+  for (const metadataPath of metadataPaths) {
+    app.all(metadataPath, async (request, reply) => {
+      const webRequest = await toWebRequest(request.raw, request.body);
+      const rejected = validatePublicHeaders(webRequest);
+      if (rejected) return sendSdkResponse(reply, rejected);
+      const response = oauthMetadataResponse(webRequest, publicEdge.authMetadata);
+      if (!response) return reply.code(404).send({ error: 'not_found' });
+      return sendSdkResponse(reply, response);
+    });
+  }
+}
+
+app.all('/mcp', async (request, reply) => {
+  if (publicEdge) {
+    const webRequest = await toWebRequest(request.raw, request.body);
+    const rejected = validatePublicHeaders(webRequest);
+    if (rejected) return sendSdkResponse(reply, rejected);
+    const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
+    let authInfo: AuthInfo;
+    try {
+      authInfo = await verifyBearerToken(request.headers.authorization, {
+        verifier: publicEdge.verifier,
+        requiredScopes: publicEdge.requiredScopes,
+        resourceMetadataUrl
+      });
+    } catch (error) {
+      return sendSdkResponse(reply, bearerAuthChallengeResponse(error, {
+        requiredScopes: publicEdge.requiredScopes,
+        resourceMetadataUrl
+      }));
+    }
+    delete request.raw.headers.authorization;
+    (request.raw as typeof request.raw & { auth?: AuthInfo }).auth = authInfo;
+  }
+  return nodeHandler(request.raw, reply.raw, request.body);
+});
 app.get('/health', async () => ({ ok: true, service: 'operator-mcp-server', version: '0.1.0' }));
 
-const port = Number(process.env.OPERATOR_MCP_PORT ?? 47200);
-const host = requireLiteralLoopbackBindHost(process.env.OPERATOR_MCP_HOST ?? '127.0.0.1', 'MCP server');
 await app.listen({ host, port });
-console.error(`[operator] MCP server listening on http://${host}:${port}/mcp`);
+if (publicEdge) console.error(`[operator] public MCP edge listening behind trusted TLS proxy for ${publicEdge.publicUrl.toString()}`);
+else console.error(`[operator] MCP server listening on http://${host}:${port}/mcp`);
 
-function createServer(): McpServer {
+function validatePublicHeaders(request: Request): Response | undefined {
+  if (!publicEdge) return undefined;
+  return hostHeaderValidationResponse(request, publicEdge.allowedHostnames)
+    ?? originValidationResponse(request, publicEdge.allowedHostnames);
+}
+
+async function sendSdkResponse(reply: FastifyReply, response: Response): Promise<FastifyReply> {
+  reply.code(response.status);
+  for (const [name, value] of response.headers) reply.header(name, value);
+  const body = await response.text();
+  return body ? reply.send(body) : reply.send();
+}
+
+function createServer(agent: LocalAgentClient): McpServer {
+  const invoke = (capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) =>
+    invokeWithAgent(agent, capability, risk, input, target);
+
   const server = new McpServer(
     { name: 'Operator', title: 'Operator', version: '0.1.0' },
     { capabilities: { tools: {} }, instructions: 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
@@ -451,7 +527,7 @@ function createServer(): McpServer {
   return server;
 }
 
-async function invoke(capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) {
+async function invokeWithAgent(agent: LocalAgentClient, capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) {
   const action: ActionRequest = {
     id: crypto.randomUUID(),
     capability,

@@ -36,6 +36,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - real WebSocket relay server and production relay client
 - MCP HTTP server with **22 semantic tools**
 - local and relay-backed MCP execution modes with unchanged tool schemas
+- OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
 - official MCP client and MCP Inspector end-to-end certification
 - Windows native launcher with bundled Node runtime and UIA sidecar
 - reproducible unsigned MSIX generation and `.appinstaller` update metadata
@@ -53,10 +54,10 @@ These are deliberately not represented as complete until their real external dep
 - publication of the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location
 - publication of `operator-runtime-cli` to npm after the signer is pinned
 - supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
-- stable public HTTPS MCP endpoint/proxy plus authentication if public plugin distribution is targeted
+- deployment and live certification of the implemented OAuth-authenticated public HTTPS MCP edge if public plugin distribution is targeted
 - real ChatGPT workflow against an explicitly paired physical device
 - final publication/submission artwork and marketplace/store metadata
-- upstream production account/auth integration, if public multi-user relay service is deployed
+- production OAuth authorization/introspection service credentials and account integration for public multi-user deployment
 
 The CI signing smoke uses an **ephemeral test certificate only**. It proves package/sign/install mechanics; it is not a substitute for production trust.
 
@@ -131,7 +132,7 @@ npm run dev
 
 Local mode talks directly to the authenticated local agent. Relay mode preserves the same 22-tool MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path, while public plugin distribution separately requires a stable public HTTPS MCP endpoint/proxy and authentication. Repository CI does not pretend those external gates are complete.
+A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path. For public distribution, the OAuth-authenticated MCP edge is implemented but still requires a real DNS/TLS endpoint and production OAuth service before live certification. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md). Repository CI does not pretend those external gates are complete.
 
 ## Windows package model
 

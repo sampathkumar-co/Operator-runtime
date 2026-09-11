@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import type { RelayHub } from './relay-hub.ts';
@@ -12,15 +13,17 @@ const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
-  #hub: RelayHub;
-  #results: RelayResultStore;
+  #hub: Pick<RelayHub, 'dispatch'>;
+  #results: Pick<RelayResultStore, 'get'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: RelayHub; results: RelayResultStore; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
+    this.#accounts = options.accounts;
     this.#token = options.token;
   }
 
@@ -44,12 +47,16 @@ export class RelayControlService {
         }
         const body = await readJson(request) as {
           accountId?: unknown;
+          principal?: unknown;
           deviceId?: unknown;
           projectKey?: unknown;
           action?: unknown;
           waitMs?: unknown;
         };
-        const accountId = validUuid(String(body.accountId ?? ''), 'accountId');
+        const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+        const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+        if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+        const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
         const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
         const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
         const action = validAction(body.action);
@@ -180,6 +187,15 @@ function boundedWait(input: unknown): number {
   const value = Number(input);
   if (!Number.isInteger(value) || value < 1_000 || value > MAX_WAIT_MS) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `waitMs must be between 1000 and ${MAX_WAIT_MS}.`);
   return value;
+}
+
+function validPrincipal(input: unknown): AccountPrincipal {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'principal must be an object.');
+  const raw = input as Record<string, unknown>;
+  const issuer = boundedText(String(raw.issuer ?? ''), 1024, 'principal issuer').trim();
+  const subject = boundedText(String(raw.subject ?? ''), 1024, 'principal subject').trim();
+  if (!issuer || !subject || /[\0\r\n]/.test(issuer) || /[\0\r\n]/.test(subject)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'principal is invalid.');
+  return { issuer, subject };
 }
 
 function validUuid(value: string, label: string): string {

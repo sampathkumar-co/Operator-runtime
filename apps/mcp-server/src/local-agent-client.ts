@@ -1,3 +1,4 @@
+import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { RelayAgentClient } from './relay-agent-client.ts';
 
@@ -6,7 +7,7 @@ type Executor = { execute(action: ActionRequest): Promise<ActionResult> };
 export class LocalAgentClient {
   #executor: Executor;
 
-  constructor(baseUrl: string, token: string) {
+  constructor(baseUrl: string, token: string, verifiedPrincipal?: AccountPrincipal) {
     const mode = (process.env.OPERATOR_EXECUTION_MODE ?? 'local').trim().toLowerCase();
     if (mode === 'local') {
       this.#executor = new DirectLocalAgentClient(baseUrl, token);
@@ -15,14 +16,14 @@ export class LocalAgentClient {
     if (mode !== 'relay') throw new Error('OPERATOR_EXECUTION_MODE must be local or relay.');
 
     const relayToken = process.env.OPERATOR_RELAY_CONTROL_TOKEN?.trim() || token;
-    const accountId = process.env.OPERATOR_RELAY_ACCOUNT_ID?.trim();
-    if (!accountId) throw new Error('OPERATOR_RELAY_ACCOUNT_ID is required in relay execution mode.');
+    const accountId = verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_ACCOUNT_ID?.trim();
+    if (!verifiedPrincipal && !accountId) throw new Error('Relay execution requires OPERATOR_RELAY_ACCOUNT_ID or a verified OAuth principal.');
     this.#executor = new RelayAgentClient({
       baseUrl: process.env.OPERATOR_RELAY_CONTROL_URL?.trim() || 'http://127.0.0.1:8790',
       token: relayToken,
-      accountId,
-      deviceId: process.env.OPERATOR_RELAY_DEVICE_ID?.trim() || undefined,
-      projectKey: process.env.OPERATOR_RELAY_PROJECT_KEY?.trim() || undefined,
+      ...(verifiedPrincipal ? { principal: verifiedPrincipal } : { accountId }),
+      deviceId: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_DEVICE_ID?.trim() || undefined,
+      projectKey: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_PROJECT_KEY?.trim() || undefined,
       waitMs: parseWait(process.env.OPERATOR_RELAY_WAIT_MS)
     });
   }
@@ -38,6 +39,7 @@ class DirectLocalAgentClient implements Executor {
 
   constructor(baseUrl: string, token: string) {
     this.#url = validateLoopbackAgentUrl(baseUrl);
+    if (token.length < 32) throw new Error('Local agent token must be at least 32 characters.');
     this.#token = token;
   }
 
