@@ -21,13 +21,15 @@ function Assert-Exit([string]$Step) {
   if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
 }
 
-function Assert-CodeSigningCertificate($Cert, [bool]$RequirePrivateKey = $false) {
+function Assert-CodeSigningCertificate($Cert, [bool]$RequirePrivateKey = $false, [bool]$RequireCurrentValidity = $true) {
   if (-not $Cert) { throw 'Signing certificate was not found.' }
   if ($RequirePrivateKey -and -not $Cert.HasPrivateKey) { throw 'Signing certificate does not expose a private key to the signing provider.' }
   if (-not $Cert.Subject) { throw 'Signing certificate has no subject.' }
-  $now = [DateTime]::UtcNow
-  if ($Cert.NotBefore.ToUniversalTime() -gt $now) { throw 'Signing certificate is not yet valid.' }
-  if ($Cert.NotAfter.ToUniversalTime() -le $now) { throw 'Signing certificate is expired.' }
+  if ($RequireCurrentValidity) {
+    $now = [DateTime]::UtcNow
+    if ($Cert.NotBefore.ToUniversalTime() -gt $now) { throw 'Signing certificate is not yet valid.' }
+    if ($Cert.NotAfter.ToUniversalTime() -le $now) { throw 'Signing certificate is expired.' }
+  }
   $ekuExtension = $Cert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | Select-Object -First 1
   if (-not $ekuExtension) { throw 'Signing certificate does not declare Enhanced Key Usage.' }
   $eku = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]$ekuExtension
@@ -64,7 +66,7 @@ switch ($Provider) {
     if ($thumb -notmatch '^[0-9A-F]{40}$') { throw 'CertificateStore provider requires a 40-hex SHA-1 CertificateThumbprint.' }
     $storePath = "Cert:\$CertificateStoreScope\My\$thumb"
     $cert = Get-Item -LiteralPath $storePath -ErrorAction Stop
-    Assert-CodeSigningCertificate $cert $true
+    Assert-CodeSigningCertificate $cert $true $true
     $args = @('sign', '/fd', 'SHA256')
     if ($CertificateStoreScope -eq 'LocalMachine') { $args += '/sm' }
     $args += @('/s', 'My', '/sha1', $thumb)
@@ -86,7 +88,7 @@ $signature = Get-AuthenticodeSignature -FilePath $msix
 if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
   throw "Authenticode verification is not Valid: $($signature.Status) $($signature.StatusMessage)"
 }
-Assert-CodeSigningCertificate $signature.SignerCertificate
+Assert-CodeSigningCertificate $signature.SignerCertificate $false $false
 $subject = $signature.SignerCertificate.Subject
 $fingerprint = $signature.SignerCertificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
 $hasTimestamp = $null -ne $signature.TimeStamperCertificate
