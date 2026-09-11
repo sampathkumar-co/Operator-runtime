@@ -122,7 +122,19 @@ export async function installVerifiedMsix(msixPath, metadata, signature) {
   }
   const script = `
 $ErrorActionPreference = 'Stop'
-Add-AppxPackage -Path ${psQuote(path.resolve(msixPath))} -ForceApplicationShutdown -ForceUpdateFromAnyVersion
+try {
+  Add-AppxPackage -Path ${psQuote(path.resolve(msixPath))}
+} catch {
+  $message = $_ | Out-String
+  $activityId = $null
+  if ($_.Exception -and $_.Exception.PSObject.Properties.Name -contains 'ActivityId') { $activityId = $_.Exception.ActivityId }
+  if (-not $activityId -and $_.ErrorDetails -and $_.ErrorDetails.Message -match 'ActivityId:\s*([0-9a-fA-F-]{36})') { $activityId = $Matches[1] }
+  if ($activityId) {
+    $deployment = Get-AppPackageLog -ActivityID $activityId | Format-List * | Out-String
+    throw ($message + [Environment]::NewLine + '[operator-appx-deployment-log]' + [Environment]::NewLine + $deployment)
+  }
+  throw $message
+}
 `;
   await runPowerShell(script);
   const installed = await getInstalledOperatorPackage();

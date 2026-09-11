@@ -124,3 +124,10 @@ test('artifact download accepts a valid streamed response without Content-Length
     await fs.rm(temp, { recursive: true, force: true });
   }
 });
+
+test('Windows bootstrap uses normal Add-AppxPackage install semantics', async () => {
+  const source = await fs.readFile(path.resolve('packages/operator-runtime-cli/src/windows.mjs'), 'utf8');
+  assert.match(source, /Add-AppxPackage -Path/);
+  assert.doesNotMatch(source, /ForceUpdateFromAnyVersion/);
+  assert.match(source, /Get-AppPackageLog -ActivityID/);
+});
