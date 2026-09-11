@@ -15,7 +15,7 @@ type Device = {
 
 async function device(prefix: string, name: string, clock?: () => Date): Promise<Device> {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate(name);
   return { state, identity, registry: new DeviceRegistryStore(state, clock ? { clock } : {}) };
 }

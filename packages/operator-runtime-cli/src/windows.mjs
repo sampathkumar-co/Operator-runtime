@@ -54,7 +54,8 @@ if ($sig.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
 $cert = $sig.SignerCertificate
 if (-not $cert) { throw 'MSIX signer certificate is missing.' }
 $fingerprint = $cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLowerInvariant()
-[ordered]@{ subject = $cert.Subject; certificateSha256 = $fingerprint } | ConvertTo-Json -Compress
+$timestamped = $null -ne $sig.TimeStamperCertificate
+[ordered]@{ subject = $cert.Subject; certificateSha256 = $fingerprint; timestamped = $timestamped } | ConvertTo-Json -Compress
 `;
   return JSON.parse(await runPowerShell(script));
 }
@@ -63,6 +64,7 @@ export function requireSignatureMatchesMetadata(signature, metadata) {
   const actual = String(signature?.certificateSha256 ?? '').toLowerCase();
   if (actual !== metadata.signerCertificateSha256) throw new Error('MSIX signer certificate does not match release metadata.');
   if (String(signature?.subject ?? '') !== metadata.signerSubject) throw new Error('MSIX signer subject does not match release metadata.');
+  if (metadata.timestamped === true && signature?.timestamped !== true) throw new Error('MSIX signature does not contain a verifiable timestamp.');
 }
 
 export function requireTrustedSigner(signature, trustedSigners) {

@@ -46,8 +46,8 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
   const authorityState = await tempDir(t, 'operator-relay-e2e-authority-');
   const deviceState = await tempDir(t, 'operator-relay-e2e-device-');
 
-  const authorityIdentity = new DeviceIdentityStore(authorityState);
-  const deviceIdentity = new DeviceIdentityStore(deviceState);
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
   const devices = new DeviceRegistryStore(authorityState);
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
@@ -143,8 +143,8 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
 test('relay refuses account routing when connected token lacks required capability', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-cap-device-');
-  const authorityIdentity = new DeviceIdentityStore(authorityState);
-  const deviceIdentity = new DeviceIdentityStore(deviceState);
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
   const devices = new DeviceRegistryStore(authorityState);
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);

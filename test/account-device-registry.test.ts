@@ -17,8 +17,8 @@ async function pairedFixture(t: test.TestContext) {
   const authorityDir = await temp(t, 'operator-account-authority-');
   const peerDir = await temp(t, 'operator-account-peer-');
   const stateDir = await temp(t, 'operator-account-state-');
-  const authority = new DeviceIdentityStore(authorityDir);
-  const peerStore = new DeviceIdentityStore(peerDir);
+  const authority = new DeviceIdentityStore(authorityDir, { platform: 'linux' });
+  const peerStore = new DeviceIdentityStore(peerDir, { platform: 'linux' });
   const authorityPublic = await authority.loadOrCreate('Relay Authority');
   const peer = await peerStore.loadOrCreate('Device');
   const devices = new DeviceRegistryStore(stateDir);

@@ -51,7 +51,7 @@ async function stateDir(t: test.TestContext, prefix: string): Promise<string> {
 
 test('relay sends signed outbound hello, processes one delivery, persists ACK cursor, and resumes from it', async (t) => {
   const state = await stateDir(t, 'operator-relay-basic-');
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Relay Test PC');
   const sockets: FakeSocket[] = [];
   const delivered: any[] = [];
@@ -105,7 +105,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
 
 test('uncertain delivery after a crash is reconciled instead of automatically replayed', async (t) => {
   const state = await stateDir(t, 'operator-relay-recovery-');
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Recovery PC');
   await fs.writeFile(path.join(state, 'relay-client.json'), JSON.stringify({
     version: 1,
@@ -153,7 +153,7 @@ test('uncertain delivery after a crash is reconciled instead of automatically re
 
 test('handler uncertainty persists processing state and refuses blind replay without recovery callback', async (t) => {
   const state = await stateDir(t, 'operator-relay-uncertain-');
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Uncertain PC');
   let calls = 0;
   const sockets: FakeSocket[] = [];

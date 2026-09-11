@@ -45,7 +45,7 @@ function New-Logo([string]$Path, [int]$Size) {
 
 if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must be a four-part MSIX version such as 0.1.0.0.' }
 $base = [Uri]$UpdateBaseUri
-if ($base.Scheme -ne 'https' -or -not $base.IsAbsoluteUri -or $base.UserInfo) { throw 'UpdateBaseUri must be a credential-free absolute HTTPS URI.' }
+if ($base.Scheme -ne 'https' -or -not $base.IsAbsoluteUri -or $base.UserInfo -or $base.Query -or $base.Fragment) { throw 'UpdateBaseUri must be a credential-free absolute HTTPS URI without query or fragment.' }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $OutputDir) { $OutputDir = Join-Path $repo 'artifacts\windows-release' }

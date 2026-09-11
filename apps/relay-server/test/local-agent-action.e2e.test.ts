@@ -42,8 +42,8 @@ test('relay action executes through the real local policy boundary and returns a
   const authorityState = await tempDir(t, 'operator-action-authority-');
   const deviceState = await tempDir(t, 'operator-action-device-');
   const projectRoot = await tempDir(t, 'operator-action-root-');
-  const authorityIdentity = new DeviceIdentityStore(authorityState);
-  const deviceIdentity = new DeviceIdentityStore(deviceState);
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
   const devices = new DeviceRegistryStore(authorityState);
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);

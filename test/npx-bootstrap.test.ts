@@ -75,9 +75,10 @@ test('release metadata binds artifact name, Windows version range, and signer id
   assert.throws(() => validateReleaseMetadata(metadata({ signerSubject: '' })), /signer subject/);
   assert.throws(() => validateReleaseMetadata(metadata({ signerCertificateSha256: 'bad' })), /64 hexadecimal/);
   const parsed = validateReleaseMetadata(metadata());
-  assert.doesNotThrow(() => requireSignatureMatchesMetadata({ subject: parsed.signerSubject, certificateSha256: parsed.signerCertificateSha256 }, parsed));
-  assert.throws(() => requireSignatureMatchesMetadata({ subject: parsed.signerSubject, certificateSha256: 'c'.repeat(64) }, parsed), /certificate does not match/);
-  assert.throws(() => requireSignatureMatchesMetadata({ subject: 'CN=Other', certificateSha256: parsed.signerCertificateSha256 }, parsed), /subject does not match/);
+  assert.doesNotThrow(() => requireSignatureMatchesMetadata({ subject: parsed.signerSubject, certificateSha256: parsed.signerCertificateSha256, timestamped: true }, parsed));
+  assert.throws(() => requireSignatureMatchesMetadata({ subject: parsed.signerSubject, certificateSha256: 'c'.repeat(64), timestamped: true }, parsed), /certificate does not match/);
+  assert.throws(() => requireSignatureMatchesMetadata({ subject: 'CN=Other', certificateSha256: parsed.signerCertificateSha256, timestamped: true }, parsed), /subject does not match/);
+  assert.throws(() => requireSignatureMatchesMetadata({ subject: parsed.signerSubject, certificateSha256: parsed.signerCertificateSha256, timestamped: false }, parsed), /verifiable timestamp/);
 });
 
 test('bootstrap rejects releases below its locally pinned minimum version', () => {
@@ -147,4 +148,72 @@ test('Windows bootstrap uses normal Add-AppxPackage install semantics', async ()
   assert.match(source, /Add-AppxPackage -Path/);
   assert.doesNotMatch(source, /ForceUpdateFromAnyVersion/);
   assert.match(source, /Get-AppPackageLog -ActivityID/);
+});
+
+test('artifact download removes partial files after an interrupted stream', async () => {
+  const meta = validateReleaseMetadata(metadata({ sizeBytes: 20, sha256: 'c'.repeat(64) }));
+  const originalFetch = globalThis.fetch;
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-npx-interrupt-'));
+  const destination = path.join(temp, meta.artifact);
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('partial'));
+      controller.error(new Error('simulated network interruption'));
+    }
+  });
+  globalThis.fetch = async () => {
+    const response = new Response(stream, { status: 200 });
+    Object.defineProperty(response, 'url', { value: DEFAULT_MANIFEST_URL });
+    return response;
+  };
+  try {
+    await assert.rejects(downloadAndVerifyArtifact(meta, DEFAULT_MANIFEST_URL, destination), /network interruption/);
+    await assert.rejects(fs.stat(destination), (error: any) => error?.code === 'ENOENT');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('artifact download removes a fully received file when its SHA-256 is wrong', async () => {
+  const body = Buffer.from('tampered-operator-msix');
+  const meta = validateReleaseMetadata(metadata({ sizeBytes: body.length, sha256: 'd'.repeat(64) }));
+  const originalFetch = globalThis.fetch;
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-npx-hash-'));
+  const destination = path.join(temp, meta.artifact);
+  globalThis.fetch = async () => {
+    const response = new Response(body, { status: 200 });
+    Object.defineProperty(response, 'url', { value: DEFAULT_MANIFEST_URL });
+    return response;
+  };
+  try {
+    await assert.rejects(downloadAndVerifyArtifact(meta, DEFAULT_MANIFEST_URL, destination), /SHA-256/);
+    await assert.rejects(fs.stat(destination), (error: any) => error?.code === 'ENOENT');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('artifact download rejects a mismatched Content-Length before creating a file', async () => {
+  const body = Buffer.from('operator-msix');
+  const meta = validateReleaseMetadata(metadata({
+    sizeBytes: body.length,
+    sha256: crypto.createHash('sha256').update(body).digest('hex')
+  }));
+  const originalFetch = globalThis.fetch;
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-npx-length-'));
+  const destination = path.join(temp, meta.artifact);
+  globalThis.fetch = async () => {
+    const response = new Response(body, { status: 200, headers: { 'content-length': String(body.length + 1) } });
+    Object.defineProperty(response, 'url', { value: DEFAULT_MANIFEST_URL });
+    return response;
+  };
+  try {
+    await assert.rejects(downloadAndVerifyArtifact(meta, DEFAULT_MANIFEST_URL, destination), /Content-Length/);
+    await assert.rejects(fs.stat(destination), (error: any) => error?.code === 'ENOENT');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(temp, { recursive: true, force: true });
+  }
 });

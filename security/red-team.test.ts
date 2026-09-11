@@ -78,7 +78,7 @@ test('emergency stop cannot be bypassed with query strings and ordinary agent au
   const state = await temp(t, 'operator-redteam-agent-state-');
   const token = 'a'.repeat(64);
   const recovery = 'r'.repeat(64);
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   const local = await identity.loadOrCreate('Red Team PC');
   await fs.writeFile(path.join(state, 'audit.ndjson'), '{"event":"must-remain"}\n', { mode: 0o600 });
   const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });
@@ -133,7 +133,7 @@ test('companion device surface never exposes private/public key PEM material', a
   const root = await temp(t, 'operator-redteam-device-root-');
   const state = await temp(t, 'operator-redteam-device-state-');
   const token = 'd'.repeat(64);
-  const identity = new DeviceIdentityStore(state);
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Key Exposure Test');
   const runtime = createRuntime({ allowedRoots: [root], allowedExecutables: ['node'] });
   const agent = createLocalAgentServer({
@@ -156,8 +156,8 @@ test('companion device surface never exposes private/public key PEM material', a
 test('tampering a relay session capability scope invalidates the Ed25519 signature', async (t) => {
   const authorityState = await temp(t, 'operator-redteam-session-authority-');
   const peerState = await temp(t, 'operator-redteam-session-peer-');
-  const authority = new DeviceIdentityStore(authorityState);
-  const peer = new DeviceIdentityStore(peerState);
+  const authority = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const peer = new DeviceIdentityStore(peerState, { platform: 'linux' });
   const authorityDevices = new DeviceRegistryStore(authorityState);
   const peerDevices = new DeviceRegistryStore(peerState);
   await pair(authority, authorityDevices, peer);
@@ -198,9 +198,9 @@ test('tampering a relay session capability scope invalidates the Ed25519 signatu
 
 test('account authority persists a hash of upstream identity rather than the raw principal', async (t) => {
   const state = await temp(t, 'operator-redteam-account-state-');
-  const authority = new DeviceIdentityStore(state);
+  const authority = new DeviceIdentityStore(state, { platform: 'linux' });
   const peerState = await temp(t, 'operator-redteam-account-peer-');
-  const peer = new DeviceIdentityStore(peerState);
+  const peer = new DeviceIdentityStore(peerState, { platform: 'linux' });
   const devices = new DeviceRegistryStore(state);
   await pair(authority, devices, peer);
   const accounts = new AccountDeviceRegistry(state, devices);

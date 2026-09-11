@@ -27,8 +27,8 @@ test('two independent Ed25519 identities pair once and registry persists public 
   const issuerDir = await tempDir(t, 'operator-pair-issuer-');
   const peerDir = await tempDir(t, 'operator-pair-peer-');
   const registryDir = await tempDir(t, 'operator-pair-registry-');
-  const issuerStore = new DeviceIdentityStore(issuerDir);
-  const peerStore = new DeviceIdentityStore(peerDir);
+  const issuerStore = new DeviceIdentityStore(issuerDir, { platform: 'linux' });
+  const peerStore = new DeviceIdentityStore(peerDir, { platform: 'linux' });
   const issuer = await issuerStore.loadOrCreate('Issuer PC');
   const peer = await peerStore.loadOrCreate('Peer PC');
   const registry = new DeviceRegistryStore(registryDir);
@@ -53,8 +53,8 @@ test('pairing rejects tampered signatures, expires challenges, and rejects repla
   const registryDir = await tempDir(t, 'operator-pair-security-registry-');
   let now = new Date('2026-09-09T12:00:00.000Z');
   const clock = () => new Date(now);
-  const issuerStore = new DeviceIdentityStore(issuerDir);
-  const peerStore = new DeviceIdentityStore(peerDir);
+  const issuerStore = new DeviceIdentityStore(issuerDir, { platform: 'linux' });
+  const peerStore = new DeviceIdentityStore(peerDir, { platform: 'linux' });
   const issuer = await issuerStore.loadOrCreate('Issuer');
   const peer = await peerStore.loadOrCreate('Peer');
   const registry = new DeviceRegistryStore(registryDir, { clock });
@@ -80,9 +80,9 @@ test('expected peer binding rejects a different device before pairing', async (t
   const expectedDir = await tempDir(t, 'operator-peer-bind-expected-');
   const attackerDir = await tempDir(t, 'operator-peer-bind-attacker-');
   const registryDir = await tempDir(t, 'operator-peer-bind-registry-');
-  const issuerStore = new DeviceIdentityStore(issuerDir);
-  const expectedStore = new DeviceIdentityStore(expectedDir);
-  const attackerStore = new DeviceIdentityStore(attackerDir);
+  const issuerStore = new DeviceIdentityStore(issuerDir, { platform: 'linux' });
+  const expectedStore = new DeviceIdentityStore(expectedDir, { platform: 'linux' });
+  const attackerStore = new DeviceIdentityStore(attackerDir, { platform: 'linux' });
   const issuer = await issuerStore.loadOrCreate('Issuer');
   const expected = await expectedStore.loadOrCreate('Expected');
   const registry = new DeviceRegistryStore(registryDir);
@@ -96,9 +96,9 @@ test('device ID cannot be rebound to a different Ed25519 key', async (t) => {
   const firstDir = await tempDir(t, 'operator-conflict-first-');
   const secondDir = await tempDir(t, 'operator-conflict-second-');
   const registryDir = await tempDir(t, 'operator-conflict-registry-');
-  const issuerStore = new DeviceIdentityStore(issuerDir);
-  const firstStore = new DeviceIdentityStore(firstDir);
-  const secondStore = new DeviceIdentityStore(secondDir);
+  const issuerStore = new DeviceIdentityStore(issuerDir, { platform: 'linux' });
+  const firstStore = new DeviceIdentityStore(firstDir, { platform: 'linux' });
+  const secondStore = new DeviceIdentityStore(secondDir, { platform: 'linux' });
   const issuer = await issuerStore.loadOrCreate('Issuer');
   const first = await firstStore.loadOrCreate('First');
   await secondStore.loadOrCreate('Second');
@@ -111,7 +111,7 @@ test('device ID cannot be rebound to a different Ed25519 key', async (t) => {
   const secondStored = JSON.parse(await fs.readFile(secondIdentityPath, 'utf8'));
   secondStored.deviceId = first.deviceId;
   await fs.writeFile(secondIdentityPath, JSON.stringify(secondStored, null, 2));
-  const conflictStore = new DeviceIdentityStore(secondDir);
+  const conflictStore = new DeviceIdentityStore(secondDir, { platform: 'linux' });
   const challenge = await registry.issuePairingChallenge(issuer, { expectedPeerDeviceId: first.deviceId });
   const response = await answerPairingChallenge(challenge, conflictStore);
   await expectCode(registry.completePairing(response), 'DEVICE_IDENTITY_CONFLICT');
@@ -123,8 +123,8 @@ test('revocation blocks subsequent signature authentication and cannot be silent
   const issuerDir = await tempDir(t, 'operator-revoke-issuer-');
   const peerDir = await tempDir(t, 'operator-revoke-peer-');
   const registryDir = await tempDir(t, 'operator-revoke-registry-');
-  const issuerStore = new DeviceIdentityStore(issuerDir);
-  const peerStore = new DeviceIdentityStore(peerDir);
+  const issuerStore = new DeviceIdentityStore(issuerDir, { platform: 'linux' });
+  const peerStore = new DeviceIdentityStore(peerDir, { platform: 'linux' });
   const issuer = await issuerStore.loadOrCreate('Issuer');
   const peer = await peerStore.loadOrCreate('Peer');
   const registry = new DeviceRegistryStore(registryDir);
