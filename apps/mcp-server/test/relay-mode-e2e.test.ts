@@ -7,18 +7,12 @@ import path from 'node:path';
 import test from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
+import { TOOL_NAMES } from '../src/tool-surface.ts';
 
 const CONTROL_TOKEN = 'relay-control-ci-0123456789abcdef0123456789';
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
 const DEVICE_ID = '22222222-2222-4222-8222-222222222222';
 const PROJECT_KEY = 'ci-project';
-const EXPECTED_TOOLS = [
-  'app.inspect', 'app.operate', 'browser.inspect', 'browser.interact', 'browser.navigate',
-  'computer.inspect', 'docker.inspect', 'docker.manage', 'file.list', 'file.read', 'file.write',
-  'git.checkpoint', 'git.diff', 'git.status', 'git.write', 'postgres.query', 'project.command',
-  'project.inspect', 'project.transaction', 'terminal.execute', 'vscode.inspect', 'vscode.open'
-];
-
 async function reservePort(): Promise<number> {
   const server = http.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -76,8 +70,8 @@ function send(res: http.ServerResponse, status: number, value: unknown): void {
 }
 
 async function runInspector(mcpUrl: string, home: string): Promise<Record<string, unknown>> {
-  const binary = path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'mcp-inspector.cmd' : 'mcp-inspector');
-  const child = spawn(binary, ['--cli', '--server-url', mcpUrl, '--transport', 'http', '--method', 'tools/list'], {
+  const inspectorEntry = path.join(process.cwd(), 'node_modules', '@modelcontextprotocol', 'inspector', 'clients', 'launcher', 'build', 'index.js');
+  const child = spawn(process.execPath, [inspectorEntry, '--cli', '--server-url', mcpUrl, '--transport', 'http', '--method', 'tools/list'], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: home },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -164,7 +158,7 @@ test('official MCP client and Inspector execute through relay control mode with 
   t.after(() => client.close());
 
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), EXPECTED_TOOLS);
+  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
 
   const inspect = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(inspect.isError, true);
@@ -188,5 +182,5 @@ test('official MCP client and Inspector execute through relay control mode with 
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
   const inspector = await runInspector(mcpUrl, inspectorHome);
   const inspectorTools = Array.isArray(inspector.tools) ? inspector.tools as Array<Record<string, unknown>> : [];
-  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), EXPECTED_TOOLS);
+  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), TOOL_NAMES);
 });
