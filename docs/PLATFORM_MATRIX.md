@@ -1,4 +1,4 @@
-﻿# ChatGPT platform matrix
+# ChatGPT platform matrix
 
 Last reviewed: 2026-09-11
 
