@@ -66,7 +66,7 @@ Device private key material is never returned through the companion read APIs.
 
 The following claims are backed by automated repository gates:
 
-- root runtime/import suite: 102 tests
+- full root runtime/import suite is green
 - root runtime suite green on Ubuntu, Windows and macOS with the same pinned Node release
 - official MCP client end-to-end test
 - MCP Inspector tool enumeration
@@ -79,15 +79,15 @@ The following claims are backed by automated repository gates:
 - real unsigned MSIX build with Windows SDK MakeAppx
 - MSIX unpack/payload/hash/App Installer validation
 - ephemeral-certificate SignTool SHA-256 signing and verification
-- signed MSIX installation, packaged launcher self-test and uninstall on Windows CI
+- bootstrap-driven signed MSIX installation, installed-package signature verification, packaged launcher self-test and uninstall on Windows CI
 
 ## Claims that must NOT be made yet
 
 Do not publish the following claims until their external gates are completed:
 
 - "production-signed Windows release" — requires the final trusted signing identity/certificate and production timestamp
-- "one-click public auto-update is live" — requires the final HTTPS update host and production-signed artifacts
-- "ChatGPT public deployment certified end to end" — requires the supported external MCP reachability/tunnel and an actual ChatGPT invocation
+- "one-command public install is live" — requires the production signer fingerprint to be pinned, timestamped signed assets published, and `operator-runtime-cli` published to npm
+- "private ChatGPT MCP path certified" — requires the supported Secure MCP Tunnel/private connection and an actual ChatGPT invocation; public plugin certification separately requires a stable public HTTPS MCP endpoint/proxy plus authentication
 - "marketplace/store approved" — requires the platform's real review process
 - "zero risk" or "cannot fail" — Operator is designed to reduce and bound execution risk, not eliminate it
 
@@ -202,10 +202,10 @@ Before final submission confirm:
 - production signing certificate is valid and not near expiry
 - manifest Publisher exactly matches signer subject
 - production release is RFC 3161 timestamped
-- final `.appinstaller` and MSIX URLs use the intended HTTPS host
-- signed artifact SHA-256 matches published metadata
-- installed production build passes `Operator.exe --self-test`
-- supported public ChatGPT/MCP transport has passed the live read workflow
+- final `.appinstaller`, MSIX and `release-metadata.json` URLs use the intended HTTPS/GitHub Release location
+- signed artifact SHA-256 matches published metadata and the signer SHA-256 fingerprint matches the npm bootstrap pin
+- `operator-runtime-cli` is published only after its production signer pin is populated; the installed production build passes `Operator.exe --self-test`
+- supported private ChatGPT/MCP transport has passed the live read workflow; if public plugin distribution is targeted, the stable public HTTPS MCP endpoint/proxy and authentication are separately certified
 - policy-denial and recovery demos have been re-run on the release build
 - screenshots contain no secrets, usernames/paths that should remain private, tokens or private account data
 - all public claims match completed gates in `docs/MILESTONES.md`

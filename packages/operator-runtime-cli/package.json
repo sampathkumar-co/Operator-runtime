@@ -1,0 +1,36 @@
+{
+  "name": "operator-runtime-cli",
+  "version": "0.1.0",
+  "description": "Secure one-command bootstrap for the Operator computer runtime.",
+  "type": "module",
+  "bin": {
+    "operator-runtime-cli": "./bin/operator-runtime-cli.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "trusted-signers.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "UNLICENSED",
+  "scripts": {
+    "prepublishOnly": "node ./src/publish-check.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sampathkumar-co/Operator-runtime.git"
+  },
+  "homepage": "https://github.com/sampathkumar-co/Operator-runtime#readme"
+}
