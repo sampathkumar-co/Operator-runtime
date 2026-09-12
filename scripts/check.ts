@@ -17,6 +17,7 @@ async function verifyWorkflowSupplyChain(): Promise<void> {
   const workflowDir = path.join(process.cwd(), '.github', 'workflows');
   const names = (await fs.readdir(workflowDir)).filter((name) => /\.ya?ml$/i.test(name)).sort();
   const unpinned: string[] = [];
+  const setupNodeCaching: string[] = [];
   const floatingRust: string[] = [];
 
   for (const name of names) {
@@ -32,6 +33,12 @@ async function verifyWorkflowSupplyChain(): Promise<void> {
           const at = spec.lastIndexOf('@');
           const ref = at >= 0 ? spec.slice(at + 1) : '';
           if (!/^[0-9a-f]{40}$/i.test(ref)) unpinned.push(`${name}:${index + 1}:${spec}`);
+          if (spec.startsWith('actions/setup-node@')) {
+            const following = lines.slice(index + 1, index + 7).join('\n');
+            if (!/^\s+package-manager-cache:\s*false\s*$/m.test(following)) {
+              setupNodeCaching.push(`${name}:${index + 1}:${spec}`);
+            }
+          }
         }
       }
       if (/\brustup\s+default\s+(?:stable|beta|nightly)\b/.test(line)) {
@@ -42,6 +49,9 @@ async function verifyWorkflowSupplyChain(): Promise<void> {
 
   if (unpinned.length > 0) {
     throw new Error(`Remote GitHub Actions must be pinned to immutable 40-hex SHAs:\n${unpinned.join('\n')}`);
+  }
+  if (setupNodeCaching.length > 0) {
+    throw new Error(`setup-node must explicitly disable automatic package-manager caching in release/test workflows:\n${setupNodeCaching.join('\n')}`);
   }
   if (floatingRust.length > 0) {
     throw new Error(`Release/test workflows must pin an explicit Rust toolchain version:\n${floatingRust.join('\n')}`);
