@@ -156,13 +156,18 @@ test('Windows bootstrap uses normal Add-AppxPackage install semantics', async ()
   assert.match(source, /Get-AppPackageLog -ActivityID/);
 });
 
-test('Windows uninstall removes the registered package but does not delete Operator state', async () => {
+test('Windows uninstall drains packaged processes and package registration before success', async () => {
   const source = await fs.readFile(path.resolve('packages/operator-runtime-cli/src/windows.mjs'), 'utf8');
-  assert.match(source, /Remove-AppxPackage -Package \$package\.PackageFullName -ErrorAction Stop/);
-  assert.match(source, /runtime\\node\.exe/);
-  assert.match(source, /Stop-Process -Id \$process\.Id -Force -ErrorAction Stop/);
-  assert.ok(source.indexOf('Stop-Process -Id $process.Id') < source.indexOf('Remove-AppxPackage -Package $package.PackageFullName'));
-  assert.match(source, /still registered after uninstall/);
+  assert.match(source, /function Get-OperatorOwnedProcesses/);
+  assert.ok(source.includes('[System.StringComparison]::OrdinalIgnoreCase'));
+  assert.ok(source.includes('$processDeadline = [DateTime]::UtcNow.AddSeconds(15)'));
+  assert.ok(source.includes('Remaining PID(s)'));
+  assert.doesNotMatch(source, /Wait-Process[^\n]*ErrorAction SilentlyContinue/);
+  assert.ok(source.indexOf('Remaining PID(s)') < source.indexOf('Remove-AppxPackage -Package $package.PackageFullName'));
+  assert.match(source, /Get-AppPackageLog -ActivityID/);
+  assert.ok(source.includes('[operator-appx-uninstall-log]'));
+  assert.ok(source.includes('$registrationDeadline = [DateTime]::UtcNow.AddSeconds(20)'));
+  assert.match(source, /still registered after uninstall timeout/);
   assert.doesNotMatch(source, /LOCALAPPDATA.*Operator/i);
 });
 
