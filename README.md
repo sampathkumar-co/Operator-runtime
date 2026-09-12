@@ -108,6 +108,8 @@ The npm bootstrap verifies bounded HTTPS release metadata, exact package size an
 
 If Operator is already installed, the equivalent local command is `operator setup`; `npx operator-runtime-cli verify` (or `operator verify`) is available for troubleshooting. Until a real production signer is pinned and the signed release plus npm package are published, the npm bootstrap intentionally fails closed instead of accepting test/unsigned builds.
 
+To uninstall the Windows package, run `npx operator-runtime-cli uninstall`. Uninstall removes the registered MSIX but preserves local Operator state/device identity; security identity reset and revocation stay separate explicit operations rather than being hidden inside package removal.
+
 For development from source, the lower-level environment-variable flow remains available below.
 
 ## Run the local agent from source

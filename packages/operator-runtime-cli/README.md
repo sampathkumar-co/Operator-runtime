@@ -12,4 +12,6 @@ Use `--root <folder>` to authorize a different project folder. `--manifest <http
 
 `npx operator-runtime-cli verify` re-checks the installed package signer against the pinned production certificate and then runs the installed Operator verification command.
 
+Uninstall the Windows package with `npx operator-runtime-cli uninstall`. This removes the registered MSIX but deliberately preserves local Operator state and device identity so uninstalling the application cannot silently erase pairing, audit, or recovery state. State reset/revocation remains a separate explicit security operation.
+
 The bootstrap intentionally fails closed until `trusted-signers.json` contains the production certificate fingerprint and a matching signed, timestamped release has been published. Test signing certificates are never included in the npm package.

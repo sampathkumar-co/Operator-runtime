@@ -12,6 +12,7 @@ import {
   validateReleaseMetadata,
   validateTrustedSigners
 } from '../packages/operator-runtime-cli/src/release.mjs';
+import { parseArgs } from '../packages/operator-runtime-cli/src/cli.mjs';
 import { requireSignatureMatchesMetadata, requireTrustedSigner, windowsPowerShellEnvironment } from '../packages/operator-runtime-cli/src/windows.mjs';
 
 function metadata(overrides: Record<string, unknown> = {}) {
@@ -32,6 +33,11 @@ function metadata(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+test('npx bootstrap exposes a bounded uninstall command without destructive flags', () => {
+  assert.deepEqual(parseArgs(['uninstall']), { command: 'uninstall' });
+  assert.throws(() => parseArgs(['uninstall', '--purge-state']), /does not accept additional arguments/);
+});
 
 test('Windows PowerShell bootstrap child rebuilds its native module search path', () => {
   const source = { Path: 'C:\\Windows\\System32', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules', KEEP: 'yes' };
@@ -148,6 +154,44 @@ test('Windows bootstrap uses normal Add-AppxPackage install semantics', async ()
   assert.match(source, /Add-AppxPackage -Path/);
   assert.doesNotMatch(source, /ForceUpdateFromAnyVersion/);
   assert.match(source, /Get-AppPackageLog -ActivityID/);
+});
+
+test('Windows uninstall drains packaged processes and package registration before success', async () => {
+  const source = await fs.readFile(path.resolve('packages/operator-runtime-cli/src/windows.mjs'), 'utf8');
+  assert.match(source, /function Get-OperatorOwnedProcesses/);
+  assert.ok(source.includes('[System.StringComparison]::OrdinalIgnoreCase'));
+  assert.ok(source.includes('$processDeadline = [DateTime]::UtcNow.AddSeconds(15)'));
+  assert.ok(source.includes('Remaining PID(s)'));
+  assert.doesNotMatch(source, /Wait-Process[^\n]*ErrorAction SilentlyContinue/);
+  assert.ok(source.indexOf('Remaining PID(s)') < source.indexOf('Remove-AppxPackage -Package $package.PackageFullName'));
+  assert.match(source, /Get-AppPackageLog -ActivityID/);
+  assert.ok(source.includes('[operator-appx-uninstall-log]'));
+  assert.ok(source.includes('$registrationDeadline = [DateTime]::UtcNow.AddSeconds(20)'));
+  assert.match(source, /still registered after uninstall timeout/);
+  assert.doesNotMatch(source, /LOCALAPPDATA.*Operator/i);
+});
+
+test('packaged Windows state lives outside MSIX AppData virtualization and uninstall smoke verifies preservation', async () => {
+  const launcher = await fs.readFile(path.resolve('native/windows-launcher/src/main.rs'), 'utf8');
+  assert.match(launcher, /env::var_os\("USERPROFILE"\)/);
+  assert.match(launcher, /PathBuf::from\(user_profile\)\.join\("\.operator"\)/);
+  assert.doesNotMatch(launcher, /env::var_os\("LOCALAPPDATA"\)/);
+
+  const harness = await fs.readFile(path.resolve('packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs'), 'utf8');
+  assert.match(harness, /process\.env\.USERPROFILE, '\.operator'/);
+
+  const workflow = await fs.readFile(path.resolve('.github/workflows/windows-signing-smoke.yml'), 'utf8');
+  assert.match(workflow, /\$operatorState = Join-Path \$env:USERPROFILE '\.operator'/);
+  assert.match(workflow, /Public uninstall unexpectedly removed local Operator state/);
+});
+
+test('Windows signing smoke captures native uninstall stderr without overriding the process exit code', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/windows-signing-smoke.yml'), 'utf8');
+  assert.match(workflow, /\$previousErrorActionPreference = \$ErrorActionPreference/);
+  assert.match(workflow, /\$ErrorActionPreference = 'Continue'[\s\S]*\$uninstallOutput = @\(& node packages\/operator-runtime-cli\/bin\/operator-runtime-cli\.mjs uninstall 2>&1\)/);
+  assert.match(workflow, /\$uninstallExit = \$LASTEXITCODE/);
+  assert.match(workflow, /\$ErrorActionPreference = \$previousErrorActionPreference/);
+  assert.match(workflow, /public-uninstall:exit=\$uninstallExit/);
 });
 
 test('artifact download removes partial files after an interrupted stream', async () => {

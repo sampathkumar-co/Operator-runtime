@@ -181,9 +181,80 @@ export async function runOperatorVerify(packageInfo) {
   await runLauncher(launcher, ['verify']);
 }
 
-export async function removeOperatorForCi() {
-  await runPowerShell(`
+export async function uninstallOperatorPackage() {
+  const out = await runPowerShell(`
 $ErrorActionPreference = 'Stop'
-Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+
+function Get-OperatorOwnedProcesses([string]$RuntimeNode, [string]$Launcher) {
+  $owned = @()
+  foreach ($candidate in @(Get-Process -Name node,Operator -ErrorAction SilentlyContinue)) {
+    try {
+      $candidatePath = [string]$candidate.Path
+      if (
+        [string]::Equals($candidatePath, $RuntimeNode, [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($candidatePath, $Launcher, [System.StringComparison]::OrdinalIgnoreCase)
+      ) {
+        $owned += $candidate
+      }
+    } catch {
+      # Unrelated processes may not expose Path. They are not Operator-owned.
+    }
+  }
+  return @($owned)
+}
+
+$packages = @(Get-AppxPackage -Name 'Operator.Runtime')
+foreach ($package in $packages) {
+  $runtimeNode = Join-Path $package.InstallLocation 'runtime\node.exe'
+  $launcher = Join-Path $package.InstallLocation 'Operator.exe'
+
+  $processDeadline = [DateTime]::UtcNow.AddSeconds(15)
+  do {
+    $ownedProcesses = @(Get-OperatorOwnedProcesses -RuntimeNode $runtimeNode -Launcher $launcher)
+    foreach ($process in $ownedProcesses) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($ownedProcesses.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 250
+  } while ([DateTime]::UtcNow -lt $processDeadline)
+
+  $remainingOwned = @(Get-OperatorOwnedProcesses -RuntimeNode $runtimeNode -Launcher $launcher)
+  if ($remainingOwned.Count -gt 0) {
+    $remainingPids = ($remainingOwned | ForEach-Object { [string]$_.Id }) -join ','
+    throw "Operator Runtime processes did not exit before uninstall. Remaining PID(s): $remainingPids"
+  }
+
+  try {
+    Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+  } catch {
+    $message = $_ | Out-String
+    $activityId = $null
+    if ($_.Exception -and $_.Exception.PSObject.Properties.Name -contains 'ActivityId') { $activityId = $_.Exception.ActivityId }
+    if (-not $activityId -and $_.ErrorDetails -and $_.ErrorDetails.Message -match 'ActivityId:\s*([0-9a-fA-F-]{36})') { $activityId = $Matches[1] }
+    if ($activityId) {
+      $deployment = Get-AppPackageLog -ActivityID $activityId | Format-List * | Out-String
+      throw ($message + [Environment]::NewLine + '[operator-appx-uninstall-log]' + [Environment]::NewLine + $deployment)
+    }
+    throw $message
+  }
+}
+
+$registrationDeadline = [DateTime]::UtcNow.AddSeconds(20)
+do {
+  $remainingPackages = @(Get-AppxPackage -Name 'Operator.Runtime' -ErrorAction SilentlyContinue)
+  if ($remainingPackages.Count -eq 0) { break }
+  Start-Sleep -Milliseconds 250
+} while ([DateTime]::UtcNow -lt $registrationDeadline)
+
+if ($remainingPackages.Count -gt 0) {
+  $remainingNames = ($remainingPackages | ForEach-Object { $_.PackageFullName }) -join ','
+  throw "Operator.Runtime is still registered after uninstall timeout: $remainingNames"
+}
+[ordered]@{ removed = $packages.Count -gt 0; packageCount = $packages.Count } | ConvertTo-Json -Compress
 `);
+  return JSON.parse(out);
+}
+
+export async function removeOperatorForCi() {
+  return await uninstallOperatorPackage();
 }

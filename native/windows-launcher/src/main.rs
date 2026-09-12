@@ -37,9 +37,9 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| "LOCALAPPDATA is required for packaged Operator state".to_string())?;
-    let state_dir = PathBuf::from(local_app_data).join("Operator");
+    let user_profile = env::var_os("USERPROFILE")
+        .ok_or_else(|| "USERPROFILE is required for persistent Operator state".to_string())?;
+    let state_dir = PathBuf::from(user_profile).join(".operator");
     env::set_var("OPERATOR_STATE_DIR", &state_dir);
     env::set_var("OPERATOR_INVOKE_CWD", &invoke_cwd);
     env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
