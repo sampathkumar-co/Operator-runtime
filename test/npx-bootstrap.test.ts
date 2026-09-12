@@ -159,6 +159,9 @@ test('Windows bootstrap uses normal Add-AppxPackage install semantics', async ()
 test('Windows uninstall removes the registered package but does not delete Operator state', async () => {
   const source = await fs.readFile(path.resolve('packages/operator-runtime-cli/src/windows.mjs'), 'utf8');
   assert.match(source, /Remove-AppxPackage -Package \$package\.PackageFullName -ErrorAction Stop/);
+  assert.match(source, /runtime\\node\.exe/);
+  assert.match(source, /Stop-Process -Id \$process\.Id -Force -ErrorAction Stop/);
+  assert.ok(source.indexOf('Stop-Process -Id $process.Id') < source.indexOf('Remove-AppxPackage -Package $package.PackageFullName'));
   assert.match(source, /still registered after uninstall/);
   assert.doesNotMatch(source, /LOCALAPPDATA.*Operator/i);
 });

@@ -186,6 +186,16 @@ export async function uninstallOperatorPackage() {
 $ErrorActionPreference = 'Stop'
 $packages = @(Get-AppxPackage -Name 'Operator.Runtime')
 foreach ($package in $packages) {
+  $runtimeNode = Join-Path $package.InstallLocation 'runtime\node.exe'
+  $launcher = Join-Path $package.InstallLocation 'Operator.exe'
+  $ownedProcesses = @(
+    Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $runtimeNode }
+    Get-Process -Name Operator -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $launcher }
+  )
+  foreach ($process in $ownedProcesses) {
+    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+    Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
+  }
   Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
 }
 if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime is still registered after uninstall.' }
