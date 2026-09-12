@@ -122,25 +122,28 @@ jobs:
             Write-BootstrapShellPhase 'health-mcp:ok'
             $smokeSucceeded = $true
           } finally {
-            Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
-            if ($package) {
-              $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
-              Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
-            }
-            Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
-
             $operatorState = Join-Path $env:LOCALAPPDATA 'Operator'
             try {
               if ($smokeSucceeded) {
                 Write-BootstrapShellPhase 'public-uninstall:start'
                 if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Operator state directory is missing before uninstall smoke.' }
+                $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
+                $runningBefore = @(Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode })
+                if ($runningBefore.Count -lt 1) { throw 'Packaged Operator runtime was not running before uninstall smoke.' }
                 & node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall
                 if ($LASTEXITCODE -ne 0) { throw "public uninstall command failed with exit code $LASTEXITCODE" }
                 if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime remained installed after public uninstall command.' }
+                if (Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode }) { throw 'Packaged Operator runtime remained running after public uninstall command.' }
                 if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
                 Write-BootstrapShellPhase 'public-uninstall:ok'
               } else {
+                Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
+                if ($package) {
+                  $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
+                  Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
                 Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+                Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
               }
             } finally {
               Write-BootstrapShellPhase 'cleanup-state:start'
