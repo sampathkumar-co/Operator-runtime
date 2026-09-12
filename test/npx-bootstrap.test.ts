@@ -171,6 +171,29 @@ test('Windows uninstall drains packaged processes and package registration befor
   assert.doesNotMatch(source, /LOCALAPPDATA.*Operator/i);
 });
 
+test('packaged Windows state lives outside MSIX AppData virtualization and uninstall smoke verifies preservation', async () => {
+  const launcher = await fs.readFile(path.resolve('native/windows-launcher/src/main.rs'), 'utf8');
+  assert.match(launcher, /env::var_os\("USERPROFILE"\)/);
+  assert.match(launcher, /PathBuf::from\(user_profile\)\.join\("\.operator"\)/);
+  assert.doesNotMatch(launcher, /env::var_os\("LOCALAPPDATA"\)/);
+
+  const harness = await fs.readFile(path.resolve('packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs'), 'utf8');
+  assert.match(harness, /process\.env\.USERPROFILE, '\.operator'/);
+
+  const workflow = await fs.readFile(path.resolve('.github/workflows/windows-signing-smoke.yml'), 'utf8');
+  assert.match(workflow, /\$operatorState = Join-Path \$env:USERPROFILE '\.operator'/);
+  assert.match(workflow, /Public uninstall unexpectedly removed local Operator state/);
+});
+
+test('Windows signing smoke captures native uninstall stderr without overriding the process exit code', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/windows-signing-smoke.yml'), 'utf8');
+  assert.match(workflow, /\$previousErrorActionPreference = \$ErrorActionPreference/);
+  assert.match(workflow, /\$ErrorActionPreference = 'Continue'[\s\S]*\$uninstallOutput = @\(& node packages\/operator-runtime-cli\/bin\/operator-runtime-cli\.mjs uninstall 2>&1\)/);
+  assert.match(workflow, /\$uninstallExit = \$LASTEXITCODE/);
+  assert.match(workflow, /\$ErrorActionPreference = \$previousErrorActionPreference/);
+  assert.match(workflow, /public-uninstall:exit=\$uninstallExit/);
+});
+
 test('artifact download removes partial files after an interrupted stream', async () => {
   const meta = validateReleaseMetadata(metadata({ sizeBytes: 20, sha256: 'c'.repeat(64) }));
   const originalFetch = globalThis.fetch;

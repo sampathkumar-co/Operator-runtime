@@ -7,7 +7,7 @@ if (![metadataPath, artifactPath, signerSubject, signerSha256, root].every(Boole
   throw new Error('Usage: ci-bootstrap-smoke.mjs <metadata> <artifact> <signer-subject> <signer-sha256> <root>');
 }
 
-const state = path.join(process.env.LOCALAPPDATA, 'Operator');
+const state = path.join(process.env.USERPROFILE, '.operator');
 await fs.mkdir(root, { recursive: true });
 await fs.rm(state, { recursive: true, force: true });
 const trustedSigners = [{ subject: signerSubject, certificateSha256: signerSha256.toLowerCase() }];

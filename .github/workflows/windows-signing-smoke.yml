@@ -122,7 +122,7 @@ jobs:
             Write-BootstrapShellPhase 'health-mcp:ok'
             $smokeSucceeded = $true
           } finally {
-            $operatorState = Join-Path $env:LOCALAPPDATA 'Operator'
+            $operatorState = Join-Path $env:USERPROFILE '.operator'
             try {
               if ($smokeSucceeded) {
                 Write-BootstrapShellPhase 'public-uninstall:start'
@@ -130,8 +130,14 @@ jobs:
                 $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
                 $runningBefore = @(Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode })
                 if ($runningBefore.Count -lt 1) { throw 'Packaged Operator runtime was not running before uninstall smoke.' }
-                $uninstallOutput = @(& node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall 2>&1)
-                $uninstallExit = $LASTEXITCODE
+                $previousErrorActionPreference = $ErrorActionPreference
+                try {
+                  $ErrorActionPreference = 'Continue'
+                  $uninstallOutput = @(& node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall 2>&1)
+                  $uninstallExit = $LASTEXITCODE
+                } finally {
+                  $ErrorActionPreference = $previousErrorActionPreference
+                }
                 foreach ($entry in $uninstallOutput) {
                   $line = [string]$entry
                   Write-Host $line
