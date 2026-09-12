@@ -118,7 +118,7 @@ jobs:
 
             Write-BootstrapShellPhase 'health-mcp:start'
             $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
-            if (-not $mcp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
+            if (-not $mp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
             Write-BootstrapShellPhase 'health-mcp:ok'
             $smokeSucceeded = $true
           } finally {
@@ -130,8 +130,15 @@ jobs:
                 $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
                 $runningBefore = @(Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode })
                 if ($runningBefore.Count -lt 1) { throw 'Packaged Operator runtime was not running before uninstall smoke.' }
-                & node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall
-                if ($LASTEXITCODE -ne 0) { throw "public uninstall command failed with exit code $LASTEXITCODE" }
+                $uninstallOutput = @(& node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall 2>&1)
+                $uninstallExit = $LASTEXITCODE
+                foreach ($entry in $uninstallOutput) {
+                  $line = [string]$entry
+                  Write-Host $line
+                  Add-Content -LiteralPath $bootstrapLog -Value "[operator-bootstrap-shell-output] $line"
+                }
+                Write-BootstrapShellPhase "public-uninstall:exit=$uninstallExit"
+                if ($uninstallExit -ne 0) { throw "public uninstall command failed with exit code $uninstallExit" }
                 if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime remained installed after public uninstall command.' }
                 if (Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode }) { throw 'Packaged Operator runtime remained running after public uninstall command.' }
                 if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
