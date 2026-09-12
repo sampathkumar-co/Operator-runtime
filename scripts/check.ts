@@ -34,10 +34,30 @@ async function verifyWorkflowSupplyChain(): Promise<void> {
           const ref = at >= 0 ? spec.slice(at + 1) : '';
           if (!/^[0-9a-f]{40}$/i.test(ref)) unpinned.push(`${name}:${index + 1}:${spec}`);
           if (spec.startsWith('actions/setup-node@')) {
-            const following = lines.slice(index + 1, index + 7).join('\n');
-            if (!/^\s+package-manager-cache:\s*false\s*$/m.test(following)) {
-              setupNodeCaching.push(`${name}:${index + 1}:${spec}`);
+            const stepIndent = line.search(/\S/);
+            let cachePolicyBoundToWith = false;
+            for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+              const candidate = lines[cursor]!;
+              const candidateText = candidate.trim();
+              if (!candidateText || candidateText.startsWith('#')) continue;
+              const candidateIndent = candidate.search(/\S/);
+              if (candidateIndent <= stepIndent) break;
+              if (candidateIndent !== stepIndent + 2 || candidateText !== 'with:') continue;
+
+              for (let withCursor = cursor + 1; withCursor < lines.length; withCursor += 1) {
+                const withLine = lines[withCursor]!;
+                const withText = withLine.trim();
+                if (!withText || withText.startsWith('#')) continue;
+                const withIndent = withLine.search(/\S/);
+                if (withIndent <= candidateIndent) break;
+                if (withIndent === candidateIndent + 2 && /^\s*package-manager-cache:\s*false\s*(?:#.*)?$/.test(withLine)) {
+                  cachePolicyBoundToWith = true;
+                  break;
+                }
+              }
+              break;
             }
+            if (!cachePolicyBoundToWith) setupNodeCaching.push(`${name}:${index + 1}:${spec}`);
           }
         }
       }
