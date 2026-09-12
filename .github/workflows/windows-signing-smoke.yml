@@ -92,6 +92,7 @@ jobs:
             Add-Content -LiteralPath $bootstrapLog -Value $line
           }
 
+          $smokeSucceeded = $false
           try {
             Write-BootstrapShellPhase 'node-smoke:start'
             & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.cert.outputs.publisher }}' '${{ steps.cert.outputs.fingerprint_sha256 }}' $root
@@ -119,6 +120,7 @@ jobs:
             $mcp = Invoke-RestMethod -Uri 'http://127.0.0.1:47200/health' -TimeoutSec 2
             if (-not $mcp.ok -or $mcp.service -ne 'operator-mcp-server') { throw 'installed MCP health check failed' }
             Write-BootstrapShellPhase 'health-mcp:ok'
+            $smokeSucceeded = $true
           } finally {
             Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
             if ($package) {
@@ -127,13 +129,24 @@ jobs:
             }
             Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
 
-            Write-BootstrapShellPhase 'cleanup-state:start'
-            Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
-            Write-BootstrapShellPhase 'cleanup-state:ok'
-
-            Write-BootstrapShellPhase 'cleanup-remove-msix:start'
-            Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
-            Write-BootstrapShellPhase 'cleanup-remove-msix:ok'
+            $operatorState = Join-Path $env:LOCALAPPDATA 'Operator'
+            try {
+              if ($smokeSucceeded) {
+                Write-BootstrapShellPhase 'public-uninstall:start'
+                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Operator state directory is missing before uninstall smoke.' }
+                & node packages/operator-runtime-cli/bin/operator-runtime-cli.mjs uninstall
+                if ($LASTEXITCODE -ne 0) { throw "public uninstall command failed with exit code $LASTEXITCODE" }
+                if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime remained installed after public uninstall command.' }
+                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
+                Write-BootstrapShellPhase 'public-uninstall:ok'
+              } else {
+                Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+              }
+            } finally {
+              Write-BootstrapShellPhase 'cleanup-state:start'
+              Remove-Item -LiteralPath $operatorState -Recurse -Force -ErrorAction SilentlyContinue
+              Write-BootstrapShellPhase 'cleanup-state:ok'
+            }
           }
           Write-BootstrapShellPhase 'step:ok'
       - name: Upload bootstrap diagnostics
