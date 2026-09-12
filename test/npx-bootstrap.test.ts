@@ -12,6 +12,7 @@ import {
   validateReleaseMetadata,
   validateTrustedSigners
 } from '../packages/operator-runtime-cli/src/release.mjs';
+import { parseArgs } from '../packages/operator-runtime-cli/src/cli.mjs';
 import { requireSignatureMatchesMetadata, requireTrustedSigner, windowsPowerShellEnvironment } from '../packages/operator-runtime-cli/src/windows.mjs';
 
 function metadata(overrides: Record<string, unknown> = {}) {
@@ -32,6 +33,11 @@ function metadata(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+test('npx bootstrap exposes a bounded uninstall command without destructive flags', () => {
+  assert.deepEqual(parseArgs(['uninstall']), { command: 'uninstall' });
+  assert.throws(() => parseArgs(['uninstall', '--purge-state']), /does not accept additional arguments/);
+});
 
 test('Windows PowerShell bootstrap child rebuilds its native module search path', () => {
   const source = { Path: 'C:\\Windows\\System32', PSModulePath: 'C:\\Program Files\\PowerShell\\7\\Modules', KEEP: 'yes' };
@@ -148,6 +154,13 @@ test('Windows bootstrap uses normal Add-AppxPackage install semantics', async ()
   assert.match(source, /Add-AppxPackage -Path/);
   assert.doesNotMatch(source, /ForceUpdateFromAnyVersion/);
   assert.match(source, /Get-AppPackageLog -ActivityID/);
+});
+
+test('Windows uninstall removes the registered package but does not delete Operator state', async () => {
+  const source = await fs.readFile(path.resolve('packages/operator-runtime-cli/src/windows.mjs'), 'utf8');
+  assert.match(source, /Remove-AppxPackage -Package \$package\.PackageFullName -ErrorAction Stop/);
+  assert.match(source, /still registered after uninstall/);
+  assert.doesNotMatch(source, /LOCALAPPDATA.*Operator/i);
 });
 
 test('artifact download removes partial files after an interrupted stream', async () => {

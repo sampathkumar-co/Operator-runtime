@@ -18,6 +18,7 @@ import {
   requireTrustedSigner,
   runOperatorSetup,
   runOperatorVerify,
+  uninstallOperatorPackage,
   verifyAuthenticode,
   verifyInstalledOperatorSignature
 } from './windows.mjs';
@@ -31,6 +32,7 @@ function usage() {
 Usage:
   npx operator-runtime-cli setup [--root <folder>] [--manifest <https-url>]
   npx operator-runtime-cli verify
+  npx operator-runtime-cli uninstall
   npx operator-runtime-cli --help
 
 Default manifest:
@@ -39,11 +41,11 @@ Default manifest:
 The bootstrap refuses unsigned, untimestamped, hash-mismatched, or unpinned Windows packages.`;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') return { command: 'help' };
-  if (argv[0] === 'verify') {
-    if (argv.length !== 1) throw new Error('verify does not accept additional arguments.');
-    return { command: 'verify' };
+  if (argv[0] === 'verify' || argv[0] === 'uninstall') {
+    if (argv.length !== 1) throw new Error(`${argv[0]} does not accept additional arguments.`);
+    return { command: argv[0] };
   }
   if (argv[0] !== 'setup') throw new Error(`Unknown command '${argv[0]}'. Use --help.`);
   let root = process.cwd();
@@ -149,6 +151,12 @@ export async function main(argv) {
   assertSupportedWindows();
   if (args.command === 'verify') {
     await verifyInstalledRelease();
+    return;
+  }
+  if (args.command === 'uninstall') {
+    const result = await uninstallOperatorPackage();
+    console.log(result.removed ? '[operator] package uninstalled.' : '[operator] package is not installed.');
+    console.log('[operator] local Operator state and device identity were preserved.');
     return;
   }
   await bootstrapRemoteRelease({ root: args.root, manifestUrl: args.manifest });

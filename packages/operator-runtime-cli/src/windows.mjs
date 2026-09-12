@@ -181,9 +181,19 @@ export async function runOperatorVerify(packageInfo) {
   await runLauncher(launcher, ['verify']);
 }
 
-export async function removeOperatorForCi() {
-  await runPowerShell(`
+export async function uninstallOperatorPackage() {
+  const out = await runPowerShell(`
 $ErrorActionPreference = 'Stop'
-Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+$packages = @(Get-AppxPackage -Name 'Operator.Runtime')
+foreach ($package in $packages) {
+  Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+}
+if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime is still registered after uninstall.' }
+[ordered]@{ removed = $packages.Count -gt 0; packageCount = $packages.Count } | ConvertTo-Json -Compress
 `);
+  return JSON.parse(out);
+}
+
+export async function removeOperatorForCi() {
+  return await uninstallOperatorPackage();
 }
