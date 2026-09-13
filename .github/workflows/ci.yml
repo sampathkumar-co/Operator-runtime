@@ -218,29 +218,101 @@ jobs:
             'runtime/node.exe',
             'native/operator-windows-uia.exe',
             'native/operator-windows-dpapi.exe',
-            'app/package.jso‰Ëˆ	Ø\Ø\ËÛØØ[XYÙ[ÜÜ˜ËÛXZ[‹ÉËˆ	Ø\Ø\ËÛØØ[XYÙ[ÜÜ˜ËØÛKÉËˆ	Ø\Ø\ËÛØØ[XYÙ[ÜÜ˜ËØ›Ûİİ˜\XÛÛ™šYËÉËˆ	Ø\Ø\ËÛXÜ\Ù\™\‹ÜÜ˜ËÜÙ\™\‹ÉËˆ	Ø\Ø\ËÛXÜ\Ù\™\‹Û›ÙWÛ[Ù[\ËÙ˜\İYKÜXÚØYÙKšœÛÛ‰Ëˆ	Ø\Ø\ËÛXÜ\Ù\™\‹Û›ÙWÛ[Ù[\ËĞ[Ù[ÛÛ^›İØÛÛÜÙ\™\‹ÜXÚØYÙKšœÛÛ‰Ëˆ	Ø\ÜÜ˜ËØÛÜ™KÜ[[YKÉËˆ	Ğ\X[šY™\İ[	Âˆ
-Bˆ›Ü™XXÚ
-	™[]]™H[ˆ	™\]Z\™Y
-HÂˆYˆ
-[›İ
-\İT]
-›Ú[‹T]	Ø\Y˜XİËİÚ[™İÜË\™[X\ÙKİ[œXÚÙY	È	™[]]™JHT]\HXYŠJHÈ›İÈ“Z\ÜÚ[™ÈXÚØYÙYš[Nˆ	™[]]™HˆBˆBˆ	X[šY™\İ^HÙ]PÛÛ[\Y˜XİËİÚ[™İÜË\™[X\ÙKİ[œXÚÙYĞ\X[šY™\İ[T˜]ÂˆYˆ
-	X[šY™\İ^[›İX]Ú	Ğ[X\ÏH›Ü\˜]Ü—™^H‰ÊHÈ›İÈ	ÓÜ\˜]Üˆ\^Xİ][Ûˆ[X\È\ÈZ\ÜÚ[™ÉÈBˆ	ˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKİ[œXÚÙYÛ˜]]™KÛÜ\˜]Ü‹]Ú[™İÜËY\K™^HK\Ù[‹]\İˆYˆ
-	TÕVUÓÑH[™H
-HÈ›İÈ	ÔXÚØYÙYTH[\ˆÙ[‹]\İ˜Z[Y	ÈBˆ	›Ûİİ˜\İ]HH›Ú[‹T]	[“ĞĞSTUH	ÓÜ\˜]Ü‰Âˆ	›Ûİİ˜\›ÛİH›Ú[‹T]	[”•S“‘T—ÕST	ÛÜ\˜]Ü‹\XÚØYÙKX]]Üš^™Y\›Ûİ	Âˆ™]ËR][HR][U\H\™XİÜHQ›Ü˜ÙHT]	›Ûİİ˜\›Ûİİ]S[ˆ™[[İ™KR][HS]\˜[]	›Ûİİ˜\İ]HT™Xİ\œÙHQ›Ü˜ÙHQ\œ›ÜXİ[ÛˆÚ[[PÛÛ[YBˆ	ˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKİ[œXÚÙYÓÜ\˜]Ü‹™^HÙ]\K\›Ûİ	›Ûİİ˜\›ÛİK[›Ë\İ\ˆYˆ
-	TÕVUÓÑH[™H
-HÈ›İÈ	ÔXÚØYÙYÜ\˜]ÜˆÙ]\˜Z[Y	ÈBˆ	ˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKİ[œXÚÙYÓÜ\˜]Ü‹™^H™\šYBˆYˆ
-	TÕVUÓÑH[™H
-HÈ›İÈ	ÔXÚØYÙYÜ\˜]Üˆ™\šYH˜Z[Y	ÈBˆ™[[İ™KR][HS]\˜[]	›Ûİİ˜\İ]HT™Xİ\œÙHQ›Ü˜ÙHQ\œ›ÜXİ[ÛˆÚ[[PÛÛ[YBˆ	Y]HHÙ]PÛÛ[\Y˜XİËİÚ[™İÜË\™[X\ÙKÜ™[X\ÙK[Y]Y]KšœÛÛˆT˜]ÈÛÛ™\œ›ÛKRœÛÛ‚ˆYˆ
-	Y]KœÚYÛ™Y[™H	˜[ÙJHÈ›İÈ	ĞÒHXÚØYÙH]\İ™[XZ[ˆ^XÚ]H[œÚYÛ™Y	ÈBˆYˆ
-	Y]KœÚLMˆ[™H
-Ù]Qš[R\Ú	\Ú^P[ÛÜš]HÒLMŠK’\Ú•ÓİÙ\’[˜\šX[
+            'app/package.json',
+            'app/apps/local-agent/src/main.ts',
+            'app/apps/local-agent/src/cli.ts',
+            'app/apps/local-agent/src/bootstrap-config.ts',
+            'app/apps/mcp-server/src/server.ts',
+            'app/apps/mcp-server/node_modules/fastify/package.json',
+            'app/apps/mcp-server/node_modules/@modelcontextprotocol/server/package.json',
+            'app/src/core/runtime.ts',
+            'AppxManifest.xml'
+          )
+          foreach ($relative in $required) {
+            if (-not (Test-Path (Join-Path 'artifacts/windows-release/unpacked' $relative) -PathType Leaf)) { throw "Missing packaged file: $relative" }
+          }
+          $manifestText = Get-Content artifacts/windows-release/unpacked/AppxManifest.xml -Raw
+          if ($manifestText -notmatch 'Alias="operator\.exe"') { throw 'Operator app execution alias is missing' }
+          & artifacts/windows-release/unpacked/native/operator-windows-dpapi.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged DPAPI helper self-test failed' }
+          $bootstrapState = Join-Path $env:LOCALAPPDATA 'Operator'
+          $bootstrapRoot = Join-Path $env:RUNNER_TEMP 'operator-package-authorized-root'
+          New-Item -ItemType Directory -Force -Path $bootstrapRoot | Out-Null
+          Remove-Item -LiteralPath $bootstrapState -Recurse -Force -ErrorAction SilentlyContinue
+          & artifacts/windows-release/unpacked/Operator.exe setup --root $bootstrapRoot --no-start
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Operator setup failed' }
+          & artifacts/windows-release/unpacked/Operator.exe verify
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Operator verify failed' }
+          Remove-Item -LiteralPath $bootstrapState -Recurse -Force -ErrorAction SilentlyContinue
+          $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
+          if ($meta.signed -ne $false) { throw 'CI package must remain explicitly unsigned' }
+          if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'release metadata hash mismatch' }
+          [xml]$installer = Get-Content artifacts/windows-release/Operator.appinstaller -Raw
+          if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must use HTTPS' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: operator-windows-unsigned-msix
+          path: |
+            artifacts/windows-release/Operator-0.1.0.0-x64.msix
+            artifacts/windows-release/Operator.appinstaller
+            artifacts/windows-release/release-metadata.json
+          if-no-files-found: error
+          retention-days: 7
 
-JHÈ›İÈ	Ü™[X\ÙHY]Y]H\ÚZ\ÛX]Ú	ÈBˆŞ[I[œİ[\ˆHÙ]PÛÛ[\Y˜XİËİÚ[™İÜË\™[X\ÙKÓÜ\˜]Ü‹˜\[œİ[\ˆT˜]ÂˆYˆ
-	[œİ[\‹\[œİ[\‹“XZ[”XÚØYÙK•\šH[›İX]Ú	×šÎ‹ËÉÊHÈ›İÈ	Ğ\[œİ[\ˆXÚØYÙHT’H]\İ\ÙHÉÈBˆH\Ù\ÎˆXİ[ÛœËİ\ØYX\Y˜XİXLMYX™MÍXMYNL˜™ÍŒÙ˜LˆÈˆÚ]‚ˆ˜[YNˆÜ\˜]Ü‹]Ú[™İÜË][œÚYÛ™Y[\Ú^ˆ]ˆˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKÓÜ\˜]Ü‹LŒKŒŒ^›\Ú^ˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKÓÜ\˜]Ü‹˜\[œİ[\‚ˆ\Y˜XİËİÚ[™İÜË\™[X\ÙKÜ™[X\ÙK[Y]Y]KšœÛÛ‚ˆY‹[›ËYš[\ËY›İ[™ˆ\œ›Ü‚ˆ™][[Û‹Y^\ÎˆÂ‚ˆX›XËYYÙKXÛÛZ[™\‚ˆ˜[YNˆX›XÈYÙH[^ÛÛZ[™\ˆÛ[ÚÙBˆ[œË[ÛˆX[K[]\İˆ[Y[İ][Z[]\ÎˆŒˆİ\Î‚ˆH\Ù\ÎˆXİ[ÛœËØÚXÚÛİ]ÙØÍ™MXXXÍX˜NNYMÍLÌNLÌØ˜NLŒHÈËŒŒBˆH\Ù\ÎˆXİ[ÛœËÜÙ]\[›ÙPŒÍŒÎŒÍÍÍ™ŒÍŒXŒY˜ÍØLÌY™MLŒÈËŒŒˆÚ]‚ˆ›ÙK]™\œÚ[Ûˆ	ÌŒ‹ŒŒËŒ‰ÂˆXÚØYÙK[X[˜YÙ\‹XØXÚNˆ˜[ÙBˆH˜[YNˆ˜[Y]H\Ş[Y[[˜\šX[Âˆ[ˆ›ÙHKY^\š[Y[[\İš\]\\ÈK]\İ\İÜX›XËYYÙKY\Ş[Y[XÛÛ™šYË\İÂˆH˜[YNˆÜ™X]H\ÜÜØX›H\Ş[Y[[š\›Û›Y[ˆÚ[ˆ˜\Úˆ[ˆˆØ]ˆ\ŞKÜX›XËYYÙKÛÜ\˜]Ü‹YYÙK™[ˆ	ÑSÑ‰ÂˆÔTUÔ—Ô‘SVWĞÓÓ•“ÓÕÒÑSXÚK\™[^KXÛÛ›Û]ÚÙ[‹LˆÔTUÔ—ÓPÔÔP“P×ÕT“ZÎ‹ËÙYÙK›Ü\˜]Ü‹\[[YK™]‹ÛXÜˆÔTUÔ—ÓĞUUÒTÔÕQTZÎ‹ËØ]]›Ü\˜]Ü‹\[[YK™]‚ˆÔTUÔ—ÓĞUUĞUUÔ’VUSÓ—ÕT“ZÎ‹ËØ]]›Ü\˜]Ü‹\[[YK™]‹Ø]]Üš^™BˆÔTUÔ—ÓĞUUÕÒÑS—ÕT“ZÎ‹ËØ]]›Ü\˜]Ü‹\[[YK™]‹İÚÙ[‚ˆÔTUÔ—ÓĞUUÒS•“ÔÔPÕSÓ—ÕT“ZÎ‹ËØ]]›Ü\˜]Ü‹\[[YK™]‹Ú[›ÜÜXİˆÔTUÔ—ÓĞUUĞUQQSÑO[Ü\˜]Ü‹\[[YBˆÔTUÔ—ÓĞUUÔ‘PQÔĞÓÔO[Ü\˜]Üœ™XYˆÔTUÔ—ÓĞUUÕÔ’UWÔĞÓÔO[Ü\˜]ÜÜš]BˆÔTUÔ—ÓĞUUÒS•“ÔÔPÕSÓ—ĞÓQS•ÒQXÚKXÛÛ™šY[X[XÛY[ˆÔTUÔ—ÓĞUUÒS•“ÔÔPÕSÓ—ĞÓQS•ÔÑPÔ‘UXÚK[Û›K[›İXK\™X[\ÙXÜ™]ˆSÑ‚ˆH˜[YNˆZ[[™Û[ÚÙH\™[™YX›XÈYÙBˆÚ[ˆ˜\Úˆ[ˆˆÙ]Y][È\Y˜Z[ˆÛÛ\ÜÙOIÙØÚÙ\ˆÛÛ\ÜÙHYˆ\ŞKÜX›XËYYÙKØÛÛ\ÜÙK[[	Âˆ	ÛÛ\ÜÙHÛÛ™šYÈK\]ZY]ˆ	ÛÛ\ÜÙH\YKXZ[K]ØZ]ˆÚYH‰
-	ÛÛ\ÜÙHÈ\HÜ\˜]Ü‹YYÙJH‚ˆ\İ[ˆ‰ÚY‚ˆš[™[™ÜÏH‰
-ØÚÙ\ˆ[œÜXİ‰ÚYˆKY›Ü›X]	ŞŞÚœÛÛˆ’ÜİÛÛ™šYË”Üš[™[™Üß_IÊH‚ˆš[ˆ	É\×‰È‰š[™[™ÜÈˆÜ™\\H	ÈÌŒİÜ‰Âˆš[ˆ	É\×‰È‰š[™[™ÜÈˆÜ™\\H	ÈÎİÜ‰Âˆš[ˆ	É\×‰È‰š[™[™ÜÈˆÜ™\\H	ÈÎKİÜ‰ÂˆHš[ˆ	É\×‰È‰š[™[™ÜÈˆÜ™\\H	ÎÎL	Âˆš[ˆ	É\×‰È‰š[™[™ÜÈˆÜ™\\H	ÌLËŒŒŒIÂˆİ\›YœÔÈR	ÒÜİˆYÙK›Ü\˜]Ü‹\[[YK™]‰È‹ËÌLËŒŒŒNÌŒÚX[Ü™\\H	ÛÜ\˜]Ü‹[XÜ\Ù\™\‰Âˆİ\›YœÔÈ‹ËÌLËŒŒŒNÎÚX[Ü™\\H	ÛÜ\˜]Ü‹\™[^IÂˆİ\›YœÔÈ‹ËÌLËŒŒŒNÎKÚX[Ü™\\H	ÛÜ\˜]Ü‹\™[^K\™\İ[ÉÂˆİ\›YœÔÈR	ÒÜİˆYÙK›Ü\˜]Ü‹\[[YK™]‰È‹ËÌLËŒŒŒNÌŒËÙ[ZÛ›İÛ‹ÛØ]]\›İXİY\™\Ûİ\˜ÙKÛXÜÜ™\\H	ÚÎ‹ËÙYÙK›Ü\˜]Ü‹\[[YK™]‹ÛXÜ	Âˆİ]\ÏH‰
-İ\›\ÔÈ[Èİ\ÛÜ\˜]Ü‹[XÜX›ÙHQİ\ÛÜ\˜]Ü‹[XÜZXY\œÈ]È	É^ÚØÛÙ_IÈR	ÒÜİˆYÙK›Ü\˜]Ü‹\[[YK™]‰ÈR	ĞÛÛ[U\Nˆ\XØ][Û‹ÚœÛÛ‰ÈVÔÕKY]H	ŞßIÈ‹ËÌLËŒŒŒNÌŒÛXÜ
-H‚ˆ\İ‰İ]\ÈˆH	ÍIÂˆÜ™\\ZH	×İİËX]][XØ]Nˆ™X\™\‰Èİ\ÛÜ\˜]Ü‹[XÜZXY\œÂˆH˜[YNˆX›XÈYÙHXYÛ›ÜİXÜÂˆYˆ˜Z[\™J
-BˆÚ[ˆ˜\Úˆ[ˆØÚÙ\ˆÛÛ\ÜÙHYˆ\ŞKÜX›XËYYÙKØÛÛ\ÜÙK[[ÙÜÈK[›ËXÛÛÜˆYBˆH˜[YNˆİÜX›XÈYÙBˆYˆ[Ø^\Ê
-BˆÚ[ˆ˜\Úˆ[ˆØÚÙ\ˆÛÛ\ÜÙHYˆ\ŞKÜX›XËYYÙKØÛÛ\ÜÙK[[İÛˆ]ˆK\™[[İ™K[Üœ[œÈYB
+  public-edge-container:
+    name: Public edge Linux container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Validate deployment invariants
+        run: node --experimental-strip-types --test test/public-edge-deployment-config.test.ts
+      - name: Create disposable deployment environment
+        shell: bash
+        run: |
+          cat > deploy/public-edge/operator-edge.env <<'EOF'
+          OPERATOR_RELAY_CONTROL_TOKEN=ci-relay-control-token-000000000000000000000000
+          OPERATOR_MCP_PUBLIC_URL=https://edge.operator-runtime.dev/mcp
+          OPERATOR_OAUTH_ISSUER=https://auth.operator-runtime.dev
+          OPERATOR_OAUTH_AUTHORIZATION_URL=https://auth.operator-runtime.dev/authorize
+          OPERATOR_OAUTH_TOKEN_URL=https://auth.operator-runtime.dev/token
+          OPERATOR_OAUTH_INTROSPECTION_URL=https://auth.operator-runtime.dev/introspect
+          OPERATOR_OAUTH_AUDIENCE=operator-runtime
+          OPERATOR_OAUTH_REQUIRED_SCOPE=operator:mcp
+          OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID=ci-confidential-client
+          OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET=ci-only-not-a-real-secret
+          EOF
+      - name: Build and smoke hardened public edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          compose='docker compose -f deploy/public-edge/compose.yml'
+          $compose config --quiet
+          $compose up -d --build --wait
+          cid="$($compose ps -q operator-edge)"
+          test -n "$cid"
+          bindings="$(docker inspect "$cid" --format '{{json .HostConfig.PortBindings}}')"
+          printf '%s\n' "$bindings" | grep -q '"47200/tcp"'
+          printf '%s\n' "$bindings" | grep -q '"8788/tcp"'
+          printf '%s\n' "$bindings" | grep -q '"8789/tcp"'
+          ! printf '%s\n' "$bindings" | grep -q '8790'
+          printf '%s\n' "$bindings" | grep -q '127.0.0.1'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/health | grep -q 'operator-mcp-server'
+          curl -fsS http://127.0.0.1:8788/health | grep -q 'operator-relay'
+          curl -fsS http://127.0.0.1:8789/health | grep -q 'operator-relay-results'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/.well-known/oauth-protected-resource/mcp | grep -q 'https://edge.operator-runtime.dev/mcp'
+          status="$(curl -sS -o /tmp/operator-mcp-body -D /tmp/operator-mcp-headers -w '%{http_code}' -H 'Host: edge.operator-runtime.dev' -H 'Content-Type: application/json' -X POST --data '{}' http://127.0.0.1:47200/mcp)"
+          test "$status" = '401'
+          grep -qi '^www-authenticate: Bearer' /tmp/operator-mcp-headers
+      - name: Public edge diagnostics
+        if: failure()
+        shell: bash
+        run: docker compose -f deploy/public-edge/compose.yml logs --no-color || true
+      - name: Stop public edge
+        if: always()
+        shell: bash
+        run: docker compose -f deploy/public-edge/compose.yml down -v --remove-orphans || true
