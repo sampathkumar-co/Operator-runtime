@@ -189,6 +189,15 @@ export class DeviceSessionTokenStore {
     return payload;
   }
 
+  async purgeForDevice(deviceIdInput: string): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    return await this.#mutate((state) => {
+      const before = state.issued.length;
+      state.issued = state.issued.filter((record) => record.subjectDeviceId !== deviceId && record.issuerDeviceId !== deviceId);
+      return before - state.issued.length;
+    });
+  }
+
   async #activePeer(deviceIdInput: string): Promise<RegisteredDevice> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const peer = (await this.#registry.listDevices()).find((candidate) => candidate.deviceId === deviceId);

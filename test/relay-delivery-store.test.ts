@@ -75,3 +75,41 @@ test('relay payloads are JSON-bounded snapshots rather than mutable caller objec
     (error: any) => error?.code === 'RELAY_PAYLOAD_TOO_LARGE'
   );
 });
+
+test('acknowledgement erases sensitive delivery payload while preserving sequence metadata', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const queued = await store.enqueue(DEVICE, 'action', {
+    action: { id: 'sensitive-action', input: { content: 'project source payload' } }
+  });
+  await store.acknowledge(DEVICE, queued.seq, queued.id);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  const record = persisted.streams[0].deliveries[0];
+  assert.equal(record.seq, 1);
+  assert.equal(record.id, queued.id);
+  assert.equal(record.status, 'acked');
+  assert.deepEqual(record.payload, {});
+  assert.equal(JSON.stringify(persisted).includes('project source payload'), false);
+});
+
+test('pending delivery payload expires to a tombstone and reconnect may cross only that expired history', async (t) => {
+  let nowMs = Date.parse('2026-09-13T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  await store.enqueue(DEVICE, 'action', { action: { input: { content: 'stale source payload' } } });
+  nowMs += 60_001;
+  assert.deepEqual(await store.pending(DEVICE), []);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
+  assert.deepEqual(await store.reconcileClientCursor(DEVICE, 0), { lastAckedSeq: 1, advanced: 1 });
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  const expired = persisted.streams[0].deliveries[0];
+  assert.equal(expired.status, 'expired');
+  assert.deepEqual(expired.payload, {});
+  assert.equal(typeof expired.expiredAt, 'string');
+  assert.equal(JSON.stringify(persisted).includes('stale source payload'), false);
+  const fresh = await store.enqueue(DEVICE, 'action', { action: { input: { content: 'fresh' } } });
+  assert.equal(fresh.seq, 2);
+  assert.deepEqual((await store.pending(DEVICE)).map((delivery) => delivery.seq), [2]);
+});

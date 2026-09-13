@@ -8,6 +8,8 @@ const MAX_DELIVERIES_PER_STREAM = 10_000;
 const MAX_PAYLOAD_BYTES = 128 * 1024;
 const MAX_KIND = 128;
 const MAX_PENDING_RETURN = 500;
+const DEFAULT_RETENTION_MS = 24 * 60 * 60_000;
+const MAX_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 type Clock = () => Date;
 type JsonObject = Record<string, unknown>;
@@ -18,8 +20,9 @@ export interface StoredRelayDelivery {
   kind: string;
   payload: JsonObject;
   createdAt: string;
-  status: 'pending' | 'acked';
+  status: 'pending' | 'acked' | 'expired';
   ackedAt?: string;
+  expiredAt?: string;
 }
 
 interface DeviceDeliveryStream {
@@ -37,11 +40,13 @@ interface RelayDeliveryState {
 export class RelayDeliveryStore {
   #file: string;
   #clock: Clock;
+  #retentionMs: number;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: Clock } = {}) {
+  constructor(stateDir: string, options: { clock?: Clock; retentionMs?: number } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-deliveries.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
   async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject): Promise<StoredRelayDelivery> {
@@ -49,6 +54,7 @@ export class RelayDeliveryStore {
     const kind = validKind(kindInput);
     const payload = safePayload(payloadInput);
     return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
       const stream = getOrCreateStream(state, deviceId);
       if (stream.deliveries.length >= MAX_DELIVERIES_PER_STREAM) {
         throw new OperatorError('RELAY_QUEUE_LIMIT', `Device relay queue has reached ${MAX_DELIVERIES_PER_STREAM} retained deliveries.`);
@@ -70,17 +76,21 @@ export class RelayDeliveryStore {
   async pending(deviceIdInput: string, limitInput = 100): Promise<StoredRelayDelivery[]> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const limit = boundedLimit(limitInput);
-    const state = await this.#read();
-    const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
-    if (!stream) return [];
-    return stream.deliveries.filter((delivery) => delivery.seq > stream.lastAckedSeq && delivery.status === 'pending').slice(0, limit).map(cloneDelivery);
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+      if (!stream) return [];
+      return stream.deliveries.filter((delivery) => delivery.seq > stream.lastAckedSeq && delivery.status === 'pending').slice(0, limit).map(cloneDelivery);
+    });
   }
 
   async cursor(deviceIdInput: string): Promise<{ lastAckedSeq: number; highestEnqueuedSeq: number }> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
-    const state = await this.#read();
-    const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
-    return stream ? { lastAckedSeq: stream.lastAckedSeq, highestEnqueuedSeq: stream.nextSeq - 1 } : { lastAckedSeq: 0, highestEnqueuedSeq: 0 };
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+      return stream ? { lastAckedSeq: stream.lastAckedSeq, highestEnqueuedSeq: stream.nextSeq - 1 } : { lastAckedSeq: 0, highestEnqueuedSeq: 0 };
+    });
   }
 
   async acknowledge(deviceIdInput: string, seqInput: number, deliveryIdInput: string): Promise<{ lastAckedSeq: number; duplicate: boolean }> {
@@ -93,7 +103,7 @@ export class RelayDeliveryStore {
       const delivery = stream.deliveries.find((candidate) => candidate.seq === seq);
       if (!delivery || delivery.id !== deliveryId) throw new OperatorError('RELAY_ACK_MISMATCH', 'Relay acknowledgement does not match the stored delivery sequence and ID.');
       if (seq <= stream.lastAckedSeq) {
-        if (delivery.status !== 'acked') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged cursor references a non-acked retained delivery.');
+        if (!['acked', 'expired'].includes(delivery.status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Terminal cursor references a non-terminal retained delivery.');
         return { lastAckedSeq: stream.lastAckedSeq, duplicate: true };
       }
       if (seq !== stream.lastAckedSeq + 1) {
@@ -101,6 +111,7 @@ export class RelayDeliveryStore {
       }
       delivery.status = 'acked';
       delivery.ackedAt = this.#clock().toISOString();
+      delivery.payload = {};
       stream.lastAckedSeq = seq;
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
     });
@@ -110,13 +121,18 @@ export class RelayDeliveryStore {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const clientSeq = validNonNegativeSeq(clientSeqInput);
     return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) {
         if (clientSeq === 0) return { lastAckedSeq: 0, advanced: 0 };
         throw new OperatorError('RELAY_RESUME_AHEAD', 'Client resume cursor references deliveries the server has never enqueued.');
       }
       if (clientSeq < stream.lastAckedSeq) {
-        throw new OperatorError('RELAY_RESUME_BEHIND', 'Client resume cursor is behind the durable server acknowledgement cursor; automatic replay is unsafe.', {
+        const crossed = stream.deliveries.filter((delivery) => delivery.seq > clientSeq && delivery.seq <= stream.lastAckedSeq);
+        if (crossed.length === stream.lastAckedSeq - clientSeq && crossed.every((delivery) => delivery.status === 'expired')) {
+          return { lastAckedSeq: stream.lastAckedSeq, advanced: stream.lastAckedSeq - clientSeq };
+        }
+        throw new OperatorError('RELAY_RESUME_BEHIND', 'Client resume cursor is behind executed relay history; automatic replay is unsafe.', {
           details: { clientSeq, serverSeq: stream.lastAckedSeq }
         });
       }
@@ -134,9 +150,25 @@ export class RelayDeliveryStore {
         if (!delivery) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay queue is missing a delivery needed to reconcile the client cursor.');
         delivery.status = 'acked';
         delivery.ackedAt = this.#clock().toISOString();
+        delivery.payload = {};
       }
       stream.lastAckedSeq = clientSeq;
       return { lastAckedSeq: clientSeq, advanced: clientSeq - from + 1 };
+    });
+  }
+
+  async expirePending(): Promise<number> {
+    return await this.#mutate((state) => expirePending(state, this.#clock().getTime(), this.#retentionMs));
+  }
+
+  async purgeDevice(deviceIdInput: string): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    return await this.#mutate((state) => {
+      const stream = state.streams.find((item) => item.deviceId === deviceId);
+      if (!stream) return 0;
+      const removed = stream.deliveries.length;
+      state.streams = state.streams.filter((item) => item.deviceId !== deviceId);
+      return removed;
     });
   }
 
@@ -180,6 +212,31 @@ export class RelayDeliveryStore {
   }
 }
 
+function boundedRetention(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_RETENTION_MS;
+  if (!Number.isFinite(value) || value < 60_000 || value > MAX_RETENTION_MS) {
+    throw new OperatorError('RELAY_DELIVERY_RETENTION_INVALID', `Relay delivery retention must be between 60000 and ${MAX_RETENTION_MS} ms.`);
+  }
+  return Math.trunc(value);
+}
+
+function expirePending(state: RelayDeliveryState, now: number, retentionMs: number): number {
+  let expired = 0;
+  const expiredAt = new Date(now).toISOString();
+  for (const stream of state.streams) {
+    while (true) {
+      const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
+      if (!next || next.status !== 'pending' || Date.parse(next.createdAt) > now - retentionMs) break;
+      next.status = 'expired';
+      next.expiredAt = expiredAt;
+      next.payload = {};
+      stream.lastAckedSeq = next.seq;
+      expired += 1;
+    }
+  }
+  return expired;
+}
+
 function getOrCreateStream(state: RelayDeliveryState, deviceId: string): DeviceDeliveryStream {
   const existing = state.streams.find((stream) => stream.deviceId === deviceId);
   if (existing) return existing;
@@ -214,13 +271,16 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const kind = validKind(entry.kind);
       const payload = safePayload(entry.payload);
       const createdAt = validIso(entry.createdAt, 'createdAt');
-      const status = entry.status === 'pending' ? 'pending' : entry.status === 'acked' ? 'acked' : null;
+      const status = entry.status === 'pending' ? 'pending' : entry.status === 'acked' ? 'acked' : entry.status === 'expired' ? 'expired' : null;
       if (!status) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery status is invalid.');
       const ackedAt = entry.ackedAt === undefined ? undefined : validIso(entry.ackedAt, 'ackedAt');
-      if (status === 'pending' && ackedAt) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain an acknowledgement timestamp.');
-      if (seq <= lastAckedSeq && status !== 'acked') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the acknowledgement cursor must be acked.');
+      const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
+      if (status === 'pending' && (ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps.');
+      if (status === 'acked' && (!ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
+      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free tombstone.');
+      if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, createdAt, status, ackedAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = 1; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');

@@ -39,7 +39,8 @@ OPERATOR_OAUTH_AUTHORIZATION_URL=https://auth.your-domain.tld/authorize
 OPERATOR_OAUTH_TOKEN_URL=https://auth.your-domain.tld/token
 OPERATOR_OAUTH_INTROSPECTION_URL=https://auth.your-domain.tld/introspect
 OPERATOR_OAUTH_AUDIENCE=operator-runtime
-OPERATOR_OAUTH_REQUIRED_SCOPE=operator:mcp
+OPERATOR_OAUTH_READ_SCOPE=operator:read
+OPERATOR_OAUTH_WRITE_SCOPE=operator:write
 OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID=<confidential-client-id>
 OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET=<secret>
 ```

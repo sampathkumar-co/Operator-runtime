@@ -7,6 +7,7 @@ import { TaskStore } from '../../../src/core/task-store.ts';
 import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
+import { ApprovalStore } from './approval-store.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
 import { LocalAgentRelayRunner } from './relay-agent.ts';
 
@@ -42,6 +43,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const emergencyStop = new EmergencyStopStore(stateDir);
+const approvals = new ApprovalStore(stateDir);
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
@@ -107,6 +109,7 @@ const agent = createLocalAgentServer({
   token,
   recoveryToken,
   emergencyStop,
+  approvals,
   audit,
   tasks,
   deviceIdentity,

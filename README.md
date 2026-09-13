@@ -34,8 +34,9 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - account-scoped multi-device registry, deterministic routing and project-to-device binding
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
-- MCP HTTP server with **22 semantic tools**
-- local and relay-backed MCP execution modes with unchanged tool schemas
+- full/private MCP runtime with **22 semantic tools**
+- curated public SPLCART Operator MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
+- local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
 - official MCP client and MCP Inspector end-to-end certification
 - Windows native launcher with bundled Node runtime and UIA sidecar

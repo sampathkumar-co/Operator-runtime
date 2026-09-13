@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DeviceRegistryStore } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
@@ -9,6 +10,7 @@ const MAX_MEMBERSHIPS = 500_000;
 const MAX_AUTH_FIELD = 1024;
 
 type Clock = () => Date;
+type ReleaseDeviceHook = (deviceId: string, accountId: string, reason: 'removed' | 'disabled' | 'erased' | 'rebind') => Promise<void> | void;
 
 export interface AccountPrincipal {
   issuer: string;
@@ -41,14 +43,18 @@ interface AccountDeviceState {
 
 export class AccountDeviceRegistry {
   #file: string;
+  #stateDir: string;
   #devices: DeviceRegistryStore;
   #clock: Clock;
+  #onReleaseDevice?: ReleaseDeviceHook;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, devices: DeviceRegistryStore, options: { clock?: Clock } = {}) {
-    this.#file = path.join(path.resolve(stateDir), 'account-devices.json');
+  constructor(stateDir: string, devices: DeviceRegistryStore, options: { clock?: Clock; onReleaseDevice?: ReleaseDeviceHook } = {}) {
+    this.#stateDir = path.resolve(stateDir);
+    this.#file = path.join(this.#stateDir, 'account-devices.json');
     this.#devices = devices;
     this.#clock = options.clock ?? (() => new Date());
+    this.#onReleaseDevice = options.onReleaseDevice;
   }
 
   async resolveOrCreateAccount(principalInput: AccountPrincipal): Promise<OperatorAccount> {
@@ -81,21 +87,15 @@ export class AccountDeviceRegistry {
   async disableAccount(accountIdInput: string, reasonInput: string): Promise<OperatorAccount> {
     const accountId = validUuid(accountIdInput, 'accountId');
     const reason = boundedReason(reasonInput, 'account disable reason');
-    return await this.#mutate((state) => {
+    return await this.#mutate(async (state) => {
       const account = state.accounts.find((candidate) => candidate.accountId === accountId);
       if (!account) throw new OperatorError('ACCOUNT_NOT_FOUND', 'Operator account was not found.');
       if (account.status === 'disabled') return cloneAccount(account);
       const at = this.#clock().toISOString();
-      account.status = 'disabled';
-      account.disabledAt = at;
-      account.disabledReason = reason;
-      for (const membership of state.memberships) {
-        if (membership.accountId === accountId && membership.status === 'active') {
-          membership.status = 'removed';
-          membership.removedAt = at;
-          membership.removedReason = 'account-disabled';
-        }
-      }
+      const released = state.memberships.filter((m) => m.accountId === accountId && m.status === 'active');
+      for (const membership of released) await this.#releaseDevice(membership.deviceId, accountId, 'disabled');
+      account.status = 'disabled'; account.disabledAt = at; account.disabledReason = reason;
+      for (const membership of released) { membership.status = 'removed'; membership.removedAt = at; membership.removedReason = 'account-disabled'; }
       return cloneAccount(account);
     });
   }
@@ -106,22 +106,15 @@ export class AccountDeviceRegistry {
     const device = (await this.#devices.listDevices()).find((candidate) => candidate.deviceId === deviceId);
     if (!device) throw new OperatorError('DEVICE_NOT_FOUND', 'Cannot bind an unpaired device to an account.');
     if (device.status !== 'active') throw new OperatorError('DEVICE_REVOKED', 'Cannot bind a revoked device to an account.');
-
-    return await this.#mutate((state) => {
-      const account = requireActiveAccount(state, accountId);
-      void account;
-      const activeForDevice = state.memberships.find((membership) => membership.deviceId === deviceId && membership.status === 'active');
-      if (activeForDevice && activeForDevice.accountId !== accountId) {
-        throw new OperatorError('DEVICE_ACCOUNT_CONFLICT', 'Device is already bound to a different active account.');
-      }
-      if (activeForDevice) return cloneMembership(activeForDevice);
+    return await this.#mutate(async (state) => {
+      requireActiveAccount(state, accountId);
+      const active = state.memberships.find((m) => m.deviceId === deviceId && m.status === 'active');
+      if (active && active.accountId !== accountId) throw new OperatorError('DEVICE_ACCOUNT_CONFLICT', 'Device is already bound to a different active account.');
+      if (active) return cloneMembership(active);
+      const priorOwners = [...new Set(state.memberships.filter((m) => m.deviceId === deviceId && m.status === 'removed').map((m) => m.accountId))];
+      for (const priorAccountId of priorOwners) await this.#releaseDevice(deviceId, priorAccountId, 'rebind');
       if (state.memberships.length >= MAX_MEMBERSHIPS) throw new OperatorError('ACCOUNT_DEVICE_LIMIT', `At most ${MAX_MEMBERSHIPS} account-device memberships may be stored.`);
-      const membership: AccountDeviceMembership = {
-        accountId,
-        deviceId,
-        status: 'active',
-        addedAt: this.#clock().toISOString()
-      };
+      const membership: AccountDeviceMembership = { accountId, deviceId, status: 'active', addedAt: this.#clock().toISOString() };
       state.memberships.push(membership);
       return cloneMembership(membership);
     });
@@ -131,15 +124,39 @@ export class AccountDeviceRegistry {
     const accountId = validUuid(accountIdInput, 'accountId');
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const reason = boundedReason(reasonInput, 'device removal reason');
-    return await this.#mutate((state) => {
+    return await this.#mutate(async (state) => {
       requireActiveAccount(state, accountId);
-      const membership = state.memberships.find((candidate) => candidate.accountId === accountId && candidate.deviceId === deviceId && candidate.status === 'active');
+      const membership = state.memberships.find((m) => m.accountId === accountId && m.deviceId === deviceId && m.status === 'active');
       if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_FOUND', 'Active account-device membership was not found.');
-      membership.status = 'removed';
-      membership.removedAt = this.#clock().toISOString();
-      membership.removedReason = reason;
+      await this.#releaseDevice(deviceId, accountId, 'removed');
+      membership.status = 'removed'; membership.removedAt = this.#clock().toISOString(); membership.removedReason = reason;
       return cloneMembership(membership);
     });
+  }
+
+  async eraseAccount(accountIdInput: string): Promise<{ accountId: string; releasedDeviceIds: string[] }> {
+    const accountId = validUuid(accountIdInput, 'accountId');
+    const releasedDeviceIds: string[] = [];
+    await this.#mutate(async (state) => {
+      const account = state.accounts.find((candidate) => candidate.accountId === accountId);
+      if (!account) throw new OperatorError('ACCOUNT_NOT_FOUND', 'Operator account was not found.');
+      const accountDir = await safeAccountEraseTarget(this.#stateDir, accountId);
+      for (const membership of state.memberships.filter((m) => m.accountId === accountId && m.status === 'active')) {
+        await this.#releaseDevice(membership.deviceId, accountId, 'erased');
+        releasedDeviceIds.push(membership.deviceId);
+      }
+      await fs.rm(accountDir, { recursive: true, force: true });
+      state.memberships = state.memberships.filter((membership) => membership.accountId !== accountId);
+      state.accounts = state.accounts.filter((candidate) => candidate.accountId !== accountId);
+    });
+    return { accountId, releasedDeviceIds: [...new Set(releasedDeviceIds)].sort() };
+  }
+
+  async erasePrincipal(principalInput: AccountPrincipal): Promise<{ erased: boolean; accountId?: string; releasedDeviceIds: string[] }> {
+    const account = await this.getAccount(principalInput);
+    if (!account) return { erased: false, releasedDeviceIds: [] };
+    const erased = await this.eraseAccount(account.accountId);
+    return { erased: true, ...erased };
   }
 
   async listDevices(accountIdInput: string): Promise<AccountDeviceMembership[]> {
@@ -162,6 +179,10 @@ export class AccountDeviceRegistry {
     if (!membership) return false;
     const device = (await this.#devices.listDevices()).find((candidate) => candidate.deviceId === deviceId);
     return device?.status === 'active';
+  }
+
+  async #releaseDevice(deviceId: string, accountId: string, reason: 'removed' | 'disabled' | 'erased' | 'rebind'): Promise<void> {
+    await this.#onReleaseDevice?.(deviceId, accountId, reason);
   }
 
   async #read(): Promise<AccountDeviceState> {
@@ -290,4 +311,20 @@ function validIso(value: string, label: string): string {
   const time = Date.parse(text);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== text) throw new OperatorError('ACCOUNT_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
   return text;
+}
+
+async function safeAccountEraseTarget(stateDir: string, accountId: string): Promise<string> {
+  const root = path.resolve(stateDir);
+  const accountsDir = path.join(root, 'accounts');
+  const target = path.join(accountsDir, accountId);
+  for (const [candidate, label] of [[root, 'state root'], [accountsDir, 'accounts directory'], [target, 'account directory']] as const) {
+    try {
+      const stat = await fs.lstat(candidate);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new OperatorError('ACCOUNT_ERASURE_PATH_INVALID', `Refusing account erasure through an unsafe ${label}.`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && candidate !== root) continue;
+      throw error;
+    }
+  }
+  return target;
 }

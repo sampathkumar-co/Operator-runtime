@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { createMcpFastifyApp } from '@modelcontextprotocol/fastify';
 import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import {
@@ -17,11 +16,27 @@ import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
+import { stableActionId } from '../../../src/core/action-identity.ts';
+import { invokePublicWithAgent } from './public-boundary.ts';
+import { registerPublicTools } from './public-tools.ts';
+import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
 const executionMode = (process.env.OPERATOR_EXECUTION_MODE ?? 'local').trim().toLowerCase();
 const publicEdge = readPublicMcpEdgeConfig();
+const publicRequestLimiter = publicEdge ? new FixedWindowRateLimiter({
+  limit: envRateLimit(process.env.OPERATOR_PUBLIC_REQUESTS_PER_MINUTE, 600, 'OPERATOR_PUBLIC_REQUESTS_PER_MINUTE'),
+  windowMs: 60_000
+}) : null;
+const publicAuthFailureLimiter = publicEdge ? new FixedWindowRateLimiter({
+  limit: envRateLimit(process.env.OPERATOR_PUBLIC_AUTH_FAILURES_PER_5_MINUTES, 30, 'OPERATOR_PUBLIC_AUTH_FAILURES_PER_5_MINUTES'),
+  windowMs: 5 * 60_000
+}) : null;
+const publicPrincipalLimiter = publicEdge ? new FixedWindowRateLimiter({
+  limit: envRateLimit(process.env.OPERATOR_PUBLIC_PRINCIPAL_REQUESTS_PER_MINUTE, 300, 'OPERATOR_PUBLIC_PRINCIPAL_REQUESTS_PER_MINUTE'),
+  windowMs: 60_000
+}) : null;
 if (executionMode === 'local' && agentToken.length < 32) {
   throw new Error('OPERATOR_AGENT_TOKEN must be set and match the local agent token.');
 }
@@ -34,7 +49,7 @@ const host = resolveMcpBindHost(process.env, publicEdge);
 
 const handler = createMcpHandler(({ authInfo }) => {
   const principal = publicEdge ? principalFromAuthInfo(authInfo, publicEdge.publicUrl) : undefined;
-  return createServer(new LocalAgentClient(agentUrl, agentToken, principal));
+  return createServer(new LocalAgentClient(agentUrl, agentToken, principal), authInfo);
 });
 const nodeHandler = toNodeHandler(handler);
 const app = createMcpFastifyApp(publicEdge
@@ -42,6 +57,15 @@ const app = createMcpFastifyApp(publicEdge
   : { host });
 
 if (publicEdge) {
+  if (publicEdge.challengeToken) {
+    app.get('/.well-known/openai-apps-challenge', async (request, reply) => {
+      const webRequest = await toWebRequest(request.raw, request.body);
+      const rejected = validatePublicHeaders(webRequest);
+      if (rejected) return sendSdkResponse(reply, rejected);
+      return reply.header('cache-control', 'no-store').type('text/plain; charset=utf-8').send(publicEdge.challengeToken);
+    });
+  }
+
   const metadataPaths = ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server'];
   for (const metadataPath of metadataPaths) {
     app.all(metadataPath, async (request, reply) => {
@@ -60,6 +84,11 @@ app.all('/mcp', async (request, reply) => {
     const webRequest = await toWebRequest(request.raw, request.body);
     const rejected = validatePublicHeaders(webRequest);
     if (rejected) return sendSdkResponse(reply, rejected);
+    const clientKey = requestClientKey(request.raw);
+    const requestDecision = publicRequestLimiter!.hit(clientKey);
+    if (!requestDecision.allowed) return sendRateLimit(reply, requestDecision);
+    const failureDecision = publicAuthFailureLimiter!.isLimited(clientKey);
+    if (!failureDecision.allowed) return sendRateLimit(reply, failureDecision);
     const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
     let authInfo: AuthInfo;
     try {
@@ -69,11 +98,17 @@ app.all('/mcp', async (request, reply) => {
         resourceMetadataUrl
       });
     } catch (error) {
+      const failed = publicAuthFailureLimiter!.hit(clientKey);
+      if (!failed.allowed) return sendRateLimit(reply, failed);
       return sendSdkResponse(reply, bearerAuthChallengeResponse(error, {
         requiredScopes: publicEdge.requiredScopes,
         resourceMetadataUrl
       }));
     }
+    publicAuthFailureLimiter!.clear(clientKey);
+    const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
+    const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
+    if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);
     delete request.raw.headers.authorization;
     (request.raw as typeof request.raw & { auth?: AuthInfo }).auth = authInfo;
   }
@@ -98,14 +133,33 @@ async function sendSdkResponse(reply: FastifyReply, response: Response): Promise
   return body ? reply.send(body) : reply.send();
 }
 
-function createServer(agent: LocalAgentClient): McpServer {
+
+function sendRateLimit(reply: FastifyReply, decision: RateLimitDecision): FastifyReply {
+  reply.header('retry-after', String(decision.retryAfterSeconds));
+  reply.header('cache-control', 'no-store');
+  return reply.code(429).send({ error: 'rate_limited' });
+}
+
+function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
+  const publicMode = Boolean(publicEdge);
   const invoke = (capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) =>
-    invokeWithAgent(agent, capability, risk, input, target);
+    publicMode
+      ? invokePublicWithAgent(agent, capability, risk, input, target, { grantedScopes: authInfo?.scopes, readScope: publicEdge?.readScope, writeScope: publicEdge?.writeScope })
+      : invokeWithAgent(agent, capability, risk, input, target);
 
   const server = new McpServer(
-    { name: 'Operator', title: 'Operator', version: '0.1.0' },
-    { capabilities: { tools: {} }, instructions: 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
+    publicMode
+      ? { name: 'splcart-operator', title: 'SPLCART Operator', version: '0.1.0' }
+      : { name: 'Operator', title: 'Operator', version: '0.1.0' },
+    { capabilities: { tools: {} }, instructions: publicMode
+      ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'
+      : 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
   );
+
+  if (publicMode) {
+    registerPublicTools(server, invoke);
+    return server;
+  }
 
   server.registerTool('computer.inspect', {
     title: 'Inspect computer',
@@ -529,7 +583,7 @@ function createServer(agent: LocalAgentClient): McpServer {
 
 async function invokeWithAgent(agent: LocalAgentClient, capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) {
   const action: ActionRequest = {
-    id: crypto.randomUUID(),
+    id: stableActionId(capability, risk, input, target),
     capability,
     risk,
     input,

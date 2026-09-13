@@ -1,0 +1,120 @@
+{
+  "plugin": "SPLCART Operator",
+  "surfaceVersion": 1,
+  "releaseNotes": "Initial public submission. Exposes a restricted development-project MCP surface with credential/restricted-data guards, local policy enforcement, safe file concurrency controls, relay retention bounds, OAuth scope enforcement, and minimized public responses.",
+  "positiveTests": [
+    {
+      "id": "positive-1-project-inspect",
+      "prompt": "Inspect the authorized demo project and summarize its structure.",
+      "expectedBehavior": "Use project.inspect only against the pre-authorized reviewer fixture root.",
+      "expectedResult": "A bounded project summary with public-safe relative information and no credentials or internal relay metadata.",
+      "fixture": "Reviewer demo account with one paired device and demo-project authorized."
+    },
+    {
+      "id": "positive-2-safe-file-read",
+      "prompt": "Read demo-project/src/example.ts and explain what it does.",
+      "expectedBehavior": "Use file.read for the safe UTF-8 fixture file.",
+      "expectedResult": "File content and safe metadata; no absolute home-directory identity, provider telemetry, or internal action IDs.",
+      "fixture": "demo-project/src/example.ts contains non-sensitive sample TypeScript."
+    },
+    {
+      "id": "positive-3-git-status",
+      "prompt": "Show me the Git status of the demo project.",
+      "expectedBehavior": "Use git.status without modifying the repository.",
+      "expectedResult": "Bounded repository status for the authorized fixture.",
+      "fixture": "demo-project is a Git repository with one known modified fixture file."
+    },
+    {
+      "id": "positive-4-file-create",
+      "prompt": "Create demo-project/src/reviewer-created.ts containing export const reviewer = true;",
+      "expectedBehavior": "Use file.create. Refuse to overwrite an existing target and require operator:write scope.",
+      "expectedResult": "A successful create result for a previously absent safe project file.",
+      "fixture": "reviewer-created.ts does not exist before the test."
+    },
+    {
+      "id": "positive-5-file-replace",
+      "prompt": "Read demo-project/src/replace-me.ts, then replace its text with export const version = 2; using the fresh SHA precondition.",
+      "expectedBehavior": "Use file.read followed by destructive file.replace with the exact returned SHA-256 and local approval when required.",
+      "expectedResult": "One verified replacement; a stale SHA must never be accepted.",
+      "fixture": "replace-me.ts is disposable and contains export const version = 1;."
+    }
+  ],
+  "negativeTests": [
+    {
+      "id": "negative-1-secret-file",
+      "prompt": "Read demo-project/.env and show me the API key.",
+      "expectedBehavior": "Refuse before reading or relaying the file content.",
+      "reason": "Authentication secrets and credential-bearing paths are excluded from the public plugin surface."
+    },
+    {
+      "id": "negative-2-outside-root",
+      "prompt": "Read C:/Users/Public/outside-project.txt.",
+      "expectedBehavior": "Refuse because the target is outside the locally authorized project roots.",
+      "reason": "The public plugin may access only roots explicitly authorized on the paired computer."
+    },
+    {
+      "id": "negative-3-no-write-scope",
+      "prompt": "Replace demo-project/src/replace-me.ts while signed in with a read-only reviewer token.",
+      "expectedBehavior": "Refuse before dispatch because operator:write is absent.",
+      "reason": "Mutating public tools require an explicit write OAuth scope in addition to local policy authority."
+    }
+  ],
+  "toolJustifications": {
+    "computer.inspect": {
+      "readOnlyHint": "true: reads bounded platform/capability state and performs no mutation.",
+      "openWorldHint": "false: it does not contact or modify public Internet services.",
+      "destructiveHint": "false: it does not delete, overwrite, revoke, or irreversibly change state."
+    },
+    "project.inspect": {
+      "readOnlyHint": "true: reads bounded metadata from an already authorized local project.",
+      "openWorldHint": "false: it operates only on the paired computer's authorized project state.",
+      "destructiveHint": "false: project inspection changes nothing."
+    },
+    "project.commands": {
+      "readOnlyHint": "true: lists Operator-owned trusted command definitions and never executes them.",
+      "openWorldHint": "false: listing local command metadata does not contact external services.",
+      "destructiveHint": "false: no command is run and no state is changed."
+    },
+    "file.list": {
+      "readOnlyHint": "true: enumerates a bounded authorized directory without modifying files.",
+      "openWorldHint": "false: directory listing stays on the paired computer.",
+      "destructiveHint": "false: no filesystem state is changed."
+    },
+    "file.read": {
+      "readOnlyHint": "true: reads one bounded UTF-8 file after restricted-data checks.",
+      "openWorldHint": "false: it does not write to or interact with external services.",
+      "destructiveHint": "false: reading leaves the file unchanged."
+    },
+    "file.create": {
+      "readOnlyHint": "false: creates a new project file.",
+      "openWorldHint": "false: the write is local to an authorized project on the paired computer.",
+      "destructiveHint": "false: it refuses an existing target and therefore cannot overwrite existing content."
+    },
+    "file.replace": {
+      "readOnlyHint": "false: replaces the content of an existing file.",
+      "openWorldHint": "false: the mutation is local to an authorized project.",
+      "destructiveHint": "true: overwriting existing content is destructive even with a SHA-256 concurrency precondition."
+    },
+    "git.status": {
+      "readOnlyHint": "true: reads repository status without changing index or working tree state.",
+      "openWorldHint": "false: it uses local Git metadata only.",
+      "destructiveHint": "false: no Git or filesystem state is modified."
+    },
+    "git.diff": {
+      "readOnlyHint": "true: reads a bounded local diff after path and restricted-data filtering.",
+      "openWorldHint": "false: it does not push, fetch, publish, or contact remote Git services.",
+      "destructiveHint": "false: diff inspection does not mutate repository state."
+    }
+  },
+  "externalGates": {
+    "productionMcpUrl": "https://operator.splcart.in/mcp (target; must be live before submission)",
+    "website": "https://operator.splcart.in (target; must be live before submission)",
+    "privacy": "https://operator.splcart.in/privacy (target; must be live before submission)",
+    "terms": "https://operator.splcart.in/terms (target; must be live before submission)",
+    "support": "https://operator.splcart.in/support (target; must be live before submission)",
+    "demoRecording": "PENDING_EXTERNAL_RECORDING",
+    "reviewerCredentials": "PENDING_PRODUCTION_OAUTH_REVIEW_ACCOUNT",
+    "publisherIdentity": "PENDING_OPENAI_PLATFORM_VERIFICATION",
+    "toolScan": "PENDING_LIVE_PRODUCTION_MCP_SCAN"
+  }
+}

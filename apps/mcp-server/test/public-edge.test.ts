@@ -16,6 +16,9 @@ function publicEnv(): NodeJS.ProcessEnv {
     OPERATOR_OAUTH_TOKEN_URL: 'https://login.operator-runtime.dev/token',
     OPERATOR_OAUTH_INTROSPECTION_URL: 'https://login.operator-runtime.dev/introspect',
     OPERATOR_OAUTH_AUDIENCE: 'operator-runtime',
+    OPERATOR_OAUTH_READ_SCOPE: 'operator:read',
+    OPERATOR_OAUTH_WRITE_SCOPE: 'operator:write',
+    OPENAI_APPS_CHALLENGE_TOKEN: 'openai-domain-proof',
     OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID: 'operator-edge',
     OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET: 'test-secret-not-production'
   };
@@ -42,7 +45,11 @@ test('public edge builds OAuth metadata and permits only explicit literal public
   const config = readPublicMcpEdgeConfig(env);
   assert.ok(config);
   assert.equal(config.publicUrl.toString(), 'https://edge.operator-runtime.dev/mcp');
-  assert.deepEqual(config.requiredScopes, ['operator:mcp']);
+  assert.deepEqual(config.requiredScopes, ['operator:read']);
+  assert.equal(config.readScope, 'operator:read');
+  assert.equal(config.writeScope, 'operator:write');
+  assert.equal(config.challengeToken, 'openai-domain-proof');
+  assert.deepEqual(config.authMetadata.oauthMetadata.scopes_supported, ['operator:read', 'operator:write']);
   assert.equal(config.authMetadata.oauthMetadata.issuer, 'https://login.operator-runtime.dev/');
   assert.equal(config.authMetadata.resourceServerUrl.toString(), 'https://edge.operator-runtime.dev/mcp');
   assert.equal(resolveMcpBindHost(env, config), '0.0.0.0');
@@ -70,14 +77,14 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
         sub: 'user-123',
         client_id: 'chatgpt-client',
         aud: ['operator-runtime'],
-        scope: 'operator:mcp profile'
+        scope: 'operator:read operator:write profile'
       });
     }
   });
   const auth = await verifier.verifyAccessToken('opaque-token-value');
   assert.equal(auth.token, '');
   assert.equal(auth.clientId, 'chatgpt-client');
-  assert.deepEqual(auth.scopes, ['operator:mcp', 'profile']);
+  assert.deepEqual(auth.scopes, ['operator:read', 'operator:write', 'profile']);
   assert.equal(auth.resource?.toString(), 'https://edge.operator-runtime.dev/mcp');
   assert.deepEqual(auth.extra, { issuer: 'https://login.operator-runtime.dev/', subject: 'user-123' });
   assert.match(seenAuthorization, /^Basic /);
@@ -97,7 +104,7 @@ test('introspection verifier rejects inactive, expired, or wrong-audience tokens
 });
 test('verified AuthInfo principal binding refuses retained tokens or resource mismatches', () => {
   const base: AuthInfo = {
-    token: '', clientId: 'chatgpt-client', scopes: ['operator:mcp'],
+    token: '', clientId: 'chatgpt-client', scopes: ['operator:read'],
     expiresAt: Math.floor(Date.now() / 1000) + 60,
     resource: new URL('https://edge.operator-runtime.dev/mcp'),
     extra: { issuer: 'https://login.operator-runtime.dev/', subject: 'user-123' }

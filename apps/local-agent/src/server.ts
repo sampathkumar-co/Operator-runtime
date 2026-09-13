@@ -9,6 +9,7 @@ import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
+import type { ApprovalStore } from './approval-store.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -91,6 +92,7 @@ export function createLocalAgentServer(options: {
   token: string;
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
+  approvals?: ApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
   onEmergencyClear?: () => Promise<void> | void;
@@ -206,6 +208,65 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+
+    if (pathname === '/v1/approvals' && req.method === 'GET') {
+      if (!options.approvals) {
+        send(res, 200, { ok: true, approvals: [], configured: false });
+        return;
+      }
+      const approvals = (await options.approvals.list()).map((record) => ({
+        actionId: record.actionId,
+        capability: record.capability,
+        risk: record.risk,
+        target: record.target,
+        status: record.status,
+        createdAt: record.createdAt,
+        approvalExpiresAt: record.approvalExpiresAt
+      }));
+      send(res, 200, { ok: true, approvals, configured: true });
+      return;
+    }
+
+    if (pathname.startsWith('/v1/approvals/') && req.method === 'POST') {
+      if (!options.approvals || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'APPROVALS_NOT_CONFIGURED', message: 'One-time approvals require persistent approval state and a recovery token.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      try {
+        const actionId = boundedString(decodeURIComponent(pathname.slice('/v1/approvals/'.length)), 'actionId', 256);
+        const body = await readJson(req) as { decision?: unknown };
+        const decision = String(body.decision ?? '');
+        const record = decision === 'approve'
+          ? await options.approvals.approve(actionId)
+          : decision === 'deny'
+            ? await options.approvals.deny(actionId)
+            : null;
+        if (!record) {
+          send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve or deny.' } });
+          return;
+        }
+        send(res, 200, {
+          ok: true,
+          approval: {
+            actionId: record.actionId,
+            capability: record.capability,
+            risk: record.risk,
+            target: record.target,
+            status: record.status,
+            approvalExpiresAt: record.approvalExpiresAt
+          }
+        });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: 'APPROVAL_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/emergency-stop' && req.method === 'GET') {
       if (!options.emergencyStop) {
         send(res, 200, { ok: true, state: { version: 1, engaged: false }, configured: false });
@@ -284,7 +345,18 @@ export function createLocalAgentServer(options: {
           return;
         }
         const action = validateActionEnvelope(body.action);
-        const result = await options.runtime.execute(action, options.permissions);
+        const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action) : false;
+        const permissions = oneTimeApproved
+          ? {
+              ...options.permissions,
+              approvedActionIds: [...new Set([...(options.permissions.approvedActionIds ?? []), action.id])]
+            }
+          : options.permissions;
+        if (oneTimeApproved) await options.approvals!.consume(action);
+        const result = await options.runtime.execute(action, permissions);
+        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
+          await options.approvals?.register(action);
+        }
         await options.audit?.append({
           taskId: action.taskId,
           capability: action.capability,

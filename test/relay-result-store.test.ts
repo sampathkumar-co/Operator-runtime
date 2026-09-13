@@ -53,3 +53,21 @@ test('relay result payloads are bounded and stored hashes are corruption-detecti
     (error: any) => error?.code === 'RELAY_RESULT_STATE_CORRUPT'
   );
 });
+
+test('relay results expire by TTL and are physically pruned from durable state', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  let now = new Date('2026-09-13T00:00:00.000Z');
+  const store = new RelayResultStore(state, { clock: () => now, retentionMs: 60_000 });
+  await store.put(deviceId, 1, deliveryId, { ok: true, output: { content: 'sensitive result' } });
+  assert.equal((await store.get(deviceId, 1))?.result.output?.content, 'sensitive result');
+
+  now = new Date('2026-09-13T00:01:00.001Z');
+  assert.equal(await store.get(deviceId, 1), null);
+  assert.equal(await store.pruneExpired(), 1);
+
+  const persisted = await fs.readFile(path.join(state, 'relay-results.json'), 'utf8');
+  assert.equal(persisted.includes('sensitive result'), false);
+  assert.deepEqual(JSON.parse(persisted).streams, []);
+});

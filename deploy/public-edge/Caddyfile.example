@@ -7,6 +7,11 @@ mcp.your-domain.tld {
         }
     }
 
+    @openai_challenge path /.well-known/openai-apps-challenge
+    handle @openai_challenge {
+        reverse_proxy 127.0.0.1:47200
+    }
+
     @oauth path /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server
     handle @oauth {
         reverse_proxy 127.0.0.1:47200

@@ -15,11 +15,11 @@ const MAX_WAIT_MS = 10 * 60_000;
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch'>;
   #results: Pick<RelayResultStore, 'get'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -37,12 +37,19 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || request.url !== '/v1/execute') {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
         if (!bearerMatches(request.headers.authorization, this.#token)) {
           send(response, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Valid relay control bearer token required.' } });
+          return;
+        }
+        if (request.url === '/v1/account/erase') {
+          const eraseBody = await readJson(request) as { principal?: unknown };
+          if (eraseBody.principal === undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Verified principal is required for account erasure.');
+          const erased = await this.#accounts.erasePrincipal(validPrincipal(eraseBody.principal));
+          send(response, 200, { ok: true, ...erased });
           return;
         }
         const body = await readJson(request) as {
