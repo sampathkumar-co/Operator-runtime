@@ -112,3 +112,32 @@ test('write has an intrinsic byte bound independent of HTTP/MCP body limits', as
   assert.equal(result.error?.code, 'WRITE_TOO_LARGE');
   await assert.rejects(fs.access(filePath));
 });
+
+test('file.create is create-only and file.replace requires an exact fresh SHA', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-safe-write-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const filePath = path.join(root, 'safe.txt');
+
+  const created = await provider.execute(action('file.create', { path: filePath, content: 'v1' }));
+  assert.equal(created.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v1');
+
+  const overwrite = await provider.execute(action('file.create', { path: filePath, content: 'bad' }));
+  assert.equal(overwrite.ok, false);
+  assert.equal(overwrite.error?.code, 'TARGET_EXISTS');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v1');
+
+  const noSha = await provider.execute(action('file.replace', { path: filePath, content: 'v2' }));
+  assert.equal(noSha.ok, false);
+  assert.equal(noSha.error?.code, 'PRECONDITION_REQUIRED');
+
+  const stale = await provider.execute(action('file.replace', { path: filePath, content: 'v2', expectedSha256: '0'.repeat(64) }));
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error?.code, 'PRECONDITION_FAILED');
+
+  const sha = crypto.createHash('sha256').update('v1').digest('hex');
+  const replaced = await provider.execute(action('file.replace', { path: filePath, content: 'v2', expectedSha256: sha }));
+  assert.equal(replaced.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
+});

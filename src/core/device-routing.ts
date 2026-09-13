@@ -91,6 +91,15 @@ export class DeviceRoutingStore {
     });
   }
 
+  async unbindDevice(deviceIdInput: string): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    return await this.#mutate((state) => {
+      const before = state.bindings.length;
+      state.bindings = state.bindings.filter((binding) => binding.deviceId !== deviceId);
+      return before - state.bindings.length;
+    });
+  }
+
   async resolve(requestInput: DeviceRouteRequest, onlineInput: OnlineDeviceDescriptor[]): Promise<DeviceRouteDecision> {
     const request = validateRequest(requestInput);
     const online = validateOnlineDevices(onlineInput, this.#clock(), request.livenessMs);

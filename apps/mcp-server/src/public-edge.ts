@@ -9,12 +9,16 @@ import { requireLiteralLoopbackBindHost } from '../../../src/core/network-author
 import { OAuthIntrospectionVerifier } from './oauth-introspection.ts';
 
 const PUBLIC_BIND_ACK = 'TLS_TERMINATES_UPSTREAM';
-const DEFAULT_SCOPE = 'operator:mcp';
+export const DEFAULT_READ_SCOPE = 'operator:read';
+export const DEFAULT_WRITE_SCOPE = 'operator:write';
 
 export interface PublicMcpEdgeConfig {
   publicUrl: URL;
   verifier: OAuthTokenVerifier;
   requiredScopes: string[];
+  readScope: string;
+  writeScope: string;
+  challengeToken?: string;
   authMetadata: AuthMetadataOptions;
   allowedHostnames: string[];
 }
@@ -38,7 +42,10 @@ export function readPublicMcpEdgeConfig(
   const tokenEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_TOKEN_URL'), 'OAuth token endpoint');
   const introspectionEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_URL'), 'OAuth introspection endpoint');
   const audience = bounded(requiredEnv(env, 'OPERATOR_OAUTH_AUDIENCE'), 2048, 'OAuth audience');
-  const requiredScope = validScope(env.OPERATOR_OAUTH_REQUIRED_SCOPE?.trim() || DEFAULT_SCOPE);
+  const readScope = validScope(env.OPERATOR_OAUTH_READ_SCOPE?.trim() || DEFAULT_READ_SCOPE);
+  const writeScope = validScope(env.OPERATOR_OAUTH_WRITE_SCOPE?.trim() || DEFAULT_WRITE_SCOPE);
+  if (readScope === writeScope) throw new Error('OAuth read and write scopes must be distinct.');
+  const challengeToken = optionalChallengeToken(env.OPENAI_APPS_CHALLENGE_TOKEN);
   const clientId = bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID'), 512, 'OAuth introspection client ID');
   const clientSecret = bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET'), 4096, 'OAuth introspection client secret');
   const verifier = new OAuthIntrospectionVerifier({
@@ -57,19 +64,22 @@ export function readPublicMcpEdgeConfig(
       token_endpoint: tokenEndpoint.toString(),
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
-      scopes_supported: [requiredScope],
+      scopes_supported: [readScope, writeScope],
       code_challenge_methods_supported: ['S256'],
       introspection_endpoint: introspectionEndpoint.toString(),
       introspection_endpoint_auth_methods_supported: ['client_secret_basic']
     },
     resourceServerUrl: publicUrl,
-    scopesSupported: [requiredScope],
-    resourceName: 'Operator'
+    scopesSupported: [readScope, writeScope],
+    resourceName: 'SPLCART Operator'
   };
   return {
     publicUrl,
     verifier,
-    requiredScopes: [requiredScope],
+    requiredScopes: [readScope],
+    readScope,
+    writeScope,
+    challengeToken,
     authMetadata,
     allowedHostnames: [publicUrl.hostname]
   };
@@ -135,6 +145,15 @@ function validScope(input: string): string {
   const scope = bounded(input, 256, 'OAuth required scope');
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(scope)) throw new Error('OAuth required scope is invalid.');
   return scope;
+}
+
+function optionalChallengeToken(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === '') return undefined;
+  const token = value.trim();
+  if (Buffer.byteLength(token, 'utf8') > 2048 || /[\0\r\n]/.test(token)) {
+    throw new Error('OPENAI_APPS_CHALLENGE_TOKEN is invalid.');
+  }
+  return token;
 }
 
 function bounded(value: string, max: number, label: string): string {

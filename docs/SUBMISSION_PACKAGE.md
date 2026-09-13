@@ -1,211 +1,140 @@
-# Operator Submission Package
+# SPLCART Operator public plugin submission package
 
-This document is the source of truth for publication copy, reviewer notes, demo sequencing and screenshot capture. It intentionally distinguishes claims already backed by repository/CI evidence from claims that must wait for a live public ChatGPT-to-device validation.
+This document is the reviewer-facing source of truth for the public ChatGPT plugin. It intentionally describes the restricted public MCP surface, not the larger private/local Operator runtime.
 
-## Product name
+## Publication identity
 
-**Operator**
+- Display name: **SPLCART Operator**
+- Package name: `splcart-operator`
+- Category: **Developer Tools**
+- Initial plugin version: `0.1.0`
+- Public MCP target: `https://operator.splcart.in/mcp`
+- Manifest: `.codex-plugin/plugin.json`
+- Machine-readable review materials: `docs/plugin-review-package.json`
 
-## One-line description
+The public endpoint must not be submitted until the target HTTPS origin, OAuth provider, legal/support pages, domain challenge, reviewer account, demo recording and Scan Tools snapshot are live and verified.
 
-A policy-gated semantic runtime that lets ChatGPT operate computers explicitly authorized by the user through structured browser, development, system and multi-device capabilities.
+## What the public plugin does
 
-## Short description
+SPLCART Operator lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
-Operator connects normal ChatGPT workflows to user-authorized computers through a compact semantic tool surface. It prefers native APIs, structured application interfaces, browser DOM/CDP and Windows UI Automation over pixel automation, and requires local policy, evidence and postcondition checks around execution.
+Public v1 exposes only these nine tools:
 
-## Longer reviewer description
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
-Operator is designed as a controlled execution substrate rather than a generic remote shell. ChatGPT calls semantic MCP tools; the MCP server routes those requests either to an authenticated local agent or through the account/device relay to a paired machine. The paired machine remains the local enforcement boundary.
-
-Capabilities include browser inspection and semantic interaction, scoped filesystem operations, Git checkpoint/write/rollback workflows, trusted project commands with artifact validation, Docker lifecycle management for already-created local Compose services, read-only structured PostgreSQL inspection, VS Code inspection/open operations, and Windows semantic automation through a native UI Automation sidecar.
-
-Every capability carries an explicit risk classification. Local policy can refuse actions before execution, including approval-required external/destructive actions. Operator also provides an emergency execution stop, redacting audit/activity records, persistent task state, device pairing/revocation, deterministic multi-device routing, privacy controls and bounded recovery semantics.
+Generic terminal execution, browser automation, Windows UI Automation, arbitrary PostgreSQL row access and the legacy generic `file.write` tool are private-runtime capabilities and are **not** part of the public plugin.
 
 ## Reviewer trust model
 
-### ChatGPT is not the local security authority
+### Local authorization still wins
 
-The MCP layer translates semantic tool calls into Operator action requests. Authorization is enforced again at the local machine boundary. A transport request cannot silently grant itself a stronger permission or risk class.
+OAuth and ChatGPT permission do not grant filesystem or computer authority by themselves. The paired device re-checks capability permissions, authorized roots, risk policy, emergency-stop state and one-time approvals before execution.
 
-### Observed content is not instruction authority
+### Public data firewall
 
-Content read from webpages, files or applications is treated as observation, not as an instruction source. The provenance boundary prevents observed content from promoting itself into execution authority.
+The public MCP boundary rejects credential-bearing paths and high-confidence restricted data before relay dispatch. Public result projection removes internal providers, evidence logs, duration telemetry, operational timestamps, internal identifiers, diagnostics and unnecessary absolute host paths.
 
-### No unrestricted shell MCP tool
+### Safe writes have real semantics
 
-The public MCP surface is semantic and bounded. Trusted project commands come from an Operator-owned registry stored outside authorized project roots. Repository-authored command configuration cannot grant itself execution authority.
+`file.create` fails when the target already exists. `file.replace` requires the SHA-256 from a fresh read and is advertised as destructive because it overwrites existing content. A stale or missing precondition fails closed.
 
-### Risky actions fail closed
+### Risky local approval is one-time
 
-External/destructive actions require the corresponding local approval authority. Tests verify that denied actions return structured policy failures such as `APPROVAL_REQUIRED` before the underlying side effect occurs.
+Approval identity is derived from the canonical action rather than a random retry UUID. A pending action can be approved locally for a bounded period, consumed exactly once, and cannot be silently replayed.
 
-## Permission summary
+### Hosted relay retention is bounded
 
-Operator should request only the permissions required for the configured use case:
+Acknowledged delivery payloads are erased immediately. Pending delivery payloads expire after 24 hours by default and become payload-free tombstones so stale work cannot execute later. Returned relay results expire after 24 hours by default and are physically pruned. Device release/account erasure purges remaining device-keyed deliveries, results, relay sessions and old project routing.
 
-- explicitly authorized filesystem/project roots
-- selected semantic capability families
-- local browser connection/isolated managed browser profile where applicable
-- local Docker daemon access only when the Docker adapter is enabled
-- explicit trusted PostgreSQL profiles for read-only database inspection
-- Windows UI Automation only on Windows when computer semantic control is enabled
-- paired relay/device identity only when multi-device operation is enabled
+## OAuth and public edge
 
-Permission expansion must be deliberate. Project files, webpage text or remote delivery payloads cannot silently expand the local policy envelope.
+The production MCP edge requires OAuth. `operator:read` is required to connect and read-only tools use that scope. Mutating public tools additionally require `operator:write`. The MCP resource/audience remains bound to the production public URL.
 
-## Privacy summary
+The edge also provides:
 
-Operator stores operational state required for execution and recovery, including task capsules, redacted activity/audit metadata, device identity/pairing state and bounded relay delivery state. Raw upstream account issuer/subject identifiers are not persisted by the account registry; an opaque generated account identifier and a SHA-256 principal hash are used instead.
+- exact `/.well-known/openai-apps-challenge` domain verification;
+- host/origin validation;
+- per-client request throttling;
+- repeated-auth-failure throttling;
+- per-principal quotas;
+- bounded request sizes;
+- no direct Internet exposure of the local agent or relay-control API.
 
-The generic privacy purge surface covers Operator-owned activity, task-history and transient-session categories. It requires recovery authority and refuses symlinked state trees. Persistent device identity/pairing state is intentionally excluded from generic purge and requires a dedicated reset path.
+## Reviewer tests
 
-Device private key material is never returned through the companion read APIs.
+The authoritative reviewer cases live in `docs/plugin-review-package.json` and must remain exactly five positive plus three negative cases.
 
-## Current certification evidence
+Positive coverage:
 
-The following claims are backed by automated repository gates:
+- inspect the authorized demo project;
+- read a safe source file;
+- inspect Git status;
+- create a previously absent safe file;
+- read then replace a disposable file using the fresh SHA precondition.
 
-- full root runtime/import suite is green
-- root runtime suite green on Ubuntu, Windows and macOS with the same pinned Node release
-- official MCP client end-to-end test
-- MCP Inspector tool enumeration
-- unchanged 22-tool MCP surface in local and relay execution modes
-- real WebSocket paired-device relay round trip
-- reconnect/ACK continuation and capability denial
-- Windows UIA native compile/test/Clippy gate
-- security red-team regression gate
-- bounded performance-regression gate
-- real unsigned MSIX build with Windows SDK MakeAppx
-- MSIX unpack/payload/hash/App Installer validation
-- ephemeral-certificate SignTool SHA-256 signing and verification
-- bootstrap-driven signed MSIX installation, installed-package signature verification, packaged launcher self-test and uninstall on Windows CI
+Negative coverage:
+
+- request `.env` / an API key and verify refusal before reading or relaying content;
+- request a path outside the authorized project root and verify refusal;
+- attempt a mutation with a read-only OAuth token and verify `operator:write` is required.
+
+Reviewer credentials must work without MFA, SMS, email confirmation or private-network access. The review account should already have one dedicated demo device paired and one non-sensitive fixture project authorized.
+
+## Demo recording
+
+The submission needs a real recording from the production path. Because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
+
+Recommended recording sequence:
+
+1. connect the reviewer/demo account through production OAuth;
+2. inspect the demo project and Git status;
+3. read a safe source file;
+4. demonstrate `.env` credential-path refusal;
+5. create a new file;
+6. read and replace the disposable fixture using the fresh SHA;
+7. show a stale-SHA or missing-write-scope refusal;
+8. show that the result contains task-relevant data but not internal relay/provider telemetry.
+
+Never expose OAuth tokens, recovery credentials, device private keys, absolute personal home paths, signing material or real user data in the recording.
 
 ## Claims that must NOT be made yet
 
-Do not publish the following claims until their external gates are completed:
+Do not claim any of the following until the external gate is actually complete:
 
-- "production-signed Windows release" — requires the final trusted signing identity/certificate and production timestamp
-- "one-command public install is live" — requires the production signer fingerprint to be pinned, timestamped signed assets published, and `operator-runtime-cli` published to npm
-- "private ChatGPT MCP path certified" — requires the supported Secure MCP Tunnel/private connection and an actual ChatGPT invocation; public plugin certification separately requires a stable public HTTPS MCP endpoint/proxy plus authentication
-- "marketplace/store approved" — requires the platform's real review process
-- "zero risk" or "cannot fail" — Operator is designed to reduce and bound execution risk, not eliminate it
+- OpenAI marketplace/plugin approval;
+- production MCP origin is live;
+- successful production Scan Tools snapshot;
+- production OAuth reviewer account is ready;
+- business/developer identity is verified in the OpenAI Platform;
+- demo recording URL exists;
+- production Windows release is signed by the final trusted certificate;
+- all countries/regions are supported;
+- zero risk, perfect security, or guaranteed execution.
 
-## Recommended demo flow
+## External submission gates
 
-Use a dedicated demo Windows machine/profile and a non-sensitive sample project.
+Before pressing Submit for Review, verify all of these against the real deployment:
 
-1. **Pair the device**
-   - show the device in the companion Devices surface
-   - show that the device is online and capability-scoped
-   - do not expose private keys, service credentials or raw tokens
+- `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
+- the OpenAI challenge token is served exactly at the required well-known path;
+- OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
+- website, privacy, terms and support URLs return production content over HTTPS;
+- hosted provider/region/subprocessor disclosures match the actual deployment;
+- the demo recording URL is reachable by reviewers;
+- Scan Tools imports exactly the intended nine-tool public surface and current annotations;
+- all nine annotation justifications match the scanned server values;
+- the exact five positive and three negative cases are reproducible;
+- country/region availability is limited to places where support/legal obligations are ready;
+- release notes describe this as the initial public submission.
 
-2. **Read-only computer inspection**
-   - ask ChatGPT to inspect the computer/application state
-   - show structured semantic evidence rather than a raw pixel-only workflow
+## Separate Microsoft Store flow
 
-3. **Browser semantic action**
-   - inspect an isolated demo browser tab
-   - navigate or interact with a harmless local/test page
-   - show postcondition evidence
-
-4. **Development workflow**
-   - inspect a sample project
-   - create a Git checkpoint
-   - make a bounded file/code change through the permitted workflow
-   - run a trusted project verification command
-   - show artifact/postcondition evidence
-
-5. **Policy denial**
-   - request an action intentionally classified external/destructive without approval
-   - show the structured `APPROVAL_REQUIRED` denial and confirm the side effect did not occur
-
-6. **Rollback/recovery**
-   - run the prepared false-green demo where a command exits zero but required artifact validation fails
-   - show that Operator restores the Git checkpoint
-
-7. **Multi-device routing**
-   - if two authorized devices are available, bind the demo project to one device
-   - show deterministic routing to that device rather than silent failover
-
-8. **Emergency stop**
-   - engage the execution stop
-   - show a capability being refused
-   - clear it using the separate recovery authority
-
-## Demo success criteria
-
-A release demo is accepted only if:
-
-- the public ChatGPT session reaches Operator through the supported production transport
-- the paired device is the machine that actually executes the request
-- a read action succeeds and returns structured evidence
-- at least one risky action is locally denied before side effect when approval is absent
-- one verified mutation succeeds with postcondition evidence
-- one rollback/recovery path is demonstrated
-- no secrets/private keys appear in the recording, screenshots, logs or companion surfaces
-
-## Screenshot capture list
-
-Actual screenshots should be captured from the real release build; do not use fabricated UI screenshots for submission evidence.
-
-Recommended captures:
-
-1. **Devices** — paired device, online status, bounded capabilities
-2. **Tasks** — recent task capsule with status/evidence summary
-3. **Permissions** — readable capability/risk configuration without secrets
-4. **Activity** — redacted bounded execution history
-5. **Emergency stop** — clear engaged/disengaged state
-6. **ChatGPT semantic inspection result** — structured result from the real external integration
-7. **Policy denial** — `APPROVAL_REQUIRED` or equivalent structured refusal
-8. **Verified development action** — successful command/artifact evidence
-9. **Rollback evidence** — failed verification followed by restored state
-10. **Windows installed package** — installed Operator identity/version from the production-signed build
-
-## Suggested screenshot captions
-
-- **Operate the machine you explicitly paired.** Operator routes semantic actions to authorized devices while the local agent remains the enforcement boundary.
-- **Semantic before pixels.** Browser DOM/CDP, application adapters and Windows UI Automation are preferred over brittle coordinate automation.
-- **Verification is part of execution.** Successful operations return bounded postcondition evidence rather than relying only on process exit codes.
-- **Risky actions can stop locally.** Policy enforcement can deny external or destructive requests before the side effect occurs.
-- **Recovery is built in.** Git-scoped transactions can checkpoint and restore project state when verification fails.
-
-## Store / marketplace feature bullets
-
-- 22 semantic MCP tools with local and multi-device relay execution
-- Browser DOM/CDP inspection and verified interaction
-- Windows semantic automation through native UI Automation
-- Scoped filesystem, Git, VS Code, Docker and PostgreSQL adapters
-- Local risk/approval enforcement and instruction-provenance defense
-- Verified project commands and artifact postconditions
-- Git checkpoints and rollback for reversible development workflows
-- Pairing, revocation and deterministic multi-device routing
-- Emergency stop, privacy controls and redacted activity history
-- Self-contained Windows MSIX packaging and auto-update metadata
-
-## Support / troubleshooting information for reviewers
-
-For review builds, provide separately through the platform's secure reviewer mechanism:
-
-- review account or pairing procedure, if required
-- exact demo device name/project key
-- public MCP endpoint or supported tunnel instructions
-- known capability restrictions
-- recovery/emergency-stop procedure
-
-Never place signing private keys, relay service credentials, local-agent bearer tokens, database passwords or private device material in this document, repository issues, screenshots or reviewer-visible logs.
-
-## Release-owner checklist
-
-Before final submission confirm:
-
-- production signing certificate is valid and not near expiry
-- manifest Publisher exactly matches signer subject
-- production release is RFC 3161 timestamped
-- final `.appinstaller`, MSIX and `release-metadata.json` URLs use the intended HTTPS/GitHub Release location
-- signed artifact SHA-256 matches published metadata and the signer SHA-256 fingerprint matches the npm bootstrap pin
-- `operator-runtime-cli` is published only after its production signer pin is populated; the installed production build passes `Operator.exe --self-test`
-- supported private ChatGPT/MCP transport has passed the live read workflow; if public plugin distribution is targeted, the stable public HTTPS MCP endpoint/proxy and authentication are separately certified
-- policy-denial and recovery demos have been re-run on the release build
-- screenshots contain no secrets, usernames/paths that should remain private, tokens or private account data
-- all public claims match completed gates in `docs/MILESTONES.md`
+The Microsoft Store package identity/signing flow is independent from this public MCP submission. Public-plugin hardening may require a refreshed Windows binary if local-agent code changes, but it does not require a new Store identity reservation. Keep the Store identity and Partner Center work on its existing release branch and rebuild/re-certify the final MSIX only when the local runtime changes are frozen.

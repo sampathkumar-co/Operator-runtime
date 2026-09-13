@@ -61,7 +61,9 @@ The authenticated local privacy API inventories only known Operator-owned catego
 
 Generic privacy deletion intentionally cannot erase device identity or pairing state. Those records are security identities and require a dedicated device-reset/revocation flow rather than a broad history-delete endpoint. Deletion refuses symbolic-link traversal and does not wildcard-delete arbitrary paths.
 
-The reference relay uses durable account/device, delivery and result stores. A real hosted service must define and enforce concrete server-side retention/deletion periods before public production use; this repository does not claim a universal hosted-retention duration.
+The public relay now enforces a 24-hour default retention window for sensitive action payloads and returned result payloads. Acknowledged delivery payloads are erased immediately. Pending deliveries that remain unacknowledged for 24 hours expire into payload-free sequence tombstones and are not later executed. Returned result payloads expire after 24 hours by default and are physically pruned. These defaults are configurable only within bounded runtime limits and the production privacy notice must state the actual deployed values.
+
+Authenticated hosted-account erasure removes the account identity binding, account/device memberships and account routing directory. Releasing or erasing a device membership also purges retained delivery payloads, returned results and relay session records for that device before it can be rebound to another account.
 
 ## Integrity and security controls
 

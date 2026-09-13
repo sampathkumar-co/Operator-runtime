@@ -6,6 +6,8 @@ import { readDurableStateText, writeDurableStateText } from './durable-state.ts'
 const MAX_STREAMS = 10_000;
 const MAX_RESULTS_PER_STREAM = 10_000;
 const MAX_RESULT_BYTES = 256 * 1024;
+const DEFAULT_RETENTION_MS = 24 * 60 * 60_000;
+const MAX_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -24,10 +26,12 @@ export class RelayResultStore {
   #file: string;
   #queue: Promise<void> = Promise.resolve();
   #clock: () => Date;
+  #retentionMs: number;
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: { clock?: () => Date; retentionMs?: number } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-results.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
   async put(deviceIdInput: string, seqInput: number, deliveryIdInput: string, resultInput: JsonObject): Promise<{ result: StoredRelayResult; duplicate: boolean }> {
@@ -37,6 +41,7 @@ export class RelayResultStore {
     const result = safeResult(resultInput);
     const resultSha256 = hashResult(result);
     return await this.#mutate((state) => {
+      pruneExpired(state, this.#clock().getTime(), this.#retentionMs);
       let stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) {
         if (state.streams.length >= MAX_STREAMS) throw new OperatorError('RELAY_RESULT_STREAM_LIMIT', 'Relay result stream limit reached.');
@@ -64,7 +69,12 @@ export class RelayResultStore {
     const seq = validSeq(seqInput);
     const state = await this.#read();
     const result = state.streams.find((stream) => stream.deviceId === deviceId)?.results.find((entry) => entry.seq === seq);
-    return result ? clone(result) : null;
+    if (!result || isExpired(result, this.#clock().getTime(), this.#retentionMs)) return null;
+    return clone(result);
+  }
+
+  async pruneExpired(): Promise<number> {
+    return await this.#mutate((state) => pruneExpired(state, this.#clock().getTime(), this.#retentionMs));
   }
 
   async has(deviceIdInput: string, seqInput: number, deliveryIdInput: string): Promise<boolean> {
@@ -73,6 +83,17 @@ export class RelayResultStore {
     const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
     const result = await this.get(deviceId, seq);
     return Boolean(result && result.deliveryId === deliveryId);
+  }
+
+  async purgeDevice(deviceIdInput: string): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    return await this.#mutate((state) => {
+      const stream = state.streams.find((item) => item.deviceId === deviceId);
+      if (!stream) return 0;
+      const removed = stream.results.length;
+      state.streams = state.streams.filter((item) => item.deviceId !== deviceId);
+      return removed;
+    });
   }
 
   async #read(): Promise<ResultState> {
@@ -113,6 +134,29 @@ export class RelayResultStore {
       release();
     }
   }
+}
+
+function boundedRetention(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_RETENTION_MS;
+  if (!Number.isFinite(value) || value < 60_000 || value > MAX_RETENTION_MS) {
+    throw new OperatorError('RELAY_RESULT_RETENTION_INVALID', `Relay result retention must be between 60000 and ${MAX_RETENTION_MS} ms.`);
+  }
+  return Math.trunc(value);
+}
+
+function isExpired(result: StoredRelayResult, now: number, retentionMs: number): boolean {
+  return Date.parse(result.recordedAt) <= now - retentionMs;
+}
+
+function pruneExpired(state: ResultState, now: number, retentionMs: number): number {
+  let removed = 0;
+  for (const stream of state.streams) {
+    const kept = stream.results.filter((entry) => !isExpired(entry, now, retentionMs));
+    removed += stream.results.length - kept.length;
+    stream.results = kept;
+  }
+  state.streams = state.streams.filter((stream) => stream.results.length > 0);
+  return removed;
 }
 
 function safeResult(input: unknown): JsonObject {

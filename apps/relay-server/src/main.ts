@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { AccountDeviceRegistry } from '../../../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
+import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -46,8 +47,26 @@ export function readRelayServiceConfig(env: NodeJS.ProcessEnv = process.env): Re
   return { stateDir, host, port, resultHost, resultPort, controlHost: CONTROL_HOST, controlPort, controlToken };
 }
 
+function createRelayStores(stateDir: string) {
+  const identity = new DeviceIdentityStore(stateDir);
+  const devices = new DeviceRegistryStore(stateDir);
+  const sessions = new DeviceSessionTokenStore(stateDir, identity, devices);
+  const deliveries = new RelayDeliveryStore(stateDir);
+  const results = new RelayResultStore(stateDir);
+  const accounts = new AccountDeviceRegistry(stateDir, devices, {
+    onReleaseDevice: async (deviceId, accountId) => {
+      await deliveries.purgeDevice(deviceId);
+      await results.purgeDevice(deviceId);
+      await sessions.purgeForDevice(deviceId);
+      await new DeviceRoutingStore(path.join(stateDir, 'accounts', accountId), devices).unbindDevice(deviceId);
+    }
+  });
+  return { identity, devices, sessions, deliveries, results, accounts };
+}
+
 export async function runRelayService(config = readRelayServiceConfig()): Promise<RelayHub> {
-  const hub = new RelayHub({ stateDir: config.stateDir });
+  const { identity, devices, sessions, deliveries, accounts } = createRelayStores(config.stateDir);
+  const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   const listening = await hub.listen(config.host, config.port);
   logListening('operator-relay', listening.host, listening.port, config.stateDir, isLoopbackHost(config.host) ? 'local-plain-websocket' : 'plain-websocket-behind-required-tls-proxy');
   return hub;
@@ -62,12 +81,7 @@ export async function runRelayResultService(config = readRelayServiceConfig()): 
 
 async function main(): Promise<void> {
   const config = readRelayServiceConfig();
-  const identity = new DeviceIdentityStore(config.stateDir);
-  const devices = new DeviceRegistryStore(config.stateDir);
-  const sessions = new DeviceSessionTokenStore(config.stateDir, identity, devices);
-  const accounts = new AccountDeviceRegistry(config.stateDir, devices);
-  const deliveries = new RelayDeliveryStore(config.stateDir);
-  const results = new RelayResultStore(config.stateDir);
+  const { identity, devices, sessions, deliveries, results, accounts } = createRelayStores(config.stateDir);
 
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, deliveries, results });

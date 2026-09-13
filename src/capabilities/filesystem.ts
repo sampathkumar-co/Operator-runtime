@@ -37,7 +37,7 @@ export class FilesystemProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    return ['file.read', 'file.list', 'file.write'].includes(action.capability);
+    return ['file.read', 'file.list', 'file.write', 'file.create', 'file.replace'].includes(action.capability);
   }
 
   score(): CapabilityScore { return SCORE; }
@@ -47,7 +47,7 @@ export class FilesystemProvider implements CapabilityProvider {
     try {
       if (action.capability === 'file.read') return await this.#read(action, started);
       if (action.capability === 'file.list') return await this.#list(action, started);
-      if (action.capability === 'file.write') return await this.#write(action, started);
+      if (['file.write', 'file.create', 'file.replace'].includes(action.capability)) return await this.#write(action, started);
       throw new OperatorError('UNSUPPORTED_ACTION', action.capability);
     } catch (error) {
       const op = error instanceof OperatorError
@@ -116,6 +116,10 @@ export class FilesystemProvider implements CapabilityProvider {
 
     const filePath = await this.#scope.resolveForWrite(requested);
     const expectedSha = normalizeExpectedSha(action.input.expectedSha256);
+    const mode = action.capability === 'file.create' ? 'create' : action.capability === 'file.replace' ? 'replace' : 'write';
+    if (mode === 'replace' && !expectedSha) {
+      throw new OperatorError('PRECONDITION_REQUIRED', 'file.replace requires expectedSha256 from a fresh file.read.');
+    }
 
     let beforeSha: string | null = null;
     try {
@@ -124,6 +128,7 @@ export class FilesystemProvider implements CapabilityProvider {
         throw new OperatorError('WRITE_SYMLINK_DENIED', 'Refusing to write through or replace an existing symbolic link.');
       }
       if (!targetStat.isFile()) throw new OperatorError('NOT_A_FILE', 'Existing write target is not a regular file.');
+      if (mode === 'create') throw new OperatorError('TARGET_EXISTS', 'file.create refuses to overwrite an existing file.');
       const before = await fs.readFile(filePath);
       beforeSha = sha256(before);
       if (expectedSha && expectedSha !== beforeSha) {
@@ -133,6 +138,7 @@ export class FilesystemProvider implements CapabilityProvider {
       if (error instanceof OperatorError) throw error;
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT') throw error;
+      if (mode === 'replace') throw new OperatorError('TARGET_MISSING', 'file.replace requires an existing file.');
       if (expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'Expected existing file is missing.');
     }
 
@@ -140,7 +146,12 @@ export class FilesystemProvider implements CapabilityProvider {
     let renamed = false;
     try {
       await fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      await fs.rename(tempPath, filePath);
+      if (mode === 'create') {
+        await fs.writeFile(filePath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        await fs.rm(tempPath, { force: true });
+      } else {
+        await fs.rename(tempPath, filePath);
+      }
       renamed = true;
     } finally {
       if (!renamed) await fs.rm(tempPath, { force: true }).catch(() => undefined);

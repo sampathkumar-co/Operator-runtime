@@ -79,3 +79,27 @@ test('relay control rejects ambiguous account authority', async (t) => {
   const body = await response.json() as any;
   assert.equal(body.error.code, 'RELAY_CONTROL_INPUT_INVALID');
 });
+
+test('relay control exposes authenticated principal erasure without creating an account', async (t) => {
+  const erased: Array<{ issuer: string; subject: string }> = [];
+  const service = new RelayControlService({
+    hub: { dispatch: async () => { throw new Error('must not dispatch'); } } as any,
+    results: { get: async () => null } as any,
+    accounts: {
+      resolveOrCreateAccount: async () => { throw new Error('must not create'); },
+      erasePrincipal: async (principal: { issuer: string; subject: string }) => {
+        erased.push(principal);
+        return { erased: true, accountId: ACCOUNT_A, releasedDeviceIds: [DEVICE_ID] };
+      }
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/account/erase`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' } })
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.deepEqual(erased, [{ issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' }]);
+});
