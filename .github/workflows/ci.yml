@@ -204,13 +204,13 @@ jobs:
         run: cargo clippy --locked --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
       - name: Build unsigned MSIX and App Installer metadata
         shell: pwsh
-        run: ./packaging/windows/build-release.ps1 -Version 0.1.0.0 -UpdateBaseUri https://updates.example.invalid/operator
+        run: ./packaging/windows/build-release.ps1 -Version 1.0.0.0 -UpdateBaseUri https://updates.example.invalid/operator
       - name: Unpack and validate release payload
         shell: pwsh
         run: |
           $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $sdk) { throw 'makeappx.exe missing' }
-          $msix = Resolve-Path artifacts/windows-release/Operator-0.1.0.0-x64.msix
+          $msix = Resolve-Path artifacts/windows-release/Operator-1.0.0.0-x64.msix
           & $sdk.FullName unpack /p $msix /d artifacts/windows-release/unpacked /o
           if ($LASTEXITCODE -ne 0) { throw 'MakeAppx unpack failed' }
           $required = @(
@@ -232,10 +232,15 @@ jobs:
             if (-not (Test-Path (Join-Path 'artifacts/windows-release/unpacked' $relative) -PathType Leaf)) { throw "Missing packaged file: $relative" }
           }
           $manifestText = Get-Content artifacts/windows-release/unpacked/AppxManifest.xml -Raw
+          if ($manifestText -notmatch 'Name="SPLCART\.SplcartOperator"') { throw 'Store package identity name mismatch' }
+          if ($manifestText -notmatch 'Publisher="CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967"') { throw 'Store package publisher mismatch' }
+          if ($manifestText -notmatch 'Version="1\.0\.0\.0"') { throw 'Store package version mismatch' }
+          if ($manifestText -notmatch '<DisplayName>SPLCART Operator</DisplayName>') { throw 'Store package display name mismatch' }
+          if ($manifestText -notmatch '<PublisherDisplayName>SPLCART</PublisherDisplayName>') { throw 'Store package publisher display name mismatch' }
           if ($manifestText -notmatch 'Alias="operator\.exe"') { throw 'Operator app execution alias is missing' }
           & artifacts/windows-release/unpacked/native/operator-windows-dpapi.exe --self-test
           if ($LASTEXITCODE -ne 0) { throw 'Packaged DPAPI helper self-test failed' }
-          $bootstrapState = Join-Path $env:LOCALAPPDATA 'Operator'
+          $bootstrapState = Join-Path $env:USERPROFILE '.operator'
           $bootstrapRoot = Join-Path $env:RUNNER_TEMP 'operator-package-authorized-root'
           New-Item -ItemType Directory -Force -Path $bootstrapRoot | Out-Null
           Remove-Item -LiteralPath $bootstrapState -Recurse -Force -ErrorAction SilentlyContinue
@@ -251,9 +256,9 @@ jobs:
           if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must use HTTPS' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: operator-windows-unsigned-msix
+          name: splcart-operator-store-submission-msix
           path: |
-            artifacts/windows-release/Operator-0.1.0.0-x64.msix
+            artifacts/windows-release/Operator-1.0.0.0-x64.msix
             artifacts/windows-release/Operator.appinstaller
             artifacts/windows-release/release-metadata.json
           if-no-files-found: error

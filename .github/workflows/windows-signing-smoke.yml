@@ -101,8 +101,8 @@ jobs:
             Write-BootstrapShellPhase 'node-smoke:ok'
 
             Write-BootstrapShellPhase 'package-query:start'
-            $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
-            if (-not $package) { throw 'Operator.Runtime package was not registered' }
+            $package = Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Select-Object -First 1
+            if (-not $package) { throw 'SPLCART.SplcartOperator package was not registered' }
             Write-BootstrapShellPhase 'package-query:ok'
 
             Write-BootstrapShellPhase 'launcher-self-test:start'
@@ -145,7 +145,7 @@ jobs:
                 }
                 Write-BootstrapShellPhase "public-uninstall:exit=$uninstallExit"
                 if ($uninstallExit -ne 0) { throw "public uninstall command failed with exit code $uninstallExit" }
-                if (Get-AppxPackage -Name 'Operator.Runtime') { throw 'Operator.Runtime remained installed after public uninstall command.' }
+                if (Get-AppxPackage -Name 'SPLCART.SplcartOperator') { throw 'SPLCART.SplcartOperator remained installed after public uninstall command.' }
                 if (Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode }) { throw 'Packaged Operator runtime remained running after public uninstall command.' }
                 if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
                 Write-BootstrapShellPhase 'public-uninstall:ok'
@@ -155,7 +155,7 @@ jobs:
                   $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
                   Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
                 }
-                Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+                Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Remove-AppxPackage -ErrorAction SilentlyContinue
                 Write-BootstrapShellPhase 'cleanup-stop-runtime:ok'
               }
             } finally {

@@ -4,7 +4,7 @@ import { validateProductionReleaseInputs } from '../scripts/production-release-i
 
 const valid = {
   version: '0.1.0.0',
-  identityName: 'Operator.Runtime',
+  identityName: 'SPLCART.SplcartOperator',
   updateBaseUri: 'https://downloads.operatorruntime.dev/product',
   timestampUri: 'https://timestamp.digicert.com'
 };
