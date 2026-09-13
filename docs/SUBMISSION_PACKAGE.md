@@ -199,12 +199,12 @@ Never place signing private keys, relay service credentials, local-agent bearer 
 
 Before final submission confirm:
 
-- production signing certificate is valid and not near expiry
-- manifest Publisher exactly matches signer subject
-- production release is RFC 3161 timestamped
-- final `.appinstaller`, MSIX and `release-metadata.json` URLs use the intended HTTPS/GitHub Release location
-- signed artifact SHA-256 matches published metadata and the signer SHA-256 fingerprint matches the npm bootstrap pin
-- `operator-runtime-cli` is published only after its production signer pin is populated; the installed production build passes `Operator.exe --self-test`
+- Store submission MSIX uses `Name=SPLCART.SplcartOperator`, `Publisher=CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967`, and `PublisherDisplayName=SPLCART` exactly as assigned by Partner Center
+- Store package version follows Store rules (non-zero first component, fourth component `0`); the first prepared submission uses `1.0.0.0`
+- the uploaded MSIX passes Partner Center package validation and Microsoft Store certification/re-signing
+- the final Store ID/direct listing link is recorded before publishing the npm bootstrap
+- `operator-runtime-cli` is published only after its `msstore`/WinGet install handoff is pinned and verified; the Store-installed production build passes `Operator.exe --self-test`
+- if a future direct sideload/GitHub MSIX channel is enabled, separately require a CA-trusted signer, RFC 3161 timestamping, immutable release metadata, and exact signer pinning
 - supported private ChatGPT/MCP transport has passed the live read workflow; if public plugin distribution is targeted, the stable public HTTPS MCP endpoint/proxy and authentication are separately certified
 - policy-denial and recovery demos have been re-run on the release build
 - screenshots contain no secrets, usernames/paths that should remain private, tokens or private account data

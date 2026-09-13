@@ -18,7 +18,7 @@ on:
       identity_name:
         description: Stable MSIX package identity name
         required: true
-        default: Operator.Runtime
+        default: SPLCART.SplcartOperator
         type: string
       publish_github_release:
         description: Publish immutable signed assets as the latest GitHub Release after verification
@@ -78,7 +78,7 @@ jobs:
           node scripts/production-release-inputs.mjs
           if ($LASTEXITCODE -ne 0) { throw 'production release input validation failed' }
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'version must be a four-part MSIX version' }
-          if ($env:IDENTITY_NAME -ne 'Operator.Runtime') { throw 'identity_name must remain Operator.Runtime for the public bootstrap.' }
+          if ($env:IDENTITY_NAME -ne 'SPLCART.SplcartOperator') { throw 'identity_name must remain SPLCART.SplcartOperator for the public bootstrap.' }
           foreach ($pair in @(@('update_base_uri', $env:UPDATE_BASE_URI), @('timestamp_uri', $env:TIMESTAMP_URI))) {
             $uri = [Uri]$pair[1]
             if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or $uri.UserInfo) { throw "$($pair[0]) must be a credential-free absolute HTTPS URI" }
@@ -169,8 +169,8 @@ jobs:
           try {
             & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.certificate.outputs.publisher }}' '${{ steps.certificate.outputs.fingerprint_sha256 }}' $root
             if ($LASTEXITCODE -ne 0) { throw "production bootstrap smoke failed with exit code $LASTEXITCODE" }
-            $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
-            if (-not $package) { throw 'Operator.Runtime production package was not registered' }
+            $package = Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Select-Object -First 1
+            if (-not $package) { throw 'SPLCART.SplcartOperator production package was not registered' }
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
             $output = & $launcher --self-test
             if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'production packaged launcher self-test failed' }
@@ -183,8 +183,8 @@ jobs:
               $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
               Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
             }
-            Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
-            Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.operator') -Recurse -Force -ErrorAction SilentlyContinue
+            Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Remove-AppxPackage -ErrorAction SilentlyContinue
           }
 
       - name: Publish immutable GitHub Release assets

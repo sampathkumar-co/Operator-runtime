@@ -1,7 +1,7 @@
 param(
-  [string]$Version = '0.1.0.0',
-  [string]$Publisher = 'CN=Operator Development',
-  [string]$IdentityName = 'Operator.Runtime',
+  [string]$Version = '1.0.0.0',
+  [string]$Publisher = 'CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967',
+  [string]$IdentityName = 'SPLCART.SplcartOperator',
   [string]$UpdateBaseUri = 'https://updates.example.invalid/operator',
   [string]$OutputDir = '',
   [string]$NodeExe = ''
@@ -115,8 +115,8 @@ $manifest = @"
          IgnorableNamespaces="uap uap5 uap10 rescap">
   <Identity Name="$identityXml" Publisher="$publisherXml" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Operator</DisplayName>
-    <PublisherDisplayName>Operator</PublisherDisplayName>
+    <DisplayName>SPLCART Operator</DisplayName>
+    <PublisherDisplayName>SPLCART</PublisherDisplayName>
     <Description>Semantic execution runtime for user-authorized computers.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
     <uap10:PackageIntegrity><uap10:Content Enforcement="on" /></uap10:PackageIntegrity>
@@ -125,7 +125,7 @@ $manifest = @"
   <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
   <Applications>
     <Application Id="Operator" Executable="Operator.exe" uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
-      <uap:VisualElements DisplayName="Operator" Description="Operate authorized computers through semantic, policy-gated capabilities."
+      <uap:VisualElements DisplayName="SPLCART Operator" Description="Operate authorized computers through semantic, policy-gated capabilities."
                           BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png" Square150x150Logo="Assets\Square150x150Logo.png" />
       <Extensions>
         <uap5:Extension Category="windows.appExecutionAlias">

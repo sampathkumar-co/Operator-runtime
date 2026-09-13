@@ -50,16 +50,16 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 These are deliberately not represented as complete until their real external dependencies exist:
 
-- production-trusted Windows code-signing identity/certificate, its SHA-256 fingerprint pinned in `operator-runtime-cli`, and RFC 3161 timestamped release signing
-- publication of the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location
-- publication of `operator-runtime-cli` to npm after the signer is pinned
+- Microsoft Store submission/certification of the exact `SPLCART.SplcartOperator` MSIX; the Store re-signs accepted MSIX packages with Microsoft trust, so no paid CA certificate is required for the Store channel
+- retrieval of the final Store ID/direct listing link after the first submission so `operator-runtime-cli` can hand installation to the `msstore`/WinGet path
+- publication of `operator-runtime-cli` to npm only after that Store install path is pinned and verified
 - supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
 - deployment and live certification of the implemented OAuth-authenticated public HTTPS MCP edge if public plugin distribution is targeted
 - real ChatGPT workflow against an explicitly paired physical device
 - final publication/submission artwork and marketplace/store metadata
 - production OAuth authorization/introspection service credentials and account integration for public multi-user deployment
 
-The CI signing smoke uses an **ephemeral test certificate only**. It proves package/sign/install mechanics; it is not a substitute for production trust.
+The CI signing smoke uses an **ephemeral test certificate only** to prove package/sign/install mechanics. For the primary zero-cost Windows channel, production trust is supplied by Microsoft Store re-signing after certification. A separate CA-trusted certificate is still required only if direct sideload/GitHub MSIX distribution is later enabled.
 
 ## Repository layout
 
