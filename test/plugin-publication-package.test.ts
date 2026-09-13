@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
-import { PUBLIC_TOOL_NAMES } from '../apps/mcp-server/src/public-tools.ts';
+import { PUBLIC_PLUGIN_TOOL_NAMES as PUBLIC_TOOL_NAMES } from '../src/core/public-plugin-surface.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
 

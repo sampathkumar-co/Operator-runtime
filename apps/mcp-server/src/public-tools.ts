@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { ActionRisk } from '../../../src/core/types.ts';
+import { PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 
 type PublicInvoke = (
   capability: string,
@@ -9,17 +10,7 @@ type PublicInvoke = (
   target?: string
 ) => Promise<any>;
 
-export const PUBLIC_TOOL_NAMES = Object.freeze([
-  'computer.inspect',
-  'project.inspect',
-  'project.commands',
-  'file.list',
-  'file.read',
-  'file.create',
-  'file.replace',
-  'git.status',
-  'git.diff'
-].sort());
+export const PUBLIC_TOOL_NAMES = PUBLIC_PLUGIN_TOOL_NAMES;
 
 export function registerPublicTools(server: McpServer, invoke: PublicInvoke): void {
   server.registerTool('computer.inspect', {
