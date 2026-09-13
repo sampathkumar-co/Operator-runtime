@@ -140,11 +140,12 @@ export class AccountDeviceRegistry {
     await this.#mutate(async (state) => {
       const account = state.accounts.find((candidate) => candidate.accountId === accountId);
       if (!account) throw new OperatorError('ACCOUNT_NOT_FOUND', 'Operator account was not found.');
+      const accountDir = await safeAccountEraseTarget(this.#stateDir, accountId);
       for (const membership of state.memberships.filter((m) => m.accountId === accountId && m.status === 'active')) {
         await this.#releaseDevice(membership.deviceId, accountId, 'erased');
         releasedDeviceIds.push(membership.deviceId);
       }
-      await fs.rm(path.join(this.#stateDir, 'accounts', accountId), { recursive: true, force: true });
+      await fs.rm(accountDir, { recursive: true, force: true });
       state.memberships = state.memberships.filter((membership) => membership.accountId !== accountId);
       state.accounts = state.accounts.filter((candidate) => candidate.accountId !== accountId);
     });
@@ -310,4 +311,20 @@ function validIso(value: string, label: string): string {
   const time = Date.parse(text);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== text) throw new OperatorError('ACCOUNT_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
   return text;
+}
+
+async function safeAccountEraseTarget(stateDir: string, accountId: string): Promise<string> {
+  const root = path.resolve(stateDir);
+  const accountsDir = path.join(root, 'accounts');
+  const target = path.join(accountsDir, accountId);
+  for (const [candidate, label] of [[root, 'state root'], [accountsDir, 'accounts directory'], [target, 'account directory']] as const) {
+    try {
+      const stat = await fs.lstat(candidate);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new OperatorError('ACCOUNT_ERASURE_PATH_INVALID', `Refusing account erasure through an unsafe ${label}.`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && candidate !== root) continue;
+      throw error;
+    }
+  }
+  return target;
 }

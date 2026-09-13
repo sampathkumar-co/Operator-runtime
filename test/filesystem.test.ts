@@ -141,3 +141,23 @@ test('file.create is create-only and file.replace requires an exact fresh SHA', 
   assert.equal(replaced.ok, true);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
 });
+
+test('file.replace never overwrites a concurrent recreation after claiming the expected file', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-cas-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'race.txt');
+  await fs.writeFile(filePath, 'v1');
+  const sha = crypto.createHash('sha256').update('v1').digest('hex');
+  const provider = new FilesystemProvider({
+    allowedRoots: [root],
+    replaceClaimHook: async (claimedPath) => { await fs.writeFile(claimedPath, 'concurrent'); }
+  });
+
+  const result = await provider.execute(action('file.replace', {
+    path: filePath, content: 'v2', expectedSha256: sha
+  }));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'PRECONDITION_FAILED');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'concurrent');
+  assert.equal((await fs.readdir(root)).some((name) => name.endsWith('.bak') || name.endsWith('.tmp')), false);
+});

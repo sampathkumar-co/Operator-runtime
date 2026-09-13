@@ -78,12 +78,13 @@ export function registerPublicTools(server: McpServer, invoke: PublicInvoke): vo
     description: 'Read a bounded Git diff for an authorized project. Secret-bearing paths or detected restricted data are refused by the public boundary.',
     inputSchema: z.object({
       cwd: z.string().min(1).max(4096),
-      paths: z.array(z.string().min(1).max(1000)).max(100).default([])
+      paths: z.array(z.string().min(1).max(1000)).min(1).max(100)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ cwd, paths }) => {
     for (const item of paths) {
-      if (item.startsWith('/') || /^[A-Za-z]:[\\/]/.test(item)) {
+      const normalized = item.replace(/\\/g, '/');
+      if (item.startsWith('/') || /^[A-Za-z]:[\\/]/.test(item) || normalized === '.' || normalized === '..' || normalized.startsWith(':') || /[*?\[\]{}]/.test(normalized)) {
         return {
           isError: true,
           content: [{ type: 'text' as const, text: 'git.diff: path filters must be project-relative.' }],
@@ -91,6 +92,6 @@ export function registerPublicTools(server: McpServer, invoke: PublicInvoke): vo
         };
       }
     }
-    return invoke('git.diff', 'read', { cwd, paths }, cwd);
+    return invoke('git.diff', 'read', { cwd, paths, publicLiteralFiles: true }, cwd);
   });
 }

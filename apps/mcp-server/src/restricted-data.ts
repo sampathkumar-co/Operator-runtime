@@ -27,7 +27,10 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/i,
   /\b(?:otp|one[- ]time(?: password| code)?|verification code)\s*[:=]\s*\d{4,10}\b/i,
   /\b(?:ssn|social security(?: number)?|aadhaar|aadhar|passport(?: number)?|driver'?s? license(?: number)?)\s*[:=]\s*[A-Za-z0-9 -]{5,32}\b/i,
-  /\b(?:medical record(?: number)?|mrn|diagnosis|patient(?: name| id)|health insurance(?: number)?)\s*[:=]\s*[^\r\n]{2,96}/i
+  /\b(?:medical record(?: number)?|mrn|diagnosis|patient(?: name| id)|health insurance(?: number)?)\s*[:=]\s*[^\r\n]{2,96}/i,
+  /\bDATABASE_URL\s*[:=]\s*["']?(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s"']+/i,
+  /\b(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET)\s*[:=]\s*["']?[A-Za-z0-9._~+\/=-]{12,}["']?/i,
+  /\b(?:PASSWORD|PASSWD|PWD)\s*[:=]\s*["'][^"'\r\n]+["']/i
 ];
 const SENSITIVE_KEYS = /(?:password|passwd|pwd|secret|token|api.?key|authorization|private.?key|otp|cvv|card.?number|ssn|social.?security|aadhaar|aadhar|passport|driver.?license|medical.?record|mrn|diagnosis|patient.?name|patient.?id|health.?insurance)/i;
 

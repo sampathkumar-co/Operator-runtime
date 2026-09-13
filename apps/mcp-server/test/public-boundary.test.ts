@@ -19,6 +19,7 @@ test('restricted-data guard rejects credential paths and high-confidence secrets
   assert.throws(() => assertPublicSafePath('/home/u/.ssh/id_ed25519'), /credential or secret-bearing/);
   assert.equal(containsRestrictedData({ apiKey: 'secret-value' }), true);
   assert.equal(containsRestrictedData('Authorization: Bearer abcdefghijklmnop'), true);
+  assert.equal(containsRestrictedData('DATABASE_URL=postgres://user:secret@db.example/app'), true);
   assert.equal(containsRestrictedData('ordinary source code with password variable names'), false);
 });
 
@@ -89,4 +90,19 @@ test('public write is denied before agent execution when OAuth write scope is ab
   assert.equal(response.isError, true);
   const structured = response.structuredContent as Record<string, any>;
   assert.equal(structured.error.code, 'OAUTH_SCOPE_REQUIRED');
+});
+
+test('public Git diff rejects sensitive nested path entries before agent execution', async () => {
+  let executed = false;
+  const agent = { execute: async () => {
+    executed = true;
+    throw new Error('must not execute');
+  } } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'git.diff', 'read', {
+    cwd: 'C:\\repo', paths: ['.env'], publicLiteralFiles: true
+  });
+  assert.equal(executed, false);
+  assert.equal(response.isError, true);
+  const structured = response.structuredContent as Record<string, any>;
+  assert.equal(structured.error.code, 'RESTRICTED_DATA_PATH_DENIED');
 });

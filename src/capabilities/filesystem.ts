@@ -29,11 +29,13 @@ export class FilesystemProvider implements CapabilityProvider {
   #scope: PathScope;
   #maxReadBytes: number;
   #maxWriteBytes: number;
+  #replaceClaimHook?: (filePath: string) => Promise<void> | void;
 
-  constructor(options: { allowedRoots: string[]; maxReadBytes?: number; maxWriteBytes?: number }) {
+  constructor(options: { allowedRoots: string[]; maxReadBytes?: number; maxWriteBytes?: number; replaceClaimHook?: (filePath: string) => Promise<void> | void }) {
     this.#scope = new PathScope(options.allowedRoots);
     this.#maxReadBytes = boundedBytes(options.maxReadBytes, DEFAULT_MAX_READ_BYTES);
     this.#maxWriteBytes = boundedBytes(options.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES);
+    this.#replaceClaimHook = options.replaceClaimHook;
   }
 
   supports(action: ActionRequest): boolean {
@@ -149,6 +151,8 @@ export class FilesystemProvider implements CapabilityProvider {
       if (mode === 'create') {
         await fs.writeFile(filePath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         await fs.rm(tempPath, { force: true });
+      } else if (mode === 'replace') {
+        beforeSha = await replaceWithExpectedSha(filePath, tempPath, expectedSha!, this.#replaceClaimHook);
       } else {
         await fs.rename(tempPath, filePath);
       }
@@ -197,4 +201,50 @@ function boundedBytes(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(Math.trunc(parsed), 1), MAX_CONFIGURED_IO_BYTES);
+}
+
+async function replaceWithExpectedSha(
+  filePath: string,
+  tempPath: string,
+  expectedSha: string,
+  afterClaim?: (filePath: string) => Promise<void> | void
+): Promise<string> {
+  const backupPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.operator-${crypto.randomUUID()}.bak`);
+  let claimed = false;
+  try {
+    try { await fs.rename(filePath, backupPath); claimed = true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TARGET_MISSING', 'file.replace requires an existing file.');
+      throw error;
+    }
+    const stat = await fs.lstat(backupPath);
+    if (stat.isSymbolicLink()) throw new OperatorError('WRITE_SYMLINK_DENIED', 'Refusing to replace a symbolic link.');
+    if (!stat.isFile()) throw new OperatorError('NOT_A_FILE', 'Existing write target is not a regular file.');
+    const before = await fs.readFile(backupPath);
+    const beforeSha = sha256(before);
+    if (beforeSha !== expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'File changed since it was inspected.', { details: { expectedSha, actualSha: beforeSha } });
+    await afterClaim?.(filePath);
+    try { await fs.link(tempPath, filePath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new OperatorError('PRECONDITION_FAILED', 'File changed during replacement.');
+      throw error;
+    }
+    await fs.rm(tempPath, { force: true });
+    await fs.rm(backupPath, { force: true });
+    claimed = false;
+    return beforeSha;
+  } finally {
+    if (claimed) await restoreClaimedPath(backupPath, filePath);
+  }
+}
+async function restoreClaimedPath(backupPath: string, filePath: string): Promise<void> {
+  try {
+    await fs.link(backupPath, filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new OperatorError('WRITE_RECOVERY_FAILED', 'Could not restore the claimed file after a failed replacement.');
+    }
+  } finally {
+    await fs.rm(backupPath, { force: true });
+  }
 }

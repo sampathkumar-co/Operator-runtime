@@ -55,8 +55,10 @@ function requirePublicScope(
 function validatePublicInput(input: Record<string, unknown>): void {
   assertNoRestrictedData(input);
   for (const [key, value] of Object.entries(input)) {
-    if (!PATH_INPUT_KEYS.has(key) || typeof value !== 'string') continue;
-    assertPublicSafePath(value);
+    if (PATH_INPUT_KEYS.has(key) && typeof value === 'string') assertPublicSafePath(value);
+    if (key === 'paths' && Array.isArray(value)) {
+      for (const item of value) if (typeof item === 'string') assertPublicSafePath(item);
+    }
   }
 }
 

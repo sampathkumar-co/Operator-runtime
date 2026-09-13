@@ -78,3 +78,32 @@ test('device release and account erasure cascade hosted account data before rebi
   assert.equal(persisted.includes(bob.accountId), false);
   assert.equal(persisted.includes('erase-account'), false);
 });
+test('account erasure refuses a symlinked accounts parent and preserves external data', async (t) => {
+  const state = await temp(t, 'operator-erasure-link-state-');
+  const outside = await temp(t, 'operator-erasure-link-outside-');
+  const devices = new DeviceRegistryStore(state);
+  const accounts = new AccountDeviceRegistry(state, devices);
+  const principal = { issuer: 'issuer', subject: 'symlink-test' };
+  const account = await accounts.resolveOrCreateAccount(principal);
+  const externalAccount = path.join(outside, account.accountId);
+  await fs.mkdir(externalAccount, { recursive: true });
+  const marker = path.join(externalAccount, 'keep.txt');
+  await fs.writeFile(marker, 'preserve');
+  const accountsLink = path.join(state, 'accounts');
+  try {
+    await fs.symlink(outside, accountsLink, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('Windows host does not grant junction/symlink creation.');
+      return;
+    }
+    throw error;
+  }
+  t.after(() => fs.unlink(accountsLink).catch(() => undefined));
+  await assert.rejects(
+    accounts.eraseAccount(account.accountId),
+    (error: any) => error?.code === 'ACCOUNT_ERASURE_PATH_INVALID'
+  );
+  assert.equal(await fs.readFile(marker, 'utf8'), 'preserve');
+  assert.notEqual(await accounts.getAccount(principal), null);
+});
