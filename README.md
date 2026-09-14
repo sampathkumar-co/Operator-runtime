@@ -51,16 +51,16 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 These are deliberately not represented as complete until their real external dependencies exist:
 
-- production-trusted Windows code-signing identity/certificate, its SHA-256 fingerprint pinned in `operator-runtime-cli`, and RFC 3161 timestamped release signing
-- publication of the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location
-- publication of `operator-runtime-cli` to npm after the signer is pinned
+- Microsoft Store lane: submit the exact Partner Center-identity MSIX and complete Partner Center certification; Store submission does not depend on the separate direct-distribution PFX lane
+- optional direct/npx lane: select a trusted Windows signer compatible with that package identity, pin its SHA-256 fingerprint in `operator-runtime-cli`, and produce an RFC 3161 timestamped direct release
+- optional direct/npx lane: publish the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location, then publish `operator-runtime-cli` to npm
 - supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
 - deployment and live certification of the implemented OAuth-authenticated public HTTPS MCP edge if public plugin distribution is targeted
 - real ChatGPT workflow against an explicitly paired physical device
 - final publication/submission artwork and marketplace/store metadata
 - production OAuth authorization/introspection service credentials and account integration for public multi-user deployment
 
-The CI signing smoke uses an **ephemeral test certificate only**. It proves package/sign/install mechanics; it is not a substitute for production trust.
+The CI signing smoke uses an **ephemeral test certificate only**. It proves direct package/sign/install mechanics; it is not a substitute for production trust and is not a Microsoft Store signing prerequisite.
 
 ## Repository layout
 
