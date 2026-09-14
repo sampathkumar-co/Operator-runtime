@@ -140,23 +140,33 @@ test('device purge erases old payloads while preserving the monotonic relay wate
   assert.deepEqual((await store.pending(DEVICE)).map((entry) => entry.seq), [3]);
 });
 
-test('unacknowledged action retry reuses one durable delivery until receipt release', async (t) => {
-  const store = new RelayDeliveryStore(await temp(t));
+test('invocation idempotency survives device ACK and reload, then expires on the bounded retention clock', async (t) => {
+  let nowMs = Date.parse('2026-09-14T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
   const key = 'a'.repeat(64);
   const first = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
-  const retryBeforeDeviceAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
-  assert.equal(retryBeforeDeviceAck.seq, first.seq);
-  assert.equal(retryBeforeDeviceAck.id, first.id);
-  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
+  const retryBeforeAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryBeforeAck.seq, first.seq);
+  assert.equal(retryBeforeAck.id, first.id);
 
   await store.acknowledge(DEVICE, first.seq, first.id);
-  const retryAfterDeviceAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
-  assert.equal(retryAfterDeviceAck.seq, first.seq);
-  assert.equal(retryAfterDeviceAck.id, first.id);
+  const reloaded = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  const recovered = await reloaded.findIdempotent(key);
+  assert.equal(recovered?.deviceId, DEVICE);
+  assert.equal(recovered?.delivery.id, first.id);
+  assert.equal(recovered?.delivery.status, 'acked');
+  const retryAfterAck = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryAfterAck.id, first.id);
 
-  assert.equal(await store.releaseIdempotency(DEVICE, first.seq, first.id, key), true);
-  assert.equal(await store.releaseIdempotency(DEVICE, first.seq, first.id, key), false);
-  const intentionalRepeat = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  const distinctInvocationKey = 'b'.repeat(64);
+  const intentionalRepeat = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, distinctInvocationKey);
   assert.equal(intentionalRepeat.seq, 2);
   assert.notEqual(intentionalRepeat.id, first.id);
+
+  nowMs += 60_001;
+  assert.equal(await reloaded.findIdempotent(key), null);
+  const afterRetention = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(afterRetention.seq, 3);
 });

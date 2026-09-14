@@ -16,15 +16,15 @@ const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch' | 'verifyIdempotency' | 'releaseIdempotency'>;
-  #results: Pick<RelayResultStore, 'get' | 'consume'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
+  #results: Pick<RelayResultStore, 'get'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'verifyIdempotency' | 'releaseIdempotency'>; results: Pick<RelayResultStore, 'get' | 'consume'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -44,30 +44,12 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/execute/ack', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
         if (!bearerMatches(request.headers.authorization, this.#token)) {
           send(response, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Valid relay control bearer token required.' } });
-          return;
-        }
-        if (request.url === '/v1/execute/ack') {
-          const ackBody = await readJson(request) as { accountId?: unknown; principal?: unknown; action?: unknown; publicBoundary?: unknown; deviceId?: unknown; seq?: unknown; deliveryId?: unknown };
-          const principal = ackBody.principal === undefined ? undefined : validPrincipal(ackBody.principal);
-          const explicitAccountId = ackBody.accountId === undefined ? undefined : validUuid(String(ackBody.accountId), 'accountId');
-          if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
-          const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
-          const action = validAction(ackBody.action);
-          const publicBoundary = ackBody.publicBoundary === true;
-          const deviceId = validUuid(String(ackBody.deviceId ?? ''), 'deviceId');
-          const seq = validSeq(ackBody.seq);
-          const deliveryId = validUuid(String(ackBody.deliveryId ?? ''), 'deliveryId');
-          const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
-          await this.#hub.verifyIdempotency(deviceId, seq, deliveryId, idempotencyKey);
-          const consumed = await this.#results.consume(deviceId, seq, deliveryId);
-          const released = await this.#hub.releaseIdempotency(deviceId, seq, deliveryId, idempotencyKey);
-          send(response, 200, { ok: true, acknowledged: { deviceId, seq, deliveryId, released, resultConsumed: Boolean(consumed) } });
           return;
         }
         if (request.url === '/v1/account/erase') {
@@ -113,29 +95,35 @@ export class RelayControlService {
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
         const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
 
-        const dispatched = await this.#hub.dispatch({
-          accountId,
-          explicitDeviceId: deviceId,
-          projectKey,
-          requiredCapabilities: [action.capability],
-          kind: 'action',
-          payload: { action, ...(publicBoundary ? { publicBoundary: true } : {}) },
-          idempotencyKey
-        });
+        const recovered = await this.#hub.recoverIdempotent(idempotencyKey);
+        let routedDeviceId: string;
+        let delivery: { id: string; seq: number };
+        if (recovered) {
+          routedDeviceId = recovered.deviceId;
+          delivery = recovered.delivery;
+        } else {
+          const dispatched = await this.#hub.dispatch({
+            accountId,
+            explicitDeviceId: deviceId,
+            projectKey,
+            requiredCapabilities: [action.capability],
+            kind: 'action',
+            payload: { action, ...(publicBoundary ? { publicBoundary: true } : {}) },
+            idempotencyKey
+          });
+          routedDeviceId = dispatched.route.deviceId;
+          delivery = dispatched.delivery;
+        }
         const deadline = Date.now() + waitMs;
         while (Date.now() <= deadline) {
           if (request.aborted || response.destroyed) return;
-          const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
-          if (stored && stored.deliveryId === dispatched.delivery.id) {
+          const stored = await this.#results.get(routedDeviceId, delivery.seq);
+          if (stored && stored.deliveryId === delivery.id) {
             const result = stored.result as unknown as ActionResult;
             if (!isActionResult(result, action.capability)) {
-              return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', dispatched.route.deviceId, dispatched.delivery.seq));
+              return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', routedDeviceId, delivery.seq));
             }
-            send(response, 200, result, {
-              'x-operator-device-id': dispatched.route.deviceId,
-              'x-operator-delivery-seq': String(dispatched.delivery.seq),
-              'x-operator-delivery-id': dispatched.delivery.id
-            });
+            send(response, 200, result);
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, 50));
@@ -145,8 +133,8 @@ export class RelayControlService {
           startedAt,
           'RELAY_RESULT_PENDING',
           'The routed action has no durable result yet. Do not blindly repeat the action; reconcile the delivery first.',
-          dispatched.route.deviceId,
-          dispatched.delivery.seq
+          routedDeviceId,
+          delivery.seq
         ));
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('RELAY_CONTROL_FAILED', error instanceof Error ? error.message : String(error));

@@ -94,6 +94,22 @@ export class RelayDeliveryStore {
     });
   }
 
+  async findIdempotent(idempotencyKeyInput: string): Promise<{ deviceId: string; delivery: StoredRelayDelivery } | null> {
+    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      let found: { deviceId: string; delivery: StoredRelayDelivery } | null = null;
+      for (const stream of state.streams) {
+        for (const delivery of stream.deliveries) {
+          if (delivery.idempotencyKey !== idempotencyKey || delivery.idempotencyReleasedAt) continue;
+          if (found) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay idempotency authority is duplicated across retained deliveries.');
+          found = { deviceId: stream.deviceId, delivery: cloneDelivery(delivery) };
+        }
+      }
+      return found;
+    });
+  }
+
   async pending(deviceIdInput: string, limitInput = 100): Promise<StoredRelayDelivery[]> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const limit = boundedLimit(limitInput);
@@ -136,35 +152,6 @@ export class RelayDeliveryStore {
       delivery.authority = undefined;
       stream.lastAckedSeq = seq;
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
-    });
-  }
-
-  async verifyIdempotency(deviceIdInput: string, seqInput: number, deliveryIdInput: string, idempotencyKeyInput: string): Promise<{ released: boolean }> {
-    const deviceId = validUuid(deviceIdInput, 'deviceId');
-    const seq = validSeq(seqInput);
-    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
-    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
-    const state = await this.#read();
-    const delivery = state.streams.find((stream) => stream.deviceId === deviceId)?.deliveries.find((candidate) => candidate.seq === seq && candidate.id === deliveryId);
-    if (!delivery || !delivery.idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references an unknown idempotent relay delivery.');
-    if (delivery.idempotencyKey !== idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_MISMATCH', 'Receipt acknowledgement does not match the action idempotency authority.');
-    return { released: Boolean(delivery.idempotencyReleasedAt) };
-  }
-
-  async releaseIdempotency(deviceIdInput: string, seqInput: number, deliveryIdInput: string, idempotencyKeyInput: string): Promise<boolean> {
-    const deviceId = validUuid(deviceIdInput, 'deviceId');
-    const seq = validSeq(seqInput);
-    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
-    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
-    return await this.#mutate((state) => {
-      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
-      const delivery = stream?.deliveries.find((candidate) => candidate.seq === seq && candidate.id === deliveryId);
-      if (!delivery) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references an unknown relay delivery.');
-      if (delivery.idempotencyKey === undefined) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references a non-idempotent relay delivery.');
-      if (delivery.idempotencyKey !== idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_MISMATCH', 'Receipt acknowledgement does not match the action idempotency authority.');
-      if (delivery.idempotencyReleasedAt) return false;
-      delivery.idempotencyReleasedAt = this.#clock().toISOString();
-      return true;
     });
   }
 
@@ -299,7 +286,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       expired += 1;
     }
     for (const delivery of stream.deliveries) {
-      if (delivery.status === 'acked' && delivery.idempotencyKey && delivery.ackedAt && Date.parse(delivery.ackedAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
+      if (delivery.status === 'acked' && delivery.idempotencyKey && Date.parse(delivery.createdAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
     }
   }
   return expired;

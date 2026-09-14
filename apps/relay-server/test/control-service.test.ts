@@ -33,6 +33,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     }
   };
   const hub = {
+    async recoverIdempotent() { return null; },
     async dispatch(input: { accountId: string }) {
       dispatchedAccounts.push(input.accountId);
       return { route: { deviceId: DEVICE_ID }, delivery: { id: `delivery-${dispatchedAccounts.length}`, seq: dispatchedAccounts.length } };
@@ -106,7 +107,7 @@ test('relay control exposes authenticated principal erasure without creating an 
 test('public relay control preserves trusted public-boundary marker in delivery envelope', async (t) => {
   let payload: any;
   const service = new RelayControlService({
-    hub: { dispatch: async (input: any) => {
+    hub: { recoverIdempotent: async () => null, dispatch: async (input: any) => {
       payload = input.payload;
       return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-public', seq: 7 } };
     } } as any,
@@ -129,56 +130,35 @@ test('public relay control preserves trusted public-boundary marker in delivery 
   assert.equal(payload.action.capability, 'computer.inspect');
 });
 
-test('receipt acknowledgement verifies action authority before consuming and is retry-safe', async (t) => {
+test('completed idempotent result is recovered before routing even when the device is offline', async (t) => {
   const deliveryId = '44444444-4444-4444-8444-444444444444';
-  let allowReceipt = false;
-  let verifyCalls = 0;
-  let consumeCalls = 0;
-  let releaseCalls = 0;
+  let recoverCalls = 0;
+  let dispatchCalls = 0;
   const hub = {
-    dispatch: async () => { throw new Error('must not dispatch'); },
-    verifyIdempotency: async () => {
-      verifyCalls += 1;
-      if (!allowReceipt) throw Object.assign(new Error('mismatch'), { code: 'RELAY_IDEMPOTENCY_MISMATCH' });
-      return { released: releaseCalls > 0 };
+    recoverIdempotent: async () => {
+      recoverCalls += 1;
+      return { deviceId: DEVICE_ID, delivery: { id: deliveryId, seq: 9 } };
     },
-    releaseIdempotency: async () => { releaseCalls += 1; return releaseCalls === 1; }
+    dispatch: async () => { dispatchCalls += 1; throw new Error('offline route must not be consulted'); }
   };
   const results = {
-    get: async () => null,
-    consume: async () => {
-      consumeCalls += 1;
-      return consumeCalls === 1 ? { deliveryId, result: { ok: true } } : null;
+    get: async (deviceId: string, seq: number) => {
+      assert.equal(deviceId, DEVICE_ID);
+      assert.equal(seq, 9);
+      return { deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 } };
     }
   };
   const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
   const { port } = await service.listen('127.0.0.1', 0);
-  t.after(() => service.close());  const ack = async () => await fetch(`http://127.0.0.1:${port}/v1/execute/ack`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
-    body: JSON.stringify({
-      accountId: ACCOUNT_A,
-      action: action(),
-      deviceId: DEVICE_ID,
-      seq: 9,
-      deliveryId
-    })
+  t.after(() => service.close());
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'mcp-request-retry' },
+    waitMs: 1000
   });
-
-  const forged = await ack();
-  assert.equal(forged.status, 409);
-  assert.equal(consumeCalls, 0);
-  assert.equal(releaseCalls, 0);
-
-  allowReceipt = true;
-  const accepted = await ack();
-  assert.equal(accepted.status, 200, await accepted.text());
-  assert.equal(consumeCalls, 1);
-  assert.equal(releaseCalls, 1);
-
-  const duplicate = await ack();
-  assert.equal(duplicate.status, 200, await duplicate.text());
-  assert.equal(verifyCalls, 3);
-  assert.equal(consumeCalls, 2);
-  assert.equal(releaseCalls, 2);
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.equal(body.provider, 'replay');
+  assert.equal(recoverCalls, 1);
+  assert.equal(dispatchCalls, 0);
 });

@@ -210,12 +210,8 @@ export class RelayHub {
     return { route, delivery };
   }
 
-  async verifyIdempotency(deviceId: string, seq: number, deliveryId: string, idempotencyKey: string): Promise<{ released: boolean }> {
-    return await this.#deliveries.verifyIdempotency(deviceId, seq, deliveryId, idempotencyKey);
-  }
-
-  async releaseIdempotency(deviceId: string, seq: number, deliveryId: string, idempotencyKey: string): Promise<boolean> {
-    return await this.#deliveries.releaseIdempotency(deviceId, seq, deliveryId, idempotencyKey);
+  async recoverIdempotent(idempotencyKey: string): Promise<{ deviceId: string; delivery: StoredRelayDelivery } | null> {
+    return await this.#deliveries.findIdempotent(idempotencyKey);
   }
 
   async deliveryCursor(deviceId: string): Promise<{ lastAckedSeq: number; highestEnqueuedSeq: number }> {
