@@ -10,6 +10,7 @@ function text(relative: string): string {
 test('Windows Store release contract pins Partner Center identity and certified Node runtime', () => {
   const build = text('packaging/windows/build-release.ps1');
   const ci = text('.github/workflows/ci.yml');
+  const production = text('.github/workflows/windows-production-release.yml');
   assert.match(build, /\[string\]\$Version = '1\.0\.0\.0'/);
   assert.match(build, /CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967/);
   assert.match(build, /SPLCART\.SplcartOperator/);
@@ -22,6 +23,10 @@ test('Windows Store release contract pins Partner Center identity and certified 
   assert.ok(ci.includes('SPLCART\\.SplcartOperator'));
   assert.ok(ci.includes('CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967'));
   assert.ok(ci.includes('Store package version mismatch'));
+  assert.match(production, /STORE_PUBLISHER: CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967/);
+  assert.match(production, /\$cert\.Subject -ne \$env:STORE_PUBLISHER/);
+  assert.match(production, /-Publisher \$env:STORE_PUBLISHER/);
+  assert.doesNotMatch(production, /-Publisher '\$\{\{ steps\.certificate\.outputs\.publisher \}\}'/);
 });
 
 test('Windows native release toolchain is pinned to Rust 1.98.1', () => {
