@@ -1,31 +1,71 @@
+# Validated with Caddy 2.11.4; production requires Caddy >= 2.11.4.
+{
+	servers {
+		timeouts {
+			read_body 15s
+			read_header 10s
+			idle 2m
+		}
+		max_header_size 32KB
+		0rtt off
+		strict_sni_host on
+	}
+}
+
 # Replace mcp.your-domain.tld with the same hostname used by OPERATOR_MCP_PUBLIC_URL.
 mcp.your-domain.tld {
-    @mcp path /mcp
-    handle @mcp {
-        reverse_proxy 127.0.0.1:47200 {
-            flush_interval -1
-        }
-    }
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
 
-    @openai_challenge path /.well-known/openai-apps-challenge
-    handle @openai_challenge {
-        reverse_proxy 127.0.0.1:47200
-    }
+	@mcp path /mcp
+	handle @mcp {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:47200 {
+			flush_interval -1
+			transport http {
+				dial_timeout 2s
+			}
+		}
+	}
 
-    @oauth path /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server
-    handle @oauth {
-        reverse_proxy 127.0.0.1:47200
-    }
+	@openai_challenge path /.well-known/openai-apps-challenge
+	handle @openai_challenge {
+		reverse_proxy 127.0.0.1:47200
+	}
 
-    @device path /device
-    handle @device {
-        reverse_proxy 127.0.0.1:8788
-    }
+	@oauth path /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server
+	handle @oauth {
+		reverse_proxy 127.0.0.1:47200
+	}
 
-    @result path /v1/device-result
-    handle @result {
-        reverse_proxy 127.0.0.1:8789
-    }
+	@device path /device
+	handle @device {
+		reverse_proxy 127.0.0.1:8788 {
+			stream_timeout 24h
+			stream_close_delay 5m
+			transport http {
+				dial_timeout 2s
+			}
+		}
+	}
 
-    respond 404
+	@device_api path /v1/device-result /v1/device-session/rotate /v1/device-enrollment/challenge /v1/device-enrollment/complete /v1/device-enrollment/poll /v1/device-self/reset
+	handle @device_api {
+		request_body {
+			max_size 256KB
+		}
+		reverse_proxy 127.0.0.1:8789 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 20s
+			}
+		}
+	}
+
+	respond 404
 }

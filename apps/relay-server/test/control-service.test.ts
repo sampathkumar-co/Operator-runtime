@@ -39,7 +39,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     }
   };
   const results = {
-    async get(_deviceId: string, seq: number) {
+    async consume(_deviceId: string, seq: number, _deliveryId: string) {
       return {
         deliveryId: `delivery-${seq}`,
         result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
@@ -63,7 +63,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
 test('relay control rejects ambiguous account authority', async (t) => {
   const service = new RelayControlService({
     hub: { dispatch: async () => { throw new Error('must not dispatch'); } } as any,
-    results: { get: async () => null } as any,
+    results: { consume: async () => null } as any,
     accounts: { resolveOrCreateAccount: async () => { throw new Error('must not resolve'); } } as any,
     token: TOKEN
   });
@@ -84,7 +84,7 @@ test('relay control exposes authenticated principal erasure without creating an 
   const erased: Array<{ issuer: string; subject: string }> = [];
   const service = new RelayControlService({
     hub: { dispatch: async () => { throw new Error('must not dispatch'); } } as any,
-    results: { get: async () => null } as any,
+    results: { consume: async () => null } as any,
     accounts: {
       resolveOrCreateAccount: async () => { throw new Error('must not create'); },
       erasePrincipal: async (principal: { issuer: string; subject: string }) => {
@@ -102,4 +102,29 @@ test('relay control exposes authenticated principal erasure without creating an 
   });
   assert.equal(response.status, 200, await response.text());
   assert.deepEqual(erased, [{ issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' }]);
+});
+test('public relay control preserves trusted public-boundary marker in delivery envelope', async (t) => {
+  let payload: any;
+  const service = new RelayControlService({
+    hub: { dispatch: async (input: any) => {
+      payload = input.payload;
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-public', seq: 7 } };
+    } } as any,
+    results: { consume: async () => ({
+      deliveryId: 'delivery-public',
+      result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
+    }) } as any,
+    accounts: { resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' },
+    publicBoundary: true,
+    action: action(), waitMs: 1000
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(payload.publicBoundary, true);
+  assert.equal(payload.action.capability, 'computer.inspect');
 });

@@ -10,6 +10,11 @@ import { EmergencyStopStore } from './emergency-stop.ts';
 import { ApprovalStore } from './approval-store.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
 import { LocalAgentRelayRunner } from './relay-agent.ts';
+import { windowsBootstrapProtector } from './bootstrap-config.ts';
+import { RelaySessionCredentialManager, deriveRelayDeviceResetUrl, deriveRelaySessionRotateUrl } from './relay-session-credentials.ts';
+import { LocalDeviceResetCoordinator } from './device-reset.ts';
+import { OperatorError } from '../../../src/core/errors.ts';
+import { RelayEnrollmentClient } from './relay-enrollment.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -69,11 +74,13 @@ const runtime = createRuntime({
   browserAutoLaunch,
   browserPath: process.env.OPERATOR_BROWSER_PATH,
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
-  windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH
+  windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
+  windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
 });
 
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
+let relaySessionCredentials: RelaySessionCredentialManager | null = null;
 let localAgentBaseUrl = '';
 let shuttingDown = false;
 
@@ -83,11 +90,28 @@ function stopRelay(): void {
 
 function startRelay(): void {
   if (!relayUrl || shuttingDown || relayRun) return;
+  const enrollment = new RelayEnrollmentClient({
+    relayUrl, resultUrl: relayResultUrl, identity: deviceIdentity,
+    allowLoopbackInsecure: relayAllowInsecureLoopback,
+    onUserCode: ({ userCode, expiresAt }) => {
+      console.error(`[operator] device pairing code: ${userCode} (expires ${expiresAt})`);
+    }
+  });
+  const sessionCredentials = new RelaySessionCredentialManager({
+    stateDir,
+    legacyTokenFile: relayTokenFile,
+    rotateUrl: deriveRelaySessionRotateUrl(relayUrl, relayResultUrl, relayAllowInsecureLoopback),
+    protector: windowsBootstrapProtector(),
+    allowLoopbackInsecure: relayAllowInsecureLoopback,
+    enrollment
+  });
+  relaySessionCredentials = sessionCredentials;
   relayRunner = new LocalAgentRelayRunner({
     stateDir,
     relayUrl,
     resultUrl: relayResultUrl,
     sessionTokenFile: relayTokenFile,
+    sessionCredentials,
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
@@ -99,9 +123,30 @@ function startRelay(): void {
       console.error(`[operator] relay connection stopped: ${error instanceof Error ? error.message : String(error)}`);
     })
     .finally(() => {
+      runner.stop();
       if (relayRunner === runner) relayRunner = null;
+      if (relaySessionCredentials === sessionCredentials) relaySessionCredentials = null;
       relayRun = null;
     });
+}
+
+async function resetLocalDevice() {
+  const coordinator = new LocalDeviceResetCoordinator({
+    stateDir,
+    identity: deviceIdentity,
+    resetUrl: relayUrl ? deriveRelayDeviceResetUrl(relayUrl, relayResultUrl, relayAllowInsecureLoopback) : undefined,
+    getResetToken: relayUrl ? async () => {
+      const credentials = relaySessionCredentials;
+      if (!credentials) throw new OperatorError('DEVICE_RESET_RELAY_UNAVAILABLE', 'Relay session credentials are not active; start Operator and retry device reset.');
+      return await credentials.forReset();
+    } : undefined,
+    stopRelay: async () => {
+      stopRelay();
+      const activeRun = relayRun;
+      if (activeRun) await activeRun;
+    }
+  });
+  return await coordinator.reset();
 }
 
 const agent = createLocalAgentServer({
@@ -115,6 +160,7 @@ const agent = createLocalAgentServer({
   deviceIdentity,
   deviceRegistry,
   privacy,
+  deviceReset: resetLocalDevice,
   onEmergencyStop: () => stopRelay(),
   onEmergencyClear: () => {
     try { startRelay(); }

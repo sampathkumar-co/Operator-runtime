@@ -22,7 +22,7 @@ function metadata(overrides: Record<string, unknown> = {}) {
     version: '1.2.3.4',
     platform: 'win32',
     arch: 'x64',
-    identityName: 'Operator.Runtime',
+    identityName: 'SPLCART.SplcartOperator',
     artifact: 'Operator-1.2.3.4-x64.msix',
     sha256: 'a'.repeat(64),
     sizeBytes: 12345,

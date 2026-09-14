@@ -36,7 +36,7 @@ export function validateProductionReleaseInputs(input = {}) {
   }
 
   const identityName = String(input.identityName ?? '').trim();
-  if (identityName !== 'Operator.Runtime') fail('identity_name must remain Operator.Runtime for the public bootstrap.');
+  if (identityName !== 'SPLCART.SplcartOperator') fail('identity_name must remain SPLCART.SplcartOperator for the public bootstrap.');
 
   const updateBaseUri = parseHttpsUrl(input.updateBaseUri, 'update_base_uri');
   if (updateBaseUri.search) fail('update_base_uri must not contain a query string.');

@@ -12,20 +12,23 @@
     "check": "tsc -p tsconfig.json",
     "test:e2e": "tsx --test test/*.test.ts",
     "certify:local": "tsx scripts/live-cert-preflight.ts",
-    "certify:tunnel": "tsx scripts/secure-tunnel-preflight.ts"
+    "certify:tunnel": "tsx scripts/secure-tunnel-preflight.ts",
+    "certify:oauth-provider": "tsx scripts/oauth-provider-preflight.ts",
+    "certify:production-edge": "tsx scripts/production-edge-preflight.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/fastify": "^2.0.0",
     "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "fastify": "^5.0.0",
+    "jose": "6.2.12",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/inspector": "2.5.0",
+    "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^6.0.0",
-    "@types/node": "^22.0.0"
+    "typescript": "^6.0.0"
   }
 }

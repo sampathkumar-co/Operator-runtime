@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { runProductionEdgePreflight } from '../scripts/production-edge-preflight.ts';
+
+function env(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    OPERATOR_EXECUTION_MODE: 'relay',
+    OPERATOR_MCP_PUBLIC_EDGE: '1',
+    OPERATOR_MCP_PUBLIC_BIND_ACK: 'TLS_TERMINATES_UPSTREAM',
+    OPERATOR_MCP_HOST: '0.0.0.0',
+    OPERATOR_MCP_PUBLIC_URL: 'https://mcp.operator.dev/mcp',
+    OPERATOR_OAUTH_ISSUER: 'https://auth.operator.dev/',
+    OPERATOR_OAUTH_AUTHORIZATION_URL: 'https://auth.operator.dev/authorize',
+    OPERATOR_OAUTH_TOKEN_URL: 'https://auth.operator.dev/token',
+    OPERATOR_OAUTH_VERIFICATION_MODE: 'jwks',
+    OPERATOR_OAUTH_JWKS_URL: 'https://auth.operator.dev/.well-known/jwks.json',
+    OPERATOR_OAUTH_AUDIENCE: 'https://mcp.operator.dev/mcp',
+    OPERATOR_OAUTH_READ_SCOPE: 'operator:read',
+    OPERATOR_OAUTH_WRITE_SCOPE: 'operator:write',
+    OPERATOR_RELAY_CONTROL_TOKEN: '0123456789abcdef0123456789abcdef',
+    ...overrides
+  };
+}
+function providerMetadata(): Record<string, unknown> {
+  return {
+    issuer: 'https://auth.operator.dev/',
+    authorization_endpoint: 'https://auth.operator.dev/authorize',
+    token_endpoint: 'https://auth.operator.dev/token',
+    jwks_uri: 'https://auth.operator.dev/.well-known/jwks.json',
+    code_challenge_methods_supported: ['S256'],
+    scopes_supported: ['operator:read', 'operator:write'],
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    client_id_metadata_document_supported: true,
+    token_endpoint_auth_methods_supported: ['none', 'private_key_jwt']
+  };
+}
+
+const fetchFn = (async () => new Response(JSON.stringify(providerMetadata()), {
+  status: 200,
+  headers: { 'content-type': 'application/json' }
+})) as typeof fetch;
+
+test('production preflight validates edge authority and OAuth metadata without exposing secrets', async () => {
+  const receipt = await runProductionEdgePreflight({ env: env(), fetchFn });
+  assert.equal(receipt.status, 'PASS');
+  assert.equal(receipt.publicMcpUrl, 'https://mcp.operator.dev/mcp');
+  assert.equal(receipt.bindHost, '0.0.0.0');
+  const serialized = JSON.stringify(receipt);
+  assert.doesNotMatch(serialized, /0123456789abcdef0123456789abcdef/);
+});
+
+test('production preflight rejects placeholders, weak relay secrets, and unsafe binds before network work', async () => {
+  let calls = 0;
+  const neverFetch = (async () => {
+    calls += 1;
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_MCP_PUBLIC_URL: 'https://mcp.your-domain.tld/mcp' }), fetchFn: neverFetch }),
+    /placeholder|reserved|private DNS/i
+  );
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_RELAY_CONTROL_TOKEN: 'too-short' }), fetchFn: neverFetch }),
+    /at least 32 bytes/
+  );
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_MCP_HOST: 'mcp.operator.dev' }), fetchFn: neverFetch }),
+    /bind host/
+  );
+  assert.equal(calls, 0);
+});

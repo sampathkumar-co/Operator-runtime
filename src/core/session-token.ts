@@ -13,8 +13,10 @@ const MIN_TTL_MS = 30_000;
 const MAX_SCOPES = 64;
 const MAX_RECORDS = 4096;
 const RETENTION_MS = 24 * 60 * 60_000;
+const RESET_RECEIPT_RECOVERY_MS = 24 * 60 * 60_000;
 
 type Clock = () => Date;
+type SessionRevokeHook = (jti: string, subjectDeviceId: string, reason?: string) => Promise<void> | void;
 
 export interface DeviceSessionPayload {
   version: 1;
@@ -43,13 +45,15 @@ export class DeviceSessionTokenStore {
   #identity: DeviceIdentityStore;
   #registry: DeviceRegistryStore;
   #clock: Clock;
+  #onRevoke?: SessionRevokeHook;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, identity: DeviceIdentityStore, registry: DeviceRegistryStore, options: { clock?: Clock } = {}) {
+  constructor(stateDir: string, identity: DeviceIdentityStore, registry: DeviceRegistryStore, options: { clock?: Clock; onRevoke?: SessionRevokeHook } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'device-sessions.json');
     this.#identity = identity;
     this.#registry = registry;
     this.#clock = options.clock ?? (() => new Date());
+    this.#onRevoke = options.onRevoke;
   }
 
   async issue(options: { subjectDeviceId: string; audience: string; scopes: string[]; ttlMs?: number }): Promise<{ token: string; payload: DeviceSessionPayload }> {
@@ -85,12 +89,49 @@ export class DeviceSessionTokenStore {
     return { token, payload };
   }
 
+  async issueOrRecover(options: { jti: string; subjectDeviceId: string; audience: string; scopes: string[]; ttlMs?: number }): Promise<{ token: string; payload: DeviceSessionPayload }> {
+    const jti = validUuid(options.jti, 'jti');
+    const local = await this.#identity.loadOrCreate();
+    const peer = await this.#activePeer(options.subjectDeviceId);
+    const audience = validAudience(options.audience);
+    const scopes = validScopes(options.scopes);
+    const ttlMs = boundedTtl(options.ttlMs ?? 5 * 60_000);
+    const record = await this.#mutate((state) => {
+      const now = this.#clock();
+      prune(state, now.getTime());
+      const existing = state.issued.find((candidate) => candidate.jti === jti);
+      if (existing) {
+        if (existing.status !== 'active' || Date.parse(existing.expiresAt) <= now.getTime()) throw new OperatorError('SESSION_REVOKED', 'Enrollment session is no longer active.');
+        if (existing.issuerDeviceId !== local.deviceId || existing.subjectDeviceId !== peer.deviceId || existing.audience !== audience || JSON.stringify(existing.scopes) !== JSON.stringify(scopes)) {
+          throw new OperatorError('SESSION_STATE_MISMATCH', 'Enrollment session identity or scope changed.');
+        }
+        return { ...existing, scopes: [...existing.scopes] };
+      }
+      if (state.issued.length >= MAX_RECORDS) throw new OperatorError('SESSION_RECORD_LIMIT', `At most ${MAX_RECORDS} session records may be retained.`);
+      const created: IssuedSessionRecord = {
+        jti, issuerDeviceId: local.deviceId, subjectDeviceId: peer.deviceId, audience, scopes: [...scopes],
+        issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + ttlMs).toISOString(), status: 'active'
+      };
+      state.issued.push(created);
+      return { ...created, scopes: [...created.scopes] };
+    });
+    return await this.#reissue(record);
+  }
+
   async rotate(jtiInput: string, options: { ttlMs?: number } = {}): Promise<{ token: string; payload: DeviceSessionPayload }> {
     const jti = validUuid(jtiInput, 'jti');
-    const snapshot = (await this.#read()).issued.find((candidate) => candidate.jti === jti);
+    const snapshotState = await this.#read();
+    const snapshot = snapshotState.issued.find((candidate) => candidate.jti === jti);
     if (!snapshot) throw new OperatorError('SESSION_NOT_FOUND', 'Issued session was not found.');
-    if (snapshot.status !== 'active') throw new OperatorError('SESSION_REVOKED', 'Issued session is revoked.');
     const now = this.#clock();
+    if (snapshot.status !== 'active') {
+      const successorJti = rotatedSuccessorJti(snapshot.revokedReason);
+      const successor = successorJti ? snapshotState.issued.find((candidate) => candidate.jti === successorJti) : undefined;
+      if (!successor || successor.status !== 'active' || Date.parse(successor.expiresAt) <= now.getTime()) {
+        throw new OperatorError('SESSION_REVOKED', 'Issued session is revoked.');
+      }
+      return await this.#reissue(successor);
+    }
     if (Date.parse(snapshot.expiresAt) <= now.getTime()) throw new OperatorError('SESSION_EXPIRED', 'Issued session has expired.');
 
     const local = await this.#identity.loadOrCreate();
@@ -129,21 +170,24 @@ export class DeviceSessionTokenStore {
       current.revokedReason = `rotated:${payload.jti}`;
       state.issued.push(recordFrom(payload));
     });
+    await this.#onRevoke?.(jti, snapshot.subjectDeviceId, `rotated:${payload.jti}`);
     return { token, payload };
   }
 
   async revoke(jtiInput: string, reasonInput?: string): Promise<IssuedSessionRecord> {
     const jti = validUuid(jtiInput, 'jti');
     const reason = reasonInput === undefined ? undefined : validReason(reasonInput);
-    return await this.#mutate((state) => {
+    const outcome = await this.#mutate((state) => {
       const record = state.issued.find((candidate) => candidate.jti === jti);
       if (!record) throw new OperatorError('SESSION_NOT_FOUND', 'Issued session was not found.');
-      if (record.status === 'revoked') return { ...record, scopes: [...record.scopes] };
+      if (record.status === 'revoked') return { record: { ...record, scopes: [...record.scopes] }, changed: false };
       record.status = 'revoked';
       record.revokedAt = this.#clock().toISOString();
       record.revokedReason = reason;
-      return { ...record, scopes: [...record.scopes] };
+      return { record: { ...record, scopes: [...record.scopes] }, changed: true };
     });
+    if (outcome.changed) await this.#onRevoke?.(jti, outcome.record.subjectDeviceId, reason);
+    return outcome.record;
   }
 
   async listIssued(limit = 100): Promise<IssuedSessionRecord[]> {
@@ -154,6 +198,14 @@ export class DeviceSessionTokenStore {
   }
 
   async verify(tokenInput: string, options: { audience: string; requiredScopes?: string[]; expectedSubjectDeviceId?: string }): Promise<DeviceSessionPayload> {
+    return await this.#verifyToken(tokenInput, options, false);
+  }
+
+  async verifyForRotation(tokenInput: string, options: { audience: string; requiredScopes?: string[]; expectedSubjectDeviceId?: string }): Promise<DeviceSessionPayload> {
+    return await this.#verifyToken(tokenInput, options, true);
+  }
+
+  async #verifyToken(tokenInput: string, options: { audience: string; requiredScopes?: string[]; expectedSubjectDeviceId?: string }, allowRotatedRetry: boolean): Promise<DeviceSessionPayload> {
     const { payload, payloadBytes, signature } = parseToken(tokenInput);
     const audience = validAudience(options.audience);
     if (payload.audience !== audience) throw new OperatorError('SESSION_AUDIENCE_MISMATCH', 'Session token audience does not match this service.');
@@ -175,7 +227,9 @@ export class DeviceSessionTokenStore {
       verified = await this.#identity.verify(payloadBytes, signature);
       const record = (await this.#read()).issued.find((candidate) => candidate.jti === payload.jti);
       if (!record) throw new OperatorError('SESSION_NOT_FOUND', 'Locally issued session is not present in the session registry.');
-      if (record.status !== 'active') throw new OperatorError('SESSION_REVOKED', 'Session token has been revoked.');
+      if (record.status !== 'active' && !(allowRotatedRetry && rotatedSuccessorJti(record.revokedReason))) {
+        throw new OperatorError('SESSION_REVOKED', 'Session token has been revoked.');
+      }
       if (!sameRecord(record, payload)) throw new OperatorError('SESSION_STATE_MISMATCH', 'Session token no longer matches its issued registry record.');
     } else {
       const issuer = await this.#activePeer(payload.issuerDeviceId);
@@ -189,6 +243,38 @@ export class DeviceSessionTokenStore {
     return payload;
   }
 
+  async verifyForResetReceipt(tokenInput: string, options: { audience: string; requiredScopes?: string[] }): Promise<DeviceSessionPayload> {
+    const { payload, payloadBytes, signature } = parseToken(tokenInput);
+    const audience = validAudience(options.audience);
+    if (payload.audience !== audience) throw new OperatorError('SESSION_AUDIENCE_MISMATCH', 'Session token audience does not match reset receipt authority.');
+    for (const scope of validScopes(options.requiredScopes ?? [])) {
+      if (!payload.scopes.includes(scope)) throw new OperatorError('SESSION_SCOPE_DENIED', `Session token is missing required scope ${scope}.`);
+    }
+    const now = this.#clock().getTime();
+    if (Date.parse(payload.issuedAt) > now + 30_000 || now - Date.parse(payload.expiresAt) > RESET_RECEIPT_RECOVERY_MS) {
+      throw new OperatorError('SESSION_RESET_RECEIPT_EXPIRED', 'Session token is outside the reset receipt recovery window.');
+    }
+    const local = await this.#identity.loadOrCreate();
+    if (payload.issuerDeviceId !== local.deviceId || payload.issuerFingerprint !== local.fingerprint) throw new OperatorError('SESSION_ISSUER_MISMATCH', 'Reset receipt token issuer does not match this relay.');
+    if (!(await this.#identity.verify(payloadBytes, signature))) throw new OperatorError('SESSION_SIGNATURE_INVALID', 'Reset receipt token signature could not be verified.');
+    return payload;
+  }
+
+  async isActive(jtiInput: string, expectedSubjectDeviceId?: string): Promise<boolean> {
+    const jti = validUuid(jtiInput, 'jti');
+    const expectedSubject = expectedSubjectDeviceId === undefined ? undefined : validUuid(expectedSubjectDeviceId, 'expectedSubjectDeviceId');
+    const record = (await this.#read()).issued.find((candidate) => candidate.jti === jti);
+    if (!record || record.status !== 'active' || Date.parse(record.expiresAt) <= this.#clock().getTime()) return false;
+    if (expectedSubject && record.subjectDeviceId !== expectedSubject) return false;
+    try {
+      await this.#activePeer(record.subjectDeviceId);
+    } catch (error) {
+      if (error instanceof OperatorError && ['DEVICE_NOT_FOUND', 'DEVICE_REVOKED'].includes(error.code)) return false;
+      throw error;
+    }
+    return true;
+  }
+
   async purgeForDevice(deviceIdInput: string): Promise<number> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     return await this.#mutate((state) => {
@@ -196,6 +282,22 @@ export class DeviceSessionTokenStore {
       state.issued = state.issued.filter((record) => record.subjectDeviceId !== deviceId && record.issuerDeviceId !== deviceId);
       return before - state.issued.length;
     });
+  }
+
+  async #reissue(record: IssuedSessionRecord): Promise<{ token: string; payload: DeviceSessionPayload }> {
+    const local = await this.#identity.loadOrCreate();
+    if (record.issuerDeviceId !== local.deviceId) throw new OperatorError('SESSION_STATE_MISMATCH', 'Rotated session issuer no longer matches this authority.');
+    const peer = await this.#activePeer(record.subjectDeviceId);
+    const payload: DeviceSessionPayload = {
+      version: 1, purpose: PURPOSE, jti: record.jti, issuerDeviceId: local.deviceId, issuerFingerprint: local.fingerprint,
+      subjectDeviceId: peer.deviceId, subjectFingerprint: peer.fingerprint, audience: record.audience, scopes: [...record.scopes],
+      issuedAt: record.issuedAt, expiresAt: record.expiresAt
+    };
+    const payloadBytes = encodePayload(payload);
+    const signature = await this.#identity.sign(payloadBytes);
+    const token = `${payloadBytes.toString('base64url')}.${signature}`;
+    if (Buffer.byteLength(token, 'utf8') > MAX_TOKEN_BYTES) throw new OperatorError('SESSION_TOKEN_TOO_LARGE', 'Generated session token exceeded the bounded size.');
+    return { token, payload };
   }
 
   async #activePeer(deviceIdInput: string): Promise<RegisteredDevice> {
@@ -375,6 +477,12 @@ function validIso(value: string, label: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('SESSION_TOKEN_INVALID', `${label} must be an ISO timestamp.`);
   return value;
+}
+
+function rotatedSuccessorJti(reason: string | undefined): string | undefined {
+  if (!reason?.startsWith('rotated:')) return undefined;
+  const candidate = reason.slice('rotated:'.length);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate) ? candidate.toLowerCase() : undefined;
 }
 
 function validReason(value: string): string {

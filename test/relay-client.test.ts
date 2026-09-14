@@ -197,3 +197,31 @@ test('relay URL policy requires TLS except explicit loopback development and bac
   assert.ok(reconnectDelay(5, 0.5) >= 7_000);
   assert.ok(reconnectDelay(50, 1) <= 30_000);
 });
+
+
+test('client durably adopts authenticated expired-history reconciliation before fresh work', async (t) => {
+  const state = await stateDir(t, 'operator-relay-expired-reconcile-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Expired Reconcile PC');
+  const delivered: number[] = [];
+  let client!: RelayClient;
+  const socket = new FakeSocket();
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      assert.equal(frame.payload.resumeAfterSeq, 0);
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'expired-conn', resumeFromSeq: 1, expiredThroughSeq: 1, heartbeatMs: 60_000 });
+      socket.server({ type: 'delivery', seq: 2, id: 'fresh-2', kind: 'task.dispatch', payload: { fresh: true } });
+    }
+    if (frame.type === 'ack' && frame.seq === 2) { client.stop(); socket.close(); }
+  };
+  client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    onDelivery: async (delivery) => { delivered.push(delivery.seq); },
+    sleep: async () => {}
+  });
+  await client.run();
+  assert.deepEqual(delivered, [2]);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 2 });
+});

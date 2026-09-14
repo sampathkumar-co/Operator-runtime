@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import type { RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
@@ -14,16 +15,18 @@ const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch'>;
-  #results: Pick<RelayResultStore, 'get'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>;
+  #results: Pick<RelayResultStore, 'consume'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>;
+  #enrollments: Pick<DeviceEnrollmentStore, 'reserve' | 'markBound'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'consume'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments: Pick<DeviceEnrollmentStore, 'reserve' | 'markBound'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
     this.#accounts = options.accounts;
+    this.#enrollments = options.enrollments;
     this.#token = options.token;
   }
 
@@ -37,7 +40,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -52,12 +55,26 @@ export class RelayControlService {
           send(response, 200, { ok: true, ...erased });
           return;
         }
+        if (request.url === '/v1/device-enrollment/claim') {
+          const claimBody = await readJson(request) as { principal?: unknown; accountId?: unknown; userCode?: unknown };
+          const principal = claimBody.principal === undefined ? undefined : validPrincipal(claimBody.principal);
+          const explicitAccountId = claimBody.accountId === undefined ? undefined : validUuid(String(claimBody.accountId), 'accountId');
+          if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required for device enrollment claim.');
+          const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+          const userCode = boundedText(String(claimBody.userCode ?? ''), 32, 'device enrollment code');
+          const reserved = await this.#enrollments.reserve(userCode, accountId);
+          const membership = await this.#accounts.bindDevice(accountId, reserved.deviceId);
+          const claimed = await this.#enrollments.markBound(reserved.enrollmentId, accountId, membership.authorityGeneration);
+          send(response, 200, { ok: true, enrollment: { status: claimed.status } });
+          return;
+        }
         const body = await readJson(request) as {
           accountId?: unknown;
           principal?: unknown;
           deviceId?: unknown;
           projectKey?: unknown;
           action?: unknown;
+          publicBoundary?: unknown;
           waitMs?: unknown;
         };
         const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
@@ -67,6 +84,7 @@ export class RelayControlService {
         const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
         const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
         const action = validAction(body.action);
+        const publicBoundary = body.publicBoundary === true;
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
 
         const dispatched = await this.#hub.dispatch({
@@ -75,11 +93,11 @@ export class RelayControlService {
           projectKey,
           requiredCapabilities: [action.capability],
           kind: 'action',
-          payload: { action }
+          payload: { action, ...(publicBoundary ? { publicBoundary: true } : {}) }
         });
         const deadline = Date.now() + waitMs;
         while (Date.now() <= deadline) {
-          const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
+          const stored = await this.#results.consume(dispatched.route.deviceId, dispatched.delivery.seq, dispatched.delivery.id);
           if (stored && stored.deliveryId === dispatched.delivery.id) {
             const result = stored.result as unknown as ActionResult;
             if (!isActionResult(result, action.capability)) {

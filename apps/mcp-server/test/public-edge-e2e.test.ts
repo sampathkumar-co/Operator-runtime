@@ -80,8 +80,9 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
       OPERATOR_OAUTH_ISSUER: 'https://login.operator-runtime.dev',
       OPERATOR_OAUTH_AUTHORIZATION_URL: 'https://login.operator-runtime.dev/authorize',
       OPERATOR_OAUTH_TOKEN_URL: 'https://login.operator-runtime.dev/token',
+      OPERATOR_OAUTH_VERIFICATION_MODE: 'introspection',
       OPERATOR_OAUTH_INTROSPECTION_URL: 'https://login.operator-runtime.dev/introspect',
-      OPERATOR_OAUTH_AUDIENCE: 'operator-runtime',
+      OPERATOR_OAUTH_AUDIENCE: 'https://edge.operator-runtime.dev/mcp',
       OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID: 'operator-edge',
       OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET: 'test-secret-not-production'
     },

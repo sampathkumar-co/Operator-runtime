@@ -78,3 +78,18 @@ test('disabled account loses active memberships and cannot bind devices', async 
   await assert.rejects(accounts.bindDevice(account.accountId, peer.deviceId), (error: any) => error?.code === 'ACCOUNT_DISABLED');
   await assert.rejects(accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'disabled-user' }), (error: any) => error?.code === 'ACCOUNT_DISABLED');
 });
+
+test('device authority generation advances across A-B-A ownership cycles', async (t) => {
+  const { accounts, peer } = await pairedFixture(t);
+  const a = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'alice-generation' });
+  const b = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'bob-generation' });
+
+  const a1 = await accounts.bindDevice(a.accountId, peer.deviceId);
+  assert.equal(a1.authorityGeneration, 1);
+  await accounts.removeDevice(a.accountId, peer.deviceId, 'move to b');
+  const b2 = await accounts.bindDevice(b.accountId, peer.deviceId);
+  assert.equal(b2.authorityGeneration, 2);
+  await accounts.removeDevice(b.accountId, peer.deviceId, 'move back to a');
+  const a3 = await accounts.bindDevice(a.accountId, peer.deviceId);
+  assert.equal(a3.authorityGeneration, 3);
+});

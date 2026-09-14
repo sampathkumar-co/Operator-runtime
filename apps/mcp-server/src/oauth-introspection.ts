@@ -74,7 +74,13 @@ function validateConfig(input: OAuthIntrospectionConfig): OAuthIntrospectionConf
   if (issuerUrl.protocol !== 'https:' || issuerUrl.username || issuerUrl.password || issuerUrl.search || issuerUrl.hash) {
     throw new Error('OAuth issuer must be credential-free HTTPS without query or fragment.');
   }
+  if (input.endpoint.origin !== issuerUrl.origin) {
+    throw new Error('OAuth introspection endpoint must use the same origin as the OAuth issuer.');
+  }
   const audience = bounded(input.audience, 2048, 'OAuth audience');
+  if (audience !== input.resourceUrl.toString()) {
+    throw new Error('OAuth audience must exactly match the public MCP resource URL.');
+  }
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 500 || timeoutMs > 30_000) {
     throw new Error('OAuth introspection timeout must be between 500 and 30000 ms.');

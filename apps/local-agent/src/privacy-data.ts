@@ -24,7 +24,7 @@ export class LocalPrivacyDataStore {
     return [
       await this.#status('activity', ['audit.ndjson', 'audit-head.json'], true),
       await this.#status('tasks', ['tasks'], true),
-      await this.#status('session-state', ['relay-client.json', 'device-sessions.json'], true),
+      await this.#status('session-state', ['relay-client.json', 'device-sessions.json', 'relay-session.token'], true),
       await this.#status('device-identity', ['device-identity.json'], false),
       await this.#status('pairing-state', ['device-registry.json', 'device-routing.json'], false)
     ];
@@ -37,7 +37,7 @@ export class LocalPrivacyDataStore {
       ? ['audit.ndjson', 'audit-head.json']
       : category === 'tasks'
         ? ['tasks']
-        : ['relay-client.json', 'device-sessions.json'];
+        : ['relay-client.json', 'device-sessions.json', 'relay-session.token'];
 
     for (const relative of targets) {
       const target = this.#target(relative);

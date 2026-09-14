@@ -17,7 +17,7 @@ import { LocalAgentClient } from './local-agent-client.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
-import { invokePublicWithAgent } from './public-boundary.ts';
+import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 
@@ -144,7 +144,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   const publicMode = Boolean(publicEdge);
   const invoke = (capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) =>
     publicMode
-      ? invokePublicWithAgent(agent, capability, risk, input, target, { grantedScopes: authInfo?.scopes, readScope: publicEdge?.readScope, writeScope: publicEdge?.writeScope })
+      ? invokePublicWithAgent(agent, capability, risk, input, target, {
+          grantedScopes: authInfo?.scopes,
+          readScope: publicEdge?.readScope,
+          writeScope: publicEdge?.writeScope,
+          resourceMetadataUrl: publicEdge ? getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl).toString() : undefined
+        })
       : invokeWithAgent(agent, capability, risk, input, target);
 
   const server = new McpServer(
@@ -157,7 +162,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   );
 
   if (publicMode) {
-    registerPublicTools(server, invoke);
+    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope }, { claimDevice: (userCode) => invokePublicServerWrite('device.claim', () => agent.claimDevice(userCode), { grantedScopes: authInfo?.scopes, writeScope: publicEdge!.writeScope, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(publicEdge!.publicUrl).toString() }) });
     return server;
   }
 
@@ -504,8 +509,8 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       targetId: z.string().min(1).optional(),
       newTab: z.boolean().default(false)
     }),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ url, targetId, newTab }) => invoke('browser.navigate', 'read', { url, targetId, newTab }, targetId));
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async ({ url, targetId, newTab }) => invoke('browser.navigate', 'write', { url, targetId, newTab }, targetId));
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',

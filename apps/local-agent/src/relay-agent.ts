@@ -1,18 +1,14 @@
 import path from 'node:path';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
-import { readDurableStateText } from '../../../src/core/durable-state.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { RelayClient, type RelayDelivery, type RelayRecoveryDecision } from '../../../src/core/relay-client.ts';
+import { RelayClient, type RelayDelivery, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
+import type { ApprovalAuthorityContext } from './approval-store.ts';
+import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
+import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
 
-const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_RESULT_BYTES = 256 * 1024;
-const RELAY_SESSION_TOKEN_OPTIONS = {
-  maxBytes: MAX_TOKEN_BYTES,
-  errorCode: 'RELAY_SESSION_TOKEN_FILE_INVALID',
-  invalidMessage: 'Relay session token file is invalid.'
-} as const;
 
 type JsonObject = Record<string, unknown>;
 
@@ -21,17 +17,19 @@ export interface LocalAgentRelayRunnerOptions {
   relayUrl: string;
   resultUrl?: string;
   sessionTokenFile: string;
+  sessionCredentials?: RelaySessionCredentialProvider;
   identity: DeviceIdentityStore;
   localAgentBaseUrl: string;
   agentToken: string;
   allowLoopbackInsecure?: boolean;
+  socketFactory?: RelaySocketFactory;
 }
 
 export class LocalAgentRelayRunner {
   #client: RelayClient;
   #identity: DeviceIdentityStore;
   #outbox: RelayResultStore;
-  #sessionTokenFile: string;
+  #sessionCredentials: RelaySessionCredentialProvider;
   #resultUrl: string;
   #localExecuteUrl: string;
   #agentToken: string;
@@ -39,7 +37,12 @@ export class LocalAgentRelayRunner {
   constructor(options: LocalAgentRelayRunnerOptions) {
     this.#identity = options.identity;
     this.#outbox = new RelayResultStore(path.join(path.resolve(options.stateDir), 'relay-outbox'));
-    this.#sessionTokenFile = path.resolve(options.sessionTokenFile);
+    const legacyFile = path.resolve(options.sessionTokenFile);
+    this.#sessionCredentials = options.sessionCredentials ?? {
+      forConnection: () => readRelaySessionTokenFile(legacyFile),
+      forRequest: () => readRelaySessionTokenFile(legacyFile),
+      stop: () => undefined
+    };
     this.#resultUrl = validateResultUrl(options.resultUrl ?? deriveResultUrl(options.relayUrl), options.relayUrl, Boolean(options.allowLoopbackInsecure));
     this.#localExecuteUrl = new URL('/v1/execute', ensureHttpBase(options.localAgentBaseUrl)).toString();
     this.#agentToken = options.agentToken;
@@ -47,15 +50,16 @@ export class LocalAgentRelayRunner {
       stateDir: options.stateDir,
       url: options.relayUrl,
       identity: options.identity,
+      socketFactory: options.socketFactory,
       allowLoopbackInsecureWs: Boolean(options.allowLoopbackInsecure),
-      getSessionToken: () => this.#readSessionToken(),
+      getSessionToken: () => this.#sessionCredentials.forConnection(),
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#handleRecovery(context.delivery)
     });
   }
 
   run(): Promise<void> { return this.#client.run(); }
-  stop(): void { this.#client.stop(); }
+  stop(): void { this.#client.stop(); this.#sessionCredentials.stop(); }
   state(): ReturnType<RelayClient['state']> { return this.#client.state(); }
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
@@ -78,6 +82,9 @@ export class LocalAgentRelayRunner {
 
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {
     const action = validateRemoteAction(payload.action);
+    const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const publicBoundary = payload.publicBoundary === true;
+    if (publicBoundary && containsRestrictedData(action.input)) return restrictedDataBlockedResult(action.capability);
     const response = await fetch(this.#localExecuteUrl, {
       redirect: 'error',
       method: 'POST',
@@ -85,11 +92,12 @@ export class LocalAgentRelayRunner {
         'content-type': 'application/json',
         authorization: `Bearer ${this.#agentToken}`
       },
-      body: JSON.stringify({ action })
+      body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
     });
     let body: unknown;
     try { body = await response.json(); }
     catch { throw new OperatorError('RELAY_LOCAL_RESULT_INVALID', 'Local agent returned a non-JSON execution response.', { retryable: false }); }
+    if (publicBoundary && containsRestrictedData(body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
       throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: false });
     }
@@ -97,7 +105,7 @@ export class LocalAgentRelayRunner {
   }
 
   async #submitResult(seq: number, deliveryId: string, result: JsonObject): Promise<void> {
-    const token = await this.#readSessionToken();
+    const token = await this.#sessionCredentials.forRequest();
     let response: Response;
     try {
       response = await fetch(this.#resultUrl, {
@@ -116,37 +124,10 @@ export class LocalAgentRelayRunner {
     throw new OperatorError(code, `Relay result service rejected result with HTTP ${response.status}.`, { retryable });
   }
 
-  async #readSessionToken(): Promise<string> {
-    return await readRelaySessionTokenFile(this.#sessionTokenFile);
-  }
+
 }
 
-export async function readRelaySessionTokenFile(fileInput: string): Promise<string> {
-  const file = path.resolve(fileInput);
-  let raw: string;
-  try {
-    raw = await readDurableStateText(file, RELAY_SESSION_TOKEN_OPTIONS);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new OperatorError('RELAY_SESSION_TOKEN_FILE_MISSING', 'Relay session token file is missing.', { retryable: true });
-    }
-    if (error instanceof OperatorError) throw error;
-    throw new OperatorError('RELAY_SESSION_TOKEN_FILE_INVALID', 'Relay session token file could not be read.', {
-      retryable: false,
-      details: { cause: String(error) }
-    });
-  }
-
-  if (Buffer.byteLength(raw, 'utf8') < 16) {
-    throw new OperatorError('RELAY_SESSION_TOKEN_FILE_INVALID', 'Relay session token file is too small to contain a valid token.', { retryable: false });
-  }
-  const token = raw.trim();
-  const tokenBytes = Buffer.byteLength(token, 'utf8');
-  if (tokenBytes < 16 || tokenBytes > MAX_TOKEN_BYTES || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
-    throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token file does not contain a valid token.', { retryable: true });
-  }
-  return token;
-}
+export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
 
 function validateRemoteAction(input: unknown): ActionRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_ACTION_INVALID', 'Relay action payload must contain an action object.');
@@ -171,6 +152,35 @@ function validateRemoteAction(input: unknown): ActionRequest {
     provenance: { kind: 'chatgpt', source: (raw.provenance as any).source === undefined ? undefined : boundedText((raw.provenance as any).source, 'provenance source', 512) },
     taskId,
     target
+  };
+}
+
+function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('RELAY_APPROVAL_AUTHORITY_INVALID', 'Relay approval authority is invalid.');
+  }
+  const raw = input as Record<string, unknown>;
+  const accountId = String(raw.accountId ?? '');
+  const deviceId = String(raw.deviceId ?? '');
+  const generation = Number(raw.generation);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuid.test(accountId) || !uuid.test(deviceId) || !Number.isSafeInteger(generation) || generation < 1) {
+    throw new OperatorError('RELAY_APPROVAL_AUTHORITY_INVALID', 'Relay approval authority is invalid.');
+  }
+  return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
+}
+
+function restrictedDataBlockedResult(capability: string): JsonObject {
+  return {
+    ok: false,
+    capability,
+    provider: 'public-boundary',
+    error: {
+      code: 'RESTRICTED_DATA_BLOCKED',
+      message: 'The public plugin refused content that may contain restricted data.'
+    },
+    evidence: [],
+    durationMs: 0
   };
 }
 

@@ -14,11 +14,18 @@ const MAX_RETENTION_MS = 30 * 24 * 60 * 60_000;
 type Clock = () => Date;
 type JsonObject = Record<string, unknown>;
 
+export interface RelayDeliveryAuthority {
+  accountId: string;
+  deviceId: string;
+  generation: number;
+}
+
 export interface StoredRelayDelivery {
   seq: number;
   id: string;
   kind: string;
   payload: JsonObject;
+  authority?: RelayDeliveryAuthority;
   createdAt: string;
   status: 'pending' | 'acked' | 'expired';
   ackedAt?: string;
@@ -49,10 +56,11 @@ export class RelayDeliveryStore {
     this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
-  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject): Promise<StoredRelayDelivery> {
+  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority): Promise<StoredRelayDelivery> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const kind = validKind(kindInput);
     const payload = safePayload(payloadInput);
+    const authority = authorityInput === undefined ? undefined : safeAuthority(authorityInput, deviceId);
     return await this.#mutate((state) => {
       expirePending(state, this.#clock().getTime(), this.#retentionMs);
       const stream = getOrCreateStream(state, deviceId);
@@ -64,6 +72,7 @@ export class RelayDeliveryStore {
         id: crypto.randomUUID(),
         kind,
         payload,
+        authority,
         createdAt: this.#clock().toISOString(),
         status: 'pending'
       };
@@ -112,12 +121,13 @@ export class RelayDeliveryStore {
       delivery.status = 'acked';
       delivery.ackedAt = this.#clock().toISOString();
       delivery.payload = {};
+      delivery.authority = undefined;
       stream.lastAckedSeq = seq;
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
     });
   }
 
-  async reconcileClientCursor(deviceIdInput: string, clientSeqInput: number): Promise<{ lastAckedSeq: number; advanced: number }> {
+  async reconcileClientCursor(deviceIdInput: string, clientSeqInput: number): Promise<{ lastAckedSeq: number; advanced: number; expiredThroughSeq?: number }> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const clientSeq = validNonNegativeSeq(clientSeqInput);
     return await this.#mutate((state) => {
@@ -129,8 +139,8 @@ export class RelayDeliveryStore {
       }
       if (clientSeq < stream.lastAckedSeq) {
         const crossed = stream.deliveries.filter((delivery) => delivery.seq > clientSeq && delivery.seq <= stream.lastAckedSeq);
-        if (crossed.length === stream.lastAckedSeq - clientSeq && crossed.every((delivery) => delivery.status === 'expired')) {
-          return { lastAckedSeq: stream.lastAckedSeq, advanced: stream.lastAckedSeq - clientSeq };
+        if (crossed.length === stream.lastAckedSeq - clientSeq && crossed.every((delivery) => delivery.status === 'expired' && Object.keys(delivery.payload).length === 0 && delivery.authority === undefined)) {
+          return { lastAckedSeq: stream.lastAckedSeq, advanced: stream.lastAckedSeq - clientSeq, expiredThroughSeq: stream.lastAckedSeq };
         }
         throw new OperatorError('RELAY_RESUME_BEHIND', 'Client resume cursor is behind executed relay history; automatic replay is unsafe.', {
           details: { clientSeq, serverSeq: stream.lastAckedSeq }
@@ -151,6 +161,7 @@ export class RelayDeliveryStore {
         delivery.status = 'acked';
         delivery.ackedAt = this.#clock().toISOString();
         delivery.payload = {};
+        delivery.authority = undefined;
       }
       stream.lastAckedSeq = clientSeq;
       return { lastAckedSeq: clientSeq, advanced: clientSeq - from + 1 };
@@ -166,9 +177,17 @@ export class RelayDeliveryStore {
     return await this.#mutate((state) => {
       const stream = state.streams.find((item) => item.deviceId === deviceId);
       if (!stream) return 0;
-      const removed = stream.deliveries.length;
-      state.streams = state.streams.filter((item) => item.deviceId !== deviceId);
-      return removed;
+      const scrubbedAt = this.#clock().toISOString();
+      const scrubbed = stream.deliveries.length;
+      for (const delivery of stream.deliveries) {
+        delivery.status = 'expired';
+        delivery.expiredAt = scrubbedAt;
+        delivery.ackedAt = undefined;
+        delivery.payload = {};
+        delivery.authority = undefined;
+      }
+      stream.lastAckedSeq = stream.nextSeq - 1;
+      return scrubbed;
     });
   }
 
@@ -230,6 +249,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       next.status = 'expired';
       next.expiredAt = expiredAt;
       next.payload = {};
+      next.authority = undefined;
       stream.lastAckedSeq = next.seq;
       expired += 1;
     }
@@ -270,6 +290,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       if (seq >= nextSeq) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Retained delivery sequence must be lower than next sequence.');
       const kind = validKind(entry.kind);
       const payload = safePayload(entry.payload);
+      const authority = entry.authority === undefined ? undefined : safeAuthority(entry.authority, deviceId);
       const createdAt = validIso(entry.createdAt, 'createdAt');
       const status = entry.status === 'pending' ? 'pending' : entry.status === 'acked' ? 'acked' : entry.status === 'expired' ? 'expired' : null;
       if (!status) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery status is invalid.');
@@ -280,7 +301,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, authority, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = 1; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');
@@ -291,7 +312,18 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
 }
 
 function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {
-  return { ...delivery, payload: structuredClone(delivery.payload) };
+  return { ...delivery, payload: structuredClone(delivery.payload), authority: delivery.authority ? { ...delivery.authority } : undefined };
+}
+
+function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority is invalid.');
+  const raw = input as Record<string, unknown>;
+  const accountId = validUuid(String(raw.accountId ?? ''), 'authority accountId');
+  const deviceId = validUuid(String(raw.deviceId ?? ''), 'authority deviceId');
+  const generation = Number(raw.generation);
+  if (deviceId !== expectedDeviceId) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority device does not match its stream.');
+  if (!Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority generation is invalid.');
+  return { accountId, deviceId, generation };
 }
 
 function safePayload(input: unknown): JsonObject {

@@ -97,7 +97,12 @@ async function ensureRuntimeReady(config: Awaited<ReturnType<BootstrapConfigStor
   if (await runtimeHealthy(config)) return;
   const dpapi = process.env.OPERATOR_WINDOWS_DPAPI_PATH;
   const uia = process.env.OPERATOR_WINDOWS_UIA_PATH;
-  if (!dpapi || !path.isAbsolute(dpapi) || !uia || !path.isAbsolute(uia)) {
+  const pathLease = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  if (
+    !dpapi || !path.isAbsolute(dpapi)
+    || !uia || !path.isAbsolute(uia)
+    || !pathLease || !path.isAbsolute(pathLease)
+  ) {
     throw new OperatorError('BOOTSTRAP_RUNTIME_START_FAILED', 'Packaged native helpers are required to start Operator automatically.');
   }
   const child = spawn(process.execPath, ['--experimental-strip-types', import.meta.filename, 'run'], {
@@ -107,7 +112,8 @@ async function ensureRuntimeReady(config: Awaited<ReturnType<BootstrapConfigStor
       ...safeChildEnvironment('desktop'),
       OPERATOR_STATE_DIR: config.stateDir,
       OPERATOR_WINDOWS_DPAPI_PATH: dpapi,
-      OPERATOR_WINDOWS_UIA_PATH: uia
+      OPERATOR_WINDOWS_UIA_PATH: uia,
+      OPERATOR_WINDOWS_PATH_LEASE_PATH: pathLease
     },
     shell: false,
     stdio: 'ignore',
@@ -185,7 +191,8 @@ async function verifyConfiguredState(stateDir: string, config: Awaited<ReturnTyp
 
 async function verifyDeviceIdentity(stateDir: string): Promise<void> {
   const store = new DeviceIdentityStore(stateDir);
-  await store.loadOrCreate();
+  const existing = await store.loadExisting();
+  if (!existing) throw new OperatorError('DEVICE_IDENTITY_MISSING', 'Operator device identity is absent. Run Operator to begin fresh device enrollment.');
   const probe = Buffer.from('operator-one-command-verify-v1', 'utf8');
   const signature = await store.sign(probe);
   if (!(await store.verify(probe, signature))) {

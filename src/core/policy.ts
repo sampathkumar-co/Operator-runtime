@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { ActionRequest, PermissionProfile } from './types.ts';
 import { PolicyError } from './errors.ts';
 import { assertInstructionAuthority } from './provenance.ts';
+import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
 
 function capabilityAllowed(capability: string, allowed: string[]): boolean {
   return allowed.some((rule) => rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1))));
@@ -13,7 +14,7 @@ function pathWithin(child: string, root: string): boolean {
 }
 
 export class PolicyEngine {
-  authorize(action: ActionRequest, permissions: PermissionProfile): void {
+  authorizeBase(action: ActionRequest, permissions: PermissionProfile): void {
     assertInstructionAuthority(action.provenance);
 
     if (!capabilityAllowed(action.capability, permissions.allowedCapabilities)) {
@@ -32,6 +33,9 @@ export class PolicyEngine {
       }
     }
 
+  }
+
+  authorizeRisk(action: ActionRequest, permissions: PermissionProfile): void {
     const approved = new Set(permissions.approvedActionIds ?? []);
     if (action.risk === 'external' && !permissions.allowExternalWrites && !approved.has(action.id)) {
       throw new PolicyError('APPROVAL_REQUIRED', 'External write requires explicit approval.', { actionId: action.id });
@@ -42,5 +46,13 @@ export class PolicyEngine {
     if (action.risk === 'destructive' && !permissions.allowDestructive && !approved.has(action.id)) {
       throw new PolicyError('APPROVAL_REQUIRED', 'Destructive action requires explicit approval.', { actionId: action.id });
     }
+  }
+
+  authorize(action: ActionRequest, permissions: PermissionProfile): void {
+    this.authorizeBase(action, permissions);
+    const rule = capabilityRiskRule(action.capability);
+    if (rule === 'dynamic') throw new PolicyError('CAPABILITY_RISK_UNRESOLVED', `Capability ${action.capability} requires trusted dynamic risk resolution.`);
+    assertCanonicalRisk(action, rule);
+    this.authorizeRisk(action, permissions);
   }
 }

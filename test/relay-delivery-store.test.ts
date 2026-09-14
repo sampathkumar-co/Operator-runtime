@@ -102,7 +102,7 @@ test('pending delivery payload expires to a tombstone and reconnect may cross on
   nowMs += 60_001;
   assert.deepEqual(await store.pending(DEVICE), []);
   assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
-  assert.deepEqual(await store.reconcileClientCursor(DEVICE, 0), { lastAckedSeq: 1, advanced: 1 });
+  assert.deepEqual(await store.reconcileClientCursor(DEVICE, 0), { lastAckedSeq: 1, advanced: 1, expiredThroughSeq: 1 });
   const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
   const expired = persisted.streams[0].deliveries[0];
   assert.equal(expired.status, 'expired');
@@ -112,4 +112,30 @@ test('pending delivery payload expires to a tombstone and reconnect may cross on
   const fresh = await store.enqueue(DEVICE, 'action', { action: { input: { content: 'fresh' } } });
   assert.equal(fresh.seq, 2);
   assert.deepEqual((await store.pending(DEVICE)).map((delivery) => delivery.seq), [2]);
+});
+
+test('device purge erases old payloads while preserving the monotonic relay watermark for rebind', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const first = await store.enqueue(DEVICE, 'action', { secret: 'owner-a-one' });
+  const second = await store.enqueue(DEVICE, 'action', { secret: 'owner-a-two' });
+  await store.acknowledge(DEVICE, first.seq, first.id);
+
+  assert.equal(await store.purgeDevice(DEVICE), 2);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 2, highestEnqueuedSeq: 2 });
+  assert.deepEqual(await store.pending(DEVICE), []);
+  assert.deepEqual(
+    await store.reconcileClientCursor(DEVICE, 0),
+    { lastAckedSeq: 2, advanced: 2, expiredThroughSeq: 2 }
+  );
+
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.equal(JSON.stringify(persisted).includes('owner-a-one'), false);
+  assert.equal(JSON.stringify(persisted).includes('owner-a-two'), false);
+  assert.equal(persisted.streams[0].deliveries.every((entry: any) => entry.status === 'expired'), true);
+  assert.equal(persisted.streams[0].deliveries.every((entry: any) => Object.keys(entry.payload).length === 0 && entry.authority === undefined), true);
+
+  const fresh = await store.enqueue(DEVICE, 'action', { owner: 'b' });
+  assert.equal(fresh.seq, 3);
+  assert.deepEqual((await store.pending(DEVICE)).map((entry) => entry.seq), [3]);
 });

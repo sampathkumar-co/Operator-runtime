@@ -102,6 +102,19 @@ export class ProjectCommandProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
+  async resolveRisk(action: ActionRequest): Promise<ActionRisk> {
+    if (action.capability === 'project.command.inspect') return 'read';
+    if (action.capability !== 'project.command.run') throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Unsupported project command capability.');
+    const projectRoot = await this.#scope.resolveExisting(String(action.input.path ?? action.input.cwd ?? ''));
+    const registry = await this.#readRegistry();
+    const project = await this.#matchProject(registry, projectRoot);
+    if (!project) throw new OperatorError('PROJECT_COMMANDS_NOT_REGISTERED', 'No trusted command registry entry exists for this project.');
+    const commandId = validateCommandId(String(action.input.commandId ?? ''));
+    const command = project.commands.find((candidate) => candidate.id === commandId);
+    if (!command) throw new OperatorError('PROJECT_COMMAND_NOT_REGISTERED', `Trusted command ${commandId} is not registered for this project.`);
+    return command.risk as ActionRisk;
+  }
+
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {

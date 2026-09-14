@@ -14,8 +14,9 @@ function publicEnv(): NodeJS.ProcessEnv {
     OPERATOR_OAUTH_ISSUER: 'https://login.operator-runtime.dev',
     OPERATOR_OAUTH_AUTHORIZATION_URL: 'https://login.operator-runtime.dev/authorize',
     OPERATOR_OAUTH_TOKEN_URL: 'https://login.operator-runtime.dev/token',
+    OPERATOR_OAUTH_VERIFICATION_MODE: 'introspection',
     OPERATOR_OAUTH_INTROSPECTION_URL: 'https://login.operator-runtime.dev/introspect',
-    OPERATOR_OAUTH_AUDIENCE: 'operator-runtime',
+    OPERATOR_OAUTH_AUDIENCE: 'https://edge.operator-runtime.dev/mcp',
     OPERATOR_OAUTH_READ_SCOPE: 'operator:read',
     OPERATOR_OAUTH_WRITE_SCOPE: 'operator:write',
     OPENAI_APPS_CHALLENGE_TOKEN: 'openai-domain-proof',
@@ -38,6 +39,7 @@ test('public edge refuses unsafe or incomplete startup authority', () => {
   assert.throws(() => readPublicMcpEdgeConfig({ ...env, OPERATOR_MCP_PUBLIC_URL: 'https://operator.example.test/mcp' }), /reserved or private DNS hostname/);
   assert.throws(() => readPublicMcpEdgeConfig({ ...env, OPERATOR_MCP_PUBLIC_URL: 'https://203.0.113.10/mcp' }), /public DNS hostname/);
   assert.throws(() => readPublicMcpEdgeConfig({ ...env, OPERATOR_OAUTH_INTROSPECTION_URL: 'https://login.operator-runtime.dev/introspect?tenant=x' }), /without query or fragment/);
+  assert.throws(() => readPublicMcpEdgeConfig({ ...env, OPERATOR_OAUTH_AUDIENCE: 'operator-runtime' }), /exactly match OPERATOR_MCP_PUBLIC_URL/);
 });
 
 test('public edge builds OAuth metadata and permits only explicit literal public binds', () => {
@@ -55,6 +57,20 @@ test('public edge builds OAuth metadata and permits only explicit literal public
   assert.equal(resolveMcpBindHost(env, config), '0.0.0.0');
   assert.throws(() => resolveMcpBindHost({ ...env, OPERATOR_MCP_HOST: 'edge.internal' }, config), /literal wildcard or loopback/);
 });
+test('public edge supports JWKS verification without introspection credentials', () => {
+  const env = publicEnv();
+  delete env.OPERATOR_OAUTH_INTROSPECTION_URL;
+  delete env.OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID;
+  delete env.OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET;
+  env.OPERATOR_OAUTH_VERIFICATION_MODE = 'jwks';
+  env.OPERATOR_OAUTH_JWKS_URL = 'https://login.operator-runtime.dev/.well-known/jwks.json';
+  const config = readPublicMcpEdgeConfig(env);
+  assert.ok(config);
+  assert.equal(config.oauthVerificationMode, 'jwks');
+  assert.equal(config.oauthJwksEndpoint?.toString(), 'https://login.operator-runtime.dev/.well-known/jwks.json');
+  assert.equal(config.oauthIntrospectionEndpoint, undefined);
+});
+
 test('introspection verifier returns bounded secret-free AuthInfo', async () => {
   let seenBody = '';
   let seenAuthorization = '';
@@ -63,7 +79,7 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
     clientId: 'edge-client',
     clientSecret: 'edge-secret',
     issuer: 'https://login.operator-runtime.dev/',
-    audience: 'operator-runtime',
+    audience: 'https://edge.operator-runtime.dev/mcp',
     resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
   }, {
     fetchFn: async (_url, init) => {
@@ -76,7 +92,7 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
         exp: Math.floor(Date.now() / 1000) + 300,
         sub: 'user-123',
         client_id: 'chatgpt-client',
-        aud: ['operator-runtime'],
+        aud: ['https://edge.operator-runtime.dev/mcp'],
         scope: 'operator:read operator:write profile'
       });
     }
@@ -96,12 +112,25 @@ test('introspection verifier rejects inactive, expired, or wrong-audience tokens
   const make = (payload: Record<string, unknown>) => new OAuthIntrospectionVerifier({
     endpoint: new URL('https://login.operator-runtime.dev/introspect'),
     clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev/',
-    audience: 'operator-runtime', resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
+    audience: 'https://edge.operator-runtime.dev/mcp', resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
   }, { fetchFn: async () => Response.json(payload) });
   await assert.rejects(() => make({ active: false }).verifyAccessToken('x'), /inactive/);
-  await assert.rejects(() => make({ active: true, exp: 1, sub: 'u', client_id: 'c', aud: 'operator-runtime' }).verifyAccessToken('x'), /expired/);
+  await assert.rejects(() => make({ active: true, exp: 1, sub: 'u', client_id: 'c', aud: 'https://edge.operator-runtime.dev/mcp' }).verifyAccessToken('x'), /expired/);
   await assert.rejects(() => make({ active: true, exp: Math.floor(Date.now() / 1000) + 60, sub: 'u', client_id: 'c', aud: 'other' }).verifyAccessToken('x'), /audience/);
 });
+test('introspection verifier binds credentials and audience to the issuer/resource authority', () => {
+  const base = {
+    clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev/',
+    audience: 'https://edge.operator-runtime.dev/mcp', resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
+  };
+  assert.throws(() => new OAuthIntrospectionVerifier({
+    ...base, endpoint: new URL('https://other.operator-runtime.dev/introspect')
+  }), /same origin/);
+  assert.throws(() => new OAuthIntrospectionVerifier({
+    ...base, endpoint: new URL('https://login.operator-runtime.dev/introspect'), audience: 'operator-runtime'
+  }), /exactly match/);
+});
+
 test('verified AuthInfo principal binding refuses retained tokens or resource mismatches', () => {
   const base: AuthInfo = {
     token: '', clientId: 'chatgpt-client', scopes: ['operator:read'],

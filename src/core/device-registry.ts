@@ -47,15 +47,18 @@ type StoredChallenge = PublicPairingChallenge & { consumedAt?: string };
 type RegistryState = { version: 1; devices: RegisteredDevice[]; challenges: StoredChallenge[] };
 
 type Clock = () => Date;
+type DeviceRevokeHook = (deviceId: string, reason?: string) => Promise<void> | void;
 
 export class DeviceRegistryStore {
   #file: string;
   #clock: Clock;
+  #onRevoke?: DeviceRevokeHook;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: Clock } = {}) {
+  constructor(stateDir: string, options: { clock?: Clock; onRevoke?: DeviceRevokeHook } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'device-registry.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#onRevoke = options.onRevoke;
   }
 
   async listDevices(): Promise<RegisteredDevice[]> {
@@ -88,6 +91,9 @@ export class DeviceRegistryStore {
     await this.#mutate((state) => {
       pruneChallenges(state, now.getTime());
       if (state.challenges.length >= MAX_CHALLENGES) {
+        state.challenges = state.challenges.filter((candidate) => candidate.consumedAt || Date.parse(candidate.expiresAt) > now.getTime());
+      }
+      if (state.challenges.length >= MAX_CHALLENGES) {
         throw new OperatorError('PAIRING_CHALLENGE_LIMIT', `At most ${MAX_CHALLENGES} pairing challenges may be retained.`);
       }
       state.challenges.push(challenge);
@@ -95,7 +101,7 @@ export class DeviceRegistryStore {
     return publicChallenge(challenge);
   }
 
-  async completePairing(response: PairingResponse): Promise<RegisteredDevice> {
+  async completePairing(response: PairingResponse, options: { allowExactReplay?: boolean } = {}): Promise<RegisteredDevice> {
     if (!response || typeof response !== 'object') throw new OperatorError('PAIRING_RESPONSE_INVALID', 'Pairing response is invalid.');
     const challengeId = validUuid(response.challengeId, 'challengeId');
     const peer = normalizePublicIdentity(response.peer);
@@ -109,8 +115,7 @@ export class DeviceRegistryStore {
       pruneChallenges(state, now.getTime());
       const challenge = state.challenges.find((candidate) => candidate.challengeId === challengeId);
       if (!challenge) throw new OperatorError('PAIRING_CHALLENGE_NOT_FOUND', 'Pairing challenge was not found or is no longer retained.');
-      if (challenge.consumedAt) throw new OperatorError('PAIRING_CHALLENGE_REPLAY', 'Pairing challenge has already been consumed.');
-      if (Date.parse(challenge.expiresAt) < now.getTime()) throw new OperatorError('PAIRING_CHALLENGE_EXPIRED', 'Pairing challenge has expired.');
+      if (!challenge.consumedAt && Date.parse(challenge.expiresAt) < now.getTime()) throw new OperatorError('PAIRING_CHALLENGE_EXPIRED', 'Pairing challenge has expired.');
       if (challenge.expectedPeerDeviceId && challenge.expectedPeerDeviceId !== peer.deviceId) {
         throw new OperatorError('PAIRING_PEER_MISMATCH', 'Pairing response came from a different device than the challenge expected.');
       }
@@ -126,6 +131,10 @@ export class DeviceRegistryStore {
 
       const sameId = state.devices.find((device) => device.deviceId === peer.deviceId);
       const sameFingerprint = state.devices.find((device) => device.fingerprint === peer.fingerprint);
+      if (challenge.consumedAt) {
+        if (options.allowExactReplay && sameId && sameId.status === 'active' && sameId.fingerprint === peer.fingerprint) return { ...sameId };
+        throw new OperatorError('PAIRING_CHALLENGE_REPLAY', 'Pairing challenge has already been consumed.');
+      }
       if (sameId && sameId.fingerprint !== peer.fingerprint) {
         throw new OperatorError('DEVICE_IDENTITY_CONFLICT', 'The device ID is already registered with a different public key.');
       }
@@ -164,15 +173,17 @@ export class DeviceRegistryStore {
   async revokeDevice(deviceIdInput: string, reasonInput?: string): Promise<RegisteredDevice> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const reason = reasonInput === undefined ? undefined : boundedReason(reasonInput);
-    return await this.#mutate((state) => {
+    const outcome = await this.#mutate((state) => {
       const device = state.devices.find((candidate) => candidate.deviceId === deviceId);
       if (!device) throw new OperatorError('DEVICE_NOT_FOUND', 'Registered device was not found.');
-      if (device.status === 'revoked') return { ...device };
+      if (device.status === 'revoked') return { device: { ...device }, changed: false };
       device.status = 'revoked';
       device.revokedAt = this.#clock().toISOString();
       device.revokedReason = reason;
-      return { ...device };
+      return { device: { ...device }, changed: true };
     });
+    if (outcome.changed) await this.#onRevoke?.(deviceId, reason);
+    return outcome.device;
   }
 
   async verifyDeviceSignature(deviceIdInput: string, payload: Uint8Array, signatureInput: string): Promise<boolean> {

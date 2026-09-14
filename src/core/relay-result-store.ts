@@ -14,9 +14,10 @@ type JsonObject = Record<string, unknown>;
 type StoredRelayResult = {
   seq: number;
   deliveryId: string;
-  result: JsonObject;
+  result?: JsonObject;
   resultSha256: string;
   recordedAt: string;
+  consumedAt?: string;
 };
 
 type ResultStream = { deviceId: string; results: StoredRelayResult[] };
@@ -69,8 +70,25 @@ export class RelayResultStore {
     const seq = validSeq(seqInput);
     const state = await this.#read();
     const result = state.streams.find((stream) => stream.deviceId === deviceId)?.results.find((entry) => entry.seq === seq);
-    if (!result || isExpired(result, this.#clock().getTime(), this.#retentionMs)) return null;
+    if (!result || result.consumedAt || isExpired(result, this.#clock().getTime(), this.#retentionMs)) return null;
     return clone(result);
+  }
+
+  async consume(deviceIdInput: string, seqInput: number, deliveryIdInput: string): Promise<StoredRelayResult | null> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const seq = validSeq(seqInput);
+    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
+    return await this.#mutate((state) => {
+      pruneExpired(state, this.#clock().getTime(), this.#retentionMs);
+      const entry = state.streams.find((stream) => stream.deviceId === deviceId)?.results.find((candidate) => candidate.seq === seq);
+      if (!entry || entry.consumedAt) return null;
+      if (entry.deliveryId !== deliveryId) throw new OperatorError('RELAY_RESULT_DELIVERY_MISMATCH', 'Stored result does not match the requested delivery ID.');
+      if (!entry.result) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Available relay result is missing its payload.');
+      const consumed = clone(entry);
+      entry.result = undefined;
+      entry.consumedAt = this.#clock().toISOString();
+      return consumed;
+    });
   }
 
   async pruneExpired(): Promise<number> {
@@ -188,11 +206,19 @@ function validateState(input: ResultState): ResultState {
       const deliveryId = validUuid(entry.deliveryId, 'deliveryId');
       if (seqs.has(seq) || ids.has(deliveryId)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state contains duplicate sequence or delivery ID.');
       seqs.add(seq); ids.add(deliveryId);
-      const result = safeResult(entry.result);
       const resultSha256 = String(entry.resultSha256 ?? '');
-      if (!/^[0-9a-f]{64}$/.test(resultSha256) || resultSha256 !== hashResult(result)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash does not match its stored result.');
+      if (!/^[0-9a-f]{64}$/.test(resultSha256)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash is invalid.');
       const recordedAt = validIso(String(entry.recordedAt ?? ''));
-      return { seq, deliveryId, result, resultSha256, recordedAt } satisfies StoredRelayResult;
+      const consumedAt = entry.consumedAt === undefined ? undefined : validIso(String(entry.consumedAt));
+      let result: JsonObject | undefined;
+      if (consumedAt) {
+        if (entry.result !== undefined) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Consumed relay result must not retain its payload.');
+      } else {
+        try { result = safeResult(entry.result); }
+        catch { throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Available relay result payload is invalid.'); }
+        if (resultSha256 !== hashResult(result)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash does not match its stored result.');
+      }
+      return { seq, deliveryId, result, resultSha256, recordedAt, consumedAt } satisfies StoredRelayResult;
     }).sort((a, b) => a.seq - b.seq);
     return { deviceId, results };
   });
@@ -200,7 +226,7 @@ function validateState(input: ResultState): ResultState {
 }
 
 function clone(result: StoredRelayResult): StoredRelayResult {
-  return { ...result, result: structuredClone(result.result) };
+  return { ...result, result: result.result === undefined ? undefined : structuredClone(result.result) };
 }
 
 function validSeq(input: number): number {

@@ -9,8 +9,9 @@ import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
-import type { ApprovalStore } from './approval-store.ts';
+import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
+import type { LocalDeviceResetResult } from './device-reset.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -69,6 +70,19 @@ function validateActionEnvelope(value: unknown): ActionRequest {
   };
 }
 
+function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('approvalAuthority must be an object.');
+  const raw = input as Record<string, unknown>;
+  const accountId = String(raw.accountId ?? '');
+  const deviceId = String(raw.deviceId ?? '');
+  const generation = Number(raw.generation);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuid.test(accountId) || !uuid.test(deviceId) || !Number.isSafeInteger(generation) || generation < 1) {
+    throw new Error('approvalAuthority is invalid.');
+  }
+  return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
+}
+
 function boundedString(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\0')) {
     throw new Error(`${field} must be a non-empty string of at most ${maxLength} characters without NUL bytes.`);
@@ -102,6 +116,7 @@ export function createLocalAgentServer(options: {
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
   privacy?: LocalPrivacyDataStore;
+  deviceReset?: () => Promise<LocalDeviceResetResult>;
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
@@ -136,7 +151,7 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/devices' && req.method === 'GET') {
-      const local = options.deviceIdentity ? await options.deviceIdentity.loadOrCreate() : null;
+      const local = options.deviceIdentity ? await options.deviceIdentity.loadExisting() : null;
       const peers = options.deviceRegistry ? await options.deviceRegistry.listDevices() : [];
       send(res, 200, {
         ok: true,
@@ -193,6 +208,26 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    if (pathname === '/v1/device/reset' && req.method === 'POST') {
+      if (!options.deviceReset || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'DEVICE_RESET_NOT_CONFIGURED', message: 'Device reset requires local recovery authority.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      try {
+        const reset = await options.deviceReset();
+        send(res, 200, { ok: true, reset });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESET_FAILED';
+        send(res, 409, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/permissions' && req.method === 'GET') {
       send(res, 200, {
         ok: true,
@@ -221,6 +256,8 @@ export function createLocalAgentServer(options: {
         target: record.target,
         status: record.status,
         createdAt: record.createdAt,
+        pendingExpiresAt: record.pendingExpiresAt,
+        approvalRequestId: record.approvalRequestId,
         approvalExpiresAt: record.approvalExpiresAt
       }));
       send(res, 200, { ok: true, approvals, configured: true });
@@ -239,12 +276,13 @@ export function createLocalAgentServer(options: {
       }
       try {
         const actionId = boundedString(decodeURIComponent(pathname.slice('/v1/approvals/'.length)), 'actionId', 256);
-        const body = await readJson(req) as { decision?: unknown };
+        const body = await readJson(req) as { decision?: unknown; approvalRequestId?: unknown };
         const decision = String(body.decision ?? '');
+        const approvalRequestId = boundedString(body.approvalRequestId, 'approvalRequestId', 128);
         const record = decision === 'approve'
-          ? await options.approvals.approve(actionId)
+          ? await options.approvals.approve(actionId, approvalRequestId)
           : decision === 'deny'
-            ? await options.approvals.deny(actionId)
+            ? await options.approvals.deny(actionId, approvalRequestId)
             : null;
         if (!record) {
           send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve or deny.' } });
@@ -258,6 +296,7 @@ export function createLocalAgentServer(options: {
             risk: record.risk,
             target: record.target,
             status: record.status,
+            approvalRequestId: record.approvalRequestId,
             approvalExpiresAt: record.approvalExpiresAt
           }
         });
@@ -339,23 +378,24 @@ export function createLocalAgentServer(options: {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.' } });
           return;
         }
-        const body = await readJson(req) as { action?: ActionRequest };
+        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown };
         if (!body.action || typeof body.action !== 'object') {
           send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
           return;
         }
         const action = validateActionEnvelope(body.action);
-        const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action) : false;
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
         const permissions = oneTimeApproved
           ? {
               ...options.permissions,
               approvedActionIds: [...new Set([...(options.permissions.approvedActionIds ?? []), action.id])]
             }
           : options.permissions;
-        if (oneTimeApproved) await options.approvals!.consume(action);
+        if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
         const result = await options.runtime.execute(action, permissions);
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
-          await options.approvals?.register(action);
+          await options.approvals?.register(action, approvalAuthority);
         }
         await options.audit?.append({
           taskId: action.taskId,

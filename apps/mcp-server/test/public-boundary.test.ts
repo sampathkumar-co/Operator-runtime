@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { McpServer } from '@modelcontextprotocol/server';
 import type { ActionResult } from '../../../src/core/types.ts';
 import type { LocalAgentClient } from '../src/local-agent-client.ts';
-import { invokePublicWithAgent } from '../src/public-boundary.ts';
-import { PUBLIC_TOOL_NAMES } from '../src/public-tools.ts';
+import { invokePublicServerWrite, invokePublicWithAgent } from '../src/public-boundary.ts';
+import { PUBLIC_TOOL_NAMES, registerPublicTools } from '../src/public-tools.ts';
 import { assertPublicSafePath, containsRestrictedData } from '../src/restricted-data.ts';
 
 test('public tool surface excludes generic high-power capabilities', () => {
@@ -12,6 +14,50 @@ test('public tool surface excludes generic high-power capabilities', () => {
     'app.inspect', 'app.operate', 'postgres.query', 'file.write'
   ]) assert.equal(PUBLIC_TOOL_NAMES.includes(denied), false, denied);
   assert.deepEqual(PUBLIC_TOOL_NAMES, [...PUBLIC_TOOL_NAMES].sort());
+});
+
+test('public tools/list advertises exact OAuth scopes at top level and compatibility metadata', async (t) => {
+  const server = new McpServer({ name: 'oauth-wire-test', version: '0.1.0' }, { capabilities: { tools: {} } });
+  registerPublicTools(server, async () => { throw new Error('not called'); }, {
+    readScope: 'operator:read', writeScope: 'operator:write'
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const sent: any[] = [];
+  const originalSend = serverTransport.send.bind(serverTransport);
+  serverTransport.send = async (message, options) => {
+    sent.push(structuredClone(message));
+    await originalSend(message, options);
+  };
+  const client = new Client({ name: 'oauth-wire-client', version: '0.1.0' });
+  t.after(async () => { await client.close().catch(() => {}); await server.close().catch(() => {}); });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const listed = await client.listTools();
+  assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [...PUBLIC_TOOL_NAMES].sort());
+  const response = sent.find((message) => Array.isArray(message?.result?.tools));
+  assert.ok(response, 'raw tools/list response was not observed');
+  for (const tool of response.result.tools as Array<Record<string, any>>) {
+    const scopes = ['device.claim', 'file.create', 'file.replace'].includes(String(tool.name))
+      ? ['operator:read', 'operator:write'] : ['operator:read'];
+    const expected = [{ type: 'oauth2', scopes }];
+    assert.deepEqual(tool.securitySchemes, expected, `${tool.name} top-level securitySchemes`);
+    assert.deepEqual(tool._meta?.securitySchemes, expected, `${tool.name} compatibility securitySchemes`);
+  }
+});
+
+test('device claim bootstrap requires write scope before calling server-side claim authority', async () => {
+  let claims = 0;
+  const auth = { writeScope: 'operator:write', resourceMetadataUrl: 'https://edge.operator-runtime.dev/.well-known/oauth-protected-resource/mcp' };
+  const denied = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read'] });
+  assert.equal(claims, 0);
+  assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as any).error.code, 'OAUTH_SCOPE_REQUIRED');
+  assert.ok(Array.isArray((denied as any)._meta?.['mcp/www_authenticate']));
+
+  const allowed = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read', 'operator:write'] });
+  assert.equal(claims, 1);
+  assert.equal(allowed.isError, false);
+  assert.deepEqual((allowed.structuredContent as any).output, { status: 'claimed' });
 });
 
 test('restricted-data guard rejects credential paths and high-confidence secrets', () => {
@@ -45,7 +91,7 @@ test('public result projection strips internal telemetry and absolute path ident
   assert.equal(structured.provider, undefined);
   assert.equal(structured.durationMs, undefined);
   assert.equal(structured.evidence, undefined);
-  assert.equal(structured.output.path, 'src/index.ts');
+  assert.equal(structured.output.path, '[path]/index.ts');
   assert.equal(structured.output.diagnostics, undefined);
   assert.equal(structured.output.createdAt, undefined);
 });
@@ -75,21 +121,38 @@ test('public boundary blocks restricted data returned by an agent before it reac
   assert.equal(JSON.stringify(response).includes('abcdefghijklmnop'), false);
 });
 
-test('public write is denied before agent execution when OAuth write scope is absent', async () => {
-  let executed = false;
+test('public write returns OAuth step-up challenge before execution and succeeds with write scope', async () => {
+  let executions = 0;
   const agent = { execute: async () => {
-    executed = true;
-    throw new Error('must not execute');
+    executions += 1;
+    return {
+      ok: true, capability: 'file.create', provider: 'test-provider',
+      output: { created: true }, evidence: [], durationMs: 1
+    } as ActionResult;
   } } as unknown as LocalAgentClient;
-  const response = await invokePublicWithAgent(agent, 'file.create', 'write', {
-    path: 'C:\\repo\\new.ts', content: 'export const value = 1;'
-  }, 'C:\\repo\\new.ts', {
-    grantedScopes: ['operator:read'], readScope: 'operator:read', writeScope: 'operator:write'
+  const input = { path: 'C:\\repo\\new.ts', content: 'export const value = 1;' };
+  const auth = {
+    readScope: 'operator:read', writeScope: 'operator:write',
+    resourceMetadataUrl: 'https://edge.operator-runtime.dev/.well-known/oauth-protected-resource/mcp'
+  };
+  const denied = await invokePublicWithAgent(agent, 'file.create', 'write', input, input.path, {
+    ...auth, grantedScopes: ['operator:read']
   });
-  assert.equal(executed, false);
-  assert.equal(response.isError, true);
-  const structured = response.structuredContent as Record<string, any>;
-  assert.equal(structured.error.code, 'OAUTH_SCOPE_REQUIRED');
+  assert.equal(executions, 0);
+  assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as Record<string, any>).error.code, 'OAUTH_SCOPE_REQUIRED');
+  const challenges = (denied as any)._meta?.['mcp/www_authenticate'];
+  assert.ok(Array.isArray(challenges) && challenges.length === 1);
+  assert.match(challenges[0], /error="insufficient_scope"/);
+  assert.match(challenges[0], /scope="operator:read operator:write"/);
+  assert.match(challenges[0], /oauth-protected-resource\/mcp/);
+  assert.equal(JSON.stringify(denied).includes('new.ts'), false);
+  const allowed = await invokePublicWithAgent(agent, 'file.create', 'write', input, input.path, {
+    ...auth, grantedScopes: ['operator:read', 'operator:write']
+  });
+  assert.equal(executions, 1);
+  assert.equal(allowed.isError, false);
+  assert.equal((allowed.structuredContent as Record<string, any>).output.created, true);
 });
 
 test('public Git diff rejects sensitive nested path entries before agent execution', async () => {
@@ -105,4 +168,159 @@ test('public Git diff rejects sensitive nested path entries before agent executi
   assert.equal(response.isError, true);
   const structured = response.structuredContent as Record<string, any>;
   assert.equal(structured.error.code, 'RESTRICTED_DATA_PATH_DENIED');
+});
+
+
+test('public result sanitizer redacts nested absolute paths and internal identifiers by value', async () => {
+  const fakeResult: ActionResult = {
+    ok: true,
+    capability: 'file.read',
+    provider: 'test-provider',
+    output: {
+      summary: 'Failed reading C:\\Users\\Alice\\private\\token.txt during inspection',
+      nested: [
+        { note: 'cache at /home/alice/.operator/state/accounts/a.json' },
+        { detail: 'requestId=req-123' }
+      ],
+      requestId: 'internal-request-123',
+      safeSha256: 'a'.repeat(64)
+    },
+    evidence: [],
+    durationMs: 2
+  };
+  const agent = { execute: async () => fakeResult } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.read', 'read', { path: 'C:\\repo' });
+  const json = JSON.stringify(response);
+  assert.equal(json.includes('C:\\\\Users\\\\Alice'), false);
+  assert.equal(json.includes('/home/alice'), false);
+  assert.equal(json.includes('req-123'), false);
+  const structured = response.structuredContent as Record<string, any>;
+  assert.equal(structured.output.requestId, undefined);
+  assert.equal(structured.output.safeSha256, 'a'.repeat(64));
+});
+
+
+test('public errors never expose raw internal exception messages or unknown internal codes', async () => {
+  const agent = { execute: async () => ({
+    ok: false,
+    capability: 'file.read',
+    provider: 'filesystem.native',
+    evidence: [],
+    durationMs: 1,
+    error: {
+      code: 'INTERNAL_SQLITE_CORRUPTION',
+      message: 'Failed reading C:\\Users\\Alice\\private\\token.txt requestId=req-123',
+      retryable: false
+    }
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.read', 'read', { path: 'C:\\repo\\safe.txt' });
+  const json = JSON.stringify(response);
+  const structured = response.structuredContent as Record<string, any>;
+  assert.equal(structured.error.code, 'PUBLIC_REQUEST_FAILED');
+  assert.equal(structured.error.message, 'The request could not be completed safely.');
+  assert.equal(json.includes('INTERNAL_SQLITE_CORRUPTION'), false);
+  assert.equal(json.includes('Alice'), false);
+  assert.equal(json.includes('req-123'), false);
+});
+
+test('thrown non-Operator errors are mapped without reflecting exception text', async () => {
+  const agent = { execute: async () => {
+    throw new Error('open /home/alice/.operator/private-state.json failed');
+  } } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.read', 'read', { path: 'C:\\repo' });
+  assert.equal(response.isError, true);
+  const json = JSON.stringify(response);
+  assert.equal(json.includes('/home/alice'), false);
+  assert.equal(json.includes('private-state.json'), false);
+  assert.equal((response.structuredContent as Record<string, any>).error.code, 'PUBLIC_BOUNDARY_REJECTED');
+});
+
+test('public computer inspect exposes only coarse platform identity', async () => {
+  const agent = { execute: async () => ({
+    ok: true, capability: 'computer.inspect', provider: 'system.native',
+    output: {
+      hostname: 'HOST-SECRET', platform: 'win32', release: '10.0.26100', arch: 'x64',
+      cpuCount: 16, totalMemoryBytes: 34359738368, node: 'v22.19.0'
+    }, evidence: [], durationMs: 1
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'computer.inspect', 'read', {});
+  assert.deepEqual((response.structuredContent as any).output, {
+    platformFamily: 'windows', architecture: 'x64'
+  });
+  const json = JSON.stringify(response);
+  assert.equal(json.includes('HOST-SECRET'), false);
+  assert.equal(json.includes('26100'), false);
+  assert.equal(json.includes('34359738368'), false);
+  assert.equal(json.includes('v22.19.0'), false);
+});
+
+test('public project inspect returns script names but never package script bodies', async () => {
+  const agent = { execute: async () => ({
+    ok: true, capability: 'project.inspect', provider: 'project.semantic',
+    output: {
+      root: 'C:\\Users\\Alice\\repo', repository: true,
+      buildSystems: ['node'], packageManager: 'npm',
+      scripts: { build: 'node build.js --token super-secret-value', test: 'node --test' },
+      manifests: ['package.json'], pyprojectDetected: false,
+      observedAt: '2026-09-14T00:00:00.000Z'
+    }, evidence: [], durationMs: 1
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'project.inspect', 'read', { path: 'C:\\repo' });
+  const output = (response.structuredContent as any).output;
+  assert.deepEqual(output.scriptNames, ['build', 'test']);
+  assert.equal(output.root, undefined);
+  const json = JSON.stringify(response);
+  assert.equal(json.includes('build.js'), false);
+  assert.equal(json.includes('super-secret-value'), false);
+  assert.equal(json.includes('Alice'), false);
+});
+
+test('public project commands expose semantic metadata without executable authority details', async () => {
+  const agent = { execute: async () => ({
+    ok: true, capability: 'project.command.inspect', provider: 'project.command.trusted',
+    output: {
+      projectRoot: 'C:\\Users\\Alice\\repo', registryConfigured: true, registryLocation: 'operator-local-config',
+      commands: [{
+        id: 'build', title: 'Build app', kind: 'build', executable: 'node.exe',
+        args: ['build.js', '--token', 'super-secret-value'], cwd: 'tools', timeoutMs: 60000, risk: 'write',
+        artifacts: [{ path: 'dist/private.json', kind: 'json', minBytes: 1, mustChange: true }]
+      }]
+    }, evidence: [], durationMs: 1
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'project.command.inspect', 'read', { path: 'C:\\repo' });
+  const command = (response.structuredContent as any).output.commands[0];
+  assert.deepEqual(command, {
+    id: 'build', title: 'Build app', kind: 'build', risk: 'write',
+    expectedOutput: { artifactCount: 1, kinds: ['json'], requiresChange: true }
+  });
+  const json = JSON.stringify(response);
+  for (const forbidden of ['node.exe', '--token', 'super-secret-value', 'dist/private.json', 'Alice']) {
+    assert.equal(json.includes(forbidden), false, forbidden);
+  }
+});
+
+test('public file list filters sensitive entry names instead of failing the whole directory', async () => {
+  const agent = { execute: async () => ({
+    ok: true, capability: 'file.list', provider: 'filesystem.native',
+    output: {
+      path: 'C:\\Users\\Alice\\repo',
+      entries: [
+        { name: '.env', type: 'file' }, { name: '.ssh', type: 'directory' },
+        { name: 'credentials.json', type: 'file' }, { name: 'src', type: 'directory' },
+        { name: 'safe.ts', type: 'file' }
+      ], truncated: false
+    }, evidence: [], durationMs: 1
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.list', 'read', { path: 'C:\\repo' });
+  assert.equal(response.isError, false);
+  const output = (response.structuredContent as any).output;
+  assert.deepEqual(output.entries, [
+    { name: 'src', type: 'directory' }, { name: 'safe.ts', type: 'file' }
+  ]);
+  assert.equal(output.path, undefined);
+  const json = JSON.stringify(response);
+  assert.equal(json.includes('.env'), false);
+  assert.equal(json.includes('.ssh'), false);
+  assert.equal(json.includes('credentials.json'), false);
+  assert.equal(json.includes('Alice'), false);
 });

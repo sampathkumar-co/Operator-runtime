@@ -3,6 +3,7 @@ import { PolicyEngine } from './policy.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
+import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
 
 export class OperatorRuntime {
   readonly router = new CapabilityRouter();
@@ -15,8 +16,14 @@ export class OperatorRuntime {
 
   async execute(action: ActionRequest, permissions: PermissionProfile): Promise<ActionResult> {
     const start = performance.now();
+    let canonicalAction = action;
     try {
-      this.policy.authorize(action, permissions);
+      this.policy.authorizeBase(action, permissions);
+      const rule = capabilityRiskRule(action.capability);
+      const canonicalRisk = rule === 'dynamic' ? await this.router.resolveRisk(action) : rule;
+      assertCanonicalRisk(action, canonicalRisk);
+      canonicalAction = { ...action, risk: canonicalRisk };
+      this.policy.authorizeRisk(canonicalAction, permissions);
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('POLICY_ERROR', String(error));
       return {
@@ -29,7 +36,7 @@ export class OperatorRuntime {
       };
     }
 
-    const ranked = await this.router.rank(action);
+    const ranked = await this.router.rank(canonicalAction);
     if (ranked.length === 0) {
       return {
         ok: false,
@@ -44,7 +51,7 @@ export class OperatorRuntime {
     const failures = [];
     for (const { provider, score } of ranked) {
       try {
-        const result = await provider.execute(action);
+        const result = await provider.execute(canonicalAction);
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score }));
         result.durationMs = Math.round(performance.now() - start);
         if (result.ok) return result;
