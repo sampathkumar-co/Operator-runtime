@@ -5,7 +5,8 @@ import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_DEVICES = 1000;
-const MAX_CHALLENGES = 128;
+const MAX_CHALLENGES = 2048;
+const MAX_ACTIVE_CHALLENGES = 128;
 const MAX_TTL_MS = 5 * 60_000;
 const MIN_TTL_MS = 30_000;
 const CHALLENGE_RETENTION_MS = 24 * 60 * 60_000;
@@ -43,7 +44,7 @@ export interface RegisteredDevice {
   revokedReason?: string;
 }
 
-type StoredChallenge = PublicPairingChallenge & { consumedAt?: string };
+type StoredChallenge = PublicPairingChallenge & { consumedAt?: string; consumedPeerDeviceId?: string; consumedPeerFingerprint?: string };
 type RegistryState = { version: 1; devices: RegisteredDevice[]; challenges: StoredChallenge[] };
 
 type Clock = () => Date;
@@ -90,15 +91,66 @@ export class DeviceRegistryStore {
 
     await this.#mutate((state) => {
       pruneChallenges(state, now.getTime());
-      if (state.challenges.length >= MAX_CHALLENGES) {
-        state.challenges = state.challenges.filter((candidate) => candidate.consumedAt || Date.parse(candidate.expiresAt) > now.getTime());
+      const activeChallenges = state.challenges.filter((candidate) => !candidate.consumedAt && Date.parse(candidate.expiresAt) > now.getTime()).length;
+      if (activeChallenges >= MAX_ACTIVE_CHALLENGES) throw new OperatorError('PAIRING_CHALLENGE_LIMIT', `At most ${MAX_ACTIVE_CHALLENGES} active pairing challenges may be retained.`);
+      while (state.challenges.length >= MAX_CHALLENGES) {
+        const reclaimIndex = state.challenges.findIndex((candidate) => Boolean(candidate.consumedAt) || Date.parse(candidate.expiresAt) <= now.getTime());
+        if (reclaimIndex < 0) break;
+        state.challenges.splice(reclaimIndex, 1);
       }
-      if (state.challenges.length >= MAX_CHALLENGES) {
-        throw new OperatorError('PAIRING_CHALLENGE_LIMIT', `At most ${MAX_CHALLENGES} pairing challenges may be retained.`);
-      }
+      if (state.challenges.length >= MAX_CHALLENGES) throw new OperatorError('PAIRING_CHALLENGE_LIMIT', 'Pairing challenge retention limit reached.');
       state.challenges.push(challenge);
     });
     return publicChallenge(challenge);
+  }
+
+  async verifyPairingForEnrollment(response: PairingResponse, options: { allowExactReplay?: boolean } = {}): Promise<PublicDeviceIdentity> {
+    if (!response || typeof response !== 'object') throw new OperatorError('PAIRING_RESPONSE_INVALID', 'Pairing response is invalid.');
+    const challengeId = validUuid(response.challengeId, 'challengeId');
+    const peer = normalizePublicIdentity(response.peer);
+    const signature = String(response.signature ?? '');
+    if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('PAIRING_SIGNATURE_INVALID', 'Pairing response signature is malformed.');
+    return await this.#mutate((state) => {
+      const now = this.#clock();
+      pruneChallenges(state, now.getTime());
+      const challenge = state.challenges.find((candidate) => candidate.challengeId === challengeId);
+      if (!challenge) throw new OperatorError('PAIRING_CHALLENGE_NOT_FOUND', 'Pairing challenge was not found or is no longer retained.');
+      if (!challenge.consumedAt && Date.parse(challenge.expiresAt) < now.getTime()) throw new OperatorError('PAIRING_CHALLENGE_EXPIRED', 'Pairing challenge has expired.');
+      if (challenge.expectedPeerDeviceId && challenge.expectedPeerDeviceId !== peer.deviceId) throw new OperatorError('PAIRING_PEER_MISMATCH', 'Pairing response came from a different device than the challenge expected.');
+      let verified = false;
+      try { verified = crypto.verify(null, pairingPayload(challenge, peer), peer.publicKeyPem, Buffer.from(signature, 'base64url')); } catch { verified = false; }
+      if (!verified) throw new OperatorError('PAIRING_SIGNATURE_INVALID', 'Pairing response signature could not be verified.');
+      if (challenge.consumedAt) {
+        const exact = challenge.consumedPeerDeviceId === peer.deviceId && challenge.consumedPeerFingerprint === peer.fingerprint;
+        if (options.allowExactReplay && exact) return { ...peer };
+        throw new OperatorError('PAIRING_CHALLENGE_REPLAY', 'Pairing challenge has already been consumed.');
+      }
+      challenge.consumedAt = now.toISOString();
+      challenge.consumedPeerDeviceId = peer.deviceId;
+      challenge.consumedPeerFingerprint = peer.fingerprint;
+      return { ...peer };
+    });
+  }
+  async registerVerifiedPeer(peerInput: PublicDeviceIdentity): Promise<RegisteredDevice> {
+    const peer = normalizePublicIdentity(peerInput);
+    return await this.#mutate((state) => {
+      const sameId = state.devices.find((device) => device.deviceId === peer.deviceId);
+      const sameFingerprint = state.devices.find((device) => device.fingerprint === peer.fingerprint);
+      if (sameId && sameId.fingerprint !== peer.fingerprint) throw new OperatorError('DEVICE_IDENTITY_CONFLICT', 'The device ID is already registered with a different public key.');
+      if (sameFingerprint && sameFingerprint.deviceId !== peer.deviceId) throw new OperatorError('DEVICE_IDENTITY_CONFLICT', 'The public-key fingerprint is already registered to a different device ID.');
+      if (sameId?.status === 'revoked') throw new OperatorError('DEVICE_REVOKED', 'This device identity is revoked and cannot be silently reactivated.');
+      if (!sameId && state.devices.length >= MAX_DEVICES) throw new OperatorError('DEVICE_REGISTRY_LIMIT', `At most ${MAX_DEVICES} peer devices may be registered.`);
+      const pairedAt = this.#clock().toISOString();
+      const registered: RegisteredDevice = sameId ?? { ...peer, status: 'active', pairedAt };
+      if (!sameId) state.devices.push(registered);
+      else {
+        sameId.deviceName = peer.deviceName;
+        sameId.createdAt = peer.createdAt;
+        sameId.publicKeyPem = peer.publicKeyPem;
+        sameId.pairedAt = pairedAt;
+      }
+      return { ...registered };
+    });
   }
 
   async completePairing(response: PairingResponse, options: { allowExactReplay?: boolean } = {}): Promise<RegisteredDevice> {
@@ -339,7 +391,11 @@ function validateState(input: RegistryState): RegistryState {
     if (challengeIds.has(challenge.challengeId)) throw new OperatorError('DEVICE_REGISTRY_CORRUPT', 'Duplicate pairing challenge ID.');
     challengeIds.add(challenge.challengeId);
     const consumedAt = raw.consumedAt === undefined ? undefined : validIsoDate(String(raw.consumedAt), 'consumedAt');
-    return { ...challenge, consumedAt };
+    const consumedPeerDeviceId = raw.consumedPeerDeviceId === undefined ? undefined : validUuid(String(raw.consumedPeerDeviceId), 'consumedPeerDeviceId');
+    const consumedPeerFingerprint = raw.consumedPeerFingerprint === undefined ? undefined : String(raw.consumedPeerFingerprint);
+    if (consumedPeerFingerprint !== undefined && !/^[A-Za-z0-9_-]{32,128}$/.test(consumedPeerFingerprint)) throw new OperatorError('DEVICE_REGISTRY_CORRUPT', 'Consumed pairing peer fingerprint is invalid.');
+    if (Boolean(consumedPeerDeviceId) !== Boolean(consumedPeerFingerprint) || (!consumedAt && consumedPeerDeviceId)) throw new OperatorError('DEVICE_REGISTRY_CORRUPT', 'Consumed pairing replay authority is inconsistent.');
+    return { ...challenge, consumedAt, consumedPeerDeviceId, consumedPeerFingerprint };
   });
   return { version: 1, devices, challenges };
 }

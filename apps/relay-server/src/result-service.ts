@@ -116,8 +116,8 @@ export class RelayResultService {
           let pollProofValid = false;
           try { pollProofValid = crypto.verify(null, binding, pairing.peer.publicKeyPem, Buffer.from(pollSignature, 'base64url')); } catch { pollProofValid = false; }
           if (!pollProofValid) throw new OperatorError('DEVICE_ENROLLMENT_SIGNATURE_INVALID', 'Device enrollment poll authority proof is invalid.');
-          const registered = await this.#devices.completePairing(pairing, { allowExactReplay: true });
-          const enrollment = await this.#enrollments.create(registered, { enrollmentId: pairing.challengeId, pollToken });
+          const peer = await this.#devices.verifyPairingForEnrollment(pairing, { allowExactReplay: true });
+          const enrollment = await this.#enrollments.create(peer, { enrollmentId: pairing.challengeId, pollToken });
           send(response, 200, { ok: true, enrollment: { enrollmentId: enrollment.enrollmentId, deviceId: enrollment.deviceId, deviceName: enrollment.deviceName, userCode: enrollment.userCode, expiresAt: enrollment.expiresAt } });
           return;
         }

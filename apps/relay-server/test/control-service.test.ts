@@ -39,7 +39,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     }
   };
   const results = {
-    async consume(_deviceId: string, seq: number, _deliveryId: string) {
+    async get(_deviceId: string, seq: number, _deliveryId: string) {
       return {
         deliveryId: `delivery-${seq}`,
         result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
@@ -63,7 +63,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
 test('relay control rejects ambiguous account authority', async (t) => {
   const service = new RelayControlService({
     hub: { dispatch: async () => { throw new Error('must not dispatch'); } } as any,
-    results: { consume: async () => null } as any,
+    results: { get: async () => null } as any,
     accounts: { resolveOrCreateAccount: async () => { throw new Error('must not resolve'); } } as any,
     token: TOKEN
   });
@@ -84,7 +84,7 @@ test('relay control exposes authenticated principal erasure without creating an 
   const erased: Array<{ issuer: string; subject: string }> = [];
   const service = new RelayControlService({
     hub: { dispatch: async () => { throw new Error('must not dispatch'); } } as any,
-    results: { consume: async () => null } as any,
+    results: { get: async () => null } as any,
     accounts: {
       resolveOrCreateAccount: async () => { throw new Error('must not create'); },
       erasePrincipal: async (principal: { issuer: string; subject: string }) => {
@@ -110,7 +110,7 @@ test('public relay control preserves trusted public-boundary marker in delivery 
       payload = input.payload;
       return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-public', seq: 7 } };
     } } as any,
-    results: { consume: async () => ({
+    results: { get: async () => ({
       deliveryId: 'delivery-public',
       result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
     }) } as any,
@@ -127,4 +127,58 @@ test('public relay control preserves trusted public-boundary marker in delivery 
   assert.equal(response.status, 200, await response.text());
   assert.equal(payload.publicBoundary, true);
   assert.equal(payload.action.capability, 'computer.inspect');
+});
+
+test('receipt acknowledgement verifies action authority before consuming and is retry-safe', async (t) => {
+  const deliveryId = '44444444-4444-4444-8444-444444444444';
+  let allowReceipt = false;
+  let verifyCalls = 0;
+  let consumeCalls = 0;
+  let releaseCalls = 0;
+  const hub = {
+    dispatch: async () => { throw new Error('must not dispatch'); },
+    verifyIdempotency: async () => {
+      verifyCalls += 1;
+      if (!allowReceipt) throw Object.assign(new Error('mismatch'), { code: 'RELAY_IDEMPOTENCY_MISMATCH' });
+      return { released: releaseCalls > 0 };
+    },
+    releaseIdempotency: async () => { releaseCalls += 1; return releaseCalls === 1; }
+  };
+  const results = {
+    get: async () => null,
+    consume: async () => {
+      consumeCalls += 1;
+      return consumeCalls === 1 ? { deliveryId, result: { ok: true } } : null;
+    }
+  };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());  const ack = async () => await fetch(`http://127.0.0.1:${port}/v1/execute/ack`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      action: action(),
+      deviceId: DEVICE_ID,
+      seq: 9,
+      deliveryId
+    })
+  });
+
+  const forged = await ack();
+  assert.equal(forged.status, 409);
+  assert.equal(consumeCalls, 0);
+  assert.equal(releaseCalls, 0);
+
+  allowReceipt = true;
+  const accepted = await ack();
+  assert.equal(accepted.status, 200, await accepted.text());
+  assert.equal(consumeCalls, 1);
+  assert.equal(releaseCalls, 1);
+
+  const duplicate = await ack();
+  assert.equal(duplicate.status, 200, await duplicate.text());
+  assert.equal(verifyCalls, 3);
+  assert.equal(consumeCalls, 2);
+  assert.equal(releaseCalls, 2);
 });

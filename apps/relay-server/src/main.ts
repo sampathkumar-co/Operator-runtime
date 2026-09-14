@@ -126,7 +126,7 @@ async function main(): Promise<void> {
     const resultListening = await resultService.listen(config.resultHost, config.resultPort);
     logListening('operator-relay-results', resultListening.host, resultListening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     if (config.controlToken) {
-      controlService = new RelayControlService({ hub, results, accounts, enrollments, token: config.controlToken });
+      controlService = new RelayControlService({ hub, results, accounts, enrollments, devices, token: config.controlToken });
       const controlListening = await controlService.listen(config.controlHost, config.controlPort);
       logListening('operator-relay-control', controlListening.host, controlListening.port, config.stateDir, 'internal-loopback-http');
     } else {

@@ -13,6 +13,7 @@ const CONTROL_TOKEN = 'relay-control-ci-0123456789abcdef0123456789';
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
 const DEVICE_ID = '22222222-2222-4222-8222-222222222222';
 const PROJECT_KEY = 'ci-project';
+const DELIVERY_IDS = ['44444444-4444-4444-8444-444444444441', '44444444-4444-4444-8444-444444444442'];
 async function reservePort(): Promise<number> {
   const server = http.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -97,11 +98,16 @@ async function runInspector(mcpUrl: string, home: string): Promise<Record<string
 
 test('official MCP client and Inspector execute through relay control mode with unchanged tool schemas', async (t) => {
   const seen: Array<{ accountId: string; deviceId?: string; projectKey?: string; action: ActionRequest }> = [];
+  const receiptAcks: any[] = [];
   const control = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-    if (req.method !== 'POST' || req.url !== '/v1/execute') return send(res, 404, { ok: false });
+    if (req.method !== 'POST' || !['/v1/execute', '/v1/execute/ack'].includes(req.url ?? '')) return send(res, 404, { ok: false });
     assert.equal(req.headers.authorization, `Bearer ${CONTROL_TOKEN}`);
     const body = await readBody(req);
+    if (req.url === '/v1/execute/ack') {
+      receiptAcks.push(body);
+      return send(res, 200, { ok: true });
+    }
     assert.equal(body.accountId, ACCOUNT_ID);
     assert.equal(body.deviceId, DEVICE_ID);
     assert.equal(body.projectKey, PROJECT_KEY);
@@ -124,7 +130,15 @@ test('official MCP client and Inspector execute through relay control mode with 
           evidence: [{ kind: 'relay-ci', status: 'pass', message: 'remote result persisted', timestamp: new Date().toISOString() }],
           durationMs: 2
         };
-    return send(res, 200, result);
+    const deliveryId = DELIVERY_IDS[seen.length - 1]!;
+    const payload = JSON.stringify(result);
+    res.writeHead(200, {
+      'content-type': 'application/json', 'content-length': Buffer.byteLength(payload),
+      'x-operator-device-id': DEVICE_ID, 'x-operator-delivery-seq': String(seen.length), 'x-operator-delivery-id': deliveryId
+    });
+    res.end(payload);
+    return;
+
   });
   const controlPort = await listen(control);
   t.after(() => new Promise<void>((resolve) => control.close(() => resolve())));
@@ -177,6 +191,8 @@ test('official MCP client and Inspector execute through relay control mode with 
   assert.equal(seen.length, 2);
   assert.equal(seen[0]?.action.provenance.kind, 'chatgpt');
   assert.equal(seen[1]?.action.risk, 'external');
+  assert.equal(receiptAcks.length, 2);
+  assert.deepEqual(receiptAcks.map((ack) => ack.deliveryId), DELIVERY_IDS);
 
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-relay-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));

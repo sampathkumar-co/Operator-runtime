@@ -26,6 +26,8 @@ export interface StoredRelayDelivery {
   kind: string;
   payload: JsonObject;
   authority?: RelayDeliveryAuthority;
+  idempotencyKey?: string;
+  idempotencyReleasedAt?: string;
   createdAt: string;
   status: 'pending' | 'acked' | 'expired';
   ackedAt?: string;
@@ -56,13 +58,22 @@ export class RelayDeliveryStore {
     this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
-  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority): Promise<StoredRelayDelivery> {
+  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority, idempotencyKeyInput?: string): Promise<StoredRelayDelivery> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const kind = validKind(kindInput);
     const payload = safePayload(payloadInput);
     const authority = authorityInput === undefined ? undefined : safeAuthority(authorityInput, deviceId);
+    const idempotencyKey = idempotencyKeyInput === undefined ? undefined : validIdempotencyKey(idempotencyKeyInput);
     return await this.#mutate((state) => {
       expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      if (idempotencyKey) {
+        for (const existingStream of state.streams) {
+          const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
+          if (!existing) continue;
+          if (existingStream.deviceId !== deviceId) throw new OperatorError('RELAY_IDEMPOTENCY_ROUTE_CHANGED', 'An unacknowledged action retry resolved to a different device.');
+          return cloneDelivery(existing);
+        }
+      }
       const stream = getOrCreateStream(state, deviceId);
       if (stream.deliveries.length >= MAX_DELIVERIES_PER_STREAM) {
         throw new OperatorError('RELAY_QUEUE_LIMIT', `Device relay queue has reached ${MAX_DELIVERIES_PER_STREAM} retained deliveries.`);
@@ -73,6 +84,7 @@ export class RelayDeliveryStore {
         kind,
         payload,
         authority,
+        idempotencyKey,
         createdAt: this.#clock().toISOString(),
         status: 'pending'
       };
@@ -124,6 +136,35 @@ export class RelayDeliveryStore {
       delivery.authority = undefined;
       stream.lastAckedSeq = seq;
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
+    });
+  }
+
+  async verifyIdempotency(deviceIdInput: string, seqInput: number, deliveryIdInput: string, idempotencyKeyInput: string): Promise<{ released: boolean }> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const seq = validSeq(seqInput);
+    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
+    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
+    const state = await this.#read();
+    const delivery = state.streams.find((stream) => stream.deviceId === deviceId)?.deliveries.find((candidate) => candidate.seq === seq && candidate.id === deliveryId);
+    if (!delivery || !delivery.idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references an unknown idempotent relay delivery.');
+    if (delivery.idempotencyKey !== idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_MISMATCH', 'Receipt acknowledgement does not match the action idempotency authority.');
+    return { released: Boolean(delivery.idempotencyReleasedAt) };
+  }
+
+  async releaseIdempotency(deviceIdInput: string, seqInput: number, deliveryIdInput: string, idempotencyKeyInput: string): Promise<boolean> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const seq = validSeq(seqInput);
+    const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
+    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
+    return await this.#mutate((state) => {
+      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+      const delivery = stream?.deliveries.find((candidate) => candidate.seq === seq && candidate.id === deliveryId);
+      if (!delivery) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references an unknown relay delivery.');
+      if (delivery.idempotencyKey === undefined) throw new OperatorError('RELAY_IDEMPOTENCY_DELIVERY_MISSING', 'Receipt acknowledgement references a non-idempotent relay delivery.');
+      if (delivery.idempotencyKey !== idempotencyKey) throw new OperatorError('RELAY_IDEMPOTENCY_MISMATCH', 'Receipt acknowledgement does not match the action idempotency authority.');
+      if (delivery.idempotencyReleasedAt) return false;
+      delivery.idempotencyReleasedAt = this.#clock().toISOString();
+      return true;
     });
   }
 
@@ -185,6 +226,8 @@ export class RelayDeliveryStore {
         delivery.ackedAt = undefined;
         delivery.payload = {};
         delivery.authority = undefined;
+        delivery.idempotencyKey = undefined;
+        delivery.idempotencyReleasedAt = undefined;
       }
       stream.lastAckedSeq = stream.nextSeq - 1;
       return scrubbed;
@@ -250,8 +293,13 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       next.expiredAt = expiredAt;
       next.payload = {};
       next.authority = undefined;
+      next.idempotencyKey = undefined;
+      next.idempotencyReleasedAt = undefined;
       stream.lastAckedSeq = next.seq;
       expired += 1;
+    }
+    for (const delivery of stream.deliveries) {
+      if (delivery.status === 'acked' && delivery.idempotencyKey && delivery.ackedAt && Date.parse(delivery.ackedAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
     }
   }
   return expired;
@@ -291,6 +339,9 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const kind = validKind(entry.kind);
       const payload = safePayload(entry.payload);
       const authority = entry.authority === undefined ? undefined : safeAuthority(entry.authority, deviceId);
+      const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(entry.idempotencyKey);
+      const idempotencyReleasedAt = entry.idempotencyReleasedAt === undefined ? undefined : validIso(entry.idempotencyReleasedAt, 'idempotencyReleasedAt');
+      if (idempotencyReleasedAt && !idempotencyKey) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Released idempotency authority is missing its key.');
       const createdAt = validIso(entry.createdAt, 'createdAt');
       const status = entry.status === 'pending' ? 'pending' : entry.status === 'acked' ? 'acked' : entry.status === 'expired' ? 'expired' : null;
       if (!status) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery status is invalid.');
@@ -298,10 +349,10 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
       if (status === 'pending' && (ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps.');
       if (status === 'acked' && (!ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
-      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free tombstone.');
+      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || idempotencyKey || idempotencyReleasedAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free, idempotency-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, authority, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, authority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = 1; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');
@@ -341,6 +392,12 @@ function validKind(value: string): string {
   const kind = String(value ?? '');
   if (!kind || kind.length > MAX_KIND || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(kind)) throw new OperatorError('RELAY_KIND_INVALID', 'Relay delivery kind is invalid.');
   return kind;
+}
+
+function validIdempotencyKey(value: string): string {
+  const key = String(value ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(key)) throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
+  return key;
 }
 
 function boundedLimit(value: number): number {

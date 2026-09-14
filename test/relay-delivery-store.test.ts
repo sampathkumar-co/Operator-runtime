@@ -139,3 +139,24 @@ test('device purge erases old payloads while preserving the monotonic relay wate
   assert.equal(fresh.seq, 3);
   assert.deepEqual((await store.pending(DEVICE)).map((entry) => entry.seq), [3]);
 });
+
+test('unacknowledged action retry reuses one durable delivery until receipt release', async (t) => {
+  const store = new RelayDeliveryStore(await temp(t));
+  const key = 'a'.repeat(64);
+  const first = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  const retryBeforeDeviceAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryBeforeDeviceAck.seq, first.seq);
+  assert.equal(retryBeforeDeviceAck.id, first.id);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
+
+  await store.acknowledge(DEVICE, first.seq, first.id);
+  const retryAfterDeviceAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryAfterDeviceAck.seq, first.seq);
+  assert.equal(retryAfterDeviceAck.id, first.id);
+
+  assert.equal(await store.releaseIdempotency(DEVICE, first.seq, first.id, key), true);
+  assert.equal(await store.releaseIdempotency(DEVICE, first.seq, first.id, key), false);
+  const intentionalRepeat = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(intentionalRepeat.seq, 2);
+  assert.notEqual(intentionalRepeat.id, first.id);
+});

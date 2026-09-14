@@ -56,6 +56,7 @@ export interface RelayDispatchRequest {
   requiredCapabilities?: string[];
   kind: string;
   payload: JsonObject;
+  idempotencyKey?: string;
 }
 
 export interface RelayDispatchResult {
@@ -204,9 +205,17 @@ export class RelayHub {
     const payload = request.kind === 'action'
       ? { ...request.payload, approvalAuthority: { ...authority } }
       : request.payload;
-    const delivery = await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority);
+    const delivery = await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey);
     await this.#pump(route.deviceId);
     return { route, delivery };
+  }
+
+  async verifyIdempotency(deviceId: string, seq: number, deliveryId: string, idempotencyKey: string): Promise<{ released: boolean }> {
+    return await this.#deliveries.verifyIdempotency(deviceId, seq, deliveryId, idempotencyKey);
+  }
+
+  async releaseIdempotency(deviceId: string, seq: number, deliveryId: string, idempotencyKey: string): Promise<boolean> {
+    return await this.#deliveries.releaseIdempotency(deviceId, seq, deliveryId, idempotencyKey);
   }
 
   async deliveryCursor(deviceId: string): Promise<{ lastAckedSeq: number; highestEnqueuedSeq: number }> {

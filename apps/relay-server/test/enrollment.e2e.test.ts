@@ -61,6 +61,7 @@ test('fresh device enrollment binds authenticated account and returns one recove
     results: { consume: async () => null } as any,
     accounts,
     enrollments,
+    devices,
     token: CONTROL_TOKEN
   });
   const resultListening = await resultService.listen('127.0.0.1', 0);
@@ -89,6 +90,7 @@ test('fresh device enrollment binds authenticated account and returns one recove
   assert.equal(completed.response.status, 200, JSON.stringify(completed.payload));
   assert.equal(completed.payload.enrollment.deviceId, device.deviceId);
   assert.equal(completed.payload.enrollment.enrollmentId, pairing.challengeId);
+  assert.equal((await devices.listDevices()).length, 0, 'unauthenticated enrollment completion must remain provisional');
   const userCode = String(completed.payload.enrollment.userCode);
   assert.match(userCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 
@@ -110,6 +112,7 @@ test('fresh device enrollment binds authenticated account and returns one recove
   }, CONTROL_TOKEN);
   assert.equal(claimed.response.status, 200, JSON.stringify(claimed.payload));
   assert.equal(claimed.payload.enrollment.status, 'claimed');
+  assert.equal((await devices.listDevices()).filter((entry) => entry.status === 'active').length, 1);
 
   const issued = await postJson(`${resultBase}/v1/device-enrollment/poll`, {
     enrollmentId: pairing.challengeId,
@@ -176,7 +179,7 @@ test('device reset forces a new cryptographic identity before fresh enrollment c
   const controlService = new RelayControlService({
     hub: { dispatch: async () => { throw new Error('must not dispatch during enrollment'); } } as any,
     results: { consume: async () => null } as any,
-    accounts, enrollments, token: CONTROL_TOKEN
+    accounts, enrollments, devices, token: CONTROL_TOKEN
   });
   const resultListening = await resultService.listen('127.0.0.1', 0);
   const controlListening = await controlService.listen('127.0.0.1', 0);
@@ -247,4 +250,29 @@ test('device reset forces a new cryptographic identity before fresh enrollment c
   const afterMembership = await accounts.activeMembershipForDevice(second.device.deviceId);
   assert.equal(afterMembership?.accountId, account.accountId);
   assert.equal((await devices.listDevices()).filter((entry) => entry.status === 'active').some((entry) => entry.deviceId === first.device.deviceId), false);
+});
+
+test('unauthenticated completed enrollments cannot exhaust permanent device or active challenge capacity', async (t) => {
+  const authorityState = await tempDir(t, 'operator-enrollment-pressure-authority-');
+  const deviceState = await tempDir(t, 'operator-enrollment-pressure-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, requestLimitPerMinute: 1000 });
+  const listening = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const base = `http://127.0.0.1:${listening.port}`;
+  const device = await deviceIdentity.loadOrCreate('Pressure Device');
+
+  for (let index = 0; index < 140; index += 1) {
+    const challenged = await postJson(`${base}/v1/device-enrollment/challenge`, { deviceId: device.deviceId });
+    assert.equal(challenged.response.status, 200, `challenge ${index}: ${JSON.stringify(challenged.payload)}`);
+    const pairing = await answerPairingChallenge(challenged.payload.challenge, deviceIdentity);
+    const pollToken = crypto.randomBytes(32).toString('base64url');
+    const pollSignature = await deviceIdentity.sign(enrollmentPollBinding(pairing.challengeId, device.deviceId, pollToken));
+    const completed = await postJson(`${base}/v1/device-enrollment/complete`, { pairingResponse: pairing, pollToken, pollSignature });
+    assert.equal(completed.response.status, 200, `complete ${index}: ${JSON.stringify(completed.payload)}`);
+  }
+
+  assert.equal((await devices.listDevices()).length, 0);
 });

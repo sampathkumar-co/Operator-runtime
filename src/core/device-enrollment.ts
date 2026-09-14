@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { RegisteredDevice } from './device-registry.ts';
+import type { PublicDeviceIdentity } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
@@ -32,6 +32,8 @@ export interface DeviceEnrollmentRecord {
 type StoredEnrollment = DeviceEnrollmentRecord & {
   userCodeSha256: string;
   pollTokenSha256: string;
+  peerCreatedAt?: string;
+  peerPublicKeyPem?: string;
 };
 type EnrollmentState = { version: typeof VERSION; enrollments: StoredEnrollment[] };
 
@@ -54,8 +56,8 @@ export class DeviceEnrollmentStore {
     this.#file = path.join(path.resolve(stateDir), 'device-enrollments.json');
     this.#clock = options.clock ?? (() => new Date());
   }
-  async create(device: RegisteredDevice, options: { enrollmentId?: string; pollToken?: string; ttlMs?: number } = {}): Promise<NewDeviceEnrollment> {
-    if (device.status !== 'active') throw new OperatorError('DEVICE_REVOKED', 'Only an active paired device may begin enrollment.');
+  async create(deviceInput: PublicDeviceIdentity, options: { enrollmentId?: string; pollToken?: string; ttlMs?: number } = {}): Promise<NewDeviceEnrollment> {
+    const device = normalizePeer(deviceInput);
     const ttl = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
     const now = this.#clock();
     const enrollmentId = options.enrollmentId === undefined ? crypto.randomUUID() : validUuid(options.enrollmentId, 'enrollmentId');
@@ -65,15 +67,17 @@ export class DeviceEnrollmentStore {
     const userCodeSha256 = secretHash('code', normalizeUserCode(userCode));
     const base = {
       enrollmentId,
-      deviceId: validUuid(device.deviceId, 'deviceId'),
-      deviceName: boundedName(device.deviceName),
-      fingerprint: validFingerprint(device.fingerprint)
+      deviceId: device.deviceId,
+      deviceName: device.deviceName,
+      fingerprint: device.fingerprint,
+      peerCreatedAt: device.createdAt,
+      peerPublicKeyPem: device.publicKeyPem
     };
     const stored = await this.#mutate((state) => {
       prune(state, now.getTime());
       const existing = state.enrollments.find((item) => item.enrollmentId === enrollmentId);
       if (existing) {
-        if (existing.deviceId !== base.deviceId || existing.fingerprint !== base.fingerprint || !hashEquals(existing.pollTokenSha256, pollTokenSha256) || !hashEquals(existing.userCodeSha256, userCodeSha256)) {
+        if (existing.deviceId !== base.deviceId || existing.fingerprint !== base.fingerprint || existing.peerCreatedAt !== base.peerCreatedAt || existing.peerPublicKeyPem !== base.peerPublicKeyPem || !hashEquals(existing.pollTokenSha256, pollTokenSha256) || !hashEquals(existing.userCodeSha256, userCodeSha256)) {
           throw new OperatorError('DEVICE_ENROLLMENT_STATE_MISMATCH', 'Enrollment retry does not match the original device authority.');
         }
         return existing;
@@ -113,6 +117,16 @@ export class DeviceEnrollmentStore {
       }
       return publicRecord(item);
     });
+  }
+
+  async peerForClaim(enrollmentIdInput: string, accountIdInput: string): Promise<PublicDeviceIdentity> {
+    const enrollmentId = validUuid(enrollmentIdInput, 'enrollmentId');
+    const accountId = validUuid(accountIdInput, 'accountId');
+    const state = await this.#read();
+    const item = state.enrollments.find((candidate) => candidate.enrollmentId === enrollmentId);
+    if (!item || item.accountId !== accountId || item.status === 'pending') throw new OperatorError('DEVICE_ENROLLMENT_STATE_MISMATCH', 'Device enrollment is not reserved for this account.');
+    if (!item.peerCreatedAt || !item.peerPublicKeyPem) throw new OperatorError('DEVICE_ENROLLMENT_RESTART_REQUIRED', 'Legacy provisional enrollment lacks promotion authority; begin enrollment again.');
+    return normalizePeer({ deviceId: item.deviceId, deviceName: item.deviceName, createdAt: item.peerCreatedAt, publicKeyPem: item.peerPublicKeyPem, fingerprint: item.fingerprint });
   }
 
   async markBound(enrollmentIdInput: string, accountIdInput: string, authorityGenerationInput: number): Promise<DeviceEnrollmentRecord> {
@@ -228,6 +242,13 @@ function validateStored(raw: StoredEnrollment): StoredEnrollment {
   const deviceId = validUuid(raw.deviceId, 'deviceId');
   const deviceName = boundedName(raw.deviceName);
   const fingerprint = validFingerprint(raw.fingerprint);
+  const peerCreatedAt = raw.peerCreatedAt === undefined ? undefined : validIso(raw.peerCreatedAt, 'peerCreatedAt');
+  const peerPublicKeyPem = raw.peerPublicKeyPem === undefined ? undefined : String(raw.peerPublicKeyPem);
+  if (Boolean(peerCreatedAt) !== Boolean(peerPublicKeyPem)) throw new OperatorError('DEVICE_ENROLLMENT_STATE_CORRUPT', 'Provisional device identity is incomplete.');
+  if (peerCreatedAt && peerPublicKeyPem) {
+    const peer = normalizePeer({ deviceId, deviceName, createdAt: peerCreatedAt, publicKeyPem: peerPublicKeyPem, fingerprint });
+    if (peer.fingerprint !== fingerprint) throw new OperatorError('DEVICE_ENROLLMENT_STATE_CORRUPT', 'Provisional device fingerprint changed.');
+  }
   const status: EnrollmentStatus = raw.status === 'pending' || raw.status === 'reserved' || raw.status === 'claimed' || raw.status === 'issued'
     ? raw.status : (() => { throw new OperatorError('DEVICE_ENROLLMENT_STATE_CORRUPT', 'Device enrollment status is invalid.'); })();
   const createdAt = validIso(raw.createdAt, 'createdAt');
@@ -256,11 +277,12 @@ function validateStored(raw: StoredEnrollment): StoredEnrollment {
     throw new OperatorError('DEVICE_ENROLLMENT_STATE_CORRUPT', 'Issued enrollment authority is incomplete.');
   }
   return { enrollmentId, deviceId, deviceName, fingerprint, status, createdAt, expiresAt,
-    userCodeSha256, pollTokenSha256, accountId, authorityGeneration, reservedAt, claimedAt, sessionJti, issuedAt };
+    userCodeSha256, pollTokenSha256, peerCreatedAt, peerPublicKeyPem, accountId, authorityGeneration, reservedAt, claimedAt, sessionJti, issuedAt };
 }
 
 function prune(state: EnrollmentState, nowMs: number): void {
   state.enrollments = state.enrollments.filter((item) => {
+    if (item.status === 'pending' && Date.parse(item.expiresAt) <= nowMs) return false;
     const reference = item.issuedAt ?? item.claimedAt ?? item.reservedAt ?? item.expiresAt;
     return nowMs - Date.parse(reference) <= RETENTION_MS;
   });
@@ -274,6 +296,20 @@ function publicRecord(item: StoredEnrollment): DeviceEnrollmentRecord {
     reservedAt: item.reservedAt, claimedAt: item.claimedAt, sessionJti: item.sessionJti, issuedAt: item.issuedAt
   };
 }
+function normalizePeer(input: PublicDeviceIdentity): PublicDeviceIdentity {
+  const deviceId = validUuid(String(input?.deviceId ?? ''), 'deviceId');
+  const deviceName = boundedName(String(input?.deviceName ?? ''));
+  const createdAt = validIso(String(input?.createdAt ?? ''), 'peerCreatedAt');
+  let publicKey: crypto.KeyObject;
+  try { publicKey = crypto.createPublicKey(String(input?.publicKeyPem ?? '')); }
+  catch { throw new OperatorError('DEVICE_ENROLLMENT_INPUT_INVALID', 'Provisional device public key is invalid.'); }
+  if (publicKey.asymmetricKeyType !== 'ed25519') throw new OperatorError('DEVICE_ENROLLMENT_INPUT_INVALID', 'Provisional device key must be Ed25519.');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const fingerprint = crypto.createHash('sha256').update(publicKeyPem).digest('base64url');
+  if (fingerprint !== validFingerprint(String(input?.fingerprint ?? ''))) throw new OperatorError('DEVICE_ENROLLMENT_INPUT_INVALID', 'Provisional device fingerprint does not match its key.');
+  return { deviceId, deviceName, createdAt, publicKeyPem, fingerprint };
+}
+
 function boundedTtl(input: number): number {
   const value = Number(input);
   if (!Number.isInteger(value) || value < MIN_TTL_MS || value > MAX_TTL_MS) {

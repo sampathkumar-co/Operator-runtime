@@ -3,6 +3,7 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
+type RelayReceipt = { deviceId: string; seq: number; deliveryId: string };
 
 export interface RelayAgentClientOptions {
   baseUrl: string;
@@ -74,11 +75,36 @@ export class RelayAgentClient {
       }),
       signal: AbortSignal.timeout(this.#waitMs + 5_000)
     });
+    const receipt = response.status === 200 ? relayReceipt(response.headers) : null;
     const body = await response.json() as ActionResult;
     if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean' || !Array.isArray(body.evidence) || typeof body.provider !== 'string') {
       throw new Error(`Relay control returned malformed HTTP ${response.status} response.`);
     }
+    if (receipt) await this.#acknowledgeReceipt(action, receipt);
     return body;
+  }
+
+  async #acknowledgeReceipt(action: ActionRequest, receipt: RelayReceipt): Promise<void> {
+    const ackBody = JSON.stringify({
+      ...(this.#accountId ? { accountId: this.#accountId } : {}), ...(this.#principal ? { principal: this.#principal } : {}),
+      ...(this.#publicBoundary ? { publicBoundary: true } : {}), action, ...receipt
+    });
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const response = await fetch(new URL('/v1/execute/ack', this.#url), {
+          redirect: 'error', method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+          body: ackBody, signal: AbortSignal.timeout(15_000)
+        });
+        const body = await response.json() as any;
+        if (response.ok && body?.ok === true) return;
+        const error = new OperatorError(typeof body?.error?.code === 'string' ? body.error.code : 'RELAY_RECEIPT_ACK_FAILED', 'Relay result receipt acknowledgement failed.');
+        if (response.status < 500) throw error;
+        lastError = error;
+      } catch (error) { lastError = error; }
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 100));
+    }
+    throw lastError instanceof Error ? lastError : new OperatorError('RELAY_RECEIPT_ACK_FAILED', 'Relay result receipt acknowledgement failed.');
   }
 }
 
@@ -90,6 +116,14 @@ function validateLoopbackControlUrl(input: string): URL {
     throw new Error('Relay control URL must be credential-free loopback http://.');
   }
   return new URL('/v1/execute', base);
+}
+
+function relayReceipt(headers: Headers): RelayReceipt {
+  const deviceId = validUuid(headers.get('x-operator-device-id') ?? '', 'relay receipt device ID');
+  const deliveryId = validUuid(headers.get('x-operator-delivery-id') ?? '', 'relay receipt delivery ID');
+  const seq = Number(headers.get('x-operator-delivery-seq'));
+  if (!Number.isSafeInteger(seq) || seq < 1) throw new Error('Relay control response is missing a valid delivery receipt sequence.');
+  return { deviceId, seq, deliveryId };
 }
 
 function validPrincipal(input: AccountPrincipal): AccountPrincipal {
