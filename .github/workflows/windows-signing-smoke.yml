@@ -147,7 +147,7 @@ jobs:
                 if ($uninstallExit -ne 0) { throw "public uninstall command failed with exit code $uninstallExit" }
                 if (Get-AppxPackage -Name 'SPLCART.SplcartOperator') { throw 'SPLCART.SplcartOperator remained installed after public uninstall command.' }
                 if (Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode }) { throw 'Packaged Operator runtime remained running after public uninstall command.' }
-                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectly removed local Operator state.' }
+                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
                 Write-BootstrapShellPhase 'public-uninstall:ok'
               } else {
                 Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
