@@ -34,6 +34,10 @@ The package contains zero first-party test/fixture files, zero forbidden secret/
 
 The 16 root-suite skips are environment-gated symlink cases where Windows denied symlink creation (`EPERM`); they are not failures and no Windows junction-race case was skipped.
 
+## Post-certification release-line consistency
+
+A final pre-merge consistency sweep found that the public npm bootstrap still declared version `0.1.0` and accepted Windows releases as old as `0.1.0.0`, while the certified Store launch line is `1.0.0.0`. The bootstrap package is now `1.0.0`, its minimum trusted Windows release is `1.0.0.0`, its user agent reports the same CLI version, and Windows signing smoke uses `1.0.0.0`. Focused release/bootstrap tests passed 25/25, the npm tarball dry-run reported `operator-runtime-cli@1.0.0`, the syntax/import checker passed, and the full Windows root suite remained 302 total / 286 passed / 0 failed / 16 expected environment skips with all five junction cases executed.
+
 ## Remaining external gates
 
 This is local unsigned-package certification, not final production approval. A trusted production signing identity/certificate, RFC 3161 timestamped final package, Partner Center submission/certification, production OAuth/public MCP deployment, live ChatGPT certification, and real-user/reviewer evidence remain external gates. The legacy .NET Framework compiler used for the path-lease helper does not provide deterministic output across separate compilations, so cross-build reproducibility is not claimed for that helper; exact-build package/source hash equality is verified.

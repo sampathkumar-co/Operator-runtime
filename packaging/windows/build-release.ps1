@@ -48,7 +48,7 @@ function New-Logo([string]$Path, [int]$Size) {
   } finally { $bitmap.Dispose() }
 }
 
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must be a four-part MSIX version such as 0.1.0.0.' }
+if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must be a four-part MSIX version such as 1.0.0.0.' }
 $base = [Uri]$UpdateBaseUri
 if ($base.Scheme -ne 'https' -or -not $base.IsAbsoluteUri -or $base.UserInfo -or $base.Query -or $base.Fragment) { throw 'UpdateBaseUri must be a credential-free absolute HTTPS URI without query or fragment.' }
 

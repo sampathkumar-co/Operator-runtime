@@ -3,7 +3,7 @@ import test from 'node:test';
 import { validateProductionReleaseInputs } from '../scripts/production-release-inputs.mjs';
 
 const valid = {
-  version: '0.1.0.0',
+  version: '1.0.0.0',
   identityName: 'SPLCART.SplcartOperator',
   updateBaseUri: 'https://downloads.operatorruntime.dev/product',
   timestampUri: 'https://timestamp.digicert.com'
@@ -11,7 +11,7 @@ const valid = {
 
 test('production release inputs accept a real HTTPS release host and timestamp service', () => {
   const parsed = validateProductionReleaseInputs(valid);
-  assert.equal(parsed.version, '0.1.0.0');
+  assert.equal(parsed.version, '1.0.0.0');
   assert.equal(parsed.updateBaseUri, 'https://downloads.operatorruntime.dev/product');
 });
 

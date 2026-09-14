@@ -5,7 +5,8 @@ import { Readable } from 'node:stream';
 
 export const DEFAULT_MANIFEST_URL =
   'https://github.com/sampathkumar-co/Operator-runtime/releases/latest/download/release-metadata.json';
-export const MINIMUM_RELEASE_VERSION = '0.1.0.0';
+export const CLI_VERSION = '1.0.0';
+export const MINIMUM_RELEASE_VERSION = '1.0.0.0';
 
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
@@ -151,7 +152,7 @@ async function fetchChecked(url, label, timeoutMs) {
       redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
-        'user-agent': 'operator-runtime-cli/0.1.0',
+        'user-agent': `operator-runtime-cli/${CLI_VERSION}`,
         accept: 'application/octet-stream, application/json'
       }
     });

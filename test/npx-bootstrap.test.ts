@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  CLI_VERSION,
   DEFAULT_MANIFEST_URL,
   downloadAndVerifyArtifact,
   resolveArtifactUrl,
@@ -48,7 +49,10 @@ test('Windows PowerShell bootstrap child rebuilds its native module search path'
   assert.equal(source.PSModulePath, 'C:\\Program Files\\PowerShell\\7\\Modules');
 });
 
-test('npm bootstrap package version is bound to the Windows production release line', () => {
+test('npm bootstrap package version is bound to the Windows production release line', async () => {
+  const pkg = JSON.parse(await fs.readFile(new URL('../packages/operator-runtime-cli/package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.version, CLI_VERSION);
+  assert.deepEqual(validatePackageReleaseVersion(pkg.version, '1.0.0.0'), { packageVersion: '1.0.0', releaseVersion: '1.0.0.0' });
   assert.deepEqual(validatePackageReleaseVersion('1.2.3', '1.2.3.4'), { packageVersion: '1.2.3', releaseVersion: '1.2.3.4' });
   assert.throws(() => validatePackageReleaseVersion('1.2.4', '1.2.3.4'), /does not match Windows release/);
   assert.throws(() => validatePackageReleaseVersion('1.2.3-beta.1', '1.2.3.4'), /stable three-part semantic version/);
@@ -88,8 +92,8 @@ test('release metadata binds artifact name, Windows version range, and signer id
 });
 
 test('bootstrap rejects releases below its locally pinned minimum version', () => {
-  assert.throws(() => validateReleaseMetadata(metadata({ version: '0.0.9.9', artifact: 'Operator-0.0.9.9-x64.msix' })), /minimum trusted version/);
-  assert.equal(validateReleaseMetadata(metadata({ version: '0.1.0.0', artifact: 'Operator-0.1.0.0-x64.msix' })).version, '0.1.0.0');
+  assert.throws(() => validateReleaseMetadata(metadata({ version: '0.9.9.9', artifact: 'Operator-0.9.9.9-x64.msix' })), /minimum trusted version/);
+  assert.equal(validateReleaseMetadata(metadata({ version: '1.0.0.0', artifact: 'Operator-1.0.0.0-x64.msix' })).version, '1.0.0.0');
 });
 
 test('trusted signer allowlist pins both certificate SHA-256 and subject', () => {
