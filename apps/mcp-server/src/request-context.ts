@@ -8,6 +8,13 @@ type McpInvocationContext = {
 
 const invocationContext = new AsyncLocalStorage<McpInvocationContext>();
 
+export function mcpInvocationScope(sessionIdInput: unknown, clientIdInput?: unknown): string {
+  const sessionId = boundedIdentityPart(sessionIdInput, 'MCP session ID', 'pre-session');
+  if (clientIdInput === undefined) return `mcp-session:${sessionId.length}:${sessionId}`;
+  const clientId = boundedIdentityPart(clientIdInput, 'OAuth client ID');
+  return `oauth-client:${clientId.length}:${clientId}:mcp-session:${sessionId.length}:${sessionId}`;
+}
+
 export function withMcpInvocation<T>(body: unknown, scopeInput: string, operation: () => T): T {
   const requestId = jsonRpcRequestId(body);
   if (requestId === undefined) return operation();
@@ -36,6 +43,12 @@ function jsonRpcRequestId(body: unknown): string | undefined {
   }
   if (typeof raw === 'number' && Number.isFinite(raw)) return `number:${String(raw)}`;
   return undefined;
+}
+
+function boundedIdentityPart(input: unknown, label: string, fallback?: string): string {
+  const value = String(input ?? '').trim() || fallback || '';
+  if (!value || value.length > 1024 || /[\0\r\n]/.test(value)) throw new Error(`${label} is invalid.`);
+  return value;
 }
 
 function boundedScope(input: string): string {

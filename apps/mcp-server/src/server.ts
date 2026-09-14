@@ -14,7 +14,7 @@ import {
 import type { FastifyReply } from 'fastify';
 import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
-import { withMcpInvocation } from './request-context.ts';
+import { mcpInvocationScope, withMcpInvocation } from './request-context.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
@@ -81,7 +81,7 @@ if (publicEdge) {
 }
 
 app.all('/mcp', async (request, reply) => {
-  let invocationScope = `mcp-session:${String(request.headers['mcp-session-id'] ?? 'local')}`;
+  let invocationScope = mcpInvocationScope(request.headers['mcp-session-id']);
   if (publicEdge) {
     const webRequest = await toWebRequest(request.raw, request.body);
     const rejected = validatePublicHeaders(webRequest);
@@ -108,7 +108,7 @@ app.all('/mcp', async (request, reply) => {
       }));
     }
     publicAuthFailureLimiter!.clear(clientKey);
-    invocationScope = `oauth-client:${authInfo.clientId}`;
+    invocationScope = mcpInvocationScope(request.headers['mcp-session-id'], authInfo.clientId);
     const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
     const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
     if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);

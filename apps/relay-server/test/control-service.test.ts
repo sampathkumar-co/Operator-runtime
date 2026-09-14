@@ -40,6 +40,7 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     }
   };
   const results = {
+    async findByIdempotencyKey() { return null; },
     async get(_deviceId: string, seq: number, _deliveryId: string) {
       return {
         deliveryId: `delivery-${seq}`,
@@ -111,7 +112,7 @@ test('public relay control preserves trusted public-boundary marker in delivery 
       payload = input.payload;
       return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-public', seq: 7 } };
     } } as any,
-    results: { get: async () => ({
+    results: { findByIdempotencyKey: async () => null, get: async () => ({
       deliveryId: 'delivery-public',
       result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
     }) } as any,
@@ -135,18 +136,15 @@ test('completed idempotent result is recovered before routing even when the devi
   let recoverCalls = 0;
   let dispatchCalls = 0;
   const hub = {
-    recoverIdempotent: async () => {
-      recoverCalls += 1;
-      return { deviceId: DEVICE_ID, delivery: { id: deliveryId, seq: 9 } };
-    },
+    recoverIdempotent: async () => { recoverCalls += 1; throw new Error('delivery recovery must not be consulted for completed work'); },
     dispatch: async () => { dispatchCalls += 1; throw new Error('offline route must not be consulted'); }
   };
   const results = {
-    get: async (deviceId: string, seq: number) => {
-      assert.equal(deviceId, DEVICE_ID);
-      assert.equal(seq, 9);
-      return { deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 } };
-    }
+    findByIdempotencyKey: async () => ({
+      deviceId: DEVICE_ID,
+      result: { seq: 9, deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 } }
+    }),
+    get: async () => { throw new Error('sequence polling must not be consulted for completed work'); }
   };
   const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
   const { port } = await service.listen('127.0.0.1', 0);
@@ -159,6 +157,24 @@ test('completed idempotent result is recovered before routing even when the devi
   assert.equal(response.status, 200);
   const body = await response.json() as any;
   assert.equal(body.provider, 'replay');
-  assert.equal(recoverCalls, 1);
+  assert.equal(recoverCalls, 0);
+  assert.equal(dispatchCalls, 0);
+});
+
+
+test('expired idempotent invocation fails closed instead of dispatching the side effect again', async (t) => {
+  let dispatchCalls = 0;
+  const hub = {
+    recoverIdempotent: async () => ({ deviceId: DEVICE_ID, delivery: { id: '55555555-5555-4555-8555-555555555555', seq: 11, status: 'expired' } }),
+    dispatch: async () => { dispatchCalls += 1; throw new Error('must not redispatch expired invocation'); }
+  };
+  const results = { findByIdempotencyKey: async () => null, get: async () => null };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, { accountId: ACCOUNT_A, action: { ...action(), taskId: 'expired-invocation' }, waitMs: 1000 });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'RELAY_EXECUTION_EXPIRED_UNCERTAIN');
   assert.equal(dispatchCalls, 0);
 });

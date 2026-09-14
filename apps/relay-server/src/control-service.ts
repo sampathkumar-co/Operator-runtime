@@ -17,14 +17,14 @@ const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
-  #results: Pick<RelayResultStore, 'get'>;
+  #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -95,10 +95,23 @@ export class RelayControlService {
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
         const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
 
+        const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
+        if (completed) {
+          const result = completed.result.result as unknown as ActionResult;
+          if (!isActionResult(result, action.capability)) {
+            return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Stored replay result is malformed.', completed.deviceId, completed.result.seq));
+          }
+          send(response, 200, result);
+          return;
+        }
+
         const recovered = await this.#hub.recoverIdempotent(idempotencyKey);
         let routedDeviceId: string;
         let delivery: { id: string; seq: number };
         if (recovered) {
+          if (recovered.delivery.status === 'expired') {
+            return send(response, 409, relayFailure(action.capability, startedAt, 'RELAY_EXECUTION_EXPIRED_UNCERTAIN', 'The original invocation expired before a durable result was recorded; refusing to execute it again.', recovered.deviceId, recovered.delivery.seq));
+          }
           routedDeviceId = recovered.deviceId;
           delivery = recovered.delivery;
         } else {

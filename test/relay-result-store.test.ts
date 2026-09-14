@@ -98,3 +98,21 @@ test('successful result consumption returns one copy and persists only a payload
   assert.equal(duplicate.duplicate, true);
   assert.equal(duplicate.result.result, undefined);
 });
+
+
+test('completed replay authority remains available for the full result retention window', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const key = 'a'.repeat(64);
+  let now = new Date('2026-09-13T00:00:50.000Z');
+  const store = new RelayResultStore(state, { clock: () => now, retentionMs: 60_000 });
+  await store.put(deviceId, 7, deliveryId, { ok: true, output: { value: 'late-complete' } }, key);
+  assert.equal((await store.findByIdempotencyKey(key))?.result.deliveryId, deliveryId);
+
+  now = new Date('2026-09-13T00:01:00.001Z');
+  assert.equal((await store.findByIdempotencyKey(key))?.result.result?.output?.value, 'late-complete');
+
+  now = new Date('2026-09-13T00:01:50.001Z');
+  assert.equal(await store.findByIdempotencyKey(key), null);
+});

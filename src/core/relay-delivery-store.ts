@@ -110,6 +110,16 @@ export class RelayDeliveryStore {
     });
   }
 
+  async retained(deviceIdInput: string, seqInput: number): Promise<StoredRelayDelivery | null> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const seq = validSeq(seqInput);
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      const delivery = state.streams.find((stream) => stream.deviceId === deviceId)?.deliveries.find((entry) => entry.seq === seq);
+      return delivery ? cloneDelivery(delivery) : null;
+    });
+  }
+
   async pending(deviceIdInput: string, limitInput = 100): Promise<StoredRelayDelivery[]> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const limit = boundedLimit(limitInput);
@@ -280,13 +290,12 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       next.expiredAt = expiredAt;
       next.payload = {};
       next.authority = undefined;
-      next.idempotencyKey = undefined;
       next.idempotencyReleasedAt = undefined;
       stream.lastAckedSeq = next.seq;
       expired += 1;
     }
     for (const delivery of stream.deliveries) {
-      if (delivery.status === 'acked' && delivery.idempotencyKey && Date.parse(delivery.createdAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
+      if (delivery.status === 'acked' && delivery.idempotencyKey && delivery.ackedAt && Date.parse(delivery.ackedAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
     }
   }
   return expired;
@@ -336,7 +345,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
       if (status === 'pending' && (ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps.');
       if (status === 'acked' && (!ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
-      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || idempotencyKey || idempotencyReleasedAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free, idempotency-free tombstone.');
+      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || authority || idempotencyReleasedAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free, authority-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
       return { seq, id, kind, payload, authority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;

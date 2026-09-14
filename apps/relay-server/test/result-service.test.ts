@@ -291,3 +291,31 @@ test('old self-reset receipt cannot revoke a newer rebound authority generation'
   assert.equal(await accounts.ownsDevice(ownerB.accountId, device.deviceId), true);
   assert.equal((await devices.listDevices()).find((candidate) => candidate.deviceId === device.deviceId)?.status, 'active');
 });
+
+
+test('late authenticated result binds to an expired idempotent tombstone and becomes replayable', async (t) => {
+  const authorityState = await tempDir(t, 'operator-late-result-authority-');
+  const deviceState = await tempDir(t, 'operator-late-result-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  let deliveryNow = Date.parse('2026-09-14T12:00:00.000Z');
+  const deliveries = new RelayDeliveryStore(authorityState, { clock: () => new Date(deliveryNow), retentionMs: 60_000 });
+  const results = new RelayResultStore(authorityState);
+  const key = 'd'.repeat(64);
+  const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'late' } }, undefined, key);
+  deliveryNow += 60_001;
+
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries, results });
+  cleanupAfter(t, service);
+  const { port } = await service.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000 })).token;
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-result`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, result: { ok: true, output: { value: 'late' } } })
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal((await results.findByIdempotencyKey(key))?.result.result?.output?.value, 'late');
+});

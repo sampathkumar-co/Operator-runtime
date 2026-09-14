@@ -206,11 +206,15 @@ export class RelayResultService {
         const deliveryId = uuid(String(body.deliveryId ?? ''), 'deliveryId');
         if (!body.result || typeof body.result !== 'object' || Array.isArray(body.result)) throw new OperatorError('RELAY_RESULT_INVALID', 'Result body must be a JSON object.');
         const pending = await this.#deliveries.pending(session.subjectDeviceId, 1);
-        const expected = pending[0];
+        let expected = pending[0];
         if (!expected || expected.seq !== seq || expected.id !== deliveryId) {
-          throw new OperatorError('RELAY_RESULT_DELIVERY_MISMATCH', 'Result does not match the device first pending delivery.');
+          const retained = await this.#deliveries.retained(session.subjectDeviceId, seq);
+          if (!retained || retained.id !== deliveryId || retained.status !== 'expired' || !retained.idempotencyKey) {
+            throw new OperatorError('RELAY_RESULT_DELIVERY_MISMATCH', 'Result does not match the device first pending or retained expired idempotent delivery.');
+          }
+          expected = retained;
         }
-        const stored = await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject);
+        const stored = await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey);
         send(response, 200, {
           ok: true,
           accepted: { deviceId: session.subjectDeviceId, seq, deliveryId, duplicate: stored.duplicate, resultSha256: stored.result.resultSha256 }

@@ -170,3 +170,22 @@ test('invocation idempotency survives device ACK and reload, then expires on the
   const afterRetention = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
   assert.equal(afterRetention.seq, 3);
 });
+
+
+test('expired idempotent delivery keeps a payload-free replay tombstone and blocks redispatch', async (t) => {
+  let nowMs = Date.parse('2026-09-14T11:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  const key = 'c'.repeat(64);
+  const first = await store.enqueue(DEVICE, 'action', { secret: 'erase-me' }, undefined, key);
+  nowMs += 60_001;
+  assert.deepEqual(await store.pending(DEVICE), []);
+  const retained = await store.findIdempotent(key);
+  assert.equal(retained?.delivery.status, 'expired');
+  assert.equal(retained?.delivery.id, first.id);
+  assert.deepEqual(retained?.delivery.payload, {});
+  const retry = await store.enqueue(DEVICE, 'action', { secret: 'must-not-replace' }, undefined, key);
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.status, 'expired');
+});

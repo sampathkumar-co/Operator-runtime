@@ -16,6 +16,7 @@ type StoredRelayResult = {
   deliveryId: string;
   result?: JsonObject;
   resultSha256: string;
+  idempotencyKey?: string;
   recordedAt: string;
   consumedAt?: string;
 };
@@ -35,10 +36,11 @@ export class RelayResultStore {
     this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
-  async put(deviceIdInput: string, seqInput: number, deliveryIdInput: string, resultInput: JsonObject): Promise<{ result: StoredRelayResult; duplicate: boolean }> {
+  async put(deviceIdInput: string, seqInput: number, deliveryIdInput: string, resultInput: JsonObject, idempotencyKeyInput?: string): Promise<{ result: StoredRelayResult; duplicate: boolean }> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const seq = validSeq(seqInput);
     const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
+    const idempotencyKey = idempotencyKeyInput === undefined ? undefined : validIdempotencyKey(idempotencyKeyInput);
     const result = safeResult(resultInput);
     const resultSha256 = hashResult(result);
     return await this.#mutate((state) => {
@@ -55,10 +57,14 @@ export class RelayResultStore {
         if (existing.seq !== seq || existing.deliveryId !== deliveryId || existing.resultSha256 !== resultSha256) {
           throw new OperatorError('RELAY_RESULT_CONFLICT', 'A different result is already stored for this delivery sequence or ID.');
         }
+        if (idempotencyKey && existing.idempotencyKey && existing.idempotencyKey !== idempotencyKey) {
+          throw new OperatorError('RELAY_RESULT_CONFLICT', 'Stored result replay authority does not match this delivery.');
+        }
+        if (idempotencyKey && !existing.idempotencyKey && !existing.consumedAt) existing.idempotencyKey = idempotencyKey;
         return { result: clone(existing), duplicate: true };
       }
       if (stream.results.length >= MAX_RESULTS_PER_STREAM) throw new OperatorError('RELAY_RESULT_LIMIT', 'Relay result retention limit reached for this device.');
-      const stored: StoredRelayResult = { seq, deliveryId, result, resultSha256, recordedAt: this.#clock().toISOString() };
+      const stored: StoredRelayResult = { seq, deliveryId, result, resultSha256, idempotencyKey, recordedAt: this.#clock().toISOString() };
       stream.results.push(stored);
       stream.results.sort((a, b) => a.seq - b.seq);
       return { result: clone(stored), duplicate: false };
@@ -74,6 +80,21 @@ export class RelayResultStore {
     return clone(result);
   }
 
+  async findByIdempotencyKey(idempotencyKeyInput: string): Promise<{ deviceId: string; result: StoredRelayResult } | null> {
+    const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
+    return await this.#mutate((state) => {
+      pruneExpired(state, this.#clock().getTime(), this.#retentionMs);
+      let found: { deviceId: string; result: StoredRelayResult } | null = null;
+      for (const stream of state.streams) {
+        const match = stream.results.find((entry) => !entry.consumedAt && entry.idempotencyKey === idempotencyKey);
+        if (!match) continue;
+        if (found) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result replay authority is duplicated.');
+        found = { deviceId: stream.deviceId, result: clone(match) };
+      }
+      return found;
+    });
+  }
+
   async consume(deviceIdInput: string, seqInput: number, deliveryIdInput: string): Promise<StoredRelayResult | null> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const seq = validSeq(seqInput);
@@ -86,6 +107,7 @@ export class RelayResultStore {
       if (!entry.result) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Available relay result is missing its payload.');
       const consumed = clone(entry);
       entry.result = undefined;
+      entry.idempotencyKey = undefined;
       entry.consumedAt = this.#clock().toISOString();
       return consumed;
     });
@@ -194,6 +216,7 @@ function hashResult(result: JsonObject): string {
 function validateState(input: ResultState): ResultState {
   if (!input || typeof input !== 'object' || input.version !== 1 || !Array.isArray(input.streams) || input.streams.length > MAX_STREAMS) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state structure is invalid.');
   const devices = new Set<string>();
+  const replayKeys = new Set<string>();
   const streams = input.streams.map((raw) => {
     const deviceId = validUuid(raw.deviceId, 'deviceId');
     if (devices.has(deviceId)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state contains duplicate device streams.');
@@ -208,6 +231,11 @@ function validateState(input: ResultState): ResultState {
       seqs.add(seq); ids.add(deliveryId);
       const resultSha256 = String(entry.resultSha256 ?? '');
       if (!/^[0-9a-f]{64}$/.test(resultSha256)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash is invalid.');
+      const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(String(entry.idempotencyKey));
+      if (idempotencyKey) {
+        if (replayKeys.has(idempotencyKey)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state contains duplicate replay authority.');
+        replayKeys.add(idempotencyKey);
+      }
       const recordedAt = validIso(String(entry.recordedAt ?? ''));
       const consumedAt = entry.consumedAt === undefined ? undefined : validIso(String(entry.consumedAt));
       let result: JsonObject | undefined;
@@ -218,7 +246,7 @@ function validateState(input: ResultState): ResultState {
         catch { throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Available relay result payload is invalid.'); }
         if (resultSha256 !== hashResult(result)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash does not match its stored result.');
       }
-      return { seq, deliveryId, result, resultSha256, recordedAt, consumedAt } satisfies StoredRelayResult;
+      return { seq, deliveryId, result, resultSha256, idempotencyKey, recordedAt, consumedAt } satisfies StoredRelayResult;
     }).sort((a, b) => a.seq - b.seq);
     return { deviceId, results };
   });
@@ -227,6 +255,12 @@ function validateState(input: ResultState): ResultState {
 
 function clone(result: StoredRelayResult): StoredRelayResult {
   return { ...result, result: result.result === undefined ? undefined : structuredClone(result.result) };
+}
+
+function validIdempotencyKey(input: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
+  return value;
 }
 
 function validSeq(input: number): number {
