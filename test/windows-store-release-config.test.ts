@@ -27,6 +27,7 @@ test('Windows Store release contract pins Partner Center identity and certified 
   assert.match(production, /\$cert\.Subject -ne \$env:STORE_PUBLISHER/);
   assert.match(production, /-Publisher \$env:STORE_PUBLISHER/);
   assert.doesNotMatch(production, /-Publisher '\$\{\{ steps\.certificate\.outputs\.publisher \}\}'/);
+  assert.match(production, /^name: Windows Direct Distribution Release/m);
 });
 
 test('Windows native release toolchain is pinned to Rust 1.98.1', () => {
