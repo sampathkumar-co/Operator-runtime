@@ -6,7 +6,7 @@ This record captures the final local unsigned Microsoft Store package audit on b
 
 Before `09db0f3` was committed on the shared branch, its exact 88-file tree was reconstructed on a fresh worktree based on `2fc591b` with no scratch helpers or generated artifacts copied in. Using the certified Node v22.23.2 runtime and a freshly built Windows path-lease helper, that clean tree passed MCP 51/51, relay 29/29, red-team 6/6, and the full Windows root suite at 302 total / 286 passed / 0 failed / 16 expected environment skips. The Git index tree transferred to the shared branch matched that certified clean-worktree tree byte-for-byte before commit.
 
-## Candidate artifact
+## Historical local candidate artifact (pre-P1)
 
 - File: `artifacts/windows-release-audit-20260914/Operator-1.0.0.0-x64.msix`
 - SHA-256: `74dd941795487e16b12d0e359f5703bafdc55ec40250f5f6861eccaeac1fcc38`
@@ -16,6 +16,17 @@ Before `09db0f3` was committed on the shared branch, its exact 88-file tree was 
 - Version / architecture: `1.0.0.0` / `x64`
 - Display / publisher display names: `SPLCART Operator` / `SPLCART`
 - Restricted capability: `runFullTrust`
+
+This local MSIX predates the final P1 review fixes below and is retained as historical packaging evidence only; it is not claimed to be byte-identical to the final P1-hardened tree.
+
+## Exact-head CI Store artifact after P1 hardening
+
+- PR head: `e62deda6fbbe197249e5cdf8a3afdd926b49eb76`
+- CI run: `#488`
+- Artifact: `splcart-operator-store-submission-msix`
+- Artifact size: `39,452,129` bytes
+- GitHub Actions artifact digest: `sha256:d7dfc11e5e326de6f43930b871498916fe12b7d2963cf30637dff7a0a86bc5b9`
+- The Windows package job built, unpacked, validated, and uploaded this Store submission artifact from the exact P1-hardened PR head.
 
 ## Artifact proof
 
