@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Four-part MSIX version, for example 0.1.0.0
+        description: Four-part MSIX version, for example 1.0.0.0
         required: true
         type: string
       update_base_uri:

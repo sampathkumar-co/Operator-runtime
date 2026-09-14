@@ -52,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           ./packaging/windows/build-release.ps1 `
-            -Version 0.1.0.0 `
+            -Version 1.0.0.0 `
             -Publisher '${{ steps.cert.outputs.publisher }}' `
             -UpdateBaseUri https://updates.example.invalid/operator `
             -OutputDir artifacts/windows-signing-smoke
@@ -60,14 +60,14 @@ jobs:
         shell: pwsh
         run: |
           ./packaging/windows/sign-release.ps1 `
-            -MsixPath artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix `
+            -MsixPath artifacts/windows-signing-smoke/Operator-1.0.0.0-x64.msix `
             -Provider CertificateStore `
             -CertificateThumbprint '${{ steps.cert.outputs.thumbprint }}' `
             -CertificateStoreScope CurrentUser `
             -SkipTimestampForTest `
             -MetadataPath artifacts/windows-signing-smoke/release-metadata.json
           ./packaging/windows/sign-release.ps1 `
-            -MsixPath artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix `
+            -MsixPath artifacts/windows-signing-smoke/Operator-1.0.0.0-x64.msix `
             -Provider VerifyOnly `
             -SkipTimestampForTest `
             -MetadataPath artifacts/windows-signing-smoke/release-metadata.json
@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $msix = (Resolve-Path artifacts/windows-signing-smoke/Operator-0.1.0.0-x64.msix).Path
+          $msix = (Resolve-Path artifacts/windows-signing-smoke/Operator-1.0.0.0-x64.msix).Path
           $meta = (Resolve-Path artifacts/windows-signing-smoke/release-metadata.json).Path
           $root = Join-Path $env:RUNNER_TEMP 'operator-installed-authorized-root'
           $bootstrapLog = Join-Path $env:RUNNER_TEMP 'operator-bootstrap-smoke.log'
@@ -147,7 +147,7 @@ jobs:
                 if ($uninstallExit -ne 0) { throw "public uninstall command failed with exit code $uninstallExit" }
                 if (Get-AppxPackage -Name 'SPLCART.SplcartOperator') { throw 'SPLCART.SplcartOperator remained installed after public uninstall command.' }
                 if (Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode }) { throw 'Packaged Operator runtime remained running after public uninstall command.' }
-                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectedly removed local Operator state.' }
+                if (-not (Test-Path -LiteralPath $operatorState -PathType Container)) { throw 'Public uninstall unexpectly removed local Operator state.' }
                 Write-BootstrapShellPhase 'public-uninstall:ok'
               } else {
                 Write-BootstrapShellPhase 'cleanup-stop-runtime:start'
