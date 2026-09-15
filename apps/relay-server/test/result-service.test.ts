@@ -301,14 +301,18 @@ test('late authenticated result binds to an expired idempotent tombstone and bec
   const devices = new DeviceRegistryStore(authorityState);
   const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'test', subject: 'late-result-owner' });
+  const membership = await accounts.bindDevice(owner.accountId, device.deviceId);
+  const authority = { accountId: owner.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
   let deliveryNow = Date.parse('2026-09-14T12:00:00.000Z');
   const deliveries = new RelayDeliveryStore(authorityState, { clock: () => new Date(deliveryNow), retentionMs: 60_000 });
   const results = new RelayResultStore(authorityState);
   const key = 'd'.repeat(64);
-  const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'late' } }, undefined, key);
+  const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'late' } }, authority, key);
   deliveryNow += 60_001;
 
-  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries, results });
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries, results });
   cleanupAfter(t, service);
   const { port } = await service.listen('127.0.0.1', 0);
   const token = (await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000 })).token;
@@ -317,5 +321,46 @@ test('late authenticated result binds to an expired idempotent tombstone and bec
     body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, result: { ok: true, output: { value: 'late' } } })
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal((await results.findByIdempotencyKey(key))?.result.result?.output?.value, 'late');
+  const replay = await results.findByIdempotencyKey(key);
+  assert.equal(replay?.result.result?.output?.value, 'late');
+  assert.deepEqual(replay?.result.replayAuthority, authority);
+});
+
+
+test('result persistence is fenced against concurrent account-device release', async (t) => {
+  const authorityState = await tempDir(t, 'operator-result-release-race-authority-');
+  const deviceState = await tempDir(t, 'operator-result-release-race-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const results = new RelayResultStore(authorityState);
+  const accounts = new AccountDeviceRegistry(authorityState, devices, { onReleaseDevice: async (deviceId) => {
+    await deliveries.purgeDevice(deviceId); await results.purgeDevice(deviceId); await sessions.purgeForDevice(deviceId);
+  } });
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'test', subject: 'release-race-owner' });
+  const membership = await accounts.bindDevice(owner.accountId, device.deviceId);
+  const authority = { accountId: owner.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
+  const key = 'e'.repeat(64);
+  const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'race' } }, authority, key);
+  const token = (await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000 })).token;
+  const originalPut = results.put.bind(results);
+  let released = false;
+  (results as any).put = async (...args: any[]) => {
+    if (!released) { released = true; await accounts.removeDevice(owner.accountId, device.deviceId, 'release race'); }
+    return await (originalPut as any)(...args);
+  };
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries, results });
+  cleanupAfter(t, service);
+  const { port } = await service.listen('127.0.0.1', 0);
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-result`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, result: { ok: true, output: { value: 'stale' } } })
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
+  assert.equal(await results.get(device.deviceId, delivery.seq), null);
+  assert.equal(await results.findByIdempotencyKey(key), null);
 });

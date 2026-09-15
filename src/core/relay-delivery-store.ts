@@ -26,6 +26,7 @@ export interface StoredRelayDelivery {
   kind: string;
   payload: JsonObject;
   authority?: RelayDeliveryAuthority;
+  replayAuthority?: RelayDeliveryAuthority;
   idempotencyKey?: string;
   idempotencyReleasedAt?: string;
   createdAt: string;
@@ -223,6 +224,7 @@ export class RelayDeliveryStore {
         delivery.ackedAt = undefined;
         delivery.payload = {};
         delivery.authority = undefined;
+        delivery.replayAuthority = undefined;
         delivery.idempotencyKey = undefined;
         delivery.idempotencyReleasedAt = undefined;
       }
@@ -289,6 +291,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       next.status = 'expired';
       next.expiredAt = expiredAt;
       next.payload = {};
+      next.replayAuthority = next.idempotencyKey && next.authority ? { ...next.authority } : undefined;
       next.authority = undefined;
       next.idempotencyReleasedAt = undefined;
       stream.lastAckedSeq = next.seq;
@@ -335,6 +338,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const kind = validKind(entry.kind);
       const payload = safePayload(entry.payload);
       const authority = entry.authority === undefined ? undefined : safeAuthority(entry.authority, deviceId);
+      const replayAuthority = entry.replayAuthority === undefined ? undefined : safeAuthority(entry.replayAuthority, deviceId);
       const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(entry.idempotencyKey);
       const idempotencyReleasedAt = entry.idempotencyReleasedAt === undefined ? undefined : validIso(entry.idempotencyReleasedAt, 'idempotencyReleasedAt');
       if (idempotencyReleasedAt && !idempotencyKey) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Released idempotency authority is missing its key.');
@@ -343,12 +347,12 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       if (!status) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery status is invalid.');
       const ackedAt = entry.ackedAt === undefined ? undefined : validIso(entry.ackedAt, 'ackedAt');
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
-      if (status === 'pending' && (ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps.');
-      if (status === 'acked' && (!ackedAt || expiredAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
-      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || authority || idempotencyReleasedAt)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free, authority-free tombstone.');
+      if (status === 'pending' && (ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps or replay authority.');
+      if (status === 'acked' && (!ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
+      if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || authority || idempotencyReleasedAt || (replayAuthority && !idempotencyKey))) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free live-authority-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, authority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, authority, replayAuthority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = 1; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');
@@ -359,7 +363,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
 }
 
 function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {
-  return { ...delivery, payload: structuredClone(delivery.payload), authority: delivery.authority ? { ...delivery.authority } : undefined };
+  return { ...delivery, payload: structuredClone(delivery.payload), authority: delivery.authority ? { ...delivery.authority } : undefined, replayAuthority: delivery.replayAuthority ? { ...delivery.replayAuthority } : undefined };
 }
 
 function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {

@@ -18,13 +18,13 @@ const MAX_WAIT_MS = 10 * 60_000;
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -97,6 +97,7 @@ export class RelayControlService {
 
         const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
         if (completed) {
+          await this.#assertReplayAuthority(accountId, completed.deviceId, completed.result.replayAuthority);
           const result = completed.result.result as unknown as ActionResult;
           if (!isActionResult(result, action.capability)) {
             return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Stored replay result is malformed.', completed.deviceId, completed.result.seq));
@@ -132,6 +133,7 @@ export class RelayControlService {
           if (request.aborted || response.destroyed) return;
           const stored = await this.#results.get(routedDeviceId, delivery.seq);
           if (stored && stored.deliveryId === delivery.id) {
+            await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
             const result = stored.result as unknown as ActionResult;
             if (!isActionResult(result, action.capability)) {
               return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', routedDeviceId, delivery.seq));
@@ -163,6 +165,16 @@ export class RelayControlService {
     this.#server = server;
     const address = server.address() as AddressInfo;
     return { host, port: address.port };
+  }
+
+  async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
+    if (!authority || authority.accountId !== accountId || authority.deviceId !== deviceId) {
+      throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result is not bound to the current account/device authority.');
+    }
+    const active = await this.#accounts.activeMembershipForDevice(deviceId);
+    if (!active || active.accountId !== authority.accountId || active.authorityGeneration !== authority.generation) {
+      throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result account authority is no longer active.');
+    }
   }
 
   async close(): Promise<void> {

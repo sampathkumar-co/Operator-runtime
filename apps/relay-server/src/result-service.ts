@@ -10,7 +10,7 @@ import { DeviceResetStore } from '../../../src/core/device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
-import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
+import { RelayDeliveryStore, type RelayDeliveryAuthority } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
@@ -214,7 +214,17 @@ export class RelayResultService {
           }
           expected = retained;
         }
-        const stored = await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey);
+        const replayAuthority = expected.idempotencyKey ? (expected.authority ?? expected.replayAuthority) : undefined;
+        if (expected.idempotencyKey && !replayAuthority) throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Replayable delivery no longer has account authority.');
+        if (replayAuthority) await this.#assertActiveReplayAuthority(replayAuthority);
+        const stored = await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey, replayAuthority);
+        if (replayAuthority) {
+          try { await this.#assertActiveReplayAuthority(replayAuthority); }
+          catch (error) {
+            await this.#results.removeExact(session.subjectDeviceId, seq, deliveryId);
+            throw error;
+          }
+        }
         send(response, 200, {
           ok: true,
           accepted: { deviceId: session.subjectDeviceId, seq, deliveryId, duplicate: stored.duplicate, resultSha256: stored.result.resultSha256 }
@@ -243,6 +253,13 @@ export class RelayResultService {
     }, this.#gcIntervalMs);
     this.#gcTimer.unref();
     return { host, port: address.port };
+  }
+
+  async #assertActiveReplayAuthority(authority: RelayDeliveryAuthority): Promise<void> {
+    const active = await this.#accounts.activeMembershipForDevice(authority.deviceId);
+    if (!active || active.accountId !== authority.accountId || active.authorityGeneration !== authority.generation) {
+      throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Device account authority changed before result persistence completed.');
+    }
   }
 
   async getResult(deviceId: string, seq: number): Promise<Awaited<ReturnType<RelayResultStore['get']>>> {

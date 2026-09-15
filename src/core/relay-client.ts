@@ -46,6 +46,13 @@ export interface RelayRecoveryContext {
 
 export type RelayRecoveryDecision = 'ack' | 'retry' | 'stop';
 
+export interface RelayExpiredRecoveryContext {
+  processing: RelayRecoveryContext['processing'];
+  expiredThroughSeq: number;
+}
+
+export type RelayExpiredRecoveryDecision = 'ack' | 'stop';
+
 interface RelayState {
   version: 1;
   lastAckedServerSeq: number;
@@ -85,6 +92,7 @@ export interface RelayClientOptions {
   getSessionToken: () => Promise<string>;
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
+  onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   allowLoopbackInsecureWs?: boolean;
   random?: () => number;
   clock?: () => Date;
@@ -100,6 +108,7 @@ export class RelayClient {
   #getSessionToken: () => Promise<string>;
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
+  #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
@@ -118,6 +127,7 @@ export class RelayClient {
     this.#getSessionToken = options.getSessionToken;
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
+    this.#onExpiredRecovery = options.onExpiredRecovery;
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -258,7 +268,13 @@ export class RelayClient {
       throw new OperatorError('RELAY_RESUME_MISMATCH', 'Relay resume cursor does not match the durable local acknowledgement cursor.', { retryable: true });
     }
     if (state.processing) {
-      throw new OperatorError('RELAY_RECOVERY_CONFLICT', 'Relay cannot skip expired history while a local delivery remains in uncertain processing state.', { retryable: false });
+      if (state.processing.seq > frame.resumeFromSeq || !this.#onExpiredRecovery) {
+        throw new OperatorError('RELAY_RECOVERY_CONFLICT', 'Relay cannot skip expired history while a local delivery remains in uncertain processing state.', { retryable: false });
+      }
+      const decision = await this.#onExpiredRecovery({ processing: { ...state.processing }, expiredThroughSeq: frame.resumeFromSeq });
+      if (decision !== 'ack') {
+        throw new OperatorError('RELAY_RECOVERY_REQUIRED', 'Expired delivery recovery callback refused to reconcile the durable processing result.', { retryable: false });
+      }
     }
     await this.#writeState({ version: 1, lastAckedServerSeq: frame.resumeFromSeq });
   }

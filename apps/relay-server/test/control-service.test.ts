@@ -30,6 +30,10 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     async resolveOrCreateAccount(principal: { issuer: string; subject: string }) {
       const accountId = principal.subject === 'user-a' ? ACCOUNT_A : ACCOUNT_B;
       return { accountId, principalHash: 'x'.repeat(43), status: 'active', createdAt: new Date(0).toISOString() } as const;
+    },
+    async activeMembershipForDevice() {
+      const accountId = dispatchedAccounts.at(-1)!;
+      return { accountId, deviceId: DEVICE_ID, status: 'active', addedAt: new Date(0).toISOString(), authorityGeneration: 1 } as const;
     }
   };
   const hub = {
@@ -44,7 +48,8 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     async get(_deviceId: string, seq: number, _deliveryId: string) {
       return {
         deliveryId: `delivery-${seq}`,
-        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
+        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: dispatchedAccounts[seq - 1], deviceId: DEVICE_ID, generation: 1 }
       };
     }
   };
@@ -114,9 +119,13 @@ test('public relay control preserves trusted public-boundary marker in delivery 
     } } as any,
     results: { findByIdempotencyKey: async () => null, get: async () => ({
       deliveryId: 'delivery-public',
-      result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
+      result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+      replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
     }) } as any,
-    accounts: { resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }) } as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 })
+    } as any,
     token: TOKEN
   });
   const { port } = await service.listen('127.0.0.1', 0);
@@ -142,11 +151,12 @@ test('completed idempotent result is recovered before routing even when the devi
   const results = {
     findByIdempotencyKey: async () => ({
       deviceId: DEVICE_ID,
-      result: { seq: 9, deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 } }
+      result: { seq: 9, deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 }, replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 } }
     }),
     get: async () => { throw new Error('sequence polling must not be consulted for completed work'); }
   };
-  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
+  const accounts = { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
   const { port } = await service.listen('127.0.0.1', 0);
   t.after(() => service.close());
   const response = await post(port, {
@@ -158,6 +168,27 @@ test('completed idempotent result is recovered before routing even when the devi
   const body = await response.json() as any;
   assert.equal(body.provider, 'replay');
   assert.equal(recoverCalls, 0);
+  assert.equal(dispatchCalls, 0);
+});
+
+
+test('completed replay is rejected after account-device authority generation changes', async (t) => {
+  let dispatchCalls = 0;
+  const results = {
+    findByIdempotencyKey: async () => ({
+      deviceId: DEVICE_ID,
+      result: { seq: 10, deliveryId: '66666666-6666-4666-8666-666666666666', result: { ok: true, capability: 'computer.inspect', provider: 'stale', evidence: [], durationMs: 1 }, replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 } }
+    }),
+    get: async () => null
+  };
+  const accounts = { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 2 }) };
+  const hub = { recoverIdempotent: async () => null, dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch stale replay'); } };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, { accountId: ACCOUNT_A, action: { ...action(), taskId: 'stale-generation' }, waitMs: 1000 });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
   assert.equal(dispatchCalls, 0);
 });
 

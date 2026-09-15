@@ -54,7 +54,8 @@ export class LocalAgentRelayRunner {
       allowLoopbackInsecureWs: Boolean(options.allowLoopbackInsecure),
       getSessionToken: () => this.#sessionCredentials.forConnection(),
       onDelivery: (delivery) => this.#handleDelivery(delivery),
-      onRecovery: (context) => this.#handleRecovery(context.delivery)
+      onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id),
+      onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id)
     });
   }
 
@@ -72,11 +73,11 @@ export class LocalAgentRelayRunner {
     await this.#submitResult(delivery.seq, delivery.id, safe);
   }
 
-  async #handleRecovery(delivery: RelayDelivery): Promise<RelayRecoveryDecision> {
+  async #recoverStoredResult(seq: number, deliveryId: string): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
-    const stored = await this.#outbox.get(identity.deviceId, delivery.seq);
-    if (!stored || stored.deliveryId !== delivery.id) return 'stop';
-    await this.#submitResult(delivery.seq, delivery.id, stored.result);
+    const stored = await this.#outbox.get(identity.deviceId, seq);
+    if (!stored || stored.deliveryId !== deliveryId) return 'stop';
+    await this.#submitResult(seq, deliveryId, stored.result);
     return 'ack';
   }
 

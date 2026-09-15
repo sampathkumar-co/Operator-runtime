@@ -178,13 +178,16 @@ test('expired idempotent delivery keeps a payload-free replay tombstone and bloc
   const state = await temp(t);
   const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
   const key = 'c'.repeat(64);
-  const first = await store.enqueue(DEVICE, 'action', { secret: 'erase-me' }, undefined, key);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 7 };
+  const first = await store.enqueue(DEVICE, 'action', { secret: 'erase-me' }, authority, key);
   nowMs += 60_001;
   assert.deepEqual(await store.pending(DEVICE), []);
   const retained = await store.findIdempotent(key);
   assert.equal(retained?.delivery.status, 'expired');
   assert.equal(retained?.delivery.id, first.id);
   assert.deepEqual(retained?.delivery.payload, {});
+  assert.equal(retained?.delivery.authority, undefined);
+  assert.deepEqual(retained?.delivery.replayAuthority, authority);
   const retry = await store.enqueue(DEVICE, 'action', { secret: 'must-not-replace' }, undefined, key);
   assert.equal(retry.id, first.id);
   assert.equal(retry.status, 'expired');

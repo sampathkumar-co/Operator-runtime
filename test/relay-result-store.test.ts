@@ -105,10 +105,13 @@ test('completed replay authority remains available for the full result retention
   const deviceId = crypto.randomUUID();
   const deliveryId = crypto.randomUUID();
   const key = 'a'.repeat(64);
+  const authority = { accountId: crypto.randomUUID(), deviceId, generation: 3 };
   let now = new Date('2026-09-13T00:00:50.000Z');
   const store = new RelayResultStore(state, { clock: () => now, retentionMs: 60_000 });
-  await store.put(deviceId, 7, deliveryId, { ok: true, output: { value: 'late-complete' } }, key);
-  assert.equal((await store.findByIdempotencyKey(key))?.result.deliveryId, deliveryId);
+  await store.put(deviceId, 7, deliveryId, { ok: true, output: { value: 'late-complete' } }, key, authority);
+  const firstReplay = await store.findByIdempotencyKey(key);
+  assert.equal(firstReplay?.result.deliveryId, deliveryId);
+  assert.deepEqual(firstReplay?.result.replayAuthority, authority);
 
   now = new Date('2026-09-13T00:01:00.001Z');
   assert.equal((await store.findByIdempotencyKey(key))?.result.result?.output?.value, 'late-complete');
