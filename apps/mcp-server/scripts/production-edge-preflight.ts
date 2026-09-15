@@ -4,7 +4,7 @@ import { readPublicMcpEdgeConfig, resolveMcpBindHost } from '../src/public-edge.
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from '../src/public-pages.ts';
 import { oauthProviderConfigFromEnv, runOAuthProviderPreflight } from './oauth-provider-preflight.ts';
 
-const PLACEHOLDER = /(?:replace-with-|your-domain|example\.(?:com|net|org)|\.invalid\b)/i;
+const PLACEHOLDER = /(?:replace-with-|required[_-]|your-domain|example\.(?:com|net|org)|\.invalid\b)/i;
 const REQUIRED_SECRET_NAMES = ['OPERATOR_RELAY_CONTROL_TOKEN'] as const;
 
 export interface ProductionEdgePreflightOptions {
@@ -45,6 +45,10 @@ function requireProductionSecrets(env: NodeJS.ProcessEnv): void {
   for (const name of REQUIRED_SECRET_NAMES) {
     const value = required(env, name);
     if (PLACEHOLDER.test(value)) throw new Error(`${name} still contains a deployment placeholder.`);
+  }
+  const challengeToken = env.OPENAI_APPS_CHALLENGE_TOKEN?.trim();
+  if (challengeToken && PLACEHOLDER.test(challengeToken)) {
+    throw new Error('OPENAI_APPS_CHALLENGE_TOKEN still contains a deployment placeholder.');
   }
   const relayToken = required(env, 'OPERATOR_RELAY_CONTROL_TOKEN');
   if (Buffer.byteLength(relayToken, 'utf8') < 32) {

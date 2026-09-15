@@ -76,6 +76,14 @@ test('production preflight rejects placeholders, weak relay secrets, and unsafe 
     /placeholder|reserved|private DNS/i
   );
   await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_RELAY_CONTROL_TOKEN: 'REQUIRED_INSTALL_PRODUCTION_SECRET' }), fetchFn: neverFetch }),
+    /deployment placeholder/
+  );
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPENAI_APPS_CHALLENGE_TOKEN: 'REQUIRED_OPENAI_CHALLENGE_TOKEN' }), fetchFn: neverFetch }),
+    /OPENAI_APPS_CHALLENGE_TOKEN.*deployment placeholder/
+  );
+  await assert.rejects(
     () => runProductionEdgePreflight({ env: env({ OPERATOR_RELAY_CONTROL_TOKEN: 'too-short' }), fetchFn: neverFetch }),
     /at least 32 bytes/
   );
