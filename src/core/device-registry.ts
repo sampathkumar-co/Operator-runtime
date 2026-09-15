@@ -132,6 +132,10 @@ export class DeviceRegistryStore {
     });
   }
   async registerVerifiedPeer(peerInput: PublicDeviceIdentity): Promise<RegisteredDevice> {
+    return (await this.registerVerifiedPeerTracked(peerInput)).device;
+  }
+
+  async registerVerifiedPeerTracked(peerInput: PublicDeviceIdentity): Promise<{ device: RegisteredDevice; created: boolean }> {
     const peer = normalizePublicIdentity(peerInput);
     return await this.#mutate((state) => {
       const sameId = state.devices.find((device) => device.deviceId === peer.deviceId);
@@ -149,7 +153,26 @@ export class DeviceRegistryStore {
         sameId.publicKeyPem = peer.publicKeyPem;
         sameId.pairedAt = pairedAt;
       }
-      return { ...registered };
+      return { device: { ...registered }, created: !sameId };
+    });
+  }
+
+  async unregisterActiveDevice(deviceIdInput: string, expectedFingerprintInput?: string): Promise<boolean> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const expectedFingerprint = expectedFingerprintInput === undefined ? undefined : String(expectedFingerprintInput);
+    if (expectedFingerprint !== undefined && !/^[A-Za-z0-9_-]{32,128}$/.test(expectedFingerprint)) {
+      throw new OperatorError('DEVICE_IDENTITY_INVALID', 'Expected device fingerprint is invalid.');
+    }
+    return await this.#mutate((state) => {
+      const index = state.devices.findIndex((device) => device.deviceId === deviceId);
+      if (index < 0) return false;
+      const device = state.devices[index]!;
+      if (device.status === 'revoked') return false;
+      if (expectedFingerprint && device.fingerprint !== expectedFingerprint) {
+        throw new OperatorError('DEVICE_IDENTITY_CONFLICT', 'Device registration fingerprint changed before rollback.');
+      }
+      state.devices.splice(index, 1);
+      return true;
     });
   }
 

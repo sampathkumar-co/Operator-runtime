@@ -7,6 +7,8 @@ import { readDurableStateText, writeDurableStateText } from './durable-state.ts'
 
 const MAX_ACCOUNTS = 100_000;
 const MAX_MEMBERSHIPS = 500_000;
+export const MAX_ACTIVE_DEVICES_PER_ACCOUNT = 32;
+export const MAX_KNOWN_DEVICES_PER_ACCOUNT = 128;
 const MAX_AUTH_FIELD = 1024;
 const ERASURE_TOMBSTONE_RETENTION_MS = 24 * 60 * 60_000;
 
@@ -135,6 +137,23 @@ export class AccountDeviceRegistry {
     });
   }
 
+  async assertCanBindDevice(accountIdInput: string, deviceIdInput?: string): Promise<void> {
+    const accountId = validUuid(accountIdInput, 'accountId');
+    const deviceId = deviceIdInput === undefined ? undefined : validUuid(deviceIdInput, 'deviceId');
+    const state = await this.#read();
+    requireActiveAccount(state, accountId);
+    if (deviceId && state.memberships.some((m) => m.accountId === accountId && m.deviceId === deviceId && m.status === 'active')) return;
+    const accountMemberships = state.memberships.filter((m) => m.accountId === accountId);
+    const activeCount = accountMemberships.filter((m) => m.status === 'active').length;
+    if (activeCount >= MAX_ACTIVE_DEVICES_PER_ACCOUNT) {
+      throw new OperatorError('ACCOUNT_DEVICE_QUOTA', `An account may have at most ${MAX_ACTIVE_DEVICES_PER_ACCOUNT} active devices.`);
+    }
+    const knownDeviceIds = new Set(accountMemberships.map((m) => m.deviceId));
+    if (deviceId && !knownDeviceIds.has(deviceId) && knownDeviceIds.size >= MAX_KNOWN_DEVICES_PER_ACCOUNT) {
+      throw new OperatorError('ACCOUNT_DEVICE_QUOTA', `An account may retain at most ${MAX_KNOWN_DEVICES_PER_ACCOUNT} distinct device identities.`);
+    }
+  }
+
   async bindDevice(accountIdInput: string, deviceIdInput: string): Promise<AccountDeviceMembership> {
     const accountId = validUuid(accountIdInput, 'accountId');
     const deviceId = validUuid(deviceIdInput, 'deviceId');
@@ -146,6 +165,13 @@ export class AccountDeviceRegistry {
       const active = state.memberships.find((m) => m.deviceId === deviceId && m.status === 'active');
       if (active && active.accountId !== accountId) throw new OperatorError('DEVICE_ACCOUNT_CONFLICT', 'Device is already bound to a different active account.');
       if (active) return cloneMembership(active);
+      const accountMemberships = state.memberships.filter((m) => m.accountId === accountId);
+      const activeCount = accountMemberships.filter((m) => m.status === 'active').length;
+      if (activeCount >= MAX_ACTIVE_DEVICES_PER_ACCOUNT) throw new OperatorError('ACCOUNT_DEVICE_QUOTA', `An account may have at most ${MAX_ACTIVE_DEVICES_PER_ACCOUNT} active devices.`);
+      const knownDeviceIds = new Set(accountMemberships.map((m) => m.deviceId));
+      if (!knownDeviceIds.has(deviceId) && knownDeviceIds.size >= MAX_KNOWN_DEVICES_PER_ACCOUNT) {
+        throw new OperatorError('ACCOUNT_DEVICE_QUOTA', `An account may retain at most ${MAX_KNOWN_DEVICES_PER_ACCOUNT} distinct device identities.`);
+      }
       if (state.memberships.some((m) => m.deviceId === deviceId && m.releasePendingReason)) {
         throw new OperatorError('DEVICE_RELEASE_PENDING', 'Device cleanup from its previous authority has not completed yet.');
       }
@@ -319,11 +345,18 @@ export class AccountDeviceRegistry {
         continue;
       }
       if (journal.phase === 'ACCOUNT_STORAGE_PURGE') {
-        await this.#mutate((current) => {
+        await this.#withQueue(async () => {
+          const current = await this.#read();
           const entry = requireErasure(current, erasureId, 'ACCOUNT_STORAGE_PURGE');
+          const ownedHistory = [...new Set(current.memberships.filter((membership) => membership.accountId === accountId).map((membership) => membership.deviceId))];
+          for (const deviceId of ownedHistory) {
+            const activeElsewhere = current.memberships.some((membership) => membership.deviceId === deviceId && membership.accountId !== accountId && membership.status === 'active');
+            if (!activeElsewhere) await this.#devices.unregisterActiveDevice(deviceId);
+          }
           current.memberships = current.memberships.filter((membership) => membership.accountId !== accountId);
           current.accounts = current.accounts.filter((candidate) => candidate.accountId !== accountId);
           entry.phase = 'REGISTRY_REMOVED'; entry.updatedAt = this.#clock().toISOString();
+          await this.#write(current);
         });
         await this.#afterErasurePhase?.('REGISTRY_REMOVED', accountId);
         continue;

@@ -441,7 +441,12 @@ function sameRecord(record: IssuedSessionRecord, payload: DeviceSessionPayload):
 }
 
 function prune(state: SessionState, nowMs: number): void {
-  state.issued = state.issued.filter((record) => nowMs - Date.parse(record.expiresAt) <= RETENTION_MS);
+  state.issued = state.issued.filter((record) => {
+    if (record.status === 'revoked' && rotatedSuccessorJti(record.revokedReason)) {
+      return Date.parse(record.expiresAt) > nowMs;
+    }
+    return nowMs - Date.parse(record.expiresAt) <= RETENTION_MS;
+  });
 }
 
 function boundedTtl(value: number): number {

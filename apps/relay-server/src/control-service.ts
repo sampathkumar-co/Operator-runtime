@@ -18,13 +18,13 @@ const MAX_WAIT_MS = 10 * 60_000;
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
-  #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>;
+  #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeer'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -69,8 +69,17 @@ export class RelayControlService {
           const userCode = boundedText(String(claimBody.userCode ?? ''), 32, 'device enrollment code');
           const reserved = await this.#enrollments.reserve(userCode, accountId);
           const peer = await this.#enrollments.peerForClaim(reserved.enrollmentId, accountId);
-          await this.#devices.registerVerifiedPeer(peer);
-          const membership = await this.#accounts.bindDevice(accountId, reserved.deviceId);
+          await this.#accounts.assertCanBindDevice(accountId, reserved.deviceId);
+          const registration = await this.#devices.registerVerifiedPeerTracked(peer);
+          let membership;
+          try {
+            membership = await this.#accounts.bindDevice(accountId, reserved.deviceId);
+          } catch (error) {
+            if (registration.created) {
+              try { await this.#devices.unregisterActiveDevice(peer.deviceId, peer.fingerprint); } catch { /* preserve the original binding failure */ }
+            }
+            throw error;
+          }
           const claimed = await this.#enrollments.markBound(reserved.enrollmentId, accountId, membership.authorityGeneration);
           send(response, 200, { ok: true, enrollment: { status: claimed.status } });
           return;

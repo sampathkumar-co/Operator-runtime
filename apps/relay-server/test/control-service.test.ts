@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayControlService } from '../src/control-service.ts';
 
 const TOKEN = 'relay-control-token-0123456789abcdef';
@@ -208,4 +209,58 @@ test('expired idempotent invocation fails closed instead of dispatching the side
   const body = await response.json() as any;
   assert.equal(body.error.code, 'RELAY_EXECUTION_EXPIRED_UNCERTAIN');
   assert.equal(dispatchCalls, 0);
+});
+
+test('device enrollment quota is rejected before permanent registration', async (t) => {
+  let registrations = 0;
+  const service = new RelayControlService({
+    hub: {} as any, results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      assertCanBindDevice: async () => { throw new OperatorError('ACCOUNT_DEVICE_QUOTA', 'quota reached'); }
+    } as any,
+    enrollments: {
+      reserve: async () => ({ enrollmentId: '44444444-4444-4444-8444-444444444444', deviceId: DEVICE_ID }),
+      peerForClaim: async () => ({ deviceId: DEVICE_ID, fingerprint: 'x'.repeat(43) }),
+      markBound: async () => { throw new Error('must not bind'); }
+    } as any,
+    devices: {
+      registerVerifiedPeerTracked: async () => { registrations += 1; throw new Error('must not register'); },
+      unregisterActiveDevice: async () => false
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-enrollment/claim`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'quota-user' }, userCode: 'ABC123' }) });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
+  assert.equal(registrations, 0);
+});
+
+test('new device registration rolls back when serialized account binding fails', async (t) => {
+  let rollbacks = 0;
+  const peer = { deviceId: DEVICE_ID, fingerprint: 'x'.repeat(43) };
+  const service = new RelayControlService({
+    hub: {} as any, results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      assertCanBindDevice: async () => undefined,
+      bindDevice: async () => { throw new OperatorError('ACCOUNT_DEVICE_QUOTA', 'quota won a race'); }
+    } as any,
+    enrollments: {
+      reserve: async () => ({ enrollmentId: '55555555-5555-4555-8555-555555555555', deviceId: DEVICE_ID }),
+      peerForClaim: async () => peer,
+      markBound: async () => { throw new Error('must not mark bound'); }
+    } as any,
+    devices: {
+      registerVerifiedPeerTracked: async () => ({ device: peer, created: true }),
+      unregisterActiveDevice: async (deviceId: string, fingerprint: string) => { assert.equal(deviceId, DEVICE_ID); assert.equal(fingerprint, peer.fingerprint); rollbacks += 1; return true; }
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-enrollment/claim`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'race-user' }, userCode: 'ABC123' }) });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
+  assert.equal(rollbacks, 1);
 });

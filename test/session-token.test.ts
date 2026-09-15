@@ -175,3 +175,27 @@ test('issuer-side revocation is immediate and revoked devices cannot receive or 
     (error: any) => error?.code === 'DEVICE_REVOKED'
   );
 });
+
+test('automatic rotation compacts expired predecessors before the global session registry can fill', async (t) => {
+  let nowMs = Date.parse('2026-09-15T00:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const a = await device('operator-session-compact-a-', 'A', clock);
+  const b = await device('operator-session-compact-b-', 'B', clock);
+  t.after(() => Promise.all([fs.rm(a.state, { recursive: true, force: true }), fs.rm(b.state, { recursive: true, force: true })]));
+  await pairBoth(a, b);
+  const peer = await b.identity.loadOrCreate();
+  const sessions = new DeviceSessionTokenStore(a.state, a.identity, a.registry, { clock });
+  let current = await sessions.issue({ subjectDeviceId: peer.deviceId, audience: 'operator-relay', scopes: ['relay:connect'], ttlMs: 60_000 });
+  const first = current;
+  current = await sessions.rotate(current.payload.jti, { ttlMs: 60_000 });
+  const replay = await sessions.rotate(first.payload.jti, { ttlMs: 60_000 });
+  assert.equal(replay.payload.jti, current.payload.jti);
+  for (let i = 0; i < 200; i += 1) {
+    nowMs += 45_000;
+    current = await sessions.rotate(current.payload.jti, { ttlMs: 60_000 });
+  }
+  const records = await sessions.listIssued(500);
+  assert.equal(records.filter((record) => record.status === 'active').length, 1);
+  assert.ok(records.length <= 3, `rotation history should stay bounded, got ${records.length}`);
+  assert.equal(records.some((record) => record.jti === first.payload.jti), false);
+});

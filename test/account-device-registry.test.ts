@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AccountDeviceRegistry } from '../src/core/account-device-registry.ts';
+import { AccountDeviceRegistry, MAX_ACTIVE_DEVICES_PER_ACCOUNT, MAX_KNOWN_DEVICES_PER_ACCOUNT } from '../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { DeviceRegistryStore, answerPairingChallenge } from '../src/core/device-registry.ts';
 
@@ -169,4 +170,83 @@ test('authority lease forces durable work to finish before release purge starts'
     accounts.withActiveAuthorityLease({ accountId: owner.accountId, deviceId: peer.deviceId, generation: membership.authorityGeneration }, async () => 'stale'),
     (error: any) => error?.code === 'ACCOUNT_AUTHORITY_REVOKED'
   );
+});
+
+test('one account cannot consume the global device registry through repeated claims', async (t) => {
+  const stateDir = await temp(t, 'operator-account-quota-');
+  const devices = new DeviceRegistryStore(stateDir);
+  const accounts = new AccountDeviceRegistry(stateDir, devices);
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'quota-owner' });
+  const peers: Array<{ deviceId: string; fingerprint: string }> = [];
+  for (let i = 0; i < MAX_ACTIVE_DEVICES_PER_ACCOUNT; i += 1) {
+    const { publicKey } = crypto.generateKeyPairSync('ed25519');
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const peer = {
+      deviceId: crypto.randomUUID(), deviceName: `quota-device-${i}`, createdAt: new Date(0).toISOString(), publicKeyPem,
+      fingerprint: crypto.createHash('sha256').update(publicKeyPem).digest('base64url')
+    };
+    await devices.registerVerifiedPeer(peer);
+    await accounts.bindDevice(owner.accountId, peer.deviceId);
+    peers.push(peer);
+  }
+  assert.equal((await accounts.listDevices(owner.accountId)).length, MAX_ACTIVE_DEVICES_PER_ACCOUNT);
+  const { publicKey } = crypto.generateKeyPairSync('ed25519');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const extra = { deviceId: crypto.randomUUID(), deviceName: 'quota-extra', createdAt: new Date(0).toISOString(), publicKeyPem, fingerprint: crypto.createHash('sha256').update(publicKeyPem).digest('base64url') };
+  await assert.rejects(accounts.assertCanBindDevice(owner.accountId, extra.deviceId), (error: any) => error?.code === 'ACCOUNT_DEVICE_QUOTA');
+  await devices.registerVerifiedPeer(extra);
+  await assert.rejects(accounts.bindDevice(owner.accountId, extra.deviceId), (error: any) => error?.code === 'ACCOUNT_DEVICE_QUOTA');
+});
+
+test('account erasure reclaims active device registrations', async (t) => {
+  const { devices, accounts, peer } = await pairedFixture(t);
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-registration-owner' });
+  await accounts.bindDevice(owner.accountId, peer.deviceId);
+  await accounts.eraseAccount(owner.accountId);
+  assert.equal((await devices.listDevices()).some((device) => device.deviceId === peer.deviceId), false);
+});
+
+
+test('removed-device cycling is bounded by a per-account distinct-device lifetime quota', async (t) => {
+  const stateDir = await temp(t, 'operator-account-history-quota-');
+  const devices = new DeviceRegistryStore(stateDir);
+  const accounts = new AccountDeviceRegistry(stateDir, devices);
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'history-quota-owner' });
+  for (let i = 0; i < MAX_KNOWN_DEVICES_PER_ACCOUNT; i += 1) {
+    const { publicKey } = crypto.generateKeyPairSync('ed25519');
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const peer = { deviceId: crypto.randomUUID(), deviceName: `history-${i}`, createdAt: new Date(0).toISOString(), publicKeyPem, fingerprint: crypto.createHash('sha256').update(publicKeyPem).digest('base64url') };
+    await devices.registerVerifiedPeer(peer);
+    await accounts.bindDevice(owner.accountId, peer.deviceId);
+    await accounts.removeDevice(owner.accountId, peer.deviceId, 'cycle identity');
+  }
+  const { publicKey } = crypto.generateKeyPairSync('ed25519');
+  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const extra = { deviceId: crypto.randomUUID(), deviceName: 'history-extra', createdAt: new Date(0).toISOString(), publicKeyPem, fingerprint: crypto.createHash('sha256').update(publicKeyPem).digest('base64url') };
+  await assert.rejects(accounts.assertCanBindDevice(owner.accountId, extra.deviceId), (error: any) => error?.code === 'ACCOUNT_DEVICE_QUOTA');
+});
+
+test('account erasure keeps a device registration that has already moved to another account', async (t) => {
+  const { devices, accounts, peer } = await pairedFixture(t);
+  const oldOwner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-old-owner' });
+  const newOwner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-new-owner' });
+  await accounts.bindDevice(oldOwner.accountId, peer.deviceId);
+  await accounts.removeDevice(oldOwner.accountId, peer.deviceId, 'moved');
+  await accounts.bindDevice(newOwner.accountId, peer.deviceId);
+  await accounts.eraseAccount(oldOwner.accountId);
+  const registered = (await devices.listDevices()).find((device) => device.deviceId === peer.deviceId);
+  assert.equal(registered?.status, 'active');
+  assert.equal(await accounts.ownsDevice(newOwner.accountId, peer.deviceId), true);
+});
+
+
+test('account erasure preserves explicit revoked cryptographic device tombstones', async (t) => {
+  const { devices, accounts, peer } = await pairedFixture(t);
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-revoked-owner' });
+  await accounts.bindDevice(owner.accountId, peer.deviceId);
+  await devices.revokeDevice(peer.deviceId, 'device lost');
+  await accounts.eraseAccount(owner.accountId);
+  const retained = (await devices.listDevices()).find((device) => device.deviceId === peer.deviceId);
+  assert.equal(retained?.status, 'revoked');
+  assert.equal(retained?.revokedReason, 'device lost');
 });
