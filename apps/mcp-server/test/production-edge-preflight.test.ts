@@ -84,6 +84,14 @@ test('production preflight rejects placeholders, weak relay secrets, and unsafe 
     /OPENAI_APPS_CHALLENGE_TOKEN.*deployment placeholder/
   );
   await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_OAUTH_READ_SCOPE: 'REQUIRED_READ_SCOPE' }), fetchFn: neverFetch }),
+    /OPERATOR_OAUTH_READ_SCOPE.*deployment placeholder/
+  );
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_OAUTH_WRITE_SCOPE: 'REQUIRED_WRITE_SCOPE' }), fetchFn: neverFetch }),
+    /OPERATOR_OAUTH_WRITE_SCOPE.*deployment placeholder/
+  );
+  await assert.rejects(
     () => runProductionEdgePreflight({ env: env({ OPERATOR_RELAY_CONTROL_TOKEN: 'too-short' }), fetchFn: neverFetch }),
     /at least 32 bytes/
   );
@@ -96,4 +104,35 @@ test('production preflight rejects placeholders, weak relay secrets, and unsafe 
     /FINAL_ACK/
   );
   assert.equal(calls, 0);
+});
+
+test('production preflight allows required labels inside legitimate OAuth hostnames', async () => {
+  const authority = 'https://required-login.company.dev';
+  const metadata = {
+    ...providerMetadata(),
+    issuer: `${authority}/`,
+    authorization_endpoint: `${authority}/authorize`,
+    token_endpoint: `${authority}/token`,
+    jwks_uri: `${authority}/.well-known/jwks.json`
+  };
+  let calls = 0;
+  const authorityFetch = (async () => {
+    calls += 1;
+    return new Response(JSON.stringify(metadata), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }) as typeof fetch;
+
+  const receipt = await runProductionEdgePreflight({
+    env: env({
+      OPERATOR_OAUTH_ISSUER: `${authority}/`,
+      OPERATOR_OAUTH_AUTHORIZATION_URL: `${authority}/authorize`,
+      OPERATOR_OAUTH_TOKEN_URL: `${authority}/token`,
+      OPERATOR_OAUTH_JWKS_URL: `${authority}/.well-known/jwks.json`
+    }),
+    fetchFn: authorityFetch
+  });
+  assert.equal(receipt.status, 'PASS');
+  assert.equal(calls, 1);
 });
