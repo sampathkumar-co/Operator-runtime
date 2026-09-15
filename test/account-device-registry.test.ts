@@ -117,3 +117,56 @@ test('device release commits authority revocation before cleanup and failed clea
   const persistedAfter = JSON.parse(await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8'));
   assert.equal('releasePendingReason' in persistedAfter.memberships.find((m: any) => m.deviceId === peer.deviceId), false);
 });
+
+test('account erasure cannot discard unfinished device-release cleanup', async (t) => {
+  const { stateDir, devices, peer } = await pairedFixture(t);
+  let allowCleanup = false;
+  let cleanupAttempts = 0;
+  const accounts = new AccountDeviceRegistry(stateDir, devices, { onReleaseDevice: async () => {
+    cleanupAttempts += 1;
+    if (!allowCleanup) throw new Error('cleanup still blocked');
+  } });
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-pending-release-owner' });
+  await accounts.bindDevice(owner.accountId, peer.deviceId);
+  await assert.rejects(accounts.removeDevice(owner.accountId, peer.deviceId, 'prepare pending cleanup'), /cleanup still blocked/);
+  await assert.rejects(accounts.eraseAccount(owner.accountId), /cleanup still blocked/);
+  const blocked = JSON.parse(await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8'));
+  assert.equal(blocked.accounts.some((account: any) => account.accountId === owner.accountId), true);
+  assert.equal(blocked.memberships.find((membership: any) => membership.deviceId === peer.deviceId)?.releasePendingReason, 'removed');
+  assert.equal(cleanupAttempts, 2);
+  allowCleanup = true;
+  await accounts.eraseAccount(owner.accountId);
+  assert.equal(cleanupAttempts, 3);
+  const completed = JSON.parse(await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8'));
+  assert.equal(completed.accounts.some((account: any) => account.accountId === owner.accountId), false);
+  assert.equal(completed.memberships.some((membership: any) => membership.accountId === owner.accountId), false);
+});
+
+test('authority lease forces durable work to finish before release purge starts', async (t) => {
+  const { devices, peer, stateDir } = await pairedFixture(t);
+  let purgeStarted = false;
+  let durableWorkFinished = false;
+  const accounts = new AccountDeviceRegistry(stateDir, devices, { onReleaseDevice: async () => {
+    purgeStarted = true;
+    assert.equal(durableWorkFinished, true);
+  } });
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'lease-order-owner' });
+  const membership = await accounts.bindDevice(owner.accountId, peer.deviceId);
+  let entered!: () => void; const insideLease = new Promise<void>((resolve) => { entered = resolve; });
+  let finish!: () => void; const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const leased = accounts.withActiveAuthorityLease({ accountId: owner.accountId, deviceId: peer.deviceId, generation: membership.authorityGeneration }, async () => {
+    entered(); await gate; durableWorkFinished = true; return 'committed';
+  });
+  await insideLease;
+  const removing = accounts.removeDevice(owner.accountId, peer.deviceId, 'lease ordering');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(purgeStarted, false);
+  finish();
+  assert.equal(await leased, 'committed');
+  await removing;
+  assert.equal(purgeStarted, true);
+  await assert.rejects(
+    accounts.withActiveAuthorityLease({ accountId: owner.accountId, deviceId: peer.deviceId, generation: membership.authorityGeneration }, async () => 'stale'),
+    (error: any) => error?.code === 'ACCOUNT_AUTHORITY_REVOKED'
+  );
+});

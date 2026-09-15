@@ -205,7 +205,16 @@ export class RelayHub {
     const payload = request.kind === 'action'
       ? { ...request.payload, approvalAuthority: { ...authority } }
       : request.payload;
-    const delivery = await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey);
+    let delivery: StoredRelayDelivery;
+    try {
+      delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
+        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey));
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
+      }
+      throw error;
+    }
     await this.#pump(route.deviceId);
     return { route, delivery };
   }

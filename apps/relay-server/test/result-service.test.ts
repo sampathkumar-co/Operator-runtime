@@ -327,7 +327,7 @@ test('late authenticated result binds to an expired idempotent tombstone and bec
 });
 
 
-test('result persistence is fenced against concurrent account-device release', async (t) => {
+test('authority lease prevents release purge from overtaking an in-flight result commit', async (t) => {
   const authorityState = await tempDir(t, 'operator-result-release-race-authority-');
   const deviceState = await tempDir(t, 'operator-result-release-race-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -337,11 +337,12 @@ test('result persistence is fenced against concurrent account-device release', a
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
   const deliveries = new RelayDeliveryStore(authorityState);
   const results = new RelayResultStore(authorityState);
-  let releasePurged!: () => void; const purged = new Promise<void>((resolve) => { releasePurged = resolve; });
-  let finishRelease!: () => void; const releaseGate = new Promise<void>((resolve) => { finishRelease = resolve; });
+  let durableWriteFinished = false;
+  let purgeStarted = false;
   const accounts = new AccountDeviceRegistry(authorityState, devices, { onReleaseDevice: async (deviceId) => {
+    purgeStarted = true;
+    assert.equal(durableWriteFinished, true);
     await deliveries.purgeDevice(deviceId); await results.purgeDevice(deviceId); await sessions.purgeForDevice(deviceId);
-    releasePurged(); await releaseGate;
   } });
   const owner = await accounts.resolveOrCreateAccount({ issuer: 'test', subject: 'release-race-owner' });
   const membership = await accounts.bindDevice(owner.accountId, device.deviceId);
@@ -350,24 +351,31 @@ test('result persistence is fenced against concurrent account-device release', a
   const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'race' } }, authority, key);
   const token = (await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000 })).token;
   const originalPut = results.put.bind(results);
-  let removing: Promise<unknown> | null = null;
+  let putEntered!: () => void; const entered = new Promise<void>((resolve) => { putEntered = resolve; });
+  let finishPut!: () => void; const putGate = new Promise<void>((resolve) => { finishPut = resolve; });
   (results as any).put = async (...args: any[]) => {
-    removing ??= accounts.removeDevice(owner.accountId, device.deviceId, 'release race');
-    await purged;
-    return await (originalPut as any)(...args);
+    putEntered(); await putGate;
+    const stored = await (originalPut as any)(...args);
+    durableWriteFinished = true;
+    return stored;
   };
   const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries, results });
   cleanupAfter(t, service);
   const { port } = await service.listen('127.0.0.1', 0);
-  const response = await fetch(`http://127.0.0.1:${port}/v1/device-result`, {
+  const responsePromise = fetch(`http://127.0.0.1:${port}/v1/device-result`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, result: { ok: true, output: { value: 'stale' } } })
   });
-  const body = await response.json() as any;
-  finishRelease();
+  await entered;
+  const removing = accounts.removeDevice(owner.accountId, device.deviceId, 'release race');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(purgeStarted, false);
+  finishPut();
+  const response = await responsePromise;
   await removing;
-  assert.equal(response.status, 400);
-  assert.equal(body.error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
+  assert.equal(purgeStarted, true);
+  assert.ok([200, 400].includes(response.status));
+  if (response.status === 400) assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
   assert.equal(await results.get(device.deviceId, delivery.seq), null);
   assert.equal(await results.findByIdempotencyKey(key), null);
 });

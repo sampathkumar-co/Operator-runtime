@@ -628,3 +628,70 @@ test('relay device hello quota is isolated per device identity', async (t) => {
   await sendHello(secondDevice);
   assert.equal(verifyCalls, 2);
 });
+
+test('authority lease prevents release purge from overtaking an in-flight delivery enqueue', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-enqueue-lease-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-enqueue-lease-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  let durableEnqueueFinished = false;
+  let purgeStarted = false;
+  const accounts = new AccountDeviceRegistry(authorityState, devices, { onReleaseDevice: async (deviceId) => {
+    purgeStarted = true;
+    assert.equal(durableEnqueueFinished, true);
+    hub?.invalidateDevice(deviceId, 'account authority removed');
+    await deliveries.purgeDevice(deviceId); await sessions.purgeForDevice(deviceId);
+  } });
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'enqueue-lease-owner' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const issued = await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'cap:file.read'], ttlMs: 60_000 });
+  const client = new RelayClient({
+    stateDir: deviceState, url: `ws://127.0.0.1:${port}/device`, allowLoopbackInsecureWs: true,
+    identity: deviceIdentity, socketFactory, getSessionToken: async () => issued.token,
+    onDelivery: async () => undefined
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  const originalEnqueue = deliveries.enqueue.bind(deliveries);
+  let storedDelivery: any = null;
+  let enqueueEntered!: () => void; const entered = new Promise<void>((resolve) => { enqueueEntered = resolve; });
+  let finishEnqueue!: () => void; const enqueueGate = new Promise<void>((resolve) => { finishEnqueue = resolve; });
+  (deliveries as any).enqueue = async (...args: any[]) => {
+    enqueueEntered(); await enqueueGate;
+    const stored = await (originalEnqueue as any)(...args);
+    storedDelivery = stored;
+    durableEnqueueFinished = true;
+    return stored;
+  };
+  const dispatching = hub.dispatch({
+    accountId: account.accountId, explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'], kind: 'action',
+    payload: { action: { id: 'enqueue-lease', capability: 'file.read' } },
+    idempotencyKey: 'f'.repeat(64)
+  });
+  await entered;
+  const removing = accounts.removeDevice(account.accountId, device.deviceId, 'enqueue lease release');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(purgeStarted, false);
+  finishEnqueue();
+  await assert.rejects(dispatching, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
+  await removing;
+  assert.equal(purgeStarted, true);
+  assert.ok(storedDelivery);
+  const retained = await deliveries.retained(device.deviceId, storedDelivery.seq);
+  assert.equal(retained?.status, 'expired');
+  assert.deepEqual(retained?.payload, {});
+  assert.equal(retained?.authority, undefined);
+  assert.equal(await deliveries.findIdempotent('f'.repeat(64)), null);
+  client.stop();
+  await run;
+});

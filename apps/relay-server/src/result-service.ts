@@ -216,10 +216,21 @@ export class RelayResultService {
         }
         const replayAuthority = expected.idempotencyKey ? (expected.authority ?? expected.replayAuthority) : undefined;
         if (expected.idempotencyKey && !replayAuthority) throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Replayable delivery no longer has account authority.');
-        if (replayAuthority) await this.#assertActiveReplayAuthority(replayAuthority);
-        const stored = await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey, replayAuthority);
-        if (replayAuthority) {
-          try { await this.#assertActiveReplayAuthority(replayAuthority); }
+        const writeAuthority = expected.authority ?? expected.replayAuthority;
+        if (writeAuthority) await this.#assertActiveReplayAuthority(writeAuthority);
+        let stored: Awaited<ReturnType<RelayResultStore['put']>>;
+        try {
+          stored = writeAuthority
+            ? await this.#accounts.withActiveAuthorityLease(writeAuthority, async () => await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey, replayAuthority))
+            : await this.#results.put(session.subjectDeviceId, seq, deliveryId, body.result as JsonObject, expected.idempotencyKey, replayAuthority);
+        } catch (error) {
+          if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
+            throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Device account authority changed before result persistence could commit.');
+          }
+          throw error;
+        }
+        if (writeAuthority) {
+          try { await this.#assertActiveReplayAuthority(writeAuthority); }
           catch (error) {
             await this.#results.removeExact(session.subjectDeviceId, seq, deliveryId);
             throw error;

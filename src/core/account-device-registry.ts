@@ -30,6 +30,12 @@ export interface OperatorAccount {
   disabledReason?: string;
 }
 
+export interface AccountDeviceAuthority {
+  accountId: string;
+  deviceId: string;
+  generation: number;
+}
+
 export interface AccountDeviceMembership {
   accountId: string;
   deviceId: string;
@@ -176,9 +182,11 @@ export class AccountDeviceRegistry {
 
   async eraseAccount(accountIdInput: string): Promise<{ accountId: string; releasedDeviceIds: string[] }> {
     const accountId = validUuid(accountIdInput, 'accountId');
-    const started = await this.#mutate((state) => {
+    const started = await this.#withQueue(async () => {
+      const state = await this.#read();
       pruneCompletedErasures(state, this.#clock().getTime());
       const existing = state.erasures.find((entry) => entry.accountId === accountId && entry.phase !== 'COMPLETE');
+      await this.#drainPendingReleasesLocked(state, { accountId });
       if (existing) return { journal: cloneErasure(existing), created: false };
       const account = state.accounts.find((candidate) => candidate.accountId === accountId);
       if (!account) throw new OperatorError('ACCOUNT_NOT_FOUND', 'Operator account was not found.');
@@ -187,6 +195,7 @@ export class AccountDeviceRegistry {
       account.status = 'erasing';
       const created: AccountErasureRecord = { erasureId: crypto.randomUUID(), accountId, deviceIds, phase: 'REQUESTED', requestedAt: now, updatedAt: now };
       state.erasures.push(created);
+      await this.#write(state);
       return { journal: cloneErasure(created), created: true };
     });
     if (started.created) await this.#afterErasurePhase?.('REQUESTED', accountId);
@@ -202,6 +211,7 @@ export class AccountDeviceRegistry {
   }
 
   async recoverErasures(): Promise<number> {
+    await this.recoverReleases();
     const state = await this.#read();
     const pending = state.erasures.filter((entry) => entry.phase !== 'COMPLETE').map((entry) => entry.erasureId);
     for (const erasureId of pending) await this.#resumeErasure(erasureId);
@@ -246,6 +256,25 @@ export class AccountDeviceRegistry {
     if (!membership) return false;
     const device = (await this.#devices.listDevices()).find((candidate) => candidate.deviceId === deviceId);
     return device?.status === 'active';
+  }
+
+  async withActiveAuthorityLease<T>(authorityInput: AccountDeviceAuthority, work: () => Promise<T>): Promise<T> {
+    const accountId = validUuid(authorityInput?.accountId, 'authority accountId');
+    const deviceId = validUuid(authorityInput?.deviceId, 'authority deviceId');
+    const generation = Number(authorityInput?.generation);
+    if (!Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('ACCOUNT_AUTHORITY_INVALID', 'Account-device authority generation is invalid.');
+    if (typeof work !== 'function') throw new OperatorError('ACCOUNT_AUTHORITY_INVALID', 'Account-device authority lease work is invalid.');
+    return await this.#withQueue(async () => {
+      const state = await this.#read();
+      const account = state.accounts.find((candidate) => candidate.accountId === accountId);
+      const membership = state.memberships.find((candidate) => candidate.accountId === accountId && candidate.deviceId === deviceId && candidate.status === 'active');
+      if (!account || account.status !== 'active' || !membership || membership.authorityGeneration !== generation) {
+        throw new OperatorError('ACCOUNT_AUTHORITY_REVOKED', 'Account-device authority is no longer active.');
+      }
+      const device = (await this.#devices.listDevices()).find((candidate) => candidate.deviceId === deviceId);
+      if (!device || device.status !== 'active') throw new OperatorError('ACCOUNT_AUTHORITY_REVOKED', 'Device cryptographic authority is no longer active.');
+      return await work();
+    });
   }
 
   async #resumeErasure(erasureIdInput: string): Promise<{ accountId: string; releasedDeviceIds: string[] }> {
