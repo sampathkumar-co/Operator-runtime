@@ -133,3 +133,12 @@ The final exact-head Codex pass identified two capacity risks. Rotated session p
 Authenticated device claims now fail closed behind both a 32-active-device quota and a 128-distinct-device lifetime quota per account. The quota is preflighted before permanent device promotion and rechecked inside serialized account binding; a newly created registration is rolled back if binding loses a race. Account erasure reclaims unbound active registrations historically owned by that account, preserves devices already rebound elsewhere, and preserves explicit revoked cryptographic tombstones.
 
 Exact local gates after these fixes: relay 38/38; MCP 59 total / 58 passed / 0 failed / 1 expected Windows file-symlink privilege skip; red-team 6/6; Windows root 315 total / 299 passed / 0 failed / 16 expected environment skips. The Windows path-lease self-test, syntax/import check, all five real junction regressions, and git diff --check are green.
+
+### Final transfer/reclamation race hardening — 2026-09-15
+
+- Ownership-transfer cleanup now purges only prior-account enrollment records, preserving the new account's reserved enrollment through `bindDevice()` and `markBound()`.
+- Serialized device binding now revalidates the cryptographic registration inside the account-registry queue after prior-owner cleanup, so concurrent old-account erasure cannot create an active membership for a registration that was just reclaimed.
+- Focused transfer/reclaim regressions: 18/18 green, including the real reserved-enrollment transfer and erase-vs-bind race.
+- Relay package: 39/39 green. MCP: 59 total / 58 pass / 0 fail / 1 expected Windows file-symlink privilege skip. Red-team: 6/6 green.
+- Windows root suite: 316 total / 300 pass / 0 fail / 16 expected environment skips; all five real junction regressions executed and passed.
+- Windows path-lease self-test and syntax/import/workflow pin checks are green; `git diff --check` is clean.

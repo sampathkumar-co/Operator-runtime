@@ -185,6 +185,16 @@ export class DeviceEnrollmentStore {
     });
   }
 
+  async purgeDeviceForAccount(deviceIdInput: string, accountIdInput: string): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const accountId = validUuid(accountIdInput, 'accountId');
+    return await this.#mutate((state) => {
+      const before = state.enrollments.length;
+      state.enrollments = state.enrollments.filter((item) => item.deviceId !== deviceId || item.accountId !== accountId);
+      return before - state.enrollments.length;
+    });
+  }
+
   async #read(): Promise<EnrollmentState> {
     try {
       const text = await readDurableStateText(this.#file, {

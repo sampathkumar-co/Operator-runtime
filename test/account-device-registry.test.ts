@@ -250,3 +250,33 @@ test('account erasure preserves explicit revoked cryptographic device tombstones
   assert.equal(retained?.status, 'revoked');
   assert.equal(retained?.revokedReason, 'device lost');
 });
+
+test('incoming bind revalidates registration after concurrent old-account erasure reclaim', async (t) => {
+  const { stateDir, devices, accounts, peer } = await pairedFixture(t);
+  const ownerA = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-race-a' });
+  const ownerB = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'erase-race-b' });
+  await accounts.bindDevice(ownerA.accountId, peer.deviceId);
+  await accounts.removeDevice(ownerA.accountId, peer.deviceId, 'prepare transfer race');
+
+  const originalUnregister = devices.unregisterActiveDevice.bind(devices);
+  let reclaimEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { reclaimEntered = resolve; });
+  let releaseReclaim!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseReclaim = resolve; });
+  devices.unregisterActiveDevice = (async (...args: Parameters<DeviceRegistryStore['unregisterActiveDevice']>) => {
+    reclaimEntered();
+    await gate;
+    return await originalUnregister(...args);
+  }) as DeviceRegistryStore['unregisterActiveDevice'];
+
+  const erasing = accounts.eraseAccount(ownerA.accountId);
+  await entered;
+  const binding = accounts.bindDevice(ownerB.accountId, peer.deviceId);
+  const rejected = assert.rejects(binding, (error: any) => error?.code === 'DEVICE_NOT_FOUND');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseReclaim();
+  await erasing;
+  await rejected;
+  assert.equal(await accounts.activeMembershipForDevice(peer.deviceId), null);
+  assert.equal((await devices.listDevices()).some((device) => device.deviceId === peer.deviceId), false);
+});

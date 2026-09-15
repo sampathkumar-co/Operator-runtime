@@ -177,6 +177,9 @@ export class AccountDeviceRegistry {
       }
       const priorOwners = [...new Set(state.memberships.filter((m) => m.deviceId === deviceId && m.status === 'removed').map((m) => m.accountId))];
       for (const priorAccountId of priorOwners) await this.#releaseDevice(deviceId, priorAccountId, 'rebind');
+      const currentDevice = (await this.#devices.listDevices()).find((candidate) => candidate.deviceId === deviceId);
+      if (!currentDevice) throw new OperatorError('DEVICE_NOT_FOUND', 'Cannot bind a device whose cryptographic registration was removed during authority transfer.');
+      if (currentDevice.status !== 'active') throw new OperatorError('DEVICE_REVOKED', 'Cannot bind a revoked device to an account.');
       if (state.memberships.length >= MAX_MEMBERSHIPS) throw new OperatorError('ACCOUNT_DEVICE_LIMIT', `At most ${MAX_MEMBERSHIPS} account-device memberships may be stored.`);
       const authorityGeneration = Math.max(0, ...state.memberships.filter((m) => m.deviceId === deviceId).map((m) => m.authorityGeneration ?? 1)) + 1;
       const membership: AccountDeviceMembership = { accountId, deviceId, status: 'active', addedAt: this.#clock().toISOString(), authorityGeneration };

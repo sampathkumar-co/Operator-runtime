@@ -66,7 +66,8 @@ function createRelayStores(stateDir: string) {
       await deliveries.purgeDevice(deviceId);
       await results.purgeDevice(deviceId);
       await sessions.purgeForDevice(deviceId);
-      await enrollments.purgeDevice(deviceId);
+      if (reason === 'rebind') await enrollments.purgeDeviceForAccount(deviceId, accountId);
+      else await enrollments.purgeDevice(deviceId);
       await new DeviceRoutingStore(path.join(stateDir, 'accounts', accountId), devices).unbindDevice(deviceId);
     },
     onErasurePhase: async (phase, accountId, deviceIds) => {

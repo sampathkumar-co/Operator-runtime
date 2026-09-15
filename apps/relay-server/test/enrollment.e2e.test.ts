@@ -161,6 +161,46 @@ test('fresh device enrollment binds authenticated account and returns one recove
   );
 });
 
+
+test('ownership transfer preserves the new reserved enrollment while prior authority is cleaned', async (t) => {
+  const authorityState = await tempDir(t, 'operator-enrollment-transfer-authority-');
+  const deviceState = await tempDir(t, 'operator-enrollment-transfer-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const enrollments = new DeviceEnrollmentStore(authorityState);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices, {
+    onReleaseDevice: async (deviceId, accountId, reason) => {
+      await sessions.purgeForDevice(deviceId);
+      if (reason === 'rebind') await enrollments.purgeDeviceForAccount(deviceId, accountId);
+      else await enrollments.purgeDevice(deviceId);
+    }
+  });
+  const device = await deviceIdentity.loadOrCreate('Transfer Device');
+  const authority = await authorityIdentity.loadOrCreate('Authority');
+  const challenge = await devices.issuePairingChallenge(authority, { expectedPeerDeviceId: device.deviceId, ttlMs: 60_000 });
+  const pairing = await answerPairingChallenge(challenge, deviceIdentity);
+  await devices.completePairing(pairing);
+  const ownerA = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'transfer-a' });
+  const ownerB = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'transfer-b' });
+  const first = await accounts.bindDevice(ownerA.accountId, device.deviceId);
+  const oldEnrollment = await enrollments.create(device, { ttlMs: 60_000 });
+  await enrollments.reserve(oldEnrollment.userCode, ownerA.accountId);
+  await enrollments.markBound(oldEnrollment.enrollmentId, ownerA.accountId, first.authorityGeneration);
+  await enrollments.markIssued(oldEnrollment.enrollmentId, oldEnrollment.pollToken, oldEnrollment.enrollmentId);
+  await accounts.removeDevice(ownerA.accountId, device.deviceId, 'transfer');
+
+  const current = await enrollments.create(device, { ttlMs: 60_000 });
+  const reserved = await enrollments.reserve(current.userCode, ownerB.accountId);
+  assert.equal(reserved.status, 'reserved');
+  const rebound = await accounts.bindDevice(ownerB.accountId, device.deviceId);
+  const claimed = await enrollments.markBound(current.enrollmentId, ownerB.accountId, rebound.authorityGeneration);
+  assert.equal(claimed.status, 'claimed');
+  assert.equal((await enrollments.poll(current.enrollmentId, current.pollToken)).accountId, ownerB.accountId);
+  await assert.rejects(enrollments.poll(oldEnrollment.enrollmentId, oldEnrollment.pollToken), (error: any) => error?.code === 'DEVICE_ENROLLMENT_UNAUTHORIZED');
+});
+
 test('device reset forces a new cryptographic identity before fresh enrollment can regain authority', async (t) => {
   const authorityState = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-reset-reenroll-authority-'));
   const deviceState = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-reset-reenroll-device-'));
