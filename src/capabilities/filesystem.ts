@@ -30,12 +30,21 @@ export class FilesystemProvider implements CapabilityProvider {
   #maxReadBytes: number;
   #maxWriteBytes: number;
   #replaceClaimHook?: (filePath: string) => Promise<void> | void;
+  #pathLeaseHook?: (capability: string, filePath: string) => Promise<void> | void;
 
-  constructor(options: { allowedRoots: string[]; maxReadBytes?: number; maxWriteBytes?: number; replaceClaimHook?: (filePath: string) => Promise<void> | void }) {
-    this.#scope = new PathScope(options.allowedRoots);
+  constructor(options: {
+    allowedRoots: string[];
+    maxReadBytes?: number;
+    maxWriteBytes?: number;
+    replaceClaimHook?: (filePath: string) => Promise<void> | void;
+    pathLeaseHook?: (capability: string, filePath: string) => Promise<void> | void;
+    windowsPathLeaseExecutable?: string;
+  }) {
+    this.#scope = new PathScope(options.allowedRoots, { windowsPathLeaseExecutable: options.windowsPathLeaseExecutable });
     this.#maxReadBytes = boundedBytes(options.maxReadBytes, DEFAULT_MAX_READ_BYTES);
     this.#maxWriteBytes = boundedBytes(options.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES);
     this.#replaceClaimHook = options.replaceClaimHook;
+    this.#pathLeaseHook = options.pathLeaseHook;
   }
 
   supports(action: ActionRequest): boolean {
@@ -68,43 +77,47 @@ export class FilesystemProvider implements CapabilityProvider {
 
   async #read(action: ActionRequest, started: number): Promise<ActionResult> {
     const requested = requiredString(action.input.path, 'path');
-    const filePath = await this.#scope.resolveExisting(requested);
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) throw new OperatorError('NOT_A_FILE', 'Requested path is not a file.');
-    if (stat.size > this.#maxReadBytes) {
-      throw new OperatorError('READ_TOO_LARGE', `File exceeds ${this.#maxReadBytes} byte read limit.`, { details: { size: stat.size } });
-    }
-    const data = await fs.readFile(filePath);
-    const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
-    const digest = sha256(data);
-    return {
-      ok: true,
-      capability: action.capability,
-      provider: this.name,
-      output: { path: filePath, size: data.byteLength, sha256: digest, content: data.toString(encoding) },
-      evidence: [evidence('file_read', 'pass', 'File read from authorized scope.', { path: filePath, size: data.byteLength, sha256: digest })],
-      durationMs: Math.round(performance.now() - started)
-    };
+    return await this.#scope.withExisting(requested, async (filePath) => {
+      await this.#pathLeaseHook?.(action.capability, filePath);
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) throw new OperatorError('NOT_A_FILE', 'Requested path is not a file.');
+      if (stat.size > this.#maxReadBytes) {
+        throw new OperatorError('READ_TOO_LARGE', `File exceeds ${this.#maxReadBytes} byte read limit.`, { details: { size: stat.size } });
+      }
+      const data = await fs.readFile(filePath);
+      const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
+      const digest = sha256(data);
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: this.name,
+        output: { path: filePath, size: data.byteLength, sha256: digest, content: data.toString(encoding) },
+        evidence: [evidence('file_read', 'pass', 'File read from authorized scope.', { path: filePath, size: data.byteLength, sha256: digest })],
+        durationMs: Math.round(performance.now() - started)
+      };
+    });
   }
 
   async #list(action: ActionRequest, started: number): Promise<ActionResult> {
     const requested = requiredString(action.input.path, 'path');
-    const dirPath = await this.#scope.resolveExisting(requested);
-    const stat = await fs.stat(dirPath);
-    if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Requested path is not a directory.');
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
-    const bounded = entries.slice(0, 500).map((entry) => ({
-      name: entry.name,
-      type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other'
-    }));
-    return {
-      ok: true,
-      capability: action.capability,
-      provider: this.name,
-      output: { path: dirPath, entries: bounded, truncated: entries.length > bounded.length },
-      evidence: [evidence('directory_list', 'pass', 'Directory listed from authorized scope.', { path: dirPath, count: bounded.length })],
-      durationMs: Math.round(performance.now() - started)
-    };
+    return await this.#scope.withExisting(requested, async (dirPath) => {
+      await this.#pathLeaseHook?.(action.capability, dirPath);
+      const stat = await fs.stat(dirPath);
+      if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Requested path is not a directory.');
+      const entries = await fs.readdir(dirPath, { withFileTypes: true });
+      const bounded = entries.slice(0, 500).map((entry) => ({
+        name: entry.name,
+        type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other'
+      }));
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: this.name,
+        output: { path: dirPath, entries: bounded, truncated: entries.length > bounded.length },
+        evidence: [evidence('directory_list', 'pass', 'Directory listed from authorized scope.', { path: dirPath, count: bounded.length })],
+        durationMs: Math.round(performance.now() - started)
+      };
+    });
   }
 
   async #write(action: ActionRequest, started: number): Promise<ActionResult> {
@@ -115,69 +128,70 @@ export class FilesystemProvider implements CapabilityProvider {
     if (contentBytes > this.#maxWriteBytes) {
       throw new OperatorError('WRITE_TOO_LARGE', `Content exceeds ${this.#maxWriteBytes} byte write limit.`, { details: { size: contentBytes } });
     }
-
-    const filePath = await this.#scope.resolveForWrite(requested);
     const expectedSha = normalizeExpectedSha(action.input.expectedSha256);
     const mode = action.capability === 'file.create' ? 'create' : action.capability === 'file.replace' ? 'replace' : 'write';
     if (mode === 'replace' && !expectedSha) {
       throw new OperatorError('PRECONDITION_REQUIRED', 'file.replace requires expectedSha256 from a fresh file.read.');
     }
 
-    let beforeSha: string | null = null;
-    try {
-      const targetStat = await fs.lstat(filePath);
-      if (targetStat.isSymbolicLink()) {
-        throw new OperatorError('WRITE_SYMLINK_DENIED', 'Refusing to write through or replace an existing symbolic link.');
+    return await this.#scope.withForWrite(requested, async (filePath) => {
+      await this.#pathLeaseHook?.(action.capability, filePath);
+      let beforeSha: string | null = null;
+      try {
+        const targetStat = await fs.lstat(filePath);
+        if (targetStat.isSymbolicLink()) {
+          throw new OperatorError('WRITE_SYMLINK_DENIED', 'Refusing to write through or replace an existing symbolic link.');
+        }
+        if (!targetStat.isFile()) throw new OperatorError('NOT_A_FILE', 'Existing write target is not a regular file.');
+        if (mode === 'create') throw new OperatorError('TARGET_EXISTS', 'file.create refuses to overwrite an existing file.');
+        const before = await fs.readFile(filePath);
+        beforeSha = sha256(before);
+        if (expectedSha && expectedSha !== beforeSha) {
+          throw new OperatorError('PRECONDITION_FAILED', 'File changed since it was inspected.', { details: { expectedSha, actualSha: beforeSha } });
+        }
+      } catch (error) {
+        if (error instanceof OperatorError) throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT') throw error;
+        if (mode === 'replace') throw new OperatorError('TARGET_MISSING', 'file.replace requires an existing file.');
+        if (expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'Expected existing file is missing.');
       }
-      if (!targetStat.isFile()) throw new OperatorError('NOT_A_FILE', 'Existing write target is not a regular file.');
-      if (mode === 'create') throw new OperatorError('TARGET_EXISTS', 'file.create refuses to overwrite an existing file.');
-      const before = await fs.readFile(filePath);
-      beforeSha = sha256(before);
-      if (expectedSha && expectedSha !== beforeSha) {
-        throw new OperatorError('PRECONDITION_FAILED', 'File changed since it was inspected.', { details: { expectedSha, actualSha: beforeSha } });
+
+      const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.operator-${crypto.randomUUID()}.tmp`);
+      let renamed = false;
+      try {
+        await fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        if (mode === 'create') {
+          await fs.writeFile(filePath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+          await fs.rm(tempPath, { force: true });
+        } else if (mode === 'replace') {
+          beforeSha = await replaceWithExpectedSha(filePath, tempPath, expectedSha!, this.#replaceClaimHook);
+        } else {
+          await fs.rename(tempPath, filePath);
+        }
+        renamed = true;
+      } finally {
+        if (!renamed) await fs.rm(tempPath, { force: true }).catch(() => undefined);
       }
-    } catch (error) {
-      if (error instanceof OperatorError) throw error;
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') throw error;
-      if (mode === 'replace') throw new OperatorError('TARGET_MISSING', 'file.replace requires an existing file.');
-      if (expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'Expected existing file is missing.');
-    }
 
-    const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.operator-${crypto.randomUUID()}.tmp`);
-    let renamed = false;
-    try {
-      await fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      if (mode === 'create') {
-        await fs.writeFile(filePath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-        await fs.rm(tempPath, { force: true });
-      } else if (mode === 'replace') {
-        beforeSha = await replaceWithExpectedSha(filePath, tempPath, expectedSha!, this.#replaceClaimHook);
-      } else {
-        await fs.rename(tempPath, filePath);
+      const after = await fs.readFile(filePath);
+      const afterSha = sha256(after);
+      if (afterSha !== sha256(Buffer.from(content, 'utf8'))) {
+        throw new OperatorError('WRITE_POSTCONDITION_FAILED', 'Written bytes do not match requested content.');
       }
-      renamed = true;
-    } finally {
-      if (!renamed) await fs.rm(tempPath, { force: true }).catch(() => undefined);
-    }
 
-    const after = await fs.readFile(filePath);
-    const afterSha = sha256(after);
-    if (afterSha !== sha256(Buffer.from(content, 'utf8'))) {
-      throw new OperatorError('WRITE_POSTCONDITION_FAILED', 'Written bytes do not match requested content.');
-    }
-
-    return {
-      ok: true,
-      capability: action.capability,
-      provider: this.name,
-      output: { path: filePath, bytes: after.byteLength, beforeSha256: beforeSha, afterSha256: afterSha },
-      evidence: [
-        evidence('file_write', 'pass', 'Atomic file write completed inside authorized scope.', { path: filePath }),
-        evidence('postcondition', 'pass', 'Written bytes match requested content.', { afterSha256: afterSha, bytes: after.byteLength })
-      ],
-      durationMs: Math.round(performance.now() - started)
-    };
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: this.name,
+        output: { path: filePath, bytes: after.byteLength, beforeSha256: beforeSha, afterSha256: afterSha },
+        evidence: [
+          evidence('file_write', 'pass', 'Atomic file write completed inside authorized scope.', { path: filePath }),
+          evidence('postcondition', 'pass', 'Written bytes match requested content.', { afterSha256: afterSha, bytes: after.byteLength })
+        ],
+        durationMs: Math.round(performance.now() - started)
+      };
+    });
   }
 }
 

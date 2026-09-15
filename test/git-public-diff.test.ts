@@ -42,3 +42,67 @@ test('public Git diff accepts an explicit literal file and rejects directory exp
   assert.equal(directory.ok, false);
   assert.equal(directory.error?.code, 'GIT_PUBLIC_PATH_FILTER_INVALID');
 });
+
+async function publicDiff(provider: GitProvider, root: string, paths: string[]) {
+  return provider.execute({
+    id: `public-${paths.join('|') || 'empty'}`,
+    capability: 'git.diff',
+    risk: 'read',
+    provenance: { kind: 'chatgpt' },
+    input: { cwd: root, paths, publicLiteralFiles: true }
+  });
+}
+
+test('public Git diff rejects the complete magic, traversal, absolute, directory, and empty corpus', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  const invalid = [
+    ':(glob)**/.env',
+    ':(icase).EnV',
+    ':(exclude)src/a.txt',
+    '!foo', '*', '**', '?', '[]', '{}',
+    '../outside.txt',
+    path.resolve(root, 'src', 'a.txt'),
+    'src'
+  ];
+  for (const candidate of invalid) {
+    const result = await publicDiff(provider, root, [candidate]);
+    assert.equal(result.ok, false, `must reject ${candidate}`);
+    assert.equal(result.error?.code, 'GIT_PUBLIC_PATH_FILTER_INVALID', candidate);
+  }
+  const empty = await publicDiff(provider, root, []);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.error?.code, 'GIT_PUBLIC_PATH_FILTER_REQUIRED');
+});
+
+test('public Git diff rejects credential-bearing literal paths at the provider boundary', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  for (const candidate of [
+    '.env',
+    '.ssh/id_rsa',
+    '.aws/credentials',
+    'credentials.json',
+    '.npmrc'
+  ]) {
+    const result = await publicDiff(provider, root, [candidate]);
+    assert.equal(result.ok, false, `must reject ${candidate}`);
+    assert.equal(result.error?.code, 'RESTRICTED_DATA_PATH_DENIED', candidate);
+  }
+});
+
+test('public Git diff keeps literal filenames literal even when they resemble pathspec syntax', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  await fs.writeFile(path.join(root, 'src', 'safe.txt'), 'base\n');
+  git(root, 'add', 'src/safe.txt');
+  git(root, 'commit', '-m', 'add-safe');
+  await fs.writeFile(path.join(root, 'src', 'safe.txt'), 'changed\n');
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), 'also changed\n');
+
+  const result = await publicDiff(provider, root, ['src/safe.txt']);
+  assert.equal(result.ok, true, result.error?.message);
+  const stdout = String((result.output as any).stdout);
+  assert.match(stdout, /src\/safe\.txt/);
+  assert.equal(stdout.includes('src/a.txt'), false);
+});

@@ -1,4 +1,4 @@
-import type { ActionRequest, CapabilityProvider, CapabilityScore } from './types.ts';
+import type { ActionRequest, ActionRisk, CapabilityProvider, CapabilityScore } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 const WEIGHTS: Record<keyof CapabilityScore, number> = {
@@ -40,6 +40,15 @@ export class CapabilityRouter {
     }
     candidates.sort((a, b) => b.score - a.score || a.provider.name.localeCompare(b.provider.name));
     return candidates;
+  }
+
+  async resolveRisk(action: ActionRequest): Promise<ActionRisk> {
+    const risks = new Set<ActionRisk>();
+    for (const provider of this.#providers) {
+      if (await provider.supports(action) && provider.resolveRisk) risks.add(await provider.resolveRisk(action));
+    }
+    if (risks.size !== 1) throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', `Capability ${action.capability} does not have one trusted dynamic risk.`);
+    return [...risks][0]!;
   }
 
   async select(action: ActionRequest): Promise<CapabilityProvider> {

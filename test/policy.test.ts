@@ -24,9 +24,9 @@ test('lexically out-of-scope path is denied before execution', () => {
   }, permissions), /outside the authorized roots/);
 });
 
-test('external writes require approval', () => {
+test('destructive actions require approval', () => {
   const policy = new PolicyEngine();
   assert.throws(() => policy.authorize({
-    id: 'publish-1', capability: 'terminal.execute', risk: 'external', input: { cwd: '/tmp/operator-safe' }, provenance: { kind: 'chatgpt' }
+    id: 'publish-1', capability: 'terminal.execute', risk: 'destructive', input: { cwd: '/tmp/operator-safe' }, provenance: { kind: 'chatgpt' }
   }, permissions), /explicit approval/);
 });

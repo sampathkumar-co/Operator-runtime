@@ -2,7 +2,7 @@ import type { AccountPrincipal } from '../../../src/core/account-device-registry
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { RelayAgentClient } from './relay-agent-client.ts';
 
-type Executor = { execute(action: ActionRequest): Promise<ActionResult> };
+type Executor = { execute(action: ActionRequest): Promise<ActionResult>; claimDevice?(userCode: string): Promise<{ status: 'claimed' }> };
 
 export class LocalAgentClient {
   #executor: Executor;
@@ -24,12 +24,18 @@ export class LocalAgentClient {
       ...(verifiedPrincipal ? { principal: verifiedPrincipal } : { accountId }),
       deviceId: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_DEVICE_ID?.trim() || undefined,
       projectKey: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_PROJECT_KEY?.trim() || undefined,
-      waitMs: parseWait(process.env.OPERATOR_RELAY_WAIT_MS)
+      waitMs: parseWait(process.env.OPERATOR_RELAY_WAIT_MS),
+      publicBoundary: process.env.OPERATOR_MCP_PUBLIC_EDGE === '1'
     });
   }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     return await this.#executor.execute(action);
+  }
+
+  async claimDevice(userCode: string): Promise<{ status: 'claimed' }> {
+    if (!this.#executor.claimDevice) throw new Error('Device enrollment claim requires relay execution mode.');
+    return await this.#executor.claimDevice(userCode);
   }
 }
 

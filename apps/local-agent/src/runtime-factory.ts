@@ -16,10 +16,11 @@ export function createRuntime(config: {
   browserPath?: string;
   browserDataDir?: string;
   windowsUiaPath?: string;
+  windowsPathLeasePath?: string;
 }): OperatorRuntime {
   return new OperatorRuntime()
     .register(new SystemInspectProvider())
-    .register(new FilesystemProvider({ allowedRoots: config.allowedRoots }))
+    .register(new FilesystemProvider({ allowedRoots: config.allowedRoots, windowsPathLeaseExecutable: config.windowsPathLeasePath }))
     .register(new ProjectInspectProvider({ allowedRoots: config.allowedRoots }))
     .register(new ProjectCommandProvider({
       allowedRoots: config.allowedRoots,

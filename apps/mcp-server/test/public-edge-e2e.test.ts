@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { PUBLIC_NOTICES_FINAL_ACK } from '../src/public-pages.ts';
 
 async function reservePort(): Promise<number> {
   const server = http.createServer();
@@ -65,6 +69,11 @@ async function waitForHealth(port: number, child: ChildProcess, stderr: () => st
 
 test('public MCP edge serves OAuth metadata and challenges unauthenticated callers', async (t) => {
   const port = await reservePort();
+  const noticesDir = mkdtempSync(path.join(tmpdir(), 'operator-edge-notices-'));
+  writeFileSync(path.join(noticesDir, 'privacy.md'), '# Production Privacy\nController: SPLCART\nRetention: 24 hours.');
+  writeFileSync(path.join(noticesDir, 'terms.md'), '# Production Terms\nEffective for this deployed service.');
+  writeFileSync(path.join(noticesDir, 'support.md'), '# Production Support\nContact and private security reporting are configured.');
+  t.after(() => rmSync(noticesDir, { recursive: true, force: true }));
   let stderr = '';
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: process.cwd(),
@@ -77,11 +86,14 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
       OPERATOR_MCP_PUBLIC_URL: 'https://edge.operator-runtime.dev/mcp',
       OPERATOR_MCP_HOST: '127.0.0.1',
       OPERATOR_MCP_PORT: String(port),
+      OPERATOR_PUBLIC_NOTICES_DIR: noticesDir,
+      OPERATOR_PUBLIC_NOTICES_FINAL_ACK: PUBLIC_NOTICES_FINAL_ACK,
       OPERATOR_OAUTH_ISSUER: 'https://login.operator-runtime.dev',
       OPERATOR_OAUTH_AUTHORIZATION_URL: 'https://login.operator-runtime.dev/authorize',
       OPERATOR_OAUTH_TOKEN_URL: 'https://login.operator-runtime.dev/token',
+      OPERATOR_OAUTH_VERIFICATION_MODE: 'introspection',
       OPERATOR_OAUTH_INTROSPECTION_URL: 'https://login.operator-runtime.dev/introspect',
-      OPERATOR_OAUTH_AUDIENCE: 'operator-runtime',
+      OPERATOR_OAUTH_AUDIENCE: 'https://edge.operator-runtime.dev/mcp',
       OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID: 'operator-edge',
       OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET: 'test-secret-not-production'
     },
@@ -97,6 +109,29 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
   const document = JSON.parse(metadata.body) as Record<string, unknown>;
   assert.equal(document.resource, 'https://edge.operator-runtime.dev/mcp');
   assert.deepEqual(document.authorization_servers, ['https://login.operator-runtime.dev/']);
+
+  for (const [pagePath, expected] of [
+    ['/', 'SPLCART Operator'],
+    ['/privacy', 'Production Privacy'],
+    ['/terms', 'Production Terms'],
+    ['/support', 'Production Support']
+  ] as const) {
+    const page = await request(port, pagePath);
+    assert.equal(page.status, 200, page.body);
+    assert.match(String(page.headers['content-type'] ?? ''), /^text\/html/);
+    assert.match(String(page.headers['content-security-policy'] ?? ''), /default-src 'none'/);
+    assert.equal(page.headers['x-frame-options'], 'DENY');
+    assert.equal(page.headers['x-content-type-options'], 'nosniff');
+    assert.ok(page.body.toLowerCase().includes(expected.toLowerCase()));
+    assert.doesNotMatch(page.body, /<script/i);
+    if (pagePath === '/') {
+      for (const href of ['/privacy', '/terms', '/support']) assert.ok(page.body.includes(`href=\"${href}\"`));
+    }
+  }
+  const wrongPageHost = await request(port, '/privacy', { host: 'evil.operator-runtime.dev' });
+  assert.ok(wrongPageHost.status >= 400);
+  const wrongPageOrigin = await request(port, '/support', { origin: 'https://evil.operator-runtime.dev' });
+  assert.ok(wrongPageOrigin.status >= 400);
 
   const challenge = await request(port, '/mcp', { method: 'POST', body: '{}' });
   assert.equal(challenge.status, 401, challenge.body);

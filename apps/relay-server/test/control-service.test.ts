@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayControlService } from '../src/control-service.ts';
 
 const TOKEN = 'relay-control-token-0123456789abcdef';
@@ -30,19 +31,26 @@ test('verified principals resolve to isolated Operator accounts', async (t) => {
     async resolveOrCreateAccount(principal: { issuer: string; subject: string }) {
       const accountId = principal.subject === 'user-a' ? ACCOUNT_A : ACCOUNT_B;
       return { accountId, principalHash: 'x'.repeat(43), status: 'active', createdAt: new Date(0).toISOString() } as const;
+    },
+    async activeMembershipForDevice() {
+      const accountId = dispatchedAccounts.at(-1)!;
+      return { accountId, deviceId: DEVICE_ID, status: 'active', addedAt: new Date(0).toISOString(), authorityGeneration: 1 } as const;
     }
   };
   const hub = {
+    async recoverIdempotent() { return null; },
     async dispatch(input: { accountId: string }) {
       dispatchedAccounts.push(input.accountId);
       return { route: { deviceId: DEVICE_ID }, delivery: { id: `delivery-${dispatchedAccounts.length}`, seq: dispatchedAccounts.length } };
     }
   };
   const results = {
-    async get(_deviceId: string, seq: number) {
+    async findByIdempotencyKey() { return null; },
+    async get(_deviceId: string, seq: number, _deliveryId: string) {
       return {
         deliveryId: `delivery-${seq}`,
-        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 }
+        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: dispatchedAccounts[seq - 1], deviceId: DEVICE_ID, generation: 1 }
       };
     }
   };
@@ -102,4 +110,157 @@ test('relay control exposes authenticated principal erasure without creating an 
   });
   assert.equal(response.status, 200, await response.text());
   assert.deepEqual(erased, [{ issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' }]);
+});
+test('public relay control preserves trusted public-boundary marker in delivery envelope', async (t) => {
+  let payload: any;
+  const service = new RelayControlService({
+    hub: { recoverIdempotent: async () => null, dispatch: async (input: any) => {
+      payload = input.payload;
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-public', seq: 7 } };
+    } } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => ({
+      deliveryId: 'delivery-public',
+      result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+      replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+    }) } as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 })
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' },
+    publicBoundary: true,
+    action: action(), waitMs: 1000
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(payload.publicBoundary, true);
+  assert.equal(payload.action.capability, 'computer.inspect');
+});
+
+test('completed idempotent result is recovered before routing even when the device is offline', async (t) => {
+  const deliveryId = '44444444-4444-4444-8444-444444444444';
+  let recoverCalls = 0;
+  let dispatchCalls = 0;
+  const hub = {
+    recoverIdempotent: async () => { recoverCalls += 1; throw new Error('delivery recovery must not be consulted for completed work'); },
+    dispatch: async () => { dispatchCalls += 1; throw new Error('offline route must not be consulted'); }
+  };
+  const results = {
+    findByIdempotencyKey: async () => ({
+      deviceId: DEVICE_ID,
+      result: { seq: 9, deliveryId, result: { ok: true, capability: 'computer.inspect', provider: 'replay', evidence: [], durationMs: 1 }, replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 } }
+    }),
+    get: async () => { throw new Error('sequence polling must not be consulted for completed work'); }
+  };
+  const accounts = { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'mcp-request-retry' },
+    waitMs: 1000
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.equal(body.provider, 'replay');
+  assert.equal(recoverCalls, 0);
+  assert.equal(dispatchCalls, 0);
+});
+
+
+test('completed replay is rejected after account-device authority generation changes', async (t) => {
+  let dispatchCalls = 0;
+  const results = {
+    findByIdempotencyKey: async () => ({
+      deviceId: DEVICE_ID,
+      result: { seq: 10, deliveryId: '66666666-6666-4666-8666-666666666666', result: { ok: true, capability: 'computer.inspect', provider: 'stale', evidence: [], durationMs: 1 }, replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 } }
+    }),
+    get: async () => null
+  };
+  const accounts = { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 2 }) };
+  const hub = { recoverIdempotent: async () => null, dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch stale replay'); } };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, { accountId: ACCOUNT_A, action: { ...action(), taskId: 'stale-generation' }, waitMs: 1000 });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
+  assert.equal(dispatchCalls, 0);
+});
+
+
+test('expired idempotent invocation fails closed instead of dispatching the side effect again', async (t) => {
+  let dispatchCalls = 0;
+  const hub = {
+    recoverIdempotent: async () => ({ deviceId: DEVICE_ID, delivery: { id: '55555555-5555-4555-8555-555555555555', seq: 11, status: 'expired' } }),
+    dispatch: async () => { dispatchCalls += 1; throw new Error('must not redispatch expired invocation'); }
+  };
+  const results = { findByIdempotencyKey: async () => null, get: async () => null };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: {} as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, { accountId: ACCOUNT_A, action: { ...action(), taskId: 'expired-invocation' }, waitMs: 1000 });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'RELAY_EXECUTION_EXPIRED_UNCERTAIN');
+  assert.equal(dispatchCalls, 0);
+});
+
+test('device enrollment quota is rejected before permanent registration', async (t) => {
+  let registrations = 0;
+  const service = new RelayControlService({
+    hub: {} as any, results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      assertCanBindDevice: async () => { throw new OperatorError('ACCOUNT_DEVICE_QUOTA', 'quota reached'); }
+    } as any,
+    enrollments: {
+      reserve: async () => ({ enrollmentId: '44444444-4444-4444-8444-444444444444', deviceId: DEVICE_ID }),
+      peerForClaim: async () => ({ deviceId: DEVICE_ID, fingerprint: 'x'.repeat(43) }),
+      markBound: async () => { throw new Error('must not bind'); }
+    } as any,
+    devices: {
+      registerVerifiedPeerTracked: async () => { registrations += 1; throw new Error('must not register'); },
+      unregisterActiveDevice: async () => false
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-enrollment/claim`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'quota-user' }, userCode: 'ABC123' }) });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
+  assert.equal(registrations, 0);
+});
+
+test('new device registration rolls back when serialized account binding fails', async (t) => {
+  let rollbacks = 0;
+  const peer = { deviceId: DEVICE_ID, fingerprint: 'x'.repeat(43) };
+  const service = new RelayControlService({
+    hub: {} as any, results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      assertCanBindDevice: async () => undefined,
+      bindDevice: async () => { throw new OperatorError('ACCOUNT_DEVICE_QUOTA', 'quota won a race'); }
+    } as any,
+    enrollments: {
+      reserve: async () => ({ enrollmentId: '55555555-5555-4555-8555-555555555555', deviceId: DEVICE_ID }),
+      peerForClaim: async () => peer,
+      markBound: async () => { throw new Error('must not mark bound'); }
+    } as any,
+    devices: {
+      registerVerifiedPeerTracked: async () => ({ device: peer, created: true }),
+      unregisterActiveDevice: async (deviceId: string, fingerprint: string) => { assert.equal(deviceId, DEVICE_ID); assert.equal(fingerprint, peer.fingerprint); rollbacks += 1; return true; }
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-enrollment/claim`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'race-user' }, userCode: 'ABC123' }) });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
+  assert.equal(rollbacks, 1);
 });

@@ -25,9 +25,9 @@ test('verified principal is forwarded to relay without process-global account au
   const seen: Record<string, unknown>[] = [];
   const control = http.createServer(async (req, res) => {
     assert.equal(req.method, 'POST');
-    assert.equal(req.url, '/v1/execute');
     assert.equal(req.headers.authorization, `Bearer ${CONTROL_TOKEN}`);
     const body = await readBody(req);
+    assert.equal(req.url, '/v1/execute');
     seen.push(body);
     const action = body.action as ActionRequest;
     const payload = JSON.stringify({

@@ -26,11 +26,13 @@ fn run() -> Result<(), String> {
         .join("cli.ts");
     let uia = root.join("native").join("operator-windows-uia.exe");
     let dpapi = root.join("native").join("operator-windows-dpapi.exe");
+    let path_lease = root.join("native").join("operator-windows-path-lease.exe");
 
     require_file(&node, "bundled Node runtime")?;
     require_file(&entry, "Operator CLI entrypoint")?;
     require_file(&uia, "Operator Windows UIA sidecar")?;
     require_file(&dpapi, "Operator Windows DPAPI helper")?;
+    require_file(&path_lease, "Operator Windows path-lease helper")?;
 
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--self-test")) {
         println!("operator-launcher-self-test:ok");
@@ -44,6 +46,7 @@ fn run() -> Result<(), String> {
     env::set_var("OPERATOR_INVOKE_CWD", &invoke_cwd);
     env::set_var("OPERATOR_WINDOWS_UIA_PATH", &uia);
     env::set_var("OPERATOR_WINDOWS_DPAPI_PATH", &dpapi);
+    env::set_var("OPERATOR_WINDOWS_PATH_LEASE_PATH", &path_lease);
 
     let mut command = Command::new(&node);
     command

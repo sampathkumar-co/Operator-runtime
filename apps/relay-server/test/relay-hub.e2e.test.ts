@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,10 +13,20 @@ import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayHub } from '../src/relay-hub.ts';
 
+const testTempDirs = new WeakMap<object, string[]>();
+
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const dirs = testTempDirs.get(t) ?? [];
+  dirs.push(dir);
+  testTempDirs.set(t, dirs);
   return dir;
+}
+
+async function cleanupTempDirs(t: test.TestContext): Promise<void> {
+  const dirs = testTempDirs.get(t) ?? [];
+  testTempDirs.delete(t);
+  for (const dir of dirs.reverse()) await fs.rm(dir, { recursive: true, force: true });
 }
 
 async function waitFor(predicate: () => Promise<boolean> | boolean, timeoutMs = 5_000): Promise<void> {
@@ -65,6 +76,7 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     deliveries
   });
   t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
   const { port } = await hub.listen('127.0.0.1', 0);
   const url = `ws://127.0.0.1:${port}/device`;
 
@@ -130,8 +142,14 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     accountId: account.accountId,
     explicitDeviceId: device.deviceId,
     requiredCapabilities: ['file.read'],
-    kind: 'task.dispatch',
-    payload: { taskId: 'task-2', action: 'file.read' }
+    kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 999 },
+      action: { id: 'task-2', capability: 'file.read', risk: 'read', input: { path: 'a.txt' }, provenance: { kind: 'chatgpt' } }
+    }
+  });
+  assert.deepEqual((second.delivery.payload as any).approvalAuthority, {
+    accountId: account.accountId, deviceId: device.deviceId, generation: 1
   });
   await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 2);
   assert.deepEqual(replayed, [second.delivery.id]);
@@ -153,6 +171,7 @@ test('relay refuses account routing when connected token lacks required capabili
   await accounts.bindDevice(account.accountId, device.deviceId);
   const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
   t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
   const { port } = await hub.listen('127.0.0.1', 0);
 
   const token = (await sessions.issue({
@@ -182,6 +201,497 @@ test('relay refuses account routing when connected token lacks required capabili
     }),
     (error: any) => error?.code === 'ROUTE_CAPABILITY_MISMATCH'
   );
+  client.stop();
+  await run;
+});
+
+
+test('account release invalidates the live socket before a concurrent dispatch can route', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-release-race-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-release-race-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState, {
+    onRevoke: async (deviceId) => { hub?.invalidateDevice(deviceId, 'device revoked'); }
+  });
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices, {
+    onRevoke: async (jti) => { hub?.invalidateSession(jti, 'session revoked'); }
+  });
+  let releaseStarted!: () => void;
+  let releaseFinish!: () => void;
+  const started = new Promise<void>((resolve) => { releaseStarted = resolve; });
+  const finish = new Promise<void>((resolve) => { releaseFinish = resolve; });
+  const accounts = new AccountDeviceRegistry(authorityState, devices, {
+    onReleaseDevice: async (deviceId) => {
+      hub?.invalidateDevice(deviceId, 'account authority removed');
+      await sessions.purgeForDevice(deviceId);
+      releaseStarted();
+      await finish;
+    }
+  });  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'release-race-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const issued = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  });
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => issued.token,
+    onDelivery: async () => { throw new Error('no delivery expected after release starts'); }
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  const removing = accounts.removeDevice(account.accountId, device.deviceId, 'ownership removed');
+  await started;
+  assert.deepEqual(await hub.onlineDevices(account.accountId), []);
+  await assert.rejects(
+    hub.dispatch({
+      accountId: account.accountId,
+      explicitDeviceId: device.deviceId,
+      requiredCapabilities: ['file.read'],
+      kind: 'action',
+      payload: { action: { id: 'release-race', capability: 'file.read' } }
+    }),
+    (error: any) => ['ROUTE_DEVICE_OFFLINE', 'ROUTE_NO_DEVICE'].includes(error?.code)
+  );
+  releaseFinish();
+  await removing;
+  client.stop();
+  await run;
+});
+
+async function liveRevocationFixture(t: test.TestContext, prefix: string) {
+  const authorityState = await tempDir(t, `${prefix}-authority-`);
+  const deviceState = await tempDir(t, `${prefix}-device-`);
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState, {
+    onRevoke: async (deviceId) => { hub?.invalidateDevice(deviceId, 'device revoked'); }
+  });
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices, {
+    onRevoke: async (jti) => { hub?.invalidateSession(jti, 'session revoked'); }
+  });
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: prefix });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const issued = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  });
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => issued.token,
+    onDelivery: async () => undefined
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  return { hub, devices, sessions, account, device, issued, client, run };
+}
+
+test('revoking the authenticated session closes the already-open relay socket', async (t) => {
+  const fixture = await liveRevocationFixture(t, 'session-live-revoke');
+  await fixture.sessions.revoke(fixture.issued.payload.jti, 'operator revoked session');
+  await waitFor(async () => (await fixture.hub!.onlineDevices(fixture.account.accountId)).length === 0);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(await fixture.hub!.onlineDevices(fixture.account.accountId), []);
+  await assert.rejects(
+    fixture.hub!.dispatch({
+      accountId: fixture.account.accountId,
+      explicitDeviceId: fixture.device.deviceId,
+      requiredCapabilities: ['file.read'],
+      kind: 'action',
+      payload: {}
+    }),
+    (error: any) => ['ROUTE_DEVICE_OFFLINE', 'ROUTE_NO_DEVICE'].includes(error?.code)
+  );
+  fixture.client.stop();
+  await fixture.run;
+});
+
+test('revoking the paired device closes the already-open relay socket', async (t) => {
+  const fixture = await liveRevocationFixture(t, 'device-live-revoke');
+  await fixture.devices.revokeDevice(fixture.device.deviceId, 'device lost');
+  await waitFor(async () => (await fixture.hub!.onlineDevices(fixture.account.accountId)).length === 0);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(await fixture.hub!.onlineDevices(fixture.account.accountId), []);
+  await assert.rejects(
+    fixture.hub!.dispatch({
+      accountId: fixture.account.accountId,
+      explicitDeviceId: fixture.device.deviceId,
+      requiredCapabilities: ['file.read'],
+      kind: 'action',
+      payload: {}
+    }),
+    (error: any) => ['ROUTE_DEVICE_INACTIVE', 'ROUTE_DEVICE_OFFLINE', 'ROUTE_NO_DEVICE'].includes(error?.code)
+  );
+  fixture.client.stop();
+  await fixture.run;
+});
+
+test('dispatch paused before enqueue fails after account erasure and leaves no queue item', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-erase-race-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-erase-race-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState, {
+    onRevoke: async (deviceId) => { hub?.invalidateDevice(deviceId, 'device revoked'); }
+  });
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices, {
+    onRevoke: async (jti) => { hub?.invalidateSession(jti, 'session revoked'); }
+  });
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const accounts = new AccountDeviceRegistry(authorityState, devices, {
+    onReleaseDevice: async (deviceId) => {
+      hub?.invalidateDevice(deviceId, 'account erased');
+      await deliveries.purgeDevice(deviceId);
+      await sessions.purgeForDevice(deviceId);
+    }
+  });
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'erase-race-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);  let pauseDispatch!: () => void;
+  let resumeDispatch!: () => void;
+  const paused = new Promise<void>((resolve) => { pauseDispatch = resolve; });
+  const resume = new Promise<void>((resolve) => { resumeDispatch = resolve; });
+  let pausedOnce = false;
+  hub = new RelayHub({
+    stateDir: authorityState,
+    identity: authorityIdentity,
+    devices,
+    sessions,
+    accounts,
+    deliveries,
+    beforeEnqueue: async () => {
+      if (pausedOnce) return;
+      pausedOnce = true;
+      pauseDispatch();
+      await resume;
+    }
+  });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const issued = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  });  const received: string[] = [];
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => issued.token,
+    onDelivery: async (delivery) => { received.push(delivery.id); }
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  const dispatching = hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { action: { id: 'erase-race', capability: 'file.read' } }
+  });
+  await paused;
+  await accounts.eraseAccount(account.accountId);
+  assert.deepEqual(await hub.onlineDevices(), []);
+  resumeDispatch();
+  await assert.rejects(dispatching, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
+  assert.deepEqual(await deliveries.cursor(device.deviceId), { lastAckedSeq: 0, highestEnqueuedSeq: 0 });
+  assert.deepEqual(received, []);
+  client.stop();
+  await run;
+});
+
+test('device transfer preserves relay cursor continuity without exposing old-owner payloads', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-rebind-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-rebind-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const accounts = new AccountDeviceRegistry(authorityState, devices, {
+    onReleaseDevice: async (deviceId) => {
+      hub?.invalidateDevice(deviceId, 'ownership transferred');
+      await deliveries.purgeDevice(deviceId);
+      await sessions.purgeForDevice(deviceId);
+    }
+  });
+  const ownerA = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'owner-a' });
+  const ownerB = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'owner-b' });
+  await accounts.bindDevice(ownerA.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const url = `ws://127.0.0.1:${port}/device`;
+  const issue = async () => (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  })).token;
+  const ownerAToken = await issue();
+  const seenA: number[] = [];
+  const clientA = new RelayClient({
+    stateDir: deviceState, url, allowLoopbackInsecureWs: true, identity: deviceIdentity, socketFactory,
+    getSessionToken: async () => ownerAToken,
+    onDelivery: async (delivery) => { seenA.push(delivery.seq); }
+  });
+  const runA = clientA.run();
+  await waitFor(async () => (await hub!.onlineDevices(ownerA.accountId)).length === 1);
+  for (let seq = 1; seq <= 3; seq += 1) {
+    await hub.dispatch({ accountId: ownerA.accountId, explicitDeviceId: device.deviceId,
+      requiredCapabilities: ['file.read'], kind: 'action', payload: { ownerASecret: `old-${seq}` } });
+    await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === seq);
+  }
+  assert.deepEqual(seenA, [1, 2, 3]);
+  clientA.stop();
+  await runA;
+  await accounts.removeDevice(ownerA.accountId, device.deviceId, 'transfer');
+  assert.deepEqual(await deliveries.cursor(device.deviceId), { lastAckedSeq: 3, highestEnqueuedSeq: 3 });
+  const queueAfterTransfer = await fs.readFile(path.join(authorityState, 'relay-deliveries.json'), 'utf8');
+  assert.equal(queueAfterTransfer.includes('old-1'), false);
+  assert.equal(queueAfterTransfer.includes('old-2'), false);
+  assert.equal(queueAfterTransfer.includes('old-3'), false);
+  await assert.rejects(
+    sessions.verify(ownerAToken, { audience: 'operator-relay', requiredScopes: ['relay:connect'], expectedSubjectDeviceId: device.deviceId }),
+    (error: any) => ['SESSION_NOT_FOUND', 'SESSION_REVOKED'].includes(error?.code)
+  );
+  await accounts.bindDevice(ownerB.accountId, device.deviceId);
+  const ownerBToken = await issue();
+  const seenB: number[] = [];
+  const clientB = new RelayClient({
+    stateDir: deviceState, url, allowLoopbackInsecureWs: true, identity: deviceIdentity, socketFactory,
+    getSessionToken: async () => ownerBToken,
+    onDelivery: async (delivery) => { seenB.push(delivery.seq); }
+  });
+  const runB = clientB.run();
+  await waitFor(async () => (await hub!.onlineDevices(ownerB.accountId)).length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(seenB, []);
+  const fresh = await hub.dispatch({
+    accountId: ownerB.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { owner: 'b', fresh: true }
+  });
+  assert.equal(fresh.delivery.seq, 4);
+  await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === 4);
+  assert.deepEqual(seenB, [4]);
+  assert.deepEqual(await clientB.state(), { version: 1, lastAckedServerSeq: 4 });
+  clientB.stop();
+  await runB;
+});
+
+
+async function openBareSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+  return socket;
+}
+
+async function rejectedUpgradeStatus(url: string): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const socket = new WebSocket(url);
+    let settled = false;
+    socket.once('unexpected-response', (request, response) => {
+      settled = true;
+      const status = response.statusCode ?? 0;
+      response.resume();
+      request.destroy();
+      try { socket.terminate(); } catch { /* rejected upgrade already owns shutdown */ }
+      resolve(status);
+    });
+    socket.once('open', () => { socket.terminate(); if (!settled) reject(new Error('upgrade unexpectedly succeeded')); });
+    socket.once('error', (error) => { if (!settled) reject(error); });
+  });
+}
+
+test('relay caps unauthenticated live WebSocket population per client before hello', async (t) => {
+  const state = await tempDir(t, 'operator-relay-live-cap-');
+  const hub = new RelayHub({
+    stateDir: state,
+    upgradeLimitPerMinute: 100,
+    maxLiveConnections: 10,
+    maxLiveConnectionsPerClient: 1
+  });
+  const { port } = await hub.listen('127.0.0.1', 0);
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const url = `ws://127.0.0.1:${port}/device`;
+  const first = await openBareSocket(url);
+  assert.equal(await rejectedUpgradeStatus(url), 429);
+  const closed = new Promise<void>((resolve) => first.once('close', () => resolve()));
+  first.terminate();
+  await closed;
+});
+
+test('relay caps unauthenticated WebSocket connection churn before allocating more clients', async (t) => {
+  const state = await tempDir(t, 'operator-relay-churn-cap-');
+  const hub = new RelayHub({ stateDir: state, upgradeLimitPerMinute: 2, maxLiveConnectionsPerClient: 10 });
+  const { port } = await hub.listen('127.0.0.1', 0);
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const url = `ws://127.0.0.1:${port}/device`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const socket = await openBareSocket(url);
+    socket.terminate();
+    await new Promise((resolve) => socket.once('close', resolve));
+  }
+  assert.equal(await rejectedUpgradeStatus(url), 429);
+});
+
+test('relay device hello quota stops repeated token verification before expensive auth', async (t) => {
+  const state = await tempDir(t, 'operator-relay-hello-cap-');
+  const deviceId = '123e4567-e89b-42d3-a456-426614174000';
+  let verifyCalls = 0;
+  const sessions = { async verify() { verifyCalls += 1; throw new Error('invalid token'); } };
+  const hub = new RelayHub({
+    stateDir: state,
+    sessions: sessions as any,
+    upgradeLimitPerMinute: 100,
+    deviceHelloLimitPerFiveMinutes: 1
+  });
+  const { port } = await hub.listen('127.0.0.1', 0);
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const url = `ws://127.0.0.1:${port}/device`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const socket = await openBareSocket(url);
+    socket.send(JSON.stringify({
+      type: 'hello', payload: { protocol: 1, deviceId, fingerprint: 'f', resumeAfterSeq: 0,
+        sentAt: new Date().toISOString(), nonce: 'abcdefghijklmnop' },
+      signature: 'a'.repeat(40), sessionToken: 'invalid'
+    }));
+    await new Promise<void>((resolve) => socket.once('close', () => resolve()));
+  }
+  assert.equal(verifyCalls, 1);
+});
+
+test('relay device hello quota is isolated per device identity', async (t) => {
+  const state = await tempDir(t, 'operator-relay-hello-isolation-');
+  const firstDevice = '123e4567-e89b-42d3-a456-426614174000';
+  const secondDevice = '123e4567-e89b-42d3-a456-426614174001';
+  let verifyCalls = 0;
+  const sessions = { async verify() { verifyCalls += 1; throw new Error('invalid token'); } };
+  const hub = new RelayHub({ stateDir: state, sessions: sessions as any,
+    upgradeLimitPerMinute: 100, deviceHelloLimitPerFiveMinutes: 1 });
+  const { port } = await hub.listen('127.0.0.1', 0);
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const url = `ws://127.0.0.1:${port}/device`;
+  const sendHello = async (deviceId: string) => {
+    const socket = await openBareSocket(url);
+    socket.send(JSON.stringify({ type: 'hello', payload: { protocol: 1, deviceId,
+      fingerprint: 'f', resumeAfterSeq: 0, sentAt: new Date().toISOString(), nonce: 'abcdefghijklmnop' },
+      signature: 'a'.repeat(40), sessionToken: 'invalid' }));
+    await new Promise<void>((resolve) => socket.once('close', () => resolve()));
+  };
+  await sendHello(firstDevice);
+  await sendHello(firstDevice);
+  await sendHello(secondDevice);
+  assert.equal(verifyCalls, 2);
+});
+
+test('authority lease prevents release purge from overtaking an in-flight delivery enqueue', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-enqueue-lease-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-enqueue-lease-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  let durableEnqueueFinished = false;
+  let purgeStarted = false;
+  const accounts = new AccountDeviceRegistry(authorityState, devices, { onReleaseDevice: async (deviceId) => {
+    purgeStarted = true;
+    assert.equal(durableEnqueueFinished, true);
+    hub?.invalidateDevice(deviceId, 'account authority removed');
+    await deliveries.purgeDevice(deviceId); await sessions.purgeForDevice(deviceId);
+  } });
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'enqueue-lease-owner' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const issued = await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'cap:file.read'], ttlMs: 60_000 });
+  const client = new RelayClient({
+    stateDir: deviceState, url: `ws://127.0.0.1:${port}/device`, allowLoopbackInsecureWs: true,
+    identity: deviceIdentity, socketFactory, getSessionToken: async () => issued.token,
+    onDelivery: async () => undefined
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  const originalEnqueue = deliveries.enqueue.bind(deliveries);
+  let storedDelivery: any = null;
+  let enqueueEntered!: () => void; const entered = new Promise<void>((resolve) => { enqueueEntered = resolve; });
+  let finishEnqueue!: () => void; const enqueueGate = new Promise<void>((resolve) => { finishEnqueue = resolve; });
+  (deliveries as any).enqueue = async (...args: any[]) => {
+    enqueueEntered(); await enqueueGate;
+    const stored = await (originalEnqueue as any)(...args);
+    storedDelivery = stored;
+    durableEnqueueFinished = true;
+    return stored;
+  };
+  const dispatching = hub.dispatch({
+    accountId: account.accountId, explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'], kind: 'action',
+    payload: { action: { id: 'enqueue-lease', capability: 'file.read' } },
+    idempotencyKey: 'f'.repeat(64)
+  });
+  await entered;
+  const removing = accounts.removeDevice(account.accountId, device.deviceId, 'enqueue lease release');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(purgeStarted, false);
+  finishEnqueue();
+  await assert.rejects(dispatching, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
+  await removing;
+  assert.equal(purgeStarted, true);
+  assert.ok(storedDelivery);
+  const retained = await deliveries.retained(device.deviceId, storedDelivery.seq);
+  assert.equal(retained?.status, 'expired');
+  assert.deepEqual(retained?.payload, {});
+  assert.equal(retained?.authority, undefined);
+  assert.equal(await deliveries.findIdempotent('f'.repeat(64)), null);
   client.stop();
   await run;
 });

@@ -2,7 +2,10 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
+import { actionHash } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
+import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import type { RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
@@ -13,17 +16,21 @@ const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch'>;
-  #results: Pick<RelayResultStore, 'get'>;
-  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
+  #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
+  #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
+  #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
+  #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch'>; results: Pick<RelayResultStore, 'get'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
     this.#accounts = options.accounts;
+    this.#enrollments = options.enrollments;
+    this.#devices = options.devices;
     this.#token = options.token;
   }
 
@@ -37,7 +44,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -52,12 +59,38 @@ export class RelayControlService {
           send(response, 200, { ok: true, ...erased });
           return;
         }
+        if (request.url === '/v1/device-enrollment/claim') {
+          const claimBody = await readJson(request) as { principal?: unknown; accountId?: unknown; userCode?: unknown };
+          const principal = claimBody.principal === undefined ? undefined : validPrincipal(claimBody.principal);
+          const explicitAccountId = claimBody.accountId === undefined ? undefined : validUuid(String(claimBody.accountId), 'accountId');
+          if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required for device enrollment claim.');
+          const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+          if (!this.#enrollments || !this.#devices) throw new OperatorError('DEVICE_ENROLLMENT_UNAVAILABLE', 'Device enrollment authority is not configured.');
+          const userCode = boundedText(String(claimBody.userCode ?? ''), 32, 'device enrollment code');
+          const reserved = await this.#enrollments.reserve(userCode, accountId);
+          const peer = await this.#enrollments.peerForClaim(reserved.enrollmentId, accountId);
+          await this.#accounts.assertCanBindDevice(accountId, reserved.deviceId);
+          const registration = await this.#devices.registerVerifiedPeerTracked(peer);
+          let membership;
+          try {
+            membership = await this.#accounts.bindDevice(accountId, reserved.deviceId);
+          } catch (error) {
+            if (registration.created) {
+              try { await this.#devices.unregisterActiveDevice(peer.deviceId, peer.fingerprint); } catch { /* preserve the original binding failure */ }
+            }
+            throw error;
+          }
+          const claimed = await this.#enrollments.markBound(reserved.enrollmentId, accountId, membership.authorityGeneration);
+          send(response, 200, { ok: true, enrollment: { status: claimed.status } });
+          return;
+        }
         const body = await readJson(request) as {
           accountId?: unknown;
           principal?: unknown;
           deviceId?: unknown;
           projectKey?: unknown;
           action?: unknown;
+          publicBoundary?: unknown;
           waitMs?: unknown;
         };
         const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
@@ -67,23 +100,52 @@ export class RelayControlService {
         const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
         const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
         const action = validAction(body.action);
+        const publicBoundary = body.publicBoundary === true;
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+        const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
 
-        const dispatched = await this.#hub.dispatch({
-          accountId,
-          explicitDeviceId: deviceId,
-          projectKey,
-          requiredCapabilities: [action.capability],
-          kind: 'action',
-          payload: { action }
-        });
+        const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
+        if (completed) {
+          await this.#assertReplayAuthority(accountId, completed.deviceId, completed.result.replayAuthority);
+          const result = completed.result.result as unknown as ActionResult;
+          if (!isActionResult(result, action.capability)) {
+            return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Stored replay result is malformed.', completed.deviceId, completed.result.seq));
+          }
+          send(response, 200, result);
+          return;
+        }
+
+        const recovered = await this.#hub.recoverIdempotent(idempotencyKey);
+        let routedDeviceId: string;
+        let delivery: { id: string; seq: number };
+        if (recovered) {
+          if (recovered.delivery.status === 'expired') {
+            return send(response, 409, relayFailure(action.capability, startedAt, 'RELAY_EXECUTION_EXPIRED_UNCERTAIN', 'The original invocation expired before a durable result was recorded; refusing to execute it again.', recovered.deviceId, recovered.delivery.seq));
+          }
+          routedDeviceId = recovered.deviceId;
+          delivery = recovered.delivery;
+        } else {
+          const dispatched = await this.#hub.dispatch({
+            accountId,
+            explicitDeviceId: deviceId,
+            projectKey,
+            requiredCapabilities: [action.capability],
+            kind: 'action',
+            payload: { action, ...(publicBoundary ? { publicBoundary: true } : {}) },
+            idempotencyKey
+          });
+          routedDeviceId = dispatched.route.deviceId;
+          delivery = dispatched.delivery;
+        }
         const deadline = Date.now() + waitMs;
         while (Date.now() <= deadline) {
-          const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
-          if (stored && stored.deliveryId === dispatched.delivery.id) {
+          if (request.aborted || response.destroyed) return;
+          const stored = await this.#results.get(routedDeviceId, delivery.seq);
+          if (stored && stored.deliveryId === delivery.id) {
+            await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
             const result = stored.result as unknown as ActionResult;
             if (!isActionResult(result, action.capability)) {
-              return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', dispatched.route.deviceId, dispatched.delivery.seq));
+              return send(response, 502, relayFailure(action.capability, startedAt, 'RELAY_RESULT_INVALID', 'Device returned a malformed ActionResult.', routedDeviceId, delivery.seq));
             }
             send(response, 200, result);
             return;
@@ -95,8 +157,8 @@ export class RelayControlService {
           startedAt,
           'RELAY_RESULT_PENDING',
           'The routed action has no durable result yet. Do not blindly repeat the action; reconcile the delivery first.',
-          dispatched.route.deviceId,
-          dispatched.delivery.seq
+          routedDeviceId,
+          delivery.seq
         ));
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('RELAY_CONTROL_FAILED', error instanceof Error ? error.message : String(error));
@@ -112,6 +174,16 @@ export class RelayControlService {
     this.#server = server;
     const address = server.address() as AddressInfo;
     return { host, port: address.port };
+  }
+
+  async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
+    if (!authority || authority.accountId !== accountId || authority.deviceId !== deviceId) {
+      throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result is not bound to the current account/device authority.');
+    }
+    const active = await this.#accounts.activeMembershipForDevice(deviceId);
+    if (!active || active.accountId !== authority.accountId || active.authorityGeneration !== authority.generation) {
+      throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result account authority is no longer active.');
+    }
   }
 
   async close(): Promise<void> {
@@ -190,6 +262,16 @@ function bearerMatches(header: string | undefined, token: string): boolean {
   return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
 }
 
+function validSeq(input: unknown): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < 1) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'delivery sequence is invalid.');
+  return value;
+}
+
+function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
+  return crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0').digest('hex');
+}
+
 function boundedWait(input: unknown): number {
   const value = Number(input);
   if (!Number.isInteger(value) || value < 1_000 || value > MAX_WAIT_MS) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', `waitMs must be between 1000 and ${MAX_WAIT_MS}.`);
@@ -230,13 +312,14 @@ function isLoopback(input: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost';
 }
 
-function send(response: http.ServerResponse, status: number, payload: unknown): void {
+function send(response: http.ServerResponse, status: number, payload: unknown, extraHeaders: Record<string, string> = {}): void {
   const body = JSON.stringify(payload);
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff'
+    'x-content-type-options': 'nosniff',
+    ...extraHeaders
   });
   response.end(body);
 }

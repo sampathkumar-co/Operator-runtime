@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Four-part MSIX version, for example 0.1.0.0
+        description: Four-part MSIX version, for example 1.0.0.0
         required: true
         type: string
       update_base_uri:
@@ -18,7 +18,7 @@ on:
       identity_name:
         description: Stable MSIX package identity name
         required: true
-        default: Operator.Runtime
+        default: SPLCART.SplcartOperator
         type: string
       publish_github_release:
         description: Publish immutable signed assets as the latest GitHub Release after verification
@@ -48,6 +48,7 @@ jobs:
       UPDATE_BASE_URI: ${{ inputs.update_base_uri }}
       TIMESTAMP_URI: ${{ inputs.timestamp_uri }}
       IDENTITY_NAME: ${{ inputs.identity_name }}
+      STORE_PUBLISHER: CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -64,8 +65,8 @@ jobs:
       - name: Rust toolchain
         shell: pwsh
         run: |
-          rustup default 1.98.0
-          rustup component add clippy --toolchain 1.98.0
+          rustup default 1.98.1
+          rustup component add clippy --toolchain 1.98.1
           rustc --version
           cargo --version
           cargo clippy --version
@@ -78,7 +79,7 @@ jobs:
           node scripts/production-release-inputs.mjs
           if ($LASTEXITCODE -ne 0) { throw 'production release input validation failed' }
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'version must be a four-part MSIX version' }
-          if ($env:IDENTITY_NAME -ne 'Operator.Runtime') { throw 'identity_name must remain Operator.Runtime for the public bootstrap.' }
+          if ($env:IDENTITY_NAME -ne 'SPLCART.SplcartOperator') { throw 'identity_name must remain SPLCART.SplcartOperator for the public bootstrap.' }
           foreach ($pair in @(@('update_base_uri', $env:UPDATE_BASE_URI), @('timestamp_uri', $env:TIMESTAMP_URI))) {
             $uri = [Uri]$pair[1]
             if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or $uri.UserInfo) { throw "$($pair[0]) must be a credential-free absolute HTTPS URI" }
@@ -93,6 +94,7 @@ jobs:
           try {
             if (-not $cert.HasPrivateKey) { throw 'Signing certificate does not contain a private key' }
             if (-not $cert.Subject) { throw 'Signing certificate has no subject' }
+            if ($cert.Subject -ne $env:STORE_PUBLISHER) { throw "Signing certificate subject '$($cert.Subject)' does not match Partner Center publisher '$env:STORE_PUBLISHER'." }
             $now = [DateTime]::UtcNow
             if ($cert.NotBefore.ToUniversalTime() -gt $now) { throw 'Signing certificate is not yet valid' }
             if ($cert.NotAfter.ToUniversalTime() -le $now) { throw 'Signing certificate is expired' }
@@ -112,12 +114,12 @@ jobs:
         shell: pwsh
         run: cargo clippy --locked --manifest-path native/windows-launcher/Cargo.toml --all-targets -- -D warnings
 
-      - name: Build package with certificate-matching publisher
+      - name: Build package with Partner Center publisher
         shell: pwsh
         run: |
           ./packaging/windows/build-release.ps1 `
             -Version $env:RELEASE_VERSION `
-            -Publisher '${{ steps.certificate.outputs.publisher }}' `
+            -Publisher $env:STORE_PUBLISHER `
             -IdentityName $env:IDENTITY_NAME `
             -UpdateBaseUri $env:UPDATE_BASE_URI
 
@@ -140,19 +142,19 @@ jobs:
           $meta = Get-Content artifacts/windows-release/release-metadata.json -Raw | ConvertFrom-Json
           if ($meta.signed -ne $true) { throw 'final package metadata is not marked signed' }
           if ($meta.timestamped -ne $true) { throw 'production release must be timestamped' }
-          if ($meta.signerSubject -ne '${{ steps.certificate.outputs.publisher }}') { throw 'metadata signer subject mismatch' }
+          if ($meta.signerSubject -ne $env:STORE_PUBLISHER) { throw 'metadata signer subject does not match Partner Center publisher' }
           if ($meta.signerCertificateSha256 -ne '${{ steps.certificate.outputs.fingerprint_sha256 }}') { throw 'metadata signer fingerprint mismatch' }
-          if ($meta.publisher -ne '${{ steps.certificate.outputs.publisher }}') { throw 'metadata publisher mismatch' }
+          if ($meta.publisher -ne $env:STORE_PUBLISHER) { throw 'metadata publisher does not match Partner Center publisher' }
           if ($meta.sha256 -ne (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'signed MSIX SHA-256 mismatch' }
           [xml]$installer = Get-Content artifacts/windows-release/Operator.appinstaller -Raw
-          if ($installer.AppInstaller.MainPackage.Publisher -ne '${{ steps.certificate.outputs.publisher }}') { throw 'App Installer publisher mismatch' }
+          if ($installer.AppInstaller.MainPackage.Publisher -ne $env:STORE_PUBLISHER) { throw 'App Installer publisher does not match Partner Center publisher' }
           if ($installer.AppInstaller.MainPackage.Uri -notmatch '^https://') { throw 'App Installer package URI must be HTTPS' }
 
       - name: Require production signer to be pinned by the npx bootstrap
         shell: pwsh
         run: |
           $trust = Get-Content packages/operator-runtime-cli/trusted-signers.json -Raw | ConvertFrom-Json
-          $expectedSubject = '${{ steps.certificate.outputs.publisher }}'
+          $expectedSubject = $env:STORE_PUBLISHER
           $expectedFingerprint = '${{ steps.certificate.outputs.fingerprint_sha256 }}'
           $match = @($trust.signers | Where-Object { $_.subject -eq $expectedSubject -and $_.certificateSha256 -eq $expectedFingerprint })
           if ($match.Count -ne 1) { throw 'Production signing certificate is not pinned exactly once in operator-runtime-cli.' }
@@ -167,10 +169,10 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'operator-production-authorized-root'
           $package = $null
           try {
-            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix '${{ steps.certificate.outputs.publisher }}' '${{ steps.certificate.outputs.fingerprint_sha256 }}' $root
+            & node packages/operator-runtime-cli/scripts/ci-bootstrap-smoke.mjs $meta $msix $env:STORE_PUBLISHER '${{ steps.certificate.outputs.fingerprint_sha256 }}' $root
             if ($LASTEXITCODE -ne 0) { throw "production bootstrap smoke failed with exit code $LASTEXITCODE" }
-            $package = Get-AppxPackage -Name 'Operator.Runtime' | Select-Object -First 1
-            if (-not $package) { throw 'Operator.Runtime production package was not registered' }
+            $package = Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Select-Object -First 1
+            if (-not $package) { throw 'SPLCART.SplcartOperator production package was not registered' }
             $launcher = Join-Path $package.InstallLocation 'Operator.exe'
             $output = & $launcher --self-test
             if ($LASTEXITCODE -ne 0 -or ($output -join "`n") -notmatch 'operator-launcher-self-test:ok') { throw 'production packaged launcher self-test failed' }
@@ -183,8 +185,8 @@ jobs:
               $bundledNode = Join-Path $package.InstallLocation 'runtime\node.exe'
               Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $bundledNode } | Stop-Process -Force -ErrorAction SilentlyContinue
             }
-            Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Operator') -Recurse -Force -ErrorAction SilentlyContinue
-            Get-AppxPackage -Name 'Operator.Runtime' | Remove-AppxPackage -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.operator') -Recurse -Force -ErrorAction SilentlyContinue
+            Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Remove-AppxPackage -ErrorAction SilentlyContinue
           }
 
       - name: Publish immutable GitHub Release assets

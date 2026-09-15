@@ -7,10 +7,14 @@ import {
 import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import { OAuthIntrospectionVerifier } from './oauth-introspection.ts';
+import { OAuthJwtVerifier } from './oauth-jwt.ts';
 
 const PUBLIC_BIND_ACK = 'TLS_TERMINATES_UPSTREAM';
 export const DEFAULT_READ_SCOPE = 'operator:read';
 export const DEFAULT_WRITE_SCOPE = 'operator:write';
+
+export type OAuthClientRegistrationMode = 'cimd' | 'dcr' | 'predefined';
+export type OAuthTokenVerificationMode = 'jwks' | 'introspection';
 
 export interface PublicMcpEdgeConfig {
   publicUrl: URL;
@@ -21,6 +25,13 @@ export interface PublicMcpEdgeConfig {
   challengeToken?: string;
   authMetadata: AuthMetadataOptions;
   allowedHostnames: string[];
+  oauthIssuer: URL;
+  oauthAuthorizationEndpoint: URL;
+  oauthTokenEndpoint: URL;
+  oauthIntrospectionEndpoint?: URL;
+  oauthJwksEndpoint?: URL;
+  oauthVerificationMode: OAuthTokenVerificationMode;
+  oauthRegistrationMode: OAuthClientRegistrationMode;
 }
 
 export function readPublicMcpEdgeConfig(
@@ -40,22 +51,26 @@ export function readPublicMcpEdgeConfig(
   const issuer = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_ISSUER'), 'OAuth issuer');
   const authorizationEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_AUTHORIZATION_URL'), 'OAuth authorization endpoint');
   const tokenEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_TOKEN_URL'), 'OAuth token endpoint');
-  const introspectionEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_URL'), 'OAuth introspection endpoint');
+  const oauthVerificationMode = verificationMode(requiredEnv(env, 'OPERATOR_OAUTH_VERIFICATION_MODE'));
+  const introspectionEndpoint = oauthVerificationMode === 'introspection'
+    ? publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_URL'), 'OAuth introspection endpoint') : undefined;
+  const jwksEndpoint = oauthVerificationMode === 'jwks'
+    ? publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_JWKS_URL'), 'OAuth JWKS endpoint') : undefined;
   const audience = bounded(requiredEnv(env, 'OPERATOR_OAUTH_AUDIENCE'), 2048, 'OAuth audience');
+  if (audience !== publicUrl.toString()) throw new Error('OPERATOR_OAUTH_AUDIENCE must exactly match OPERATOR_MCP_PUBLIC_URL.');
   const readScope = validScope(env.OPERATOR_OAUTH_READ_SCOPE?.trim() || DEFAULT_READ_SCOPE);
   const writeScope = validScope(env.OPERATOR_OAUTH_WRITE_SCOPE?.trim() || DEFAULT_WRITE_SCOPE);
   if (readScope === writeScope) throw new Error('OAuth read and write scopes must be distinct.');
   const challengeToken = optionalChallengeToken(env.OPENAI_APPS_CHALLENGE_TOKEN);
-  const clientId = bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID'), 512, 'OAuth introspection client ID');
-  const clientSecret = bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET'), 4096, 'OAuth introspection client secret');
-  const verifier = new OAuthIntrospectionVerifier({
-    endpoint: introspectionEndpoint,
-    clientId,
-    clientSecret,
-    issuer: issuer.toString(),
-    audience,
-    resourceUrl: publicUrl
-  }, options);
+  const oauthRegistrationMode = registrationMode(env.OPERATOR_OAUTH_CLIENT_REGISTRATION_MODE?.trim() || 'cimd');
+  const verifier: OAuthTokenVerifier = oauthVerificationMode === 'jwks'
+    ? new OAuthJwtVerifier({ jwksUrl: jwksEndpoint!, issuer: issuer.toString(), audience, resourceUrl: publicUrl }, options)
+    : new OAuthIntrospectionVerifier({
+        endpoint: introspectionEndpoint!,
+        clientId: bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID'), 512, 'OAuth introspection client ID'),
+        clientSecret: bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET'), 4096, 'OAuth introspection client secret'),
+        issuer: issuer.toString(), audience, resourceUrl: publicUrl
+      }, options);
 
   const authMetadata: AuthMetadataOptions = {
     oauthMetadata: {
@@ -66,8 +81,11 @@ export function readPublicMcpEdgeConfig(
       grant_types_supported: ['authorization_code', 'refresh_token'],
       scopes_supported: [readScope, writeScope],
       code_challenge_methods_supported: ['S256'],
-      introspection_endpoint: introspectionEndpoint.toString(),
-      introspection_endpoint_auth_methods_supported: ['client_secret_basic']
+      ...(jwksEndpoint ? { jwks_uri: jwksEndpoint.toString() } : {}),
+      ...(introspectionEndpoint ? {
+        introspection_endpoint: introspectionEndpoint.toString(),
+        introspection_endpoint_auth_methods_supported: ['client_secret_basic']
+      } : {})
     },
     resourceServerUrl: publicUrl,
     scopesSupported: [readScope, writeScope],
@@ -81,7 +99,14 @@ export function readPublicMcpEdgeConfig(
     writeScope,
     challengeToken,
     authMetadata,
-    allowedHostnames: [publicUrl.hostname]
+    allowedHostnames: [publicUrl.hostname],
+    oauthIssuer: issuer,
+    oauthAuthorizationEndpoint: authorizationEndpoint,
+    oauthTokenEndpoint: tokenEndpoint,
+    oauthIntrospectionEndpoint: introspectionEndpoint,
+    oauthJwksEndpoint: jwksEndpoint,
+    oauthVerificationMode,
+    oauthRegistrationMode
   };
 }
 
@@ -145,6 +170,16 @@ function validScope(input: string): string {
   const scope = bounded(input, 256, 'OAuth required scope');
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(scope)) throw new Error('OAuth required scope is invalid.');
   return scope;
+}
+
+function registrationMode(input: string): OAuthClientRegistrationMode {
+  if (input === 'cimd' || input === 'dcr' || input === 'predefined') return input;
+  throw new Error('OPERATOR_OAUTH_CLIENT_REGISTRATION_MODE must be cimd, dcr, or predefined.');
+}
+
+function verificationMode(input: string): OAuthTokenVerificationMode {
+  if (input === 'jwks' || input === 'introspection') return input;
+  throw new Error('OPERATOR_OAUTH_VERIFICATION_MODE must be jwks or introspection.');
 }
 
 function optionalChallengeToken(value: string | undefined): string | undefined {

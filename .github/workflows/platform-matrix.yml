@@ -23,13 +23,16 @@ jobs:
         with:
           node-version: '22.23.2'
           package-manager-cache: false
-      - name: Build real Windows DPAPI helper for identity tests
+      - name: Build real Windows native security helpers
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          rustup default 1.98.0
+          rustup default 1.98.1
           cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
           $helper = (Resolve-Path native/windows-dpapi/target/release/operator-windows-dpapi.exe).Path
           "OPERATOR_WINDOWS_DPAPI_PATH=$helper" >> $env:GITHUB_ENV
+          ./native/windows-path-lease/build.ps1
+          $pathLease = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$pathLease" >> $env:GITHUB_ENV
       - name: Import and full runtime test suite
         run: npm run check

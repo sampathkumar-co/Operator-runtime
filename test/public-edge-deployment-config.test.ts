@@ -14,6 +14,7 @@ test('public-edge image uses patched pinned Node and a non-root read-only runtim
   assert.match(dockerfile, /^USER node$/m);
   assert.match(dockerfile, /^HEALTHCHECK .*healthcheck\.mjs"\]$/m);
   assert.match(dockerfile, /^ENTRYPOINT \["node", "deploy\/public-edge\/supervisor\.mjs"\]$/m);
+  assert.doesNotMatch(dockerfile, /^COPY PRIVACY\.md TERMS\.md SUPPORT\.md \.\/$/m);
   assert.doesNotMatch(dockerfile, /npm ci .*--include=dev/);
 });
 
@@ -28,6 +29,10 @@ test('public-edge compose publishes backends only on host loopback and never pub
   assert.match(compose, /read_only: true/);
   assert.match(compose, /cap_drop:\r?\n\s+- ALL/);
   assert.match(compose, /no-new-privileges:true/);
+  assert.match(compose, /OPERATOR_PUBLIC_NOTICES_DIR: \/run\/operator-public-notices/);
+  assert.match(compose, /source: \.\/production-notices/);
+  assert.match(compose, /target: \/run\/operator-public-notices/);
+  assert.match(compose, /read_only: true[\s\S]*create_host_path: false/);
   assert.doesNotMatch(compose, /privileged:\s*true|network_mode:\s*host/);
 });
 
@@ -73,14 +78,43 @@ test('loopback probe preserves the canonical Host header without permitting remo
 test('public-edge deployment templates contain routes but no committed credentials', () => {
   const env = text('deploy/public-edge/operator-edge.env.example');
   const caddy = text('deploy/public-edge/Caddyfile.example');
+  const caddyImage = text('deploy/public-edge/caddy-image.txt').trim();
+  const gitignore = text('.gitignore');
+  const mcpPackage = JSON.parse(text('apps/mcp-server/package.json')) as { scripts?: Record<string, string> };
   for (const name of [
     'OPERATOR_RELAY_CONTROL_TOKEN',
     'OPERATOR_MCP_PUBLIC_URL',
-    'OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET'
+    'OPERATOR_OAUTH_VERIFICATION_MODE',
+    'OPERATOR_OAUTH_JWKS_URL',
+    'OPERATOR_OAUTH_AUDIENCE',
+    'OPERATOR_PUBLIC_NOTICES_FINAL_ACK'
   ]) assert.match(env, new RegExp(`^${name}=`, 'm'));
   assert.match(env, /replace-with-/);
+  assert.match(env, /^OPERATOR_OAUTH_VERIFICATION_MODE=jwks$/m);
+  assert.match(env, /^OPERATOR_OAUTH_AUDIENCE=https:\/\/mcp\.your-domain\.tld\/mcp$/m);
+  assert.doesNotMatch(env, /^OPERATOR_OAUTH_AUDIENCE=operator-runtime$/m);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:47200/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8788/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
+  for (const page of ['/', '/privacy', '/terms', '/support']) {
+    assert.ok(caddy.includes(page), `Caddy ingress must expose ${page}`);
+  }
+  for (const route of [
+    '/v1/device-result', '/v1/device-session/rotate',
+    '/v1/device-enrollment/challenge', '/v1/device-enrollment/complete',
+    '/v1/device-enrollment/poll', '/v1/device-self/reset'
+  ]) assert.ok(caddy.includes(route), `Caddy ingress must expose ${route}`);
+  assert.match(caddy, /max_header_size 32KB/);
+  assert.match(caddy, /read_body 15s/);
+  assert.match(caddy, /read_header 10s/);
+  assert.match(caddy, /max_size 256KB/);
+  assert.match(caddy, /stream_timeout 24h/);
+  assert.match(caddy, /stream_close_delay 5m/);
+  assert.match(caddy, /strict_sni_host on/);
+  assert.match(caddy, /0rtt off/);
+  assert.match(caddy, /Validated with Caddy 2\.11\.4/);
+  assert.equal(caddyImage, 'caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648');
+  assert.equal(mcpPackage.scripts?.['certify:oauth-provider'], 'tsx scripts/oauth-provider-preflight.ts');
+  assert.equal(mcpPackage.scripts?.['certify:production-edge'], 'tsx scripts/production-edge-preflight.ts');
   assert.doesNotMatch(caddy, /8790/);
 });

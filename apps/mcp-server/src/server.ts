@@ -14,12 +14,14 @@ import {
 import type { FastifyReply } from 'fastify';
 import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
+import { mcpInvocationScope, withMcpInvocation } from './request-context.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
-import { invokePublicWithAgent } from './public-boundary.ts';
+import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
+import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -57,12 +59,30 @@ const app = createMcpFastifyApp(publicEdge
   : { host });
 
 if (publicEdge) {
+  const publicServicePages = loadPublicServicePages(process.env);
   if (publicEdge.challengeToken) {
     app.get('/.well-known/openai-apps-challenge', async (request, reply) => {
       const webRequest = await toWebRequest(request.raw, request.body);
       const rejected = validatePublicHeaders(webRequest);
       if (rejected) return sendSdkResponse(reply, rejected);
       return reply.header('cache-control', 'no-store').type('text/plain; charset=utf-8').send(publicEdge.challengeToken);
+    });
+  }
+
+  for (const pagePath of PUBLIC_SERVICE_PAGE_PATHS) {
+    app.get(pagePath, async (request, reply) => {
+      const webRequest = await toWebRequest(request.raw, request.body);
+      const rejected = validatePublicHeaders(webRequest);
+      if (rejected) return sendSdkResponse(reply, rejected);
+      return reply
+        .header('cache-control', 'public, max-age=300')
+        .header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+        .header('cross-origin-resource-policy', 'same-origin')
+        .header('x-content-type-options', 'nosniff')
+        .header('x-frame-options', 'DENY')
+        .header('x-robots-tag', 'index, follow')
+        .type('text/html; charset=utf-8')
+        .send(publicServicePages[pagePath]);
     });
   }
 
@@ -80,6 +100,7 @@ if (publicEdge) {
 }
 
 app.all('/mcp', async (request, reply) => {
+  let invocationScope = mcpInvocationScope(request.headers['mcp-session-id']);
   if (publicEdge) {
     const webRequest = await toWebRequest(request.raw, request.body);
     const rejected = validatePublicHeaders(webRequest);
@@ -106,13 +127,14 @@ app.all('/mcp', async (request, reply) => {
       }));
     }
     publicAuthFailureLimiter!.clear(clientKey);
+    invocationScope = mcpInvocationScope(request.headers['mcp-session-id'], authInfo.clientId);
     const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
     const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
     if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);
     delete request.raw.headers.authorization;
     (request.raw as typeof request.raw & { auth?: AuthInfo }).auth = authInfo;
   }
-  return nodeHandler(request.raw, reply.raw, request.body);
+  return withMcpInvocation(request.body, invocationScope, () => nodeHandler(request.raw, reply.raw, request.body));
 });
 app.get('/health', async () => ({ ok: true, service: 'operator-mcp-server', version: '0.1.0' }));
 
@@ -144,7 +166,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   const publicMode = Boolean(publicEdge);
   const invoke = (capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) =>
     publicMode
-      ? invokePublicWithAgent(agent, capability, risk, input, target, { grantedScopes: authInfo?.scopes, readScope: publicEdge?.readScope, writeScope: publicEdge?.writeScope })
+      ? invokePublicWithAgent(agent, capability, risk, input, target, {
+          grantedScopes: authInfo?.scopes,
+          readScope: publicEdge?.readScope,
+          writeScope: publicEdge?.writeScope,
+          resourceMetadataUrl: publicEdge ? getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl).toString() : undefined
+        })
       : invokeWithAgent(agent, capability, risk, input, target);
 
   const server = new McpServer(
@@ -157,7 +184,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   );
 
   if (publicMode) {
-    registerPublicTools(server, invoke);
+    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope }, { claimDevice: (userCode) => invokePublicServerWrite('device.claim', () => agent.claimDevice(userCode), { grantedScopes: authInfo?.scopes, writeScope: publicEdge!.writeScope, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(publicEdge!.publicUrl).toString() }) });
     return server;
   }
 
@@ -504,8 +531,8 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       targetId: z.string().min(1).optional(),
       newTab: z.boolean().default(false)
     }),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ url, targetId, newTab }) => invoke('browser.navigate', 'read', { url, targetId, newTab }, targetId));
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  }, async ({ url, targetId, newTab }) => invoke('browser.navigate', 'write', { url, targetId, newTab }, targetId));
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',

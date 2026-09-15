@@ -197,3 +197,48 @@ test('relay URL policy requires TLS except explicit loopback development and bac
   assert.ok(reconnectDelay(5, 0.5) >= 7_000);
   assert.ok(reconnectDelay(50, 1) <= 30_000);
 });
+
+
+
+test('expired processing resubmits durable recovery before advancing into fresh work', async (t) => {
+  const state = await stateDir(t, 'operator-relay-expired-processing-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Expired Processing PC');
+  await fs.writeFile(path.join(state, 'relay-client.json'), JSON.stringify({ version: 1, lastAckedServerSeq: 0, processing: { seq: 1, id: 'expired-local-1', startedAt: '2026-09-14T00:00:00.000Z' } }, null, 2));
+  let expiredRecoveries = 0; const delivered: number[] = []; let client!: RelayClient;
+  const socket = new FakeSocket();
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') { assert.deepEqual(frame.payload.pendingRecovery, { seq: 1, id: 'expired-local-1' }); socket.server({ type: 'welcome', protocol: 1, connectionId: 'expired-processing', resumeFromSeq: 1, expiredThroughSeq: 1, heartbeatMs: 60_000 }); socket.server({ type: 'delivery', seq: 2, id: 'fresh-2', kind: 'task.dispatch', payload: { fresh: true } }); }
+    if (frame.type === 'ack' && frame.seq === 2) { client.stop(); socket.close(); }
+  };
+  client = new RelayClient({ stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true, identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; }, getSessionToken: async () => 'session', onDelivery: async (delivery) => { delivered.push(delivery.seq); }, onExpiredRecovery: async ({ processing, expiredThroughSeq }) => { expiredRecoveries += 1; assert.deepEqual({ seq: processing.seq, id: processing.id, expiredThroughSeq }, { seq: 1, id: 'expired-local-1', expiredThroughSeq: 1 }); return 'ack'; }, sleep: async () => {} });
+  await client.run();
+  assert.equal(expiredRecoveries, 1); assert.deepEqual(delivered, [2]); assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 2 });
+});
+
+test('client durably adopts authenticated expired-history reconciliation before fresh work', async (t) => {
+  const state = await stateDir(t, 'operator-relay-expired-reconcile-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Expired Reconcile PC');
+  const delivered: number[] = [];
+  let client!: RelayClient;
+  const socket = new FakeSocket();
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      assert.equal(frame.payload.resumeAfterSeq, 0);
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'expired-conn', resumeFromSeq: 1, expiredThroughSeq: 1, heartbeatMs: 60_000 });
+      socket.server({ type: 'delivery', seq: 2, id: 'fresh-2', kind: 'task.dispatch', payload: { fresh: true } });
+    }
+    if (frame.type === 'ack' && frame.seq === 2) { client.stop(); socket.close(); }
+  };
+  client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    onDelivery: async (delivery) => { delivered.push(delivery.seq); },
+    sleep: async () => {}
+  });
+  await client.run();
+  assert.deepEqual(delivered, [2]);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 2 });
+});

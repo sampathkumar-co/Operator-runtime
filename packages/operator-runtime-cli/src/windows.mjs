@@ -100,7 +100,7 @@ $fingerprint = $cert.GetCertHashString([System.Security.Cryptography.HashAlgorit
 export async function getInstalledOperatorPackage() {
   const script = `
 $ErrorActionPreference = 'Stop'
-$p = Get-AppxPackage -Name 'Operator.Runtime' | Sort-Object Version -Descending | Select-Object -First 1
+$p = Get-AppxPackage -Name 'SPLCART.SplcartOperator' | Sort-Object Version -Descending | Select-Object -First 1
 if ($p) {
   [ordered]@{ version = [string]$p.Version; publisher = [string]$p.Publisher; installLocation = [string]$p.InstallLocation } | ConvertTo-Json -Compress
 }
@@ -203,7 +203,7 @@ function Get-OperatorOwnedProcesses([string]$RuntimeNode, [string]$Launcher) {
   return @($owned)
 }
 
-$packages = @(Get-AppxPackage -Name 'Operator.Runtime')
+$packages = @(Get-AppxPackage -Name 'SPLCART.SplcartOperator')
 foreach ($package in $packages) {
   $runtimeNode = Join-Path $package.InstallLocation 'runtime\node.exe'
   $launcher = Join-Path $package.InstallLocation 'Operator.exe'
@@ -241,14 +241,14 @@ foreach ($package in $packages) {
 
 $registrationDeadline = [DateTime]::UtcNow.AddSeconds(20)
 do {
-  $remainingPackages = @(Get-AppxPackage -Name 'Operator.Runtime' -ErrorAction SilentlyContinue)
+  $remainingPackages = @(Get-AppxPackage -Name 'SPLCART.SplcartOperator' -ErrorAction SilentlyContinue)
   if ($remainingPackages.Count -eq 0) { break }
   Start-Sleep -Milliseconds 250
 } while ([DateTime]::UtcNow -lt $registrationDeadline)
 
 if ($remainingPackages.Count -gt 0) {
   $remainingNames = ($remainingPackages | ForEach-Object { $_.PackageFullName }) -join ','
-  throw "Operator.Runtime is still registered after uninstall timeout: $remainingNames"
+  throw "SPLCART.SplcartOperator is still registered after uninstall timeout: $remainingNames"
 }
 [ordered]@{ removed = $packages.Count -gt 0; packageCount = $packages.Count } | ConvertTo-Json -Compress
 `);

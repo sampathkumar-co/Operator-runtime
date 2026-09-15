@@ -102,7 +102,7 @@ test('pending delivery payload expires to a tombstone and reconnect may cross on
   nowMs += 60_001;
   assert.deepEqual(await store.pending(DEVICE), []);
   assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
-  assert.deepEqual(await store.reconcileClientCursor(DEVICE, 0), { lastAckedSeq: 1, advanced: 1 });
+  assert.deepEqual(await store.reconcileClientCursor(DEVICE, 0), { lastAckedSeq: 1, advanced: 1, expiredThroughSeq: 1 });
   const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
   const expired = persisted.streams[0].deliveries[0];
   assert.equal(expired.status, 'expired');
@@ -112,4 +112,83 @@ test('pending delivery payload expires to a tombstone and reconnect may cross on
   const fresh = await store.enqueue(DEVICE, 'action', { action: { input: { content: 'fresh' } } });
   assert.equal(fresh.seq, 2);
   assert.deepEqual((await store.pending(DEVICE)).map((delivery) => delivery.seq), [2]);
+});
+
+test('device purge erases old payloads while preserving the monotonic relay watermark for rebind', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const first = await store.enqueue(DEVICE, 'action', { secret: 'owner-a-one' });
+  const second = await store.enqueue(DEVICE, 'action', { secret: 'owner-a-two' });
+  await store.acknowledge(DEVICE, first.seq, first.id);
+
+  assert.equal(await store.purgeDevice(DEVICE), 2);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 2, highestEnqueuedSeq: 2 });
+  assert.deepEqual(await store.pending(DEVICE), []);
+  assert.deepEqual(
+    await store.reconcileClientCursor(DEVICE, 0),
+    { lastAckedSeq: 2, advanced: 2, expiredThroughSeq: 2 }
+  );
+
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.equal(JSON.stringify(persisted).includes('owner-a-one'), false);
+  assert.equal(JSON.stringify(persisted).includes('owner-a-two'), false);
+  assert.equal(persisted.streams[0].deliveries.every((entry: any) => entry.status === 'expired'), true);
+  assert.equal(persisted.streams[0].deliveries.every((entry: any) => Object.keys(entry.payload).length === 0 && entry.authority === undefined), true);
+
+  const fresh = await store.enqueue(DEVICE, 'action', { owner: 'b' });
+  assert.equal(fresh.seq, 3);
+  assert.deepEqual((await store.pending(DEVICE)).map((entry) => entry.seq), [3]);
+});
+
+test('invocation idempotency survives device ACK and reload, then expires on the bounded retention clock', async (t) => {
+  let nowMs = Date.parse('2026-09-14T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  const key = 'a'.repeat(64);
+  const first = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  const retryBeforeAck = await store.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryBeforeAck.seq, first.seq);
+  assert.equal(retryBeforeAck.id, first.id);
+
+  await store.acknowledge(DEVICE, first.seq, first.id);
+  const reloaded = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  const recovered = await reloaded.findIdempotent(key);
+  assert.equal(recovered?.deviceId, DEVICE);
+  assert.equal(recovered?.delivery.id, first.id);
+  assert.equal(recovered?.delivery.status, 'acked');
+  const retryAfterAck = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(retryAfterAck.id, first.id);
+
+  const distinctInvocationKey = 'b'.repeat(64);
+  const intentionalRepeat = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, distinctInvocationKey);
+  assert.equal(intentionalRepeat.seq, 2);
+  assert.notEqual(intentionalRepeat.id, first.id);
+
+  nowMs += 60_001;
+  assert.equal(await reloaded.findIdempotent(key), null);
+  const afterRetention = await reloaded.enqueue(DEVICE, 'action', { action: { id: 'once' } }, undefined, key);
+  assert.equal(afterRetention.seq, 3);
+});
+
+
+test('expired idempotent delivery keeps a payload-free replay tombstone and blocks redispatch', async (t) => {
+  let nowMs = Date.parse('2026-09-14T11:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { clock, retentionMs: 60_000 });
+  const key = 'c'.repeat(64);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 7 };
+  const first = await store.enqueue(DEVICE, 'action', { secret: 'erase-me' }, authority, key);
+  nowMs += 60_001;
+  assert.deepEqual(await store.pending(DEVICE), []);
+  const retained = await store.findIdempotent(key);
+  assert.equal(retained?.delivery.status, 'expired');
+  assert.equal(retained?.delivery.id, first.id);
+  assert.deepEqual(retained?.delivery.payload, {});
+  assert.equal(retained?.delivery.authority, undefined);
+  assert.deepEqual(retained?.delivery.replayAuthority, authority);
+  const retry = await store.enqueue(DEVICE, 'action', { secret: 'must-not-replace' }, undefined, key);
+  assert.equal(retry.id, first.id);
+  assert.equal(retry.status, 'expired');
 });

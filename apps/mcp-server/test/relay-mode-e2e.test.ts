@@ -124,7 +124,13 @@ test('official MCP client and Inspector execute through relay control mode with 
           evidence: [{ kind: 'relay-ci', status: 'pass', message: 'remote result persisted', timestamp: new Date().toISOString() }],
           durationMs: 2
         };
-    return send(res, 200, result);
+    const payload = JSON.stringify(result);
+    res.writeHead(200, {
+      'content-type': 'application/json', 'content-length': Buffer.byteLength(payload)
+    });
+    res.end(payload);
+    return;
+
   });
   const controlPort = await listen(control);
   t.after(() => new Promise<void>((resolve) => control.close(() => resolve())));
@@ -174,9 +180,16 @@ test('official MCP client and Inspector execute through relay control mode with 
   const blockedResult = blocked.structuredContent as Record<string, unknown>;
   assert.equal(blockedResult.provider, 'policy');
   assert.equal((blockedResult.error as Record<string, unknown>)?.code, 'APPROVAL_REQUIRED');
-  assert.equal(seen.length, 2);
+
+  const inspectAgain = await client.callTool({ name: 'computer.inspect', arguments: {} });
+  assert.notEqual(inspectAgain.isError, true);
+  assert.equal(seen.length, 3);
   assert.equal(seen[0]?.action.provenance.kind, 'chatgpt');
   assert.equal(seen[1]?.action.risk, 'external');
+  assert.equal(seen[0]?.action.id, seen[2]?.action.id);
+  assert.ok(seen[0]?.action.taskId);
+  assert.ok(seen[2]?.action.taskId);
+  assert.notEqual(seen[0]?.action.taskId, seen[2]?.action.taskId);
 
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-relay-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));

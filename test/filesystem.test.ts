@@ -71,7 +71,7 @@ test('symlink escape is blocked at the local boundary', async (t) => {
 
   const result = await provider.execute(action('file.read', { path: path.join(link, 'secret.txt') }));
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'PATH_OUTSIDE_SCOPE');
+  assert.equal(result.error?.code, process.platform === 'win32' ? 'WINDOWS_PATH_LEASE_DENIED' : 'PATH_OUTSIDE_SCOPE');
 });
 
 test('write refuses an existing file symlink instead of reading or replacing its target', async (t) => {
