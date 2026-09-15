@@ -107,6 +107,9 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
     const page = await request(port, pagePath);
     assert.equal(page.status, 200, page.body);
     assert.match(String(page.headers['content-type'] ?? ''), /^text\/html/);
+    assert.match(String(page.headers['content-security-policy'] ?? ''), /default-src 'none'/);
+    assert.equal(page.headers['x-frame-options'], 'DENY');
+    assert.equal(page.headers['x-content-type-options'], 'nosniff');
     assert.ok(page.body.toLowerCase().includes(expected.toLowerCase()));
     assert.doesNotMatch(page.body, /<script/i);
   }

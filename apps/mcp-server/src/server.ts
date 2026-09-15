@@ -75,6 +75,10 @@ if (publicEdge) {
       if (rejected) return sendSdkResponse(reply, rejected);
       return reply
         .header('cache-control', 'public, max-age=300')
+        .header('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+        .header('cross-origin-resource-policy', 'same-origin')
+        .header('x-content-type-options', 'nosniff')
+        .header('x-frame-options', 'DENY')
         .header('x-robots-tag', 'index, follow')
         .type('text/html; charset=utf-8')
         .send(renderPublicServicePage(pagePath));

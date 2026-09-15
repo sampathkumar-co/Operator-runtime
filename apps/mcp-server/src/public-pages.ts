@@ -11,10 +11,7 @@ const PAGE_SOURCES: Record<PublicServicePagePath, { title: string; source: strin
 };
 
 export function renderPublicServicePage(path: PublicServicePagePath): string {
-  const page = PAGE_SOURCES[path];
-  const sourceUrl = new URL(page.source, import.meta.url);
-  const markdown = readFileSync(fileURLToPath(sourceUrl), 'utf8');
-  return renderDocument(page.title, markdown);
+  return RENDERED_PAGES[path];
 }
 
 function renderDocument(title: string, markdown: string): string {
@@ -39,3 +36,12 @@ function escapeHtml(value: string): string {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 }
+
+const RENDERED_PAGES: Record<PublicServicePagePath, string> = Object.fromEntries(
+  PUBLIC_SERVICE_PAGE_PATHS.map((path) => {
+    const page = PAGE_SOURCES[path];
+    const sourceUrl = new URL(page.source, import.meta.url);
+    const markdown = readFileSync(fileURLToPath(sourceUrl), 'utf8');
+    return [path, renderDocument(page.title, markdown)];
+  })
+) as Record<PublicServicePagePath, string>;
