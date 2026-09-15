@@ -302,6 +302,19 @@ jobs:
       - name: Create disposable deployment environment
         shell: bash
         run: |
+          mkdir -p deploy/public-edge/production-notices
+          cat > deploy/public-edge/production-notices/privacy.md <<'EOF'
+          # CI Production Privacy
+          Controller and retention are finalized for this disposable CI deployment.
+          EOF
+          cat > deploy/public-edge/production-notices/terms.md <<'EOF'
+          # CI Production Terms
+          Effective terms for this disposable CI deployment.
+          EOF
+          cat > deploy/public-edge/production-notices/support.md <<'EOF'
+          # CI Production Support
+          Support and private security reporting are configured for this disposable CI deployment.
+          EOF
           cat > deploy/public-edge/operator-edge.env <<'EOF'
           OPERATOR_RELAY_CONTROL_TOKEN=ci-relay-control-token-000000000000000000000000
           OPERATOR_MCP_PUBLIC_URL=https://edge.operator-runtime.dev/mcp
@@ -316,6 +329,7 @@ jobs:
           OPERATOR_OAUTH_CLIENT_REGISTRATION_MODE=cimd
           OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID=ci-confidential-client
           OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET=ci-only-not-a-real-secret
+          OPERATOR_PUBLIC_NOTICES_FINAL_ACK=I_CONFIRM_OPERATOR_PUBLIC_NOTICES_ARE_FINAL
           EOF
       - name: Build and smoke hardened public edge
         shell: bash
@@ -333,6 +347,10 @@ jobs:
           ! printf '%s\n' "$bindings" | grep -q '8790'
           printf '%s\n' "$bindings" | grep -q '127.0.0.1'
           curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/health | grep -q 'operator-mcp-server'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/ | grep -q 'SPLCART Operator'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/privacy | grep -q 'CI Production Privacy'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/terms | grep -q 'CI Production Terms'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/support | grep -q 'CI Production Support'
           curl -fsS http://127.0.0.1:8788/health | grep -q 'operator-relay'
           curl -fsS http://127.0.0.1:8789/health | grep -q 'operator-relay-results'
           curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/.well-known/oauth-protected-resource/mcp | grep -q 'https://edge.operator-runtime.dev/mcp'
