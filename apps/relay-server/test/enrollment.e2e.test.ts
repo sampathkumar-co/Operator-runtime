@@ -197,8 +197,25 @@ test('ownership transfer preserves the new reserved enrollment while prior autho
   const rebound = await accounts.bindDevice(ownerB.accountId, device.deviceId);
   const claimed = await enrollments.markBound(current.enrollmentId, ownerB.accountId, rebound.authorityGeneration);
   assert.equal(claimed.status, 'claimed');
+  await enrollments.markIssued(current.enrollmentId, current.pollToken, current.enrollmentId);
   assert.equal((await enrollments.poll(current.enrollmentId, current.pollToken)).accountId, ownerB.accountId);
   await assert.rejects(enrollments.poll(oldEnrollment.enrollmentId, oldEnrollment.pollToken), (error: any) => error?.code === 'DEVICE_ENROLLMENT_UNAUTHORIZED');
+
+  await accounts.removeDevice(ownerB.accountId, device.deviceId, 'transfer back');
+  const backToA = await enrollments.create(device, { ttlMs: 60_000 });
+  await enrollments.reserve(backToA.userCode, ownerA.accountId);
+  const reboundToA = await accounts.bindDevice(ownerA.accountId, device.deviceId);
+  const claimedBackToA = await enrollments.markBound(backToA.enrollmentId, ownerA.accountId, reboundToA.authorityGeneration);
+  assert.equal(claimedBackToA.status, 'claimed');
+  await enrollments.markIssued(backToA.enrollmentId, backToA.pollToken, backToA.enrollmentId);
+
+  await accounts.removeDevice(ownerA.accountId, device.deviceId, 'same-account reenroll');
+  const sameAccount = await enrollments.create(device, { ttlMs: 60_000 });
+  await enrollments.reserve(sameAccount.userCode, ownerA.accountId);
+  const reboundSameAccount = await accounts.bindDevice(ownerA.accountId, device.deviceId);
+  const claimedSameAccount = await enrollments.markBound(sameAccount.enrollmentId, ownerA.accountId, reboundSameAccount.authorityGeneration);
+  assert.equal(claimedSameAccount.status, 'claimed');
+  assert.equal((await enrollments.poll(sameAccount.enrollmentId, sameAccount.pollToken)).accountId, ownerA.accountId);
 });
 
 test('device reset forces a new cryptographic identity before fresh enrollment can regain authority', async (t) => {

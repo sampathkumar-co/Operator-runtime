@@ -142,3 +142,9 @@ Exact local gates after these fixes: relay 38/38; MCP 59 total / 58 passed / 0 f
 - Relay package: 39/39 green. MCP: 59 total / 58 pass / 0 fail / 1 expected Windows file-symlink privilege skip. Red-team: 6/6 green.
 - Windows root suite: 316 total / 300 pass / 0 fail / 16 expected environment skips; all five real junction regressions executed and passed.
 - Windows path-lease self-test and syntax/import/workflow pin checks are green; `git diff --check` is clean.
+
+## Final rebind reservation preservation — 2026-09-15
+
+The final Codex pass identified an A→B→A / same-account re-enrollment edge case: rebind cleanup scoped by account could delete the target account's newly reserved enrollment when that account also appeared in device ownership history. Rebind enrollment cleanup now removes superseded historical records while preserving the current `reserved` claim; ordinary remove/disable/erasure cleanup remains a full device purge.
+
+Regression coverage now executes A→B→A and same-account re-enrollment and proves each newly reserved enrollment survives historical cleanup and reaches `claimed`. Exact-tree gates after this fix: relay 39/39; MCP 59 total / 58 passed / 0 failed / 1 expected Windows file-symlink skip; red-team 6/6; Windows root 316 total / 300 passed / 0 failed / 16 expected environment skips; all five real Windows junction tests passed; path-lease self-test and syntax/import checks green; `git diff --check` green.

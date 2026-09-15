@@ -190,7 +190,7 @@ export class DeviceEnrollmentStore {
     const accountId = validUuid(accountIdInput, 'accountId');
     return await this.#mutate((state) => {
       const before = state.enrollments.length;
-      state.enrollments = state.enrollments.filter((item) => item.deviceId !== deviceId || item.accountId !== accountId);
+      state.enrollments = state.enrollments.filter((item) => item.deviceId !== deviceId || item.accountId !== accountId || item.status === 'reserved');
       return before - state.enrollments.length;
     });
   }
