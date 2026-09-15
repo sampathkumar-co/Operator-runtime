@@ -21,7 +21,7 @@ import { stableActionId } from '../../../src/core/action-identity.ts';
 import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
-import { PUBLIC_SERVICE_PAGE_PATHS, renderPublicServicePage } from './public-pages.ts';
+import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -59,6 +59,7 @@ const app = createMcpFastifyApp(publicEdge
   : { host });
 
 if (publicEdge) {
+  const publicServicePages = loadPublicServicePages(process.env);
   if (publicEdge.challengeToken) {
     app.get('/.well-known/openai-apps-challenge', async (request, reply) => {
       const webRequest = await toWebRequest(request.raw, request.body);
@@ -81,7 +82,7 @@ if (publicEdge) {
         .header('x-frame-options', 'DENY')
         .header('x-robots-tag', 'index, follow')
         .type('text/html; charset=utf-8')
-        .send(renderPublicServicePage(pagePath));
+        .send(publicServicePages[pagePath]);
     });
   }
 

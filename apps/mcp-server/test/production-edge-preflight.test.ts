@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test, { after } from 'node:test';
+import { PUBLIC_NOTICES_FINAL_ACK } from '../src/public-pages.ts';
 import { runProductionEdgePreflight } from '../scripts/production-edge-preflight.ts';
+
+
+const noticesDir = mkdtempSync(path.join(tmpdir(), 'operator-preflight-notices-'));
+writeFileSync(path.join(noticesDir, 'privacy.md'), '# Final Privacy\nController and retention are finalized.');
+writeFileSync(path.join(noticesDir, 'terms.md'), '# Final Terms\nEffective production terms.');
+writeFileSync(path.join(noticesDir, 'support.md'), '# Final Support\nSupport and private security channel configured.');
+after(() => rmSync(noticesDir, { recursive: true, force: true }));
 
 function env(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -18,6 +29,8 @@ function env(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     OPERATOR_OAUTH_READ_SCOPE: 'operator:read',
     OPERATOR_OAUTH_WRITE_SCOPE: 'operator:write',
     OPERATOR_RELAY_CONTROL_TOKEN: '0123456789abcdef0123456789abcdef',
+    OPERATOR_PUBLIC_NOTICES_DIR: noticesDir,
+    OPERATOR_PUBLIC_NOTICES_FINAL_ACK: PUBLIC_NOTICES_FINAL_ACK,
     ...overrides
   };
 }
@@ -46,6 +59,7 @@ test('production preflight validates edge authority and OAuth metadata without e
   assert.equal(receipt.status, 'PASS');
   assert.equal(receipt.publicMcpUrl, 'https://mcp.operator.dev/mcp');
   assert.equal(receipt.bindHost, '0.0.0.0');
+  assert.deepEqual(receipt.reviewerPages, ['/', '/privacy', '/terms', '/support']);
   const serialized = JSON.stringify(receipt);
   assert.doesNotMatch(serialized, /0123456789abcdef0123456789abcdef/);
 });
@@ -68,6 +82,10 @@ test('production preflight rejects placeholders, weak relay secrets, and unsafe 
   await assert.rejects(
     () => runProductionEdgePreflight({ env: env({ OPERATOR_MCP_HOST: 'mcp.operator.dev' }), fetchFn: neverFetch }),
     /bind host/
+  );
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env({ OPERATOR_PUBLIC_NOTICES_FINAL_ACK: '' }), fetchFn: neverFetch }),
+    /FINAL_ACK/
   );
   assert.equal(calls, 0);
 });

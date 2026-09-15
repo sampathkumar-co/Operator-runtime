@@ -11,3 +11,4 @@ Thumbs.db
 native/*/target/
 
 deploy/public-edge/operator-edge.env
+deploy/public-edge/production-notices/

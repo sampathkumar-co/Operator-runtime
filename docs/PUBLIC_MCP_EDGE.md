@@ -55,7 +55,7 @@ Binding the MCP process to `127.0.0.1` behind a same-host reverse proxy is prefe
 
 Use the repository's canonical `deploy/public-edge/Caddyfile.example` for production ingress. It is validated against **Caddy 2.11.4** and production must use Caddy 2.11.4 or newer; older versions do not understand the complete hardened server policy.
 
-The Caddy ingress exposes the public MCP/OAuth discovery surface, the exact reviewer website `/` plus read-only pages `/privacy`, `/terms`, and `/support`, the device WebSocket, and the six device lifecycle HTTP endpoints required by enrollment, result delivery, session rotation, and self-reset. The three reviewer pages are rendered by the public MCP edge from the repository-reviewed `PRIVACY.md`, `TERMS.md`, and `SUPPORT.md` sources with HTML escaping and no arbitrary file-path input. The immutable bundled sources are read and rendered once at process startup rather than synchronously on each public request; responses add a restrictive content-security policy, same-origin resource policy, frame denial, and `nosniff`. Relay control on port `8790` is never proxied. The canonical file also applies bounded request bodies/headers, slow-request timeouts, strict SNI/Host handling, security headers, and bounded WebSocket reload behavior.
+The Caddy ingress exposes the public MCP/OAuth discovery surface, the exact reviewer website `/` plus read-only pages `/privacy`, `/terms`, and `/support`, the device WebSocket, and the six device lifecycle HTTP endpoints required by enrollment, result delivery, session rotation, and self-reset. Production notice content is **not** copied from the repository drafts. The operator must provide separately reviewed `privacy.md`, `terms.md`, and `support.md` files in `deploy/public-edge/production-notices/`; Compose mounts that directory read-only at `/run/operator-public-notices`. Public-edge startup and `certify:production-edge` both fail closed unless the files are present, bounded regular files, free of known repository-draft language, and `OPERATOR_PUBLIC_NOTICES_FINAL_ACK=I_CONFIRM_OPERATOR_PUBLIC_NOTICES_ARE_FINAL` is set. The fixed files are read and rendered once at process startup with HTML escaping and no request-controlled file path; responses add a restrictive content-security policy, same-origin resource policy, frame denial, and `nosniff`. Relay control on port `8790` is never proxied. The canonical file also applies bounded request bodies/headers, slow-request timeouts, strict SNI/Host handling, security headers, and bounded WebSocket reload behavior.
 
 Before starting production ingress, validate the exact file with the pinned certification image:
 
@@ -64,6 +64,22 @@ docker run --rm -v "$PWD/deploy/public-edge/Caddyfile.example:/etc/caddy/Caddyfi
 ```
 
 Do not substitute an older proxy snippet unless it exposes the exact same lifecycle routes and preserves the same TLS/request limits. Certificate/key configuration depends on the deployment environment.
+
+
+## Finalized reviewer notices
+
+The repository-root `PRIVACY.md`, `TERMS.md`, and `SUPPORT.md` files are technical/reference drafts and must **not** be published unchanged as production notices. Before starting the public edge:
+
+```bash
+mkdir -p deploy/public-edge/production-notices
+# Place separately reviewed, deployment-specific privacy.md, terms.md and support.md here.
+# Finalize controller/publisher contact, hosting regions/providers, actual retention, subprocessors,
+# jurisdiction/consumer disclosures and the private security-reporting/support channel.
+chmod 750 deploy/public-edge/production-notices
+chmod 640 deploy/public-edge/production-notices/{privacy,terms,support}.md
+```
+
+Then replace the acknowledgement placeholder in `operator-edge.env` with exactly `I_CONFIRM_OPERATOR_PUBLIC_NOTICES_ARE_FINAL`. The notice directory is git-ignored, mounted read-only, and uses fixed filenames only. Missing files, a relative/symlinked directory, oversized/non-regular files, a missing acknowledgement, or known repository-draft wording stop the public edge before it listens.
 
 ## OAuth provider preflight
 
@@ -77,7 +93,7 @@ The production preflight validates the public-edge environment and then fetches 
 
 ## Startup order
 
-1. Validate `deploy/public-edge/Caddyfile.example` with Caddy 2.11.4+ and run `npm --prefix apps/mcp-server run certify:production-edge`.
+1. Install the separately reviewed production notice files, set the exact final-notice acknowledgement, validate `deploy/public-edge/Caddyfile.example` with Caddy 2.11.4+, and run `npm --prefix apps/mcp-server run certify:production-edge`.
 2. Start the relay delivery/result services and confirm paired-device routing independently.
 3. Start the loopback relay-control service with `OPERATOR_RELAY_CONTROL_TOKEN`.
 4. Start the MCP edge with the public-edge environment above.
@@ -108,8 +124,10 @@ The repository includes `deploy/public-edge/` for the recommended single-host VP
 
 ```bash
 cp deploy/public-edge/operator-edge.env.example deploy/public-edge/operator-edge.env
+mkdir -p deploy/public-edge/production-notices
+# Install final reviewed privacy.md, terms.md and support.md in production-notices/.
 chmod 600 deploy/public-edge/operator-edge.env
-# Replace every placeholder before starting.
+# Replace every placeholder, including the final-notice acknowledgement, before starting.
 docker compose -f deploy/public-edge/compose.yml config --quiet
 docker compose -f deploy/public-edge/compose.yml up -d --build --wait
 docker compose -f deploy/public-edge/compose.yml ps

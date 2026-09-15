@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { PUBLIC_NOTICES_FINAL_ACK } from '../src/public-pages.ts';
 
 async function reservePort(): Promise<number> {
   const server = http.createServer();
@@ -65,6 +69,11 @@ async function waitForHealth(port: number, child: ChildProcess, stderr: () => st
 
 test('public MCP edge serves OAuth metadata and challenges unauthenticated callers', async (t) => {
   const port = await reservePort();
+  const noticesDir = mkdtempSync(path.join(tmpdir(), 'operator-edge-notices-'));
+  writeFileSync(path.join(noticesDir, 'privacy.md'), '# Production Privacy\nController: SPLCART\nRetention: 24 hours.');
+  writeFileSync(path.join(noticesDir, 'terms.md'), '# Production Terms\nEffective for this deployed service.');
+  writeFileSync(path.join(noticesDir, 'support.md'), '# Production Support\nContact and private security reporting are configured.');
+  t.after(() => rmSync(noticesDir, { recursive: true, force: true }));
   let stderr = '';
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: process.cwd(),
@@ -77,6 +86,8 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
       OPERATOR_MCP_PUBLIC_URL: 'https://edge.operator-runtime.dev/mcp',
       OPERATOR_MCP_HOST: '127.0.0.1',
       OPERATOR_MCP_PORT: String(port),
+      OPERATOR_PUBLIC_NOTICES_DIR: noticesDir,
+      OPERATOR_PUBLIC_NOTICES_FINAL_ACK: PUBLIC_NOTICES_FINAL_ACK,
       OPERATOR_OAUTH_ISSUER: 'https://login.operator-runtime.dev',
       OPERATOR_OAUTH_AUTHORIZATION_URL: 'https://login.operator-runtime.dev/authorize',
       OPERATOR_OAUTH_TOKEN_URL: 'https://login.operator-runtime.dev/token',
@@ -101,9 +112,9 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
 
   for (const [pagePath, expected] of [
     ['/', 'SPLCART Operator'],
-    ['/privacy', 'Operator privacy and data-retention model'],
-    ['/terms', 'SPLCART Operator Terms of Service'],
-    ['/support', 'SPLCART Operator Support']
+    ['/privacy', 'Production Privacy'],
+    ['/terms', 'Production Terms'],
+    ['/support', 'Production Support']
   ] as const) {
     const page = await request(port, pagePath);
     assert.equal(page.status, 200, page.body);

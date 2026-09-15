@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readPublicMcpEdgeConfig, resolveMcpBindHost } from '../src/public-edge.ts';
+import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from '../src/public-pages.ts';
 import { oauthProviderConfigFromEnv, runOAuthProviderPreflight } from './oauth-provider-preflight.ts';
 
 const PLACEHOLDER = /(?:replace-with-|your-domain|example\.(?:com|net|org)|\.invalid\b)/i;
@@ -16,6 +17,7 @@ export async function runProductionEdgePreflight(
 ): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   requireProductionSecrets(env);
+  loadPublicServicePages(env);
   const edge = readPublicMcpEdgeConfig(env, { fetchFn: options.fetchFn });
   if (!edge) throw new Error('Production edge preflight requires OPERATOR_MCP_PUBLIC_EDGE=1.');
   const bindHost = resolveMcpBindHost(env, edge);
@@ -30,6 +32,7 @@ export async function runProductionEdgePreflight(
     publicMcpUrl: edge.publicUrl.toString(),
     bindHost,
     allowedHostnames: edge.allowedHostnames,
+    reviewerPages: [...PUBLIC_SERVICE_PAGE_PATHS],
     oauth: provider,
     externalGates: {
       tlsDnsReachability: 'REQUIRES_DEPLOYED_EDGE',

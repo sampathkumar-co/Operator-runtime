@@ -9,7 +9,6 @@ RUN npm ci --prefix apps/mcp-server --omit=dev --ignore-scripts --no-audit --no-
  && npm ci --prefix apps/relay-server --omit=dev --ignore-scripts --no-audit --no-fund
 
 COPY src ./src
-COPY PRIVACY.md TERMS.md SUPPORT.md ./
 COPY apps/mcp-server/src ./apps/mcp-server/src
 COPY apps/relay-server/src ./apps/relay-server/src
 COPY deploy/public-edge/supervisor.mjs deploy/public-edge/healthcheck.mjs deploy/public-edge/http-probe.mjs ./deploy/public-edge/
