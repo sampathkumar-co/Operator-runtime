@@ -126,7 +126,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
 - the OpenAI challenge token is served exactly at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return production content over HTTPS; the canonical Operator edge serves `/privacy`, `/terms`, and `/support` from the reviewed repository sources, but deployment-specific publisher/contact, jurisdiction, hosting/region, retention, subprocessor, and private security-reporting details must be finalized before submission;
+- website, privacy, terms and support URLs return production content over HTTPS; the canonical Operator edge serves `/` plus `/privacy`, `/terms`, and `/support` from the reviewed repository sources, but deployment-specific publisher/contact, jurisdiction, hosting/region, retention, subprocessor, and private security-reporting details must be finalized before submission;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - the demo recording URL is reachable by reviewers;
 - Scan Tools imports exactly the intended nine-tool public surface and current annotations;

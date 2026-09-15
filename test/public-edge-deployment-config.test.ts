@@ -90,7 +90,7 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:47200/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8788/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
-  for (const page of ['/privacy', '/terms', '/support']) {
+  for (const page of ['/', '/privacy', '/terms', '/support']) {
     assert.ok(caddy.includes(page), `Caddy ingress must expose ${page}`);
   }
   for (const route of [

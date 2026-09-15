@@ -100,6 +100,7 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
   assert.deepEqual(document.authorization_servers, ['https://login.operator-runtime.dev/']);
 
   for (const [pagePath, expected] of [
+    ['/', 'SPLCART Operator'],
     ['/privacy', 'Operator privacy and data-retention model'],
     ['/terms', 'SPLCART Operator Terms of Service'],
     ['/support', 'SPLCART Operator Support']
@@ -112,6 +113,9 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
     assert.equal(page.headers['x-content-type-options'], 'nosniff');
     assert.ok(page.body.toLowerCase().includes(expected.toLowerCase()));
     assert.doesNotMatch(page.body, /<script/i);
+    if (pagePath === '/') {
+      for (const href of ['/privacy', '/terms', '/support']) assert.ok(page.body.includes(`href=\"${href}\"`));
+    }
   }
   const wrongPageHost = await request(port, '/privacy', { host: 'evil.operator-runtime.dev' });
   assert.ok(wrongPageHost.status >= 400);
