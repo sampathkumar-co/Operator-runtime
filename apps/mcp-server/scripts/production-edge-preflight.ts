@@ -4,7 +4,7 @@ import { readPublicMcpEdgeConfig, resolveMcpBindHost } from '../src/public-edge.
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from '../src/public-pages.ts';
 import { oauthProviderConfigFromEnv, runOAuthProviderPreflight } from './oauth-provider-preflight.ts';
 
-const PLACEHOLDER = /(?:^replace-with-|^required[_-]|your-domain|example\.(?:com|net|org)|\.invalid\b)/i;
+const PLACEHOLDER = /(?:replace-with-|^required[_-]|your-domain|example\.(?:com|net|org)|\.invalid\b)/i;
 const REQUIRED_SECRET_NAMES = ['OPERATOR_RELAY_CONTROL_TOKEN'] as const;
 
 export interface ProductionEdgePreflightOptions {
