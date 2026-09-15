@@ -55,7 +55,7 @@ Binding the MCP process to `127.0.0.1` behind a same-host reverse proxy is prefe
 
 Use the repository's canonical `deploy/public-edge/Caddyfile.example` for production ingress. It is validated against **Caddy 2.11.4** and production must use Caddy 2.11.4 or newer; older versions do not understand the complete hardened server policy.
 
-The Caddy ingress exposes only the public MCP/OAuth discovery surface, the device WebSocket, and the six device lifecycle HTTP endpoints required by enrollment, result delivery, session rotation, and self-reset. Relay control on port `8790` is never proxied. The canonical file also applies bounded request bodies/headers, slow-request timeouts, strict SNI/Host handling, security headers, and bounded WebSocket reload behavior.
+The Caddy ingress exposes the public MCP/OAuth discovery surface, the exact read-only reviewer pages `/privacy`, `/terms`, and `/support`, the device WebSocket, and the six device lifecycle HTTP endpoints required by enrollment, result delivery, session rotation, and self-reset. The three reviewer pages are rendered by the public MCP edge from the repository-reviewed `PRIVACY.md`, `TERMS.md`, and `SUPPORT.md` sources with HTML escaping and no arbitrary file-path input. Relay control on port `8790` is never proxied. The canonical file also applies bounded request bodies/headers, slow-request timeouts, strict SNI/Host handling, security headers, and bounded WebSocket reload behavior.
 
 Before starting production ingress, validate the exact file with the pinned certification image:
 
@@ -92,6 +92,7 @@ Before public registration, verify:
 
 - `GET /.well-known/oauth-protected-resource/mcp` returns the canonical HTTPS MCP resource and authorization server
 - `GET /.well-known/oauth-authorization-server` returns the configured OAuth server metadata
+- `GET /privacy`, `GET /terms`, and `GET /support` return the reviewed production-page sources over HTTPS; wrong Host/Origin values remain rejected
 - `certify:production-edge` passes against the production environment and issuer, including S256 and CIMD/DCR registration compatibility
 - a real authorization verifies the exact ChatGPT redirect URI and `resource` -> access-token audience binding
 - unauthenticated `/mcp` receives `401` with a bearer challenge pointing at protected-resource metadata

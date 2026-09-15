@@ -20,6 +20,11 @@ mcp.your-domain.tld {
 		Referrer-Policy "no-referrer"
 	}
 
+	@public_pages path /privacy /terms /support
+	handle @public_pages {
+		reverse_proxy 127.0.0.1:47200
+	}
+
 	@mcp path /mcp
 	handle @mcp {
 		request_body {

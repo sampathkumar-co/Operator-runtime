@@ -21,6 +21,7 @@ import { stableActionId } from '../../../src/core/action-identity.ts';
 import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
+import { PUBLIC_SERVICE_PAGE_PATHS, renderPublicServicePage } from './public-pages.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -64,6 +65,19 @@ if (publicEdge) {
       const rejected = validatePublicHeaders(webRequest);
       if (rejected) return sendSdkResponse(reply, rejected);
       return reply.header('cache-control', 'no-store').type('text/plain; charset=utf-8').send(publicEdge.challengeToken);
+    });
+  }
+
+  for (const pagePath of PUBLIC_SERVICE_PAGE_PATHS) {
+    app.get(pagePath, async (request, reply) => {
+      const webRequest = await toWebRequest(request.raw, request.body);
+      const rejected = validatePublicHeaders(webRequest);
+      if (rejected) return sendSdkResponse(reply, rejected);
+      return reply
+        .header('cache-control', 'public, max-age=300')
+        .header('x-robots-tag', 'index, follow')
+        .type('text/html; charset=utf-8')
+        .send(renderPublicServicePage(pagePath));
     });
   }
 

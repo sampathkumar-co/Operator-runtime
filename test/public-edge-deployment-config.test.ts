@@ -14,6 +14,7 @@ test('public-edge image uses patched pinned Node and a non-root read-only runtim
   assert.match(dockerfile, /^USER node$/m);
   assert.match(dockerfile, /^HEALTHCHECK .*healthcheck\.mjs"\]$/m);
   assert.match(dockerfile, /^ENTRYPOINT \["node", "deploy\/public-edge\/supervisor\.mjs"\]$/m);
+  assert.match(dockerfile, /^COPY PRIVACY\.md TERMS\.md SUPPORT\.md \.\/$/m);
   assert.doesNotMatch(dockerfile, /npm ci .*--include=dev/);
 });
 
@@ -89,6 +90,9 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:47200/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8788/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
+  for (const page of ['/privacy', '/terms', '/support']) {
+    assert.ok(caddy.includes(page), `Caddy ingress must expose ${page}`);
+  }
   for (const route of [
     '/v1/device-result', '/v1/device-session/rotate',
     '/v1/device-enrollment/challenge', '/v1/device-enrollment/complete',

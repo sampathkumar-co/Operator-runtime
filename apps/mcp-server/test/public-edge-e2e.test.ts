@@ -99,6 +99,22 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
   assert.equal(document.resource, 'https://edge.operator-runtime.dev/mcp');
   assert.deepEqual(document.authorization_servers, ['https://login.operator-runtime.dev/']);
 
+  for (const [pagePath, expected] of [
+    ['/privacy', 'Operator privacy and data-retention model'],
+    ['/terms', 'SPLCART Operator Terms of Service'],
+    ['/support', 'SPLCART Operator Support']
+  ] as const) {
+    const page = await request(port, pagePath);
+    assert.equal(page.status, 200, page.body);
+    assert.match(String(page.headers['content-type'] ?? ''), /^text\/html/);
+    assert.ok(page.body.toLowerCase().includes(expected.toLowerCase()));
+    assert.doesNotMatch(page.body, /<script/i);
+  }
+  const wrongPageHost = await request(port, '/privacy', { host: 'evil.operator-runtime.dev' });
+  assert.ok(wrongPageHost.status >= 400);
+  const wrongPageOrigin = await request(port, '/support', { origin: 'https://evil.operator-runtime.dev' });
+  assert.ok(wrongPageOrigin.status >= 400);
+
   const challenge = await request(port, '/mcp', { method: 'POST', body: '{}' });
   assert.equal(challenge.status, 401, challenge.body);
   assert.match(String(challenge.headers['www-authenticate'] ?? ''), /invalid_token/);
