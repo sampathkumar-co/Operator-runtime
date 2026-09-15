@@ -96,6 +96,7 @@ export async function runRelayService(config = readRelayServiceConfig()): Promis
   const { identity, devices, sessions, deliveries, accounts } = stores;
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   stores.attachHub(hub);
+  await accounts.recoverReleases();
   await accounts.recoverErasures();
   const listening = await hub.listen(config.host, config.port);
   logListening('operator-relay', listening.host, listening.port, config.stateDir, isLoopbackHost(config.host) ? 'local-plain-websocket' : 'plain-websocket-behind-required-tls-proxy');
@@ -116,6 +117,7 @@ async function main(): Promise<void> {
 
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   stores.attachHub(hub);
+  await accounts.recoverReleases();
   await accounts.recoverErasures();
   const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, results, enrollments });
   let controlService: RelayControlService | null = null;

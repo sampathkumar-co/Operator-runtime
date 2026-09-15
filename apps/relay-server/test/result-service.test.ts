@@ -337,8 +337,11 @@ test('result persistence is fenced against concurrent account-device release', a
   const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
   const deliveries = new RelayDeliveryStore(authorityState);
   const results = new RelayResultStore(authorityState);
+  let releasePurged!: () => void; const purged = new Promise<void>((resolve) => { releasePurged = resolve; });
+  let finishRelease!: () => void; const releaseGate = new Promise<void>((resolve) => { finishRelease = resolve; });
   const accounts = new AccountDeviceRegistry(authorityState, devices, { onReleaseDevice: async (deviceId) => {
     await deliveries.purgeDevice(deviceId); await results.purgeDevice(deviceId); await sessions.purgeForDevice(deviceId);
+    releasePurged(); await releaseGate;
   } });
   const owner = await accounts.resolveOrCreateAccount({ issuer: 'test', subject: 'release-race-owner' });
   const membership = await accounts.bindDevice(owner.accountId, device.deviceId);
@@ -347,9 +350,10 @@ test('result persistence is fenced against concurrent account-device release', a
   const delivery = await deliveries.enqueue(device.deviceId, 'action', { action: { id: 'race' } }, authority, key);
   const token = (await sessions.issue({ subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000 })).token;
   const originalPut = results.put.bind(results);
-  let released = false;
+  let removing: Promise<unknown> | null = null;
   (results as any).put = async (...args: any[]) => {
-    if (!released) { released = true; await accounts.removeDevice(owner.accountId, device.deviceId, 'release race'); }
+    removing ??= accounts.removeDevice(owner.accountId, device.deviceId, 'release race');
+    await purged;
     return await (originalPut as any)(...args);
   };
   const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries, results });
@@ -359,8 +363,11 @@ test('result persistence is fenced against concurrent account-device release', a
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, result: { ok: true, output: { value: 'stale' } } })
   });
+  const body = await response.json() as any;
+  finishRelease();
+  await removing;
   assert.equal(response.status, 400);
-  assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
+  assert.equal(body.error.code, 'RELAY_RESULT_AUTHORITY_REVOKED');
   assert.equal(await results.get(device.deviceId, delivery.seq), null);
   assert.equal(await results.findByIdempotencyKey(key), null);
 });

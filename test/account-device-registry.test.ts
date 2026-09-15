@@ -93,3 +93,27 @@ test('device authority generation advances across A-B-A ownership cycles', async
   const a3 = await accounts.bindDevice(a.accountId, peer.deviceId);
   assert.equal(a3.authorityGeneration, 3);
 });
+
+
+test('device release commits authority revocation before cleanup and failed cleanup is recoverable', async (t) => {
+  const { stateDir, devices, peer } = await pairedFixture(t);
+  let hookSawRevoked = false;
+  let failCleanup = true;
+  const accounts = new AccountDeviceRegistry(stateDir, devices, { onReleaseDevice: async (deviceId) => {
+    hookSawRevoked = (await new AccountDeviceRegistry(stateDir, devices).activeMembershipForDevice(deviceId)) === null;
+    if (failCleanup) { failCleanup = false; throw new Error('simulated cleanup crash'); }
+  } });
+  const owner = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'release-order-owner' });
+  await accounts.bindDevice(owner.accountId, peer.deviceId);
+  await assert.rejects(accounts.removeDevice(owner.accountId, peer.deviceId, 'release ordering'), /simulated cleanup crash/);
+  assert.equal(hookSawRevoked, true);
+  assert.equal(await accounts.activeMembershipForDevice(peer.deviceId), null);
+  const persistedBefore = JSON.parse(await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8'));
+  assert.equal(persistedBefore.memberships.find((m: any) => m.deviceId === peer.deviceId)?.releasePendingReason, 'removed');
+  let recovered = 0;
+  const reloaded = new AccountDeviceRegistry(stateDir, devices, { onReleaseDevice: async () => { recovered += 1; } });
+  assert.equal(await reloaded.recoverReleases(), 1);
+  assert.equal(recovered, 1);
+  const persistedAfter = JSON.parse(await fs.readFile(path.join(stateDir, 'account-devices.json'), 'utf8'));
+  assert.equal('releasePendingReason' in persistedAfter.memberships.find((m: any) => m.deviceId === peer.deviceId), false);
+});

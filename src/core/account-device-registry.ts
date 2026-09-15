@@ -38,6 +38,7 @@ export interface AccountDeviceMembership {
   authorityGeneration: number;
   removedAt?: string;
   removedReason?: string;
+  releasePendingReason?: 'removed' | 'disabled';
 }
 
 export interface AccountErasureRecord {
@@ -109,16 +110,21 @@ export class AccountDeviceRegistry {
   async disableAccount(accountIdInput: string, reasonInput: string): Promise<OperatorAccount> {
     const accountId = validUuid(accountIdInput, 'accountId');
     const reason = boundedReason(reasonInput, 'account disable reason');
-    return await this.#mutate(async (state) => {
+    return await this.#withQueue(async () => {
+      const state = await this.#read();
+      pruneCompletedErasures(state, this.#clock().getTime());
       const account = state.accounts.find((candidate) => candidate.accountId === accountId);
       if (!account) throw new OperatorError('ACCOUNT_NOT_FOUND', 'Operator account was not found.');
       if (account.status === 'erasing') throw new OperatorError('ACCOUNT_ERASING', 'Operator account erasure is in progress.');
-      if (account.status === 'disabled') return cloneAccount(account);
-      const at = this.#clock().toISOString();
-      const released = state.memberships.filter((m) => m.accountId === accountId && m.status === 'active');
-      for (const membership of released) await this.#releaseDevice(membership.deviceId, accountId, 'disabled');
-      account.status = 'disabled'; account.disabledAt = at; account.disabledReason = reason;
-      for (const membership of released) { membership.status = 'removed'; membership.removedAt = at; membership.removedReason = 'account-disabled'; }
+      if (account.status !== 'disabled') {
+        const at = this.#clock().toISOString();
+        account.status = 'disabled'; account.disabledAt = at; account.disabledReason = reason;
+        for (const membership of state.memberships.filter((m) => m.accountId === accountId && m.status === 'active')) {
+          membership.status = 'removed'; membership.removedAt = at; membership.removedReason = 'account-disabled'; membership.releasePendingReason = 'disabled';
+        }
+        await this.#write(state);
+      }
+      await this.#drainPendingReleasesLocked(state, { accountId });
       return cloneAccount(account);
     });
   }
@@ -134,6 +140,9 @@ export class AccountDeviceRegistry {
       const active = state.memberships.find((m) => m.deviceId === deviceId && m.status === 'active');
       if (active && active.accountId !== accountId) throw new OperatorError('DEVICE_ACCOUNT_CONFLICT', 'Device is already bound to a different active account.');
       if (active) return cloneMembership(active);
+      if (state.memberships.some((m) => m.deviceId === deviceId && m.releasePendingReason)) {
+        throw new OperatorError('DEVICE_RELEASE_PENDING', 'Device cleanup from its previous authority has not completed yet.');
+      }
       const priorOwners = [...new Set(state.memberships.filter((m) => m.deviceId === deviceId && m.status === 'removed').map((m) => m.accountId))];
       for (const priorAccountId of priorOwners) await this.#releaseDevice(deviceId, priorAccountId, 'rebind');
       if (state.memberships.length >= MAX_MEMBERSHIPS) throw new OperatorError('ACCOUNT_DEVICE_LIMIT', `At most ${MAX_MEMBERSHIPS} account-device memberships may be stored.`);
@@ -148,12 +157,19 @@ export class AccountDeviceRegistry {
     const accountId = validUuid(accountIdInput, 'accountId');
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const reason = boundedReason(reasonInput, 'device removal reason');
-    return await this.#mutate(async (state) => {
+    return await this.#withQueue(async () => {
+      const state = await this.#read();
+      pruneCompletedErasures(state, this.#clock().getTime());
       requireActiveAccount(state, accountId);
-      const membership = state.memberships.find((m) => m.accountId === accountId && m.deviceId === deviceId && m.status === 'active');
-      if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_FOUND', 'Active account-device membership was not found.');
-      await this.#releaseDevice(deviceId, accountId, 'removed');
-      membership.status = 'removed'; membership.removedAt = this.#clock().toISOString(); membership.removedReason = reason;
+      let membership = state.memberships.find((m) => m.accountId === accountId && m.deviceId === deviceId && m.status === 'active');
+      if (membership) {
+        membership.status = 'removed'; membership.removedAt = this.#clock().toISOString(); membership.removedReason = reason; membership.releasePendingReason = 'removed';
+        await this.#write(state);
+      } else {
+        membership = state.memberships.find((m) => m.accountId === accountId && m.deviceId === deviceId && m.status === 'removed' && m.releasePendingReason === 'removed');
+        if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_FOUND', 'Active account-device membership was not found.');
+      }
+      await this.#drainPendingReleasesLocked(state, { accountId, deviceId });
       return cloneMembership(membership);
     });
   }
@@ -175,6 +191,14 @@ export class AccountDeviceRegistry {
     });
     if (started.created) await this.#afterErasurePhase?.('REQUESTED', accountId);
     return await this.#resumeErasure(started.journal.erasureId);
+  }
+
+  async recoverReleases(): Promise<number> {
+    return await this.#withQueue(async () => {
+      const state = await this.#read();
+      pruneCompletedErasures(state, this.#clock().getTime());
+      return await this.#drainPendingReleasesLocked(state);
+    });
   }
 
   async recoverErasures(): Promise<number> {
@@ -295,6 +319,26 @@ export class AccountDeviceRegistry {
       entry.updatedAt = this.#clock().toISOString();
     });
   }
+  async #drainPendingReleasesLocked(state: AccountDeviceState, filter: { accountId?: string; deviceId?: string } = {}): Promise<number> {
+    const pending = state.memberships
+      .filter((membership) => membership.status === 'removed' && membership.releasePendingReason
+        && (!filter.accountId || membership.accountId === filter.accountId)
+        && (!filter.deviceId || membership.deviceId === filter.deviceId))
+      .sort((a, b) => a.deviceId.localeCompare(b.deviceId) || a.authorityGeneration - b.authorityGeneration);
+    let completed = 0;
+    for (const target of pending) {
+      const reason = target.releasePendingReason!;
+      await this.#releaseDevice(target.deviceId, target.accountId, reason);
+      const current = state.memberships.find((membership) => membership.accountId === target.accountId && membership.deviceId === target.deviceId && membership.authorityGeneration === target.authorityGeneration);
+      if (current?.releasePendingReason === reason) {
+        current.releasePendingReason = undefined;
+        await this.#write(state);
+      }
+      completed += 1;
+    }
+    return completed;
+  }
+
   async #releaseDevice(deviceId: string, accountId: string, reason: 'removed' | 'disabled' | 'erased' | 'rebind'): Promise<void> {
     await this.#onReleaseDevice?.(deviceId, accountId, reason);
   }
@@ -326,19 +370,22 @@ export class AccountDeviceRegistry {
   }
 
   async #mutate<T>(mutator: (state: AccountDeviceState) => T | Promise<T>): Promise<T> {
-    let release!: () => void;
-    const previous = this.#queue;
-    this.#queue = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
+    return await this.#withQueue(async () => {
       const state = await this.#read();
       pruneCompletedErasures(state, this.#clock().getTime());
       const result = await mutator(state);
       await this.#write(state);
       return result;
-    } finally {
-      release();
-    }
+    });
+  }
+
+  async #withQueue<T>(work: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = this.#queue;
+    this.#queue = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await work(); }
+    finally { release(); }
   }
 }
 
@@ -394,12 +441,17 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
     if (!Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership authority generation is invalid.');
     const removedAt = raw.removedAt === undefined ? undefined : validIso(raw.removedAt, 'removedAt');
     const removedReason = raw.removedReason === undefined ? undefined : boundedReason(raw.removedReason, 'removedReason');
+    const releasePendingReason = raw.releasePendingReason === undefined ? undefined
+      : raw.releasePendingReason === 'removed' || raw.releasePendingReason === 'disabled' ? raw.releasePendingReason : null;
+    if (releasePendingReason === null) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership pending release reason is invalid.');
     if (status === 'active') {
-      if (removedAt || removedReason) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Active membership cannot contain removal metadata.');
+      if (removedAt || removedReason || releasePendingReason) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Active membership cannot contain removal metadata.');
       if (activeDevices.has(deviceId)) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'One device cannot have multiple active account memberships.');
       activeDevices.add(deviceId);
+    } else if (releasePendingReason && (!removedAt || !removedReason)) {
+      throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Pending release cleanup requires removal metadata.');
     }
-    return { accountId, deviceId, status, addedAt, authorityGeneration, removedAt, removedReason } satisfies AccountDeviceMembership;
+    return { accountId, deviceId, status, addedAt, authorityGeneration, removedAt, removedReason, releasePendingReason: releasePendingReason ?? undefined } satisfies AccountDeviceMembership;
   });
 
   const erasureIds = new Set<string>();
