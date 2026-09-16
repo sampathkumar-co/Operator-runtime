@@ -224,7 +224,10 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
-if (relayUrl) console.error(`[operator] relay capabilities: ${relaySupportedCapabilities.join(', ') || 'none'}`);
+if (relayUrl) {
+  const relayCapabilities = await runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES);
+  console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
+}
 
 const emergencyStatus = await emergencyStop.status();
 if (relayUrl && emergencyStatus.engaged) {
