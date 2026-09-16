@@ -174,3 +174,9 @@ test('runtime manifest requires the complete hardened native boundary', () => {
     ]
   })), /unsafe file path|missing/);
 });
+
+test('npm package metadata is canonical before publication', async () => {
+  const pkg = JSON.parse(await fs.readFile(path.resolve('packages/mecrod-operator/package.json'), 'utf8'));
+  assert.equal(pkg.bin?.operator, 'bin/operator.mjs');
+  assert.equal(pkg.repository?.url, 'git+https://github.com/sampathkumar-co/Operator-runtime.git');
+});

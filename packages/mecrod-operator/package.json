@@ -4,7 +4,7 @@
   "description": "Secure one-command Operator runtime for connecting ChatGPT to a user-authorized Windows computer.",
   "type": "module",
   "bin": {
-    "operator": "./bin/operator.mjs"
+    "operator": "bin/operator.mjs"
   },
   "files": [
     "bin",
@@ -15,8 +15,12 @@
   "engines": {
     "node": ">=22.14.0 <23 || >=24.0.0 <25 || >=26.0.0 <27"
   },
-  "os": ["win32"],
-  "cpu": ["x64"],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -27,7 +31,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sampathkumar-co/Operator-runtime.git"
+    "url": "git+https://github.com/sampathkumar-co/Operator-runtime.git"
   },
   "homepage": "https://operator.splcart.in"
 }
