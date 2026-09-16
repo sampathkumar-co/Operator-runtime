@@ -34,8 +34,9 @@ const trustedPath = [
   path.join(programFiles, 'nodejs'),
   path.join(programFiles, 'Docker', 'Docker', 'resources', 'bin')
 ];
-process.env.Path = [...new Set(trustedPath.map((entry) => path.resolve(entry)))].join(path.delimiter);
 delete process.env.PATH;
+delete process.env.Path;
+process.env.Path = [...new Set(trustedPath.map((entry) => path.resolve(entry)))].join(path.delimiter);
 process.env.PATHEXT = '.COM;.EXE;.BAT;.CMD';
 
 // The public npm command is intentionally pinned to the production relay authority.
