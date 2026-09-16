@@ -299,6 +299,195 @@ test('capability downgrade retires an incompatible queued head and keeps the sam
   assert.equal((await deliveries.retained(device.deviceId, compatible.seq))?.status, 'acked');
 });
 
+test('stale downgraded session cannot retire work after a restored-capability session supersedes it', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-cap-supersede-authority-');
+  const lowState = await tempDir(t, 'operator-relay-cap-supersede-low-');
+  const highState = await tempDir(t, 'operator-relay-cap-supersede-high-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(lowState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'cap-supersede-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const membership = (await accounts.listDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+  assert.ok(membership);
+  const authority = { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
+
+  const queued = await deliveries.enqueue(
+    device.deviceId,
+    'action',
+    { action: { id: 'restored-git', capability: 'git.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } } },
+    authority,
+    undefined,
+    ['git.write']
+  );
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
+    ttlMs: 60_000
+  })).token;
+
+  const originalRetire = deliveries.expireUnroutableHeads.bind(deliveries);
+  let enterRetirement!: () => void;
+  let releaseRetirement!: () => void;
+  let finishRetirement!: () => void;
+  const retirementEntered = new Promise<void>((resolve) => { enterRetirement = resolve; });
+  const retirementGate = new Promise<void>((resolve) => { releaseRetirement = resolve; });
+  const retirementFinished = new Promise<void>((resolve) => { finishRetirement = resolve; });
+  let retirementResult = -1;
+  (deliveries as any).expireUnroutableHeads = async (...args: any[]) => {
+    enterRetirement();
+    await retirementGate;
+    retirementResult = await (originalRetire as any)(...args);
+    finishRetirement();
+    return retirementResult;
+  };
+
+  let releaseLowReconnect!: () => void;
+  const lowReconnectGate = new Promise<void>((resolve) => { releaseLowReconnect = resolve; });
+  const lowClient = new RelayClient({
+    stateDir: lowState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async () => { throw new Error('downgraded session must never receive Git work'); },
+    sleep: async () => { await lowReconnectGate; }
+  });
+  const lowRun = lowClient.run();
+  await retirementEntered;
+
+  let highDeliverySeen!: () => void;
+  let releaseHighDelivery!: () => void;
+  const highDeliveryStarted = new Promise<void>((resolve) => { highDeliverySeen = resolve; });
+  const highDeliveryGate = new Promise<void>((resolve) => { releaseHighDelivery = resolve; });
+  const seen: string[] = [];
+  const highClient = new RelayClient({
+    stateDir: highState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['file.read', 'git.write'],
+    onDelivery: async (delivery) => {
+      seen.push(delivery.id);
+      highDeliverySeen();
+      await highDeliveryGate;
+    },
+    sleep: async () => undefined
+  });
+  const highRun = highClient.run();
+  await highDeliveryStarted;
+
+  releaseRetirement();
+  await retirementFinished;
+  assert.equal(retirementResult, 0, 'superseded capability snapshot must not mutate the durable queue');
+  assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
+  assert.equal((await deliveries.retained(device.deviceId, queued.seq))?.status, 'pending');
+
+  releaseHighDelivery();
+  await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
+  assert.deepEqual(seen, [queued.id]);
+  assert.equal((await deliveries.retained(device.deviceId, queued.seq))?.status, 'acked');
+
+  lowClient.stop();
+  releaseLowReconnect();
+  highClient.stop();
+  await Promise.all([lowRun, highRun]);
+});
+
+test('legacy unroutable queue head is terminalized and the device reconnects for compatible work', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-legacy-head-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-legacy-head-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'legacy-head-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const membership = (await accounts.listDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+  assert.ok(membership);
+  const authority = { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
+  const legacy = {
+    version: 1,
+    streams: [{
+      deviceId: device.deviceId,
+      nextSeq: 2,
+      lastAckedSeq: 0,
+      deliveries: [{
+        seq: 1,
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        kind: 'task.dispatch',
+        payload: { taskId: 'legacy-unroutable' },
+        authority,
+        createdAt: new Date().toISOString(),
+        status: 'pending'
+      }]
+    }]
+  };
+  await fs.writeFile(path.join(authorityState, 'relay-deliveries.json'), JSON.stringify(legacy, null, 2));
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  })).token;
+
+  const seen: string[] = [];
+  let capabilityReads = 0;
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    getSupportedCapabilities: async () => {
+      capabilityReads += 1;
+      return ['file.read'];
+    },
+    onDelivery: async (delivery) => { seen.push(delivery.id); },
+    sleep: async () => undefined
+  });
+  const run = client.run();
+  await waitFor(async () => capabilityReads >= 2 && (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
+  const retired = await deliveries.retained(device.deviceId, 1);
+  assert.equal(retired?.status, 'expired');
+  assert.deepEqual(retired?.payload, {});
+  assert.equal(retired?.requiredCapabilities, undefined);
+
+  const dispatched = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { action: { id: 'post-legacy-file', capability: 'file.read' } }
+  });
+  await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 2);
+  assert.deepEqual(seen, [dispatched.delivery.id]);
+
+  client.stop();
+  await run;
+});
+
 test('dispatch racing a capability downgrade is retired instead of falsely accepted', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-cap-race-authority-');
   const deviceState = await tempDir(t, 'operator-relay-cap-race-device-');

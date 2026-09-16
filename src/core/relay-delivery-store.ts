@@ -216,20 +216,26 @@ export class RelayDeliveryStore {
     });
   }
 
-  async expireCapabilityIncompatibleHeads(deviceIdInput: string, supportedCapabilitiesInput: readonly string[]): Promise<number> {
+  async expireUnroutableHeads(
+    deviceIdInput: string,
+    supportedCapabilitiesInput: readonly string[],
+    canCommit: () => boolean = () => true
+  ): Promise<number> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const supported = new Set(safeRequiredCapabilities([...supportedCapabilitiesInput]));
     return await this.#mutate((state) => {
       expirePending(state, this.#clock().getTime(), this.#retentionMs);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
-      if (!stream) return 0;
+      if (!stream || !canCommit()) return 0;
       let expired = 0;
       const expiredAt = this.#clock().toISOString();
       while (true) {
         const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
         if (!next || next.status !== 'pending') break;
-        if (next.requiredCapabilities === undefined) throw new OperatorError('RELAY_DELIVERY_CAPABILITIES_MISSING', 'Pending relay delivery has no durable capability requirements.');
-        if (next.requiredCapabilities.every((capability) => supported.has(capability))) break;
+        const routable = next.authority !== undefined
+          && next.requiredCapabilities !== undefined
+          && next.requiredCapabilities.every((capability) => supported.has(capability));
+        if (routable) break;
         expireDelivery(next, expiredAt);
         stream.lastAckedSeq = next.seq;
         expired += 1;

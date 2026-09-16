@@ -401,20 +401,29 @@ export class RelayHub {
     if (!connection || connection.socket.readyState !== WebSocket.OPEN || connection.inFlightSeq !== undefined) return;
     const [next] = await this.#deliveries.pending(deviceId, 1);
     if (!next) return;
-    if (!next.authority) throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Pending relay delivery has no durable authorization generation.');
-    if (next.requiredCapabilities === undefined) throw new OperatorError('RELAY_DELIVERY_CAPABILITIES_MISSING', 'Pending relay delivery has no durable capability requirements.');
-    const missingCapabilities = next.requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
-    if (missingCapabilities.length > 0) {
-      await this.#assertDispatchAuthority(next.authority, connection.sessionId);
-      const retired = await this.#deliveries.expireCapabilityIncompatibleHeads(deviceId, connection.capabilities);
-      if (retired > 0 && this.#connections.get(deviceId)?.sessionId === connection.sessionId) {
+    const requiredCapabilities = next.requiredCapabilities;
+    const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
+    const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
+    if (unroutable) {
+      if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+      const capabilitySnapshot = [...connection.capabilities];
+      const isCurrentSnapshot = () => {
+        const active = this.#connections.get(deviceId);
+        return active?.sessionId === connection.sessionId
+          && active.socket === connection.socket
+          && active.socket.readyState === WebSocket.OPEN
+          && active.capabilities.length === capabilitySnapshot.length
+          && active.capabilities.every((capability, index) => capability === capabilitySnapshot[index]);
+      };
+      const retired = await this.#deliveries.expireUnroutableHeads(deviceId, capabilitySnapshot, isCurrentSnapshot);
+      if (retired > 0 && isCurrentSnapshot()) {
         this.#connections.delete(deviceId);
         connection.inFlightSeq = undefined;
         try { connection.socket.close(4009, 'capability queue reconciliation'); } catch { /* reconnect will reconcile the durable cursor */ }
       }
       return;
     }
-    await this.#assertDispatchAuthority(next.authority, connection.sessionId, next.requiredCapabilities);
+    await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
     connection.inFlightSeq = next.seq;
     try {
       send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
