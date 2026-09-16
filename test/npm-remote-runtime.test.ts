@@ -106,6 +106,16 @@ test('npm publication fails closed unless exact source commit is supplied', asyn
   assert.match(source, /manifest\.sourceCommit !== expectedCommit/);
 });
 
+test('npm release revalidates source binding outside suppressible lifecycle hooks', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-release.yml'), 'utf8');
+  const directGate = workflow.indexOf('Revalidate exact source binding immediately before publish');
+  const directCommand = workflow.indexOf('node packages/mecrod-operator/src/publish-check.mjs', directGate);
+  const publish = workflow.indexOf('npm publish ./packages/mecrod-operator', directCommand);
+  assert.ok(directGate >= 0 && directCommand > directGate && publish > directCommand);
+  assert.match(workflow.slice(publish), /--ignore-scripts=false/);
+  assert.match(workflow.slice(publish), /NPM_CONFIG_IGNORE_SCRIPTS:\s*'false'/);
+});
+
 test('runtime manifest requires the complete hardened native boundary', () => {
   const parsed = validateRuntimeManifest(manifest());
   assert.equal(parsed.files.length, 4);
