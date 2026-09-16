@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import test from 'node:test';
 import {
   assertSupportedRuntime,
@@ -46,7 +48,7 @@ test('runtime launcher allows only the certified Node 22 Windows x64 line', () =
 
 test('npx parent credentials are not inherited by the remote runtime', () => {
   const env = safeRuntimeEnvironment({
-    Path: 'C:\\Windows\\System32',
+    Path: 'C:\\project\\node_modules\\.bin;C:\\Windows\\System32',
     USERPROFILE: 'C:\\Users\\test',
     TEMP: 'C:\\Temp',
     NPM_TOKEN: 'npm-secret',
@@ -57,7 +59,6 @@ test('npx parent credentials are not inherited by the remote runtime', () => {
     NODE_OPTIONS: '--require malicious.js',
     OPERATOR_RELAY_URL: 'wss://evil.example/device'
   });
-  assert.equal(env.Path, 'C:\\Windows\\System32');
   assert.equal(env.USERPROFILE, 'C:\\Users\\test');
   assert.equal(env.TEMP, 'C:\\Temp');
   assert.equal(env.NPM_TOKEN, undefined);
@@ -67,6 +68,26 @@ test('npx parent credentials are not inherited by the remote runtime', () => {
   assert.equal(env.NPM_CONFIG_USERCONFIG, undefined);
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.OPERATOR_RELAY_URL, undefined);
+});
+
+test('relay-only entrypoint removes npm PATH authority before importing providers', async () => {
+  const source = await fs.readFile(path.resolve('apps/local-agent/src/remote.ts'), 'utf8');
+  const deleteUpper = source.indexOf('delete process.env.PATH;');
+  const deleteMixed = source.indexOf('delete process.env.Path;');
+  const setTrusted = source.indexOf('process.env.Path =');
+  const loadMain = source.indexOf("await import('./main.ts')");
+  assert.ok(deleteUpper >= 0 && deleteMixed > deleteUpper && setTrusted > deleteMixed && loadMain > setTrusted);
+  assert.match(source, /wss:\/\/operator\.splcart\.in\/device/);
+  assert.match(source, /https:\/\/operator\.splcart\.in\/v1\/device-result/);
+  assert.doesNotMatch(source, /process\.env\.OPERATOR_RELAY_URL\s*\?\?/);
+});
+
+test('npm publication fails closed unless exact source commit is supplied', async () => {
+  const source = await fs.readFile(path.resolve('packages/mecrod-operator/src/publish-check.mjs'), 'utf8');
+  assert.match(source, /process\.env\.OPERATOR_SOURCE_COMMIT/);
+  assert.doesNotMatch(source, /process\.env\.GITHUB_SHA/);
+  assert.match(source, /Refusing npm publish: OPERATOR_SOURCE_COMMIT/);
+  assert.match(source, /manifest\.sourceCommit !== expectedCommit/);
 });
 
 test('runtime manifest requires the complete hardened native boundary', () => {
