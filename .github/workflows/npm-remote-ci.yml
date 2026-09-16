@@ -126,7 +126,11 @@ jobs:
           npm install --prefix $installDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
           node (Join-Path $installDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
-          if ($LASTEXITCODE -ne 0) { throw 'packed artifact doctor failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
+          $shim = Join-Path $installDir 'node_modules/.bin/operator.cmd'
+          if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create operator.cmd bin shim' }
+          & $shim doctor
+          if ($LASTEXITCODE -ne 0) { throw 'installed npm bin shim doctor failed' }
 
   node-compatibility:
     name: Node ${{ matrix.node }} launcher compatibility
