@@ -87,8 +87,10 @@ export function assertSupportedRuntime(
   if (parts.length < 2 || parts.some((part) => !Number.isSafeInteger(part))) {
     throw new Error('Unable to determine the Node.js version.');
   }
-  if (parts[0] !== 22 || parts[1] < 14) {
-    throw new Error(`Operator remote requires Node.js 22.14 through 22.x; received ${version}.`);
+  const major = parts[0];
+  const supported = (major === 22 && parts[1] >= 14) || major === 24 || major === 26;
+  if (!supported) {
+    throw new Error(`Operator remote requires Node.js 22.14+, 24.x, or 26.x; received ${version}.`);
   }
 }
 
