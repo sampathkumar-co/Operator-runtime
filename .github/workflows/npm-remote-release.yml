@@ -125,7 +125,11 @@ jobs:
           npm install --prefix $smokeDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed npm install failed' }
           node (Join-Path $smokeDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
-          if ($LASTEXITCODE -ne 0) { throw 'installed tarball doctor failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
+          $shim = Join-Path $smokeDir 'node_modules/.bin/operator.cmd'
+          if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create operator.cmd bin shim' }
+          & $shim doctor
+          if ($LASTEXITCODE -ne 0) { throw 'installed npm bin shim doctor failed' }
           "package_version=$($json[0].version)" >> $env:GITHUB_OUTPUT
 
       - name: Refuse duplicate npm version
