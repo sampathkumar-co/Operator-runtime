@@ -113,8 +113,8 @@ export function validateOAuthProviderMetadataDocument(metadata: Record<string, u
     exactUrl(metadata.introspection_endpoint, config.oauthIntrospectionEndpoint, 'introspection_endpoint');
   }
   requireArray(metadata.code_challenge_methods_supported, 'code_challenge_methods_supported', 'S256');
-  requireArray(metadata.scopes_supported, 'scopes_supported', config.readScope);
-  requireArray(metadata.scopes_supported, 'scopes_supported', config.writeScope);
+  // RFC 8414 allows supported scopes to be omitted from scopes_supported even when the field is present.
+  if (metadata.scopes_supported !== undefined) stringArray(metadata.scopes_supported, 'scopes_supported');
   if (metadata.response_types_supported !== undefined) requireArray(metadata.response_types_supported, 'response_types_supported', 'code');
   if (metadata.grant_types_supported !== undefined) requireArray(metadata.grant_types_supported, 'grant_types_supported', 'authorization_code');
   validateRegistration(metadata, config.oauthRegistrationMode, config.oauthVerificationMode);

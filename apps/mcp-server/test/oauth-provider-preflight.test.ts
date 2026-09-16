@@ -44,14 +44,18 @@ test('provider metadata accepts DCR when CIMD is unavailable', () => {
   });
   assert.deepEqual(validateProviderMetadata(value, { ...config, registrationMode: 'dcr' }), { registrationMode: 'dcr' });
 });
-test('provider metadata fails closed on PKCE, scope, endpoint, or registration drift', () => {
+test('provider metadata fails closed on PKCE, malformed scope metadata, endpoint, or registration drift', () => {
   assert.throws(
     () => validateProviderMetadata(metadata({ code_challenge_methods_supported: ['plain'] }), config),
     /S256/
   );
+  assert.deepEqual(
+    validateProviderMetadata(metadata({ scopes_supported: ['openid', 'profile', 'email'] }), config),
+    { registrationMode: 'cimd' }
+  );
   assert.throws(
-    () => validateProviderMetadata(metadata({ scopes_supported: [config.readScope] }), config),
-    /operator:write/
+    () => validateProviderMetadata(metadata({ scopes_supported: ['openid', 42] }), config),
+    /scopes_supported.*invalid/i
   );
   assert.throws(
     () => validateProviderMetadata(metadata({ token_endpoint: 'https://evil.example/token' }), config),

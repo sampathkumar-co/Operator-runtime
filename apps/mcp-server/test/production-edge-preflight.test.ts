@@ -41,7 +41,7 @@ function providerMetadata(): Record<string, unknown> {
     token_endpoint: 'https://auth.operator.dev/token',
     jwks_uri: 'https://auth.operator.dev/.well-known/jwks.json',
     code_challenge_methods_supported: ['S256'],
-    scopes_supported: ['operator:read', 'operator:write'],
+    scopes_supported: ['openid', 'profile', 'email'],
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     client_id_metadata_document_supported: true,
@@ -108,6 +108,18 @@ test('production preflight rejects placeholders, weak relay secrets, and unsafe 
     /FINAL_ACK/
   );
   assert.equal(calls, 0);
+});
+
+test('production preflight rejects malformed advertised scope metadata without requiring custom scopes to be listed', async () => {
+  const malformedFetch = (async () => new Response(JSON.stringify({
+    ...providerMetadata(),
+    scopes_supported: ['openid', 42]
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+
+  await assert.rejects(
+    () => runProductionEdgePreflight({ env: env(), fetchFn: malformedFetch }),
+    /scopes_supported.*invalid/i
+  );
 });
 
 test('production preflight allows required labels inside legitimate OAuth hostnames', async () => {
