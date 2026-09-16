@@ -117,7 +117,8 @@ export function validateOAuthProviderMetadataDocument(metadata: Record<string, u
   // RFC 8414 allows supported scopes to be omitted from scopes_supported even when the field is present.
   if (metadata.scopes_supported !== undefined) stringArray(metadata.scopes_supported, 'scopes_supported');
   if (metadata.response_types_supported !== undefined) requireArray(metadata.response_types_supported, 'response_types_supported', 'code');
-  if (metadata.grant_types_supported !== undefined) requireArray(metadata.grant_types_supported, 'grant_types_supported', 'authorization_code');
+  requireArray(metadata.grant_types_supported, 'grant_types_supported', 'authorization_code');
+  requireArray(metadata.grant_types_supported, 'grant_types_supported', 'refresh_token');
   validateRegistration(metadata, config.oauthRegistrationMode, config.oauthVerificationMode);
 }
 function validateRegistration(

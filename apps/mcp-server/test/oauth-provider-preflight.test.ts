@@ -49,6 +49,14 @@ test('provider metadata fails closed on PKCE, malformed scope metadata, endpoint
     () => validateProviderMetadata(metadata({ code_challenge_methods_supported: ['plain'] }), config),
     /S256/
   );
+  assert.throws(
+    () => validateProviderMetadata(metadata({ grant_types_supported: ['authorization_code'] }), config),
+    /grant_types_supported.*refresh_token/i
+  );
+  assert.throws(
+    () => validateProviderMetadata(metadata({ grant_types_supported: undefined }), config),
+    /grant_types_supported.*invalid/i
+  );
   assert.deepEqual(
     validateProviderMetadata(metadata({ scopes_supported: ['openid', 'profile', 'email'] }), config),
     { registrationMode: 'cimd' }
