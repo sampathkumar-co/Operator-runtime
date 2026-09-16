@@ -15,7 +15,7 @@ const SCORE: CapabilityScore = {
 };
 
 const NULL_GIT_CONFIG = process.platform === 'win32' ? 'NUL' : '/dev/null';
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${NULL_GIT_CONFIG}`];
+const SAFE_GIT_PREFIX = ['--no-pager', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${NULL_GIT_CONFIG}`];
 const PUBLIC_GIT_PREFIX = [...SAFE_GIT_PREFIX, '--literal-pathspecs'];
 const READ_ONLY_GIT_ENV = Object.freeze({
   GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG,
