@@ -44,6 +44,24 @@ test('remote CLI is explicit and bounded', () => {
   );
 });
 
+test('remote launcher binds its local agent to an ephemeral loopback port', async () => {
+  const source = await fs.readFile(path.resolve('packages/mecrod-operator/src/cli.mjs'), 'utf8');
+  assert.match(source, /env\.OPERATOR_AGENT_HOST = '127\.0\.0\.1'/);
+  assert.match(source, /env\.OPERATOR_AGENT_PORT = '0'/);
+  assert.doesNotMatch(source, /env\.OPERATOR_AGENT_PORT = '47100'/);
+});
+
+test('npm runtime CI emits push evidence for every branch SHA', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  const pushStart = workflow.indexOf('  push:');
+  const pullRequestStart = workflow.indexOf('  pull_request:');
+  assert.ok(pushStart >= 0 && pullRequestStart > pushStart);
+  const pushSection = workflow.slice(pushStart, pullRequestStart);
+  assert.match(pushSection, /branches:\s*\['\*\*'\]/);
+  assert.equal(pushSection.includes('\n    paths:'), false);
+  assert.equal(workflow.slice(pullRequestStart).includes('\n    paths:'), true);
+});
+
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.14.0'));
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.23.2'));

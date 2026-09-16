@@ -180,3 +180,24 @@ test('Git checkpoint and write disable repository hooks for index-changing opera
   assert.equal(staged.ok, true, staged.error?.message);
   await assert.rejects(fs.access(marker));
 });
+
+test('Git checkpoint disables reference-transaction hooks during ref updates', async (t) => {
+  const root = await tempDir(t, 'operator-git-ref-hook-root-');
+  await initRepo(root, 'safe content\n');
+  const hooks = path.join(root, 'evil-ref-hooks');
+  const marker = path.join(root, 'reference-transaction.marker');
+  await fs.mkdir(hooks, { recursive: true });
+  const hook = path.join(hooks, 'reference-transaction');
+  await fs.writeFile(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker.replace(/\\/g, '/'))}\ncat >/dev/null\nexit 0\n`);
+  await fs.chmod(hook, 0o755);
+  git(root, ['config', '--local', 'core.hooksPath', hooks.replace(/\\/g, '/')]);
+  await fs.writeFile(path.join(root, 'state.txt'), 'changed safely\n');
+
+  const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
+  const created = await checkpoint.execute({
+    id: 'reference-hook-checkpoint', capability: 'git.checkpoint.create', risk: 'write',
+    input: { cwd: root }, provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(created.ok, true, created.error?.message);
+  await assert.rejects(fs.access(marker));
+});

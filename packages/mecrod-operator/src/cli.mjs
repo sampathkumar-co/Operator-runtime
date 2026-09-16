@@ -301,7 +301,7 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   const env = safeRuntimeEnvironment();
   env.OPERATOR_ALLOWED_ROOTS = authorizedRoot;
   env.OPERATOR_AGENT_HOST = '127.0.0.1';
-  env.OPERATOR_AGENT_PORT = '47100';
+  env.OPERATOR_AGENT_PORT = '0';
   env.OPERATOR_AGENT_TOKEN = randomSecret();
   env.OPERATOR_RECOVERY_TOKEN = randomSecret();
   env.OPERATOR_RELAY_URL = RELAY_URL;
