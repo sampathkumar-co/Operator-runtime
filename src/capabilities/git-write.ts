@@ -18,7 +18,8 @@ const SCORE: CapabilityScore = {
   interactionCost: 0.01
 };
 
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '--literal-pathspecs'];
+const DISABLED_HOOKS_PATH = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${DISABLED_HOOKS_PATH}`, '--literal-pathspecs'];
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 type RepoState = {

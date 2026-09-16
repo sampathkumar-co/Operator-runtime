@@ -20,7 +20,8 @@ const SCORE: CapabilityScore = {
 
 const REF_PREFIX = 'refs/operator/checkpoints/';
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false'];
+const DISABLED_HOOKS_PATH = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${DISABLED_HOOKS_PATH}`];
 
 type RepoState = {
   root: string;

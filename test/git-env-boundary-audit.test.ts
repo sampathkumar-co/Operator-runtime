@@ -156,3 +156,27 @@ test('Git checkpoint rejects content filters loaded through repository config in
   assert.equal(result.error?.code, 'GIT_LOCAL_FILTER_DENIED');
   await assert.rejects(fs.access(marker));
 });
+
+
+test('Git checkpoint and write disable repository hooks for index-changing operations', async (t) => {
+  const root = await tempDir(t, 'operator-git-hooks-root-');
+  await initRepo(root, 'safe content\n');
+  const hooks = path.join(root, 'evil-hooks');
+  const marker = path.join(root, 'post-index-change.marker');
+  await fs.mkdir(hooks, { recursive: true });
+  const hook = path.join(hooks, 'post-index-change');
+  await fs.writeFile(hook, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker.replace(/\\/g, '/'))}\nexit 0\n`);
+  await fs.chmod(hook, 0o755);
+  git(root, ['config', '--local', 'core.hooksPath', hooks.replace(/\\/g, '/')]);
+  await fs.writeFile(path.join(root, 'state.txt'), 'changed safely\n');
+
+  const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
+  const created = await checkpoint.execute({ id: 'hook-checkpoint', capability: 'git.checkpoint.create', risk: 'write', input: { cwd: root }, provenance: { kind: 'chatgpt' } });
+  assert.equal(created.ok, true, created.error?.message);
+  await assert.rejects(fs.access(marker));
+
+  const writer = new GitWriteProvider({ allowedRoots: [root] });
+  const staged = await writer.execute({ id: 'hook-stage', capability: 'git.write', risk: 'write', input: { operation: 'stage', cwd: root, paths: ['state.txt'], expectedCurrentFingerprint: String((created.output as any).fingerprint) }, provenance: { kind: 'chatgpt' } });
+  assert.equal(staged.ok, true, staged.error?.message);
+  await assert.rejects(fs.access(marker));
+});
