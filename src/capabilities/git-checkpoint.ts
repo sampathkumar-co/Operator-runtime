@@ -311,7 +311,7 @@ function parseNameStatus(raw: string): Array<{ status: string; path: string }> {
 }
 
 async function assertNoRepoLocalContentFilters(root: string): Promise<void> {
-  const configured = await runGit(root, ['config', '--local', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], {}, true);
+  const configured = await runGit(root, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], {}, true);
   if (configured.code === 0 && configured.stdout.trim()) {
     throw new OperatorError('GIT_LOCAL_FILTER_DENIED', 'Repository-local Git clean/smudge/process filters are disabled for checkpoint operations because they can execute arbitrary commands.', {
       details: { keys: configured.stdout.split(/\r?\n/).filter(Boolean).slice(0, 50) }
@@ -346,7 +346,14 @@ function checkpointIdentityEnv(): NodeJS.ProcessEnv {
 }
 
 function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
+  const nullConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const env: NodeJS.ProcessEnv = {
+    GIT_PAGER: '',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_GLOBAL: nullConfig,
+    GIT_CONFIG_SYSTEM: nullConfig,
+    GIT_CONFIG_NOSYSTEM: '1'
+  };
   for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }

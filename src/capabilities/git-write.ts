@@ -126,13 +126,14 @@ export class GitWriteProvider implements CapabilityProvider {
     if (staged.code === 0) throw new OperatorError('GIT_NOTHING_STAGED', 'No staged changes are available to commit.');
     if (staged.code !== 1) throw new OperatorError('GIT_STAGED_CHECK_FAILED', staged.stderr.trim() || `git diff exited ${staged.code}.`);
 
+    const identity = await commitIdentityEnv(before.root);
     const hooksDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-empty-hooks-'));
     try {
       await runGit(before.root, [
         '-c', `core.hooksPath=${hooksDir}`,
         '-c', 'commit.gpgSign=false',
         'commit', '--no-verify', '--no-gpg-sign', '-m', message
-      ], {});
+      ], identity);
     } finally {
       await fs.rm(hooksDir, { recursive: true, force: true });
     }
@@ -224,8 +225,41 @@ function success(
   };
 }
 
+async function commitIdentityEnv(root: string): Promise<NodeJS.ProcessEnv> {
+  const [nameResult, emailResult] = await Promise.all([
+    runGit(root, ['config', '--local', '--get', 'user.name'], {}, true),
+    runGit(root, ['config', '--local', '--get', 'user.email'], {}, true)
+  ]);
+  for (const result of [nameResult, emailResult]) {
+    if (![0, 1].includes(result.code)) {
+      throw new OperatorError('GIT_CONFIG_INSPECTION_FAILED', result.stderr.trim() || 'Unable to inspect repository-local Git identity.');
+    }
+  }
+  let name = 'Operator';
+  let email = 'operator@local.invalid';
+  if (nameResult.code === 0 && emailResult.code === 0) {
+    const localName = nameResult.stdout.trim();
+    const localEmail = emailResult.stdout.trim();
+    if (!localName || localName.length > 200 || /[\0\r\n]/.test(localName)) throw new OperatorError('GIT_IDENTITY_INVALID', 'Repository-local Git user.name is invalid.');
+    if (!localEmail || localEmail.length > 320 || /[\0\r\n]/.test(localEmail)) throw new OperatorError('GIT_IDENTITY_INVALID', 'Repository-local Git user.email is invalid.');
+    name = localName;
+    email = localEmail;
+  }
+  return {
+    GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email
+  };
+}
+
 function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
+  const nullConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const env: NodeJS.ProcessEnv = {
+    GIT_PAGER: '',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_GLOBAL: nullConfig,
+    GIT_CONFIG_SYSTEM: nullConfig,
+    GIT_CONFIG_NOSYSTEM: '1'
+  };
   for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }

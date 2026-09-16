@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { GitCheckpointProvider } from '../src/capabilities/git-checkpoint.ts';
+import { GitWriteProvider } from '../src/capabilities/git-write.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -88,5 +89,70 @@ test('Git checkpoint ignores caller-controlled XDG global filter configuration',
     input: { cwd: root, label: 'xdg config must be ignored' }, provenance: { kind: 'chatgpt' }
   });
   assert.equal(result.ok, true, result.error?.message);
+  await assert.rejects(fs.access(marker));
+});
+
+
+test('Git checkpoint and write ignore HOME global filters and global commit identity', async (t) => {
+  const root = await tempDir(t, 'operator-git-home-root-');
+  const home = await tempDir(t, 'operator-git-home-config-');
+  await initRepo(root, 'safe content\n');
+  const marker = path.join(root, 'home-filter-ran.marker');
+  const script = path.join(root, 'home-filter.cjs');
+  await fs.writeFile(script, `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, 'executed'); process.stdin.pipe(process.stdout);\n`);
+  await fs.writeFile(path.join(root, '.gitattributes'), '*.txt filter=operator-home\n');
+  git(root, ['add', '.gitattributes', 'home-filter.cjs']);
+  git(root, ['commit', '-m', 'add home filter fixture']);
+  git(root, ['config', '--unset', 'user.name']);
+  git(root, ['config', '--unset', 'user.email']);
+  const command = `node ${script.replace(/\\/g, '/')}`;
+  await fs.writeFile(path.join(home, '.gitconfig'), `[user]\n\tname = Attacker Global\n\temail = attacker@example.invalid\n[filter "operator-home"]\n\tclean = ${command}\n\tsmudge = ${command}\n`);
+  const previousHome = process.env.HOME;
+  const previousProfile = process.env.USERPROFILE;
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  t.after(() => { restoreEnv('HOME', previousHome); restoreEnv('USERPROFILE', previousProfile); });
+
+  await fs.writeFile(path.join(root, 'state.txt'), 'changed safely\n');
+  const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
+  const created = await checkpoint.execute({ id: 'home-filter-checkpoint', capability: 'git.checkpoint.create', risk: 'write', input: { cwd: root }, provenance: { kind: 'chatgpt' } });
+  assert.equal(created.ok, true, created.error?.message);
+  await assert.rejects(fs.access(marker));
+
+  const writer = new GitWriteProvider({ allowedRoots: [root] });
+  const staged = await writer.execute({ id: 'home-filter-stage', capability: 'git.write', risk: 'write', input: { operation: 'stage', cwd: root, paths: ['state.txt'], expectedCurrentFingerprint: String((created.output as any).fingerprint) }, provenance: { kind: 'chatgpt' } });
+  assert.equal(staged.ok, true, staged.error?.message);
+  await assert.rejects(fs.access(marker));
+
+
+  const inspected = await checkpoint.execute({ id: 'home-filter-inspect', capability: 'git.checkpoint.inspect', risk: 'read', input: { cwd: root }, provenance: { kind: 'runtime' } });
+  assert.equal(inspected.ok, true, inspected.error?.message);
+  const committed = await writer.execute({ id: 'home-filter-commit', capability: 'git.write', risk: 'write', input: { operation: 'commit', cwd: root, message: 'test: isolated global config', expectedCurrentFingerprint: String((inspected.output as any).current.fingerprint) }, provenance: { kind: 'chatgpt' } });
+  assert.equal(committed.ok, true, committed.error?.message);
+  await assert.rejects(fs.access(marker));
+  restoreEnv('HOME', previousHome);
+  restoreEnv('USERPROFILE', previousProfile);
+  assert.equal(git(root, ['log', '-1', '--pretty=%an%x00%ae']).trim(), 'Operator\0operator@local.invalid');
+});
+
+
+test('Git checkpoint rejects content filters loaded through repository config includes', async (t) => {
+  const root = await tempDir(t, 'operator-git-include-root-');
+  await initRepo(root, 'safe content\n');
+  const marker = path.join(root, 'include-filter-ran.marker');
+  const script = path.join(root, 'include-filter.cjs');
+  const included = path.join(root, 'included-git-config');
+  await fs.writeFile(script, `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, 'executed'); process.stdin.pipe(process.stdout);\n`);
+  await fs.writeFile(path.join(root, '.gitattributes'), '*.txt filter=operator-include\n');
+  git(root, ['add', '.gitattributes', 'include-filter.cjs']);
+  git(root, ['commit', '-m', 'add include filter fixture']);
+  const command = `node ${script.replace(/\\/g, '/')}`;
+  await fs.writeFile(included, `[filter "operator-include"]\n\tclean = ${command}\n\tsmudge = ${command}\n`);
+  git(root, ['config', '--local', 'include.path', included.replace(/\\/g, '/')]);
+
+  const provider = new GitCheckpointProvider({ allowedRoots: [root] });
+  const result = await provider.execute({ id: 'included-filter-denied', capability: 'git.checkpoint.create', risk: 'write', input: { cwd: root }, provenance: { kind: 'chatgpt' } });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'GIT_LOCAL_FILTER_DENIED');
   await assert.rejects(fs.access(marker));
 });
