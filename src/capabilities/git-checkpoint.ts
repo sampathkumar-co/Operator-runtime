@@ -353,7 +353,8 @@ function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_GLOBAL: nullConfig,
     GIT_CONFIG_SYSTEM: nullConfig,
-    GIT_CONFIG_NOSYSTEM: '1'
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_NO_LAZY_FETCH: '1'
   };
   for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];

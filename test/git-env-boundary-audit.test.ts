@@ -35,6 +35,13 @@ async function initRepo(root: string, content: string): Promise<void> {
   git(root, ['commit', '-m', 'initial']);
 }
 
+test('Git checkpoint and write subprocesses disable lazy promisor fetching', async () => {
+  const checkpointSource = await fs.readFile(path.resolve('src/capabilities/git-checkpoint.ts'), 'utf8');
+  const writeSource = await fs.readFile(path.resolve('src/capabilities/git-write.ts'), 'utf8');
+  assert.match(checkpointSource, /GIT_NO_LAZY_FETCH:\s*'1'/);
+  assert.match(writeSource, /GIT_NO_LAZY_FETCH:\s*'1'/);
+});
+
 test('Git checkpoint ignores ambient GIT_DIR/GIT_WORK_TREE redirection', async (t) => {
   const allowed = await tempDir(t, 'operator-git-env-allowed-');
   const outside = await tempDir(t, 'operator-git-env-outside-');

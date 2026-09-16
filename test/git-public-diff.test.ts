@@ -163,6 +163,26 @@ async function writeFilterScript(root: string, marker: string): Promise<string> 
   return `${quoteGitCommandPath(process.execPath)} ${quoteGitCommandPath(script)}`;
 }
 
+test('read-only Git diff disables lazy promisor fetch helpers', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  const marker = path.join(root, 'lazy-fetch.marker');
+  const helper = path.join(root, 'lazy-fetch-helper.cjs');
+  await fs.writeFile(helper, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); process.exit(1);\n`);
+  git(root, 'config', 'remote.origin.url', `ext::node ${helper.replace(/\\/g, '/')}`);
+  git(root, 'config', 'remote.origin.promisor', 'true');
+  git(root, 'config', 'remote.origin.partialclonefilter', 'blob:none');
+  git(root, 'config', 'protocol.ext.allow', 'always');
+  const blob = git(root, 'rev-parse', 'HEAD:src/a.txt').trim();
+  const objectPath = path.join(root, '.git', 'objects', blob.slice(0, 2), blob.slice(2));
+  await fs.access(objectPath);
+  await fs.rm(objectPath);
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), 'changed\n');
+  const result = await provider.execute({ id: 'lazy-diff', capability: 'git.diff', risk: 'read', provenance: { kind: 'chatgpt' }, input: { cwd: root, paths: ['src/a.txt'] } });
+  assert.equal(result.ok, false);
+  await assert.rejects(fs.access(marker));
+});
+
 test('public Git diff keeps literal filenames literal even when they resemble pathspec syntax', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
