@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 const REQUIRED_RELAY_URL = 'wss://operator.splcart.in/device';
 const REQUIRED_RESULT_URL = 'https://operator.splcart.in/v1/device-result';
 
@@ -15,8 +17,26 @@ for (const [name, value] of [
   ['OPERATOR_WINDOWS_UIA_PATH', process.env.OPERATOR_WINDOWS_UIA_PATH],
   ['OPERATOR_WINDOWS_PATH_LEASE_PATH', process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH]
 ] as const) {
-  if (!value) throw new Error(`${name} is required by the hardened Windows npm runtime.`);
+  if (!value || !path.isAbsolute(value)) throw new Error(`${name} must be an absolute path from the hardened Windows npm runtime.`);
 }
+
+// npm/npx can prepend project-local .bin directories to PATH. Rebuild executable
+// search authority before importing any capability provider so project files cannot
+// shadow git/node/npm or other explicitly allowed executables.
+const systemRoot = process.env.SYSTEMROOT || process.env.WINDIR || 'C:\\Windows';
+const programFiles = process.env.PROGRAMFILES || 'C:\\Program Files';
+const trustedPath = [
+  path.dirname(process.execPath),
+  path.join(systemRoot, 'System32'),
+  systemRoot,
+  path.join(systemRoot, 'System32', 'Wbem'),
+  path.join(programFiles, 'Git', 'cmd'),
+  path.join(programFiles, 'nodejs'),
+  path.join(programFiles, 'Docker', 'Docker', 'resources', 'bin')
+];
+process.env.Path = [...new Set(trustedPath.map((entry) => path.resolve(entry)))].join(path.delimiter);
+delete process.env.PATH;
+process.env.PATHEXT = '.COM;.EXE;.BAT;.CMD';
 
 // The public npm command is intentionally pinned to the production relay authority.
 // Caller environment variables cannot redirect a paired device to another relay.
