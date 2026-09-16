@@ -94,6 +94,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'remote CLI tests failed' }
           node packages/mecrod-operator/bin/operator.mjs doctor
           if ($LASTEXITCODE -ne 0) { throw 'packaged runtime doctor failed' }
+          node packages/mecrod-operator/scripts/test-required-relay-failure.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Validate publishable tarball and installed-package doctor
         id: pack
@@ -137,9 +139,15 @@ jobs:
           }
           exit 0
 
+      - name: Revalidate exact source binding immediately before publish
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: node packages/mecrod-operator/src/publish-check.mjs
+
       - name: Publish npm runtime with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ inputs.npm_tag }}
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
-        run: npm publish ./packages/mecrod-operator --access public --tag "$env:NPM_TAG" --provenance
+          NPM_CONFIG_IGNORE_SCRIPTS: 'false'
+        run: npm publish ./packages/mecrod-operator --access public --tag "$env:NPM_TAG" --provenance --ignore-scripts=false
