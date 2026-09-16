@@ -18,19 +18,30 @@ const helperSources = [
   ['operator-windows-path-lease.exe', process.env.OPERATOR_BUILD_PATH_LEASE_PATH || path.join(repoRoot, 'native', 'windows-path-lease', 'target', 'release', 'operator-windows-path-lease.exe')]
 ];
 
-async function copyTree(source, destination) {
-  const stat = await fs.lstat(source);
-  if (stat.isSymbolicLink()) throw new Error(`Refusing symbolic link in runtime source: ${source}`);
-  if (stat.isDirectory()) {
-    await fs.mkdir(destination, { recursive: true });
-    for (const name of await fs.readdir(source)) {
-      await copyTree(path.join(source, name), path.join(destination, name));
-    }
-    return;
+function gitText(args) {
+  return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim();
+}
+
+function assertTrackedRuntimeSourcesClean() {
+  const status = gitText(['status', '--porcelain=v1', '--untracked-files=no', '--', 'src', 'apps/local-agent/src']);
+  if (status) throw new Error('Runtime source tree contains tracked changes; refusing to bind modified bytes to HEAD.');
+}
+
+async function copyTrackedTree(repoRelativeRoot, destinationRoot) {
+  const raw = execFileSync('git', ['ls-files', '-z', '--', repoRelativeRoot], { cwd: repoRoot, encoding: 'utf8' });
+  const prefix = `${repoRelativeRoot}/`;
+  const files = raw.split('\0').filter(Boolean);
+  if (files.length === 0) throw new Error(`No tracked runtime sources found under ${repoRelativeRoot}.`);
+  for (const repoRelative of files) {
+    if (!repoRelative.startsWith(prefix) || !repoRelative.endsWith('.ts')) throw new Error(`Unexpected tracked runtime source: ${repoRelative}`);
+    const relative = repoRelative.slice(prefix.length);
+    const source = path.join(repoRoot, ...repoRelative.split('/'));
+    const destination = path.join(destinationRoot, ...relative.split('/'));
+    const stat = await fs.lstat(source);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing non-file tracked runtime source: ${repoRelative}`);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(source, destination);
   }
-  if (!stat.isFile()) throw new Error(`Unsupported runtime source entry: ${source}`);
-  await fs.mkdir(path.dirname(destination), { recursive: true });
-  await fs.copyFile(source, destination);
 }
 
 async function sha256(file) {
@@ -56,16 +67,23 @@ async function listFiles(root, relative = '') {
 }
 
 function sourceCommit() {
+  const head = gitText(['rev-parse', 'HEAD']).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new Error('Checked-out Git HEAD must be a 40-character SHA.');
   const supplied = String(process.env.OPERATOR_SOURCE_COMMIT || '').trim();
-  const value = supplied || execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
-  if (!/^[0-9a-f]{40}$/i.test(value)) throw new Error('Runtime source commit must be a 40-character Git SHA.');
-  return value.toLowerCase();
+  if (supplied) {
+    if (!/^[0-9a-f]{40}$/i.test(supplied)) throw new Error('Runtime source commit must be a 40-character Git SHA.');
+    if (supplied.toLowerCase() !== head) throw new Error('Runtime source commit does not match the checked-out Git HEAD.');
+  }
+  return head;
 }
 
+const commit = sourceCommit();
+assertTrackedRuntimeSourcesClean();
 await fs.rm(runtimeRoot, { recursive: true, force: true });
 await fs.mkdir(nativeRoot, { recursive: true });
-await copyTree(path.join(repoRoot, 'src'), path.join(appRoot, 'src'));
-await copyTree(path.join(repoRoot, 'apps', 'local-agent', 'src'), path.join(appRoot, 'apps', 'local-agent', 'src'));
+await copyTrackedTree('src', path.join(appRoot, 'src'));
+await copyTrackedTree('apps/local-agent/src', path.join(appRoot, 'apps', 'local-agent', 'src'));
+
 await fs.writeFile(path.join(appRoot, 'package.json'), JSON.stringify({ private: true, type: 'module' }, null, 2) + '\n', 'utf8');
 
 for (const [name, source] of helperSources) {
@@ -88,7 +106,7 @@ const manifest = {
   version: pkg.version,
   platform: 'win32',
   arch: 'x64',
-  sourceCommit: sourceCommit(),
+  sourceCommit: commit,
   files
 };
 await fs.writeFile(path.join(runtimeRoot, 'runtime-manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');

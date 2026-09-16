@@ -116,6 +116,17 @@ test('npm release revalidates source binding outside suppressible lifecycle hook
   assert.match(workflow.slice(publish), /--ignore-scripts=false/);
 });
 
+test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
+  const source = await fs.readFile(path.resolve('packages/mecrod-operator/scripts/build-runtime-payload.mjs'), 'utf8');
+  assert.match(source, /gitText\(\['status', '--porcelain=v1', '--untracked-files=no'/);
+  assert.match(source, /\['ls-files', '-z', '--', repoRelativeRoot\]/);
+  assert.match(source, /supplied\.toLowerCase\(\) !== head/);
+  assert.match(source, /contains tracked changes/);
+  assert.match(source, /copyTrackedTree\('src'/);
+  assert.match(source, /copyTrackedTree\('apps\/local-agent\/src'/);
+  assert.doesNotMatch(source, /copyTree\(path\.join\(repoRoot/);
+});
+
 test('runtime manifest requires the complete hardened native boundary', () => {
   const parsed = validateRuntimeManifest(manifest());
   assert.equal(parsed.files.length, 4);
