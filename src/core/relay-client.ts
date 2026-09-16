@@ -93,6 +93,7 @@ export interface RelayClientOptions {
   socketFactory?: RelaySocketFactory;
   getSessionToken: () => Promise<string>;
   supportedCapabilities?: readonly string[];
+  getSupportedCapabilities?: () => Promise<readonly string[]>;
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
@@ -109,7 +110,7 @@ export class RelayClient {
   #identity: DeviceIdentityStore;
   #socketFactory: RelaySocketFactory;
   #getSessionToken: () => Promise<string>;
-  #supportedCapabilities: string[];
+  #getSupportedCapabilities: () => Promise<string[]>;
   #requireCapabilityBinding: boolean;
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
@@ -130,8 +131,14 @@ export class RelayClient {
     this.#identity = options.identity;
     this.#socketFactory = options.socketFactory ?? nativeSocketFactory;
     this.#getSessionToken = options.getSessionToken;
-    this.#requireCapabilityBinding = options.supportedCapabilities !== undefined;
-    this.#supportedCapabilities = validateSupportedCapabilities(options.supportedCapabilities ?? []);
+    if (options.supportedCapabilities !== undefined && options.getSupportedCapabilities) {
+      throw new OperatorError('RELAY_CAPABILITIES_CONFIGURATION_INVALID', 'Configure either static or dynamic relay capabilities, not both.');
+    }
+    this.#requireCapabilityBinding = options.supportedCapabilities !== undefined || options.getSupportedCapabilities !== undefined;
+    const staticCapabilities = validateSupportedCapabilities(options.supportedCapabilities ?? []);
+    this.#getSupportedCapabilities = options.getSupportedCapabilities
+      ? async () => validateSupportedCapabilities(await options.getSupportedCapabilities!())
+      : async () => [...staticCapabilities];
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
     this.#onExpiredRecovery = options.onExpiredRecovery;
@@ -170,6 +177,7 @@ export class RelayClient {
   async #connectOnce(): Promise<void> {
     const state = await this.#readState();
     const token = await this.#getSessionToken();
+    const supportedCapabilities = await this.#getSupportedCapabilities();
     if (!token || Buffer.byteLength(token, 'utf8') > 16 * 1024) {
       throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token is missing or exceeds the bounded size.');
     }
@@ -191,7 +199,7 @@ export class RelayClient {
       fingerprint: identity.fingerprint,
       resumeAfterSeq: state.lastAckedServerSeq,
       pendingRecovery: state.processing ? { seq: state.processing.seq, id: state.processing.id } : null,
-      capabilities: [...this.#supportedCapabilities],
+      capabilities: [...supportedCapabilities],
       sentAt: this.#clock().toISOString(),
       nonce: crypto.randomBytes(24).toString('base64url')
     };
@@ -230,7 +238,7 @@ export class RelayClient {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          await this.#validateWelcome(frame, state);
+          await this.#validateWelcome(frame, state, supportedCapabilities);
           welcomed = true;
           this.#attempt = 0;
           this.#lastPongAt = Date.now();
@@ -260,14 +268,14 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  async #validateWelcome(frame: WelcomeFrame, state: RelayState): Promise<void> {
+  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<void> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
     if (this.#requireCapabilityBinding) {
       if (frame.capabilityBinding !== 1) {
         throw new OperatorError('RELAY_CAPABILITY_BINDING_REQUIRED', 'Relay did not acknowledge signed local capability binding.', { retryable: false });
       }
       const effective = validateSupportedCapabilities(frame.capabilities ?? []);
-      const advertised = new Set(this.#supportedCapabilities);
+      const advertised = new Set(supportedCapabilities);
       if (effective.some((capability) => !advertised.has(capability))) {
         throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
       }

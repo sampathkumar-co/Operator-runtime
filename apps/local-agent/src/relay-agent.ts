@@ -21,7 +21,8 @@ export interface LocalAgentRelayRunnerOptions {
   identity: DeviceIdentityStore;
   localAgentBaseUrl: string;
   agentToken: string;
-  supportedCapabilities: readonly string[];
+  supportedCapabilities?: readonly string[];
+  getSupportedCapabilities?: () => Promise<readonly string[]>;
   allowLoopbackInsecure?: boolean;
   socketFactory?: RelaySocketFactory;
 }
@@ -55,6 +56,7 @@ export class LocalAgentRelayRunner {
       allowLoopbackInsecureWs: Boolean(options.allowLoopbackInsecure),
       getSessionToken: () => this.#sessionCredentials.forConnection(),
       supportedCapabilities: options.supportedCapabilities,
+      getSupportedCapabilities: options.getSupportedCapabilities,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id),
       onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id)

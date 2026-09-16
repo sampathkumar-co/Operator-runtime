@@ -106,6 +106,62 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
 });
 
 
+test('relay recomputes signed capabilities before every reconnect hello', async (t) => {
+  const state = await stateDir(t, 'operator-relay-dynamic-capabilities-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Dynamic Capability PC');
+  const sockets: FakeSocket[] = [];
+  const snapshots = [
+    ['file.read', 'git.write'],
+    ['file.read']
+  ];
+  let capabilityReads = 0;
+  let client!: RelayClient;
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket = new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type !== 'hello') return;
+      const expected = connectionNumber === 1 ? ['file.read', 'git.write'] : ['file.read'];
+      assert.deepEqual(frame.payload.capabilities, expected);
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: `dynamic-${connectionNumber}`,
+        resumeFromSeq: 0,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: expected
+      });
+      setTimeout(() => {
+        if (connectionNumber === 1) socket.close(1012, 'simulate network reconnect');
+        else { client.stop(); socket.close(); }
+      }, 0);
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    getSupportedCapabilities: async () => snapshots[Math.min(capabilityReads++, snapshots.length - 1)],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(capabilityReads, 2);
+  assert.equal(sockets.length, 2);
+});
+
+
 test('capability-aware client rejects a relay that does not acknowledge signed capability binding', async (t) => {
   const state = await stateDir(t, 'operator-relay-capability-binding-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });

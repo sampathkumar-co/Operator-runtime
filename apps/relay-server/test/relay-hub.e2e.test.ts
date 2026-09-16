@@ -210,7 +210,7 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
-test('queued delivery is not replayed after reconnect loses a required signed capability', async (t) => {
+test('queued delivery is not replayed when the same client reconnects after losing a required signed capability', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-queued-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-queued-cap-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -225,15 +225,6 @@ test('queued delivery is not replayed after reconnect loses a required signed ca
   const membership = (await accounts.listDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
   assert.ok(membership);
 
-  const queued = await deliveries.enqueue(
-    device.deviceId,
-    'action',
-    { action: { id: 'queued-git', capability: 'git.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } } },
-    { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration },
-    undefined,
-    ['git.write']
-  );
-
   const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
   t.after(() => hub.close());
   t.after(() => cleanupTempDirs(t));
@@ -246,20 +237,50 @@ test('queued delivery is not replayed after reconnect loses a required signed ca
   })).token;
 
   const seen: string[] = [];
+  const sockets: RelaySocketLike[] = [];
+  let advertisedCapabilities: readonly string[] = ['file.read', 'git.write'];
+  let capabilityReads = 0;
   let client!: RelayClient;
   client = new RelayClient({
     stateDir: deviceState,
     url: `ws://127.0.0.1:${port}/device`,
     allowLoopbackInsecureWs: true,
     identity: deviceIdentity,
-    socketFactory,
+    socketFactory: (url) => {
+      const socket = socketFactory(url);
+      sockets.push(socket);
+      return socket;
+    },
     getSessionToken: async () => token,
-    supportedCapabilities: ['file.read'],
+    getSupportedCapabilities: async () => {
+      capabilityReads += 1;
+      return advertisedCapabilities;
+    },
     onDelivery: async (delivery) => { seen.push(delivery.id); },
-    sleep: async () => { client.stop(); }
+    sleep: async () => {
+      if (capabilityReads >= 2) client.stop();
+    }
   });
-  await client.run();
+  const run = client.run();
+  await waitFor(async () => {
+    const online = await hub.onlineDevices(account.accountId);
+    return online.some((entry) => entry.deviceId === device.deviceId && entry.capabilities.includes('git.write'));
+  });
 
+  const queued = await deliveries.enqueue(
+    device.deviceId,
+    'action',
+    { action: { id: 'queued-git', capability: 'git.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } } },
+    { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration },
+    undefined,
+    ['git.write']
+  );
+
+  advertisedCapabilities = ['file.read'];
+  sockets.at(-1)?.close(1012, 'simulate Git removal during network disconnect');
+  await run;
+
+  assert.ok(capabilityReads >= 2, 'supported capabilities must be recomputed for the reconnect hello');
   assert.deepEqual(seen, []);
   assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
   const [stillPending] = await deliveries.pending(device.deviceId);

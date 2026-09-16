@@ -82,8 +82,6 @@ const runtime = createRuntime({
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
 });
-const relaySupportedCapabilities = await runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES);
-
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
@@ -132,7 +130,7 @@ function startRelay(): void {
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
-    supportedCapabilities: relaySupportedCapabilities,
+    getSupportedCapabilities: () => runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES),
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
   const runner = relayRunner;
