@@ -6,6 +6,8 @@ One-command Windows runtime for connecting a user-authorized computer to Operato
 npx @mecrod/operator@latest remote
 ```
 
+Requires Windows x64 with a supported Node.js line: 22.14+, 24.x, or 26.x.
+
 The command does **not** install an MSIX and does **not** start a local MCP server. It verifies the package's runtime manifest, starts the existing hardened local policy/runtime agent, and connects that agent to the pinned production relay at `wss://operator.splcart.in/device`. ChatGPT talks to the hosted MCP edge.
 
 On first use the runtime prints a one-time device pairing code. Claim that code from Operator in the authenticated ChatGPT connection. The resulting short-lived relay credential is protected for the current Windows user with DPAPI and is rotated by the existing relay-session authority.
