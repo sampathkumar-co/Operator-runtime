@@ -85,6 +85,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'runtime doctor failed' }
           node packages/mecrod-operator/src/publish-check.mjs
           if ($LASTEXITCODE -ne 0) { throw 'publication source binding failed' }
+          node packages/mecrod-operator/scripts/test-required-relay-failure.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Certify packed npm artifact
         shell: pwsh
