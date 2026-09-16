@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { createReadStream } from 'node:fs';
+import fsNative, { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,30 @@ const appRoot = path.join(runtimeRoot, 'app');
 const nativeRoot = path.join(runtimeRoot, 'native');
 const pkg = JSON.parse(await fs.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
 
+const gitExecutable = resolveTrustedGitExecutable(process.env);
+
+function resolveTrustedGitExecutable(source) {
+  const pathValue = source.PATH ?? source.Path ?? '';
+  const names = process.platform === 'win32' ? ['git.exe', 'git.com'] : ['git'];
+  for (const rawDirectory of String(pathValue).split(path.delimiter)) {
+    const trimmed = rawDirectory.trim();
+    const directory = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')
+      ? trimmed.slice(1, -1)
+      : trimmed;
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const name of names) {
+      try {
+        const resolved = fsNative.realpathSync.native(path.resolve(directory, name));
+        const stat = fsNative.statSync(resolved);
+        if (!path.isAbsolute(resolved) || !stat.isFile()) continue;
+        if (process.platform !== 'win32') fsNative.accessSync(resolved, fsNative.constants.X_OK);
+        return resolved;
+      } catch { /* next trusted PATH candidate */ }
+    }
+  }
+  throw new Error('Trusted Git executable was not found in absolute PATH directories.');
+}
+
 const helperSources = [
   ['operator-windows-dpapi.exe', process.env.OPERATOR_BUILD_DPAPI_PATH || path.join(repoRoot, 'native', 'windows-dpapi', 'target', 'release', 'operator-windows-dpapi.exe')],
   ['operator-windows-uia.exe', process.env.OPERATOR_BUILD_UIA_PATH || path.join(repoRoot, 'native', 'windows-uia', 'target', 'release', 'operator-windows-uia.exe')],
@@ -19,7 +43,7 @@ const helperSources = [
 ];
 
 function gitText(args) {
-  return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim();
+  return execFileSync(gitExecutable, args, { cwd: repoRoot, encoding: 'utf8' }).trim();
 }
 
 function assertTrackedRuntimeSourcesClean() {
@@ -28,7 +52,7 @@ function assertTrackedRuntimeSourcesClean() {
 }
 
 async function copyTrackedTree(repoRelativeRoot, destinationRoot) {
-  const raw = execFileSync('git', ['ls-files', '-z', '--', repoRelativeRoot], { cwd: repoRoot, encoding: 'utf8' });
+  const raw = execFileSync(gitExecutable, ['ls-files', '-z', '--', repoRelativeRoot], { cwd: repoRoot, encoding: 'utf8' });
   const prefix = `${repoRelativeRoot}/`;
   const files = raw.split('\0').filter(Boolean);
   if (files.length === 0) throw new Error(`No tracked runtime sources found under ${repoRelativeRoot}.`);

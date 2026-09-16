@@ -150,6 +150,10 @@ test('npm release revalidates source binding outside suppressible lifecycle hook
 test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
   const source = await fs.readFile(path.resolve('packages/mecrod-operator/scripts/build-runtime-payload.mjs'), 'utf8');
   assert.match(source, /gitText\(\['status', '--porcelain=v1', '--untracked-files=no'/);
+  assert.match(source, /resolveTrustedGitExecutable\(process\.env\)/);
+  assert.match(source, /execFileSync\(gitExecutable, args/);
+  assert.match(source, /execFileSync\(gitExecutable, \['ls-files'/);
+  assert.doesNotMatch(source, /execFileSync\('git'/);
   assert.match(source, /\['ls-files', '-z', '--', repoRelativeRoot\]/);
   assert.match(source, /supplied\.toLowerCase\(\) !== head/);
   assert.match(source, /contains tracked changes/);
