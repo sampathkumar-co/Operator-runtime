@@ -1,17 +1,9 @@
 name: NPM Remote Runtime CI
 
 on:
+  # Every pushed SHA must produce release-source evidence; PR runs remain path-scoped below.
   push:
     branches: ['**']
-    paths:
-      - 'packages/mecrod-operator/**'
-      - 'apps/local-agent/**'
-      - 'src/**'
-      - 'native/windows-dpapi/**'
-      - 'native/windows-uia/**'
-      - 'native/windows-path-lease/**'
-      - 'test/npm-remote-runtime.test.ts'
-      - '.github/workflows/npm-remote-ci.yml'
   pull_request:
     paths:
       - 'packages/mecrod-operator/**'
