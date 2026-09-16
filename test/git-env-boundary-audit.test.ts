@@ -4,8 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { supportedGitAvailable } from './git-test-support.ts';
 import { GitCheckpointProvider } from '../src/capabilities/git-checkpoint.ts';
 import { GitWriteProvider } from '../src/capabilities/git-write.ts';
+const gitTest = supportedGitAvailable() ? test : test.skip;
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -45,7 +47,7 @@ test('all Git subprocess boundaries disable lazy promisor fetching twice', async
   }
 });
 
-test('Git checkpoint ignores ambient GIT_DIR/GIT_WORK_TREE redirection', async (t) => {
+gitTest('Git checkpoint ignores ambient GIT_DIR/GIT_WORK_TREE redirection', async (t) => {
   const allowed = await tempDir(t, 'operator-git-env-allowed-');
   const outside = await tempDir(t, 'operator-git-env-outside-');
   await initRepo(allowed, 'allowed\n');
@@ -76,7 +78,7 @@ test('Git checkpoint ignores ambient GIT_DIR/GIT_WORK_TREE redirection', async (
 });
 
 
-test('Git checkpoint ignores caller-controlled XDG global filter configuration', async (t) => {
+gitTest('Git checkpoint ignores caller-controlled XDG global filter configuration', async (t) => {
   const root = await tempDir(t, 'operator-git-xdg-root-');
   const xdg = await tempDir(t, 'operator-git-xdg-config-');
   await initRepo(root, 'safe content\n');
@@ -103,7 +105,7 @@ test('Git checkpoint ignores caller-controlled XDG global filter configuration',
 });
 
 
-test('Git checkpoint and write ignore HOME global filters and global commit identity', async (t) => {
+gitTest('Git checkpoint and write ignore HOME global filters and global commit identity', async (t) => {
   const root = await tempDir(t, 'operator-git-home-root-');
   const home = await tempDir(t, 'operator-git-home-config-');
   await initRepo(root, 'safe content\n');
@@ -146,7 +148,7 @@ test('Git checkpoint and write ignore HOME global filters and global commit iden
 });
 
 
-test('Git checkpoint rejects content filters loaded through repository config includes', async (t) => {
+gitTest('Git checkpoint rejects content filters loaded through repository config includes', async (t) => {
   const root = await tempDir(t, 'operator-git-include-root-');
   await initRepo(root, 'safe content\n');
   const marker = path.join(root, 'include-filter-ran.marker');
@@ -168,7 +170,7 @@ test('Git checkpoint rejects content filters loaded through repository config in
 });
 
 
-test('Git checkpoint and write disable repository hooks for index-changing operations', async (t) => {
+gitTest('Git checkpoint and write disable repository hooks for index-changing operations', async (t) => {
   const root = await tempDir(t, 'operator-git-hooks-root-');
   await initRepo(root, 'safe content\n');
   const hooks = path.join(root, 'evil-hooks');
@@ -191,7 +193,7 @@ test('Git checkpoint and write disable repository hooks for index-changing opera
   await assert.rejects(fs.access(marker));
 });
 
-test('Git checkpoint disables reference-transaction hooks during ref updates', async (t) => {
+gitTest('Git checkpoint disables reference-transaction hooks during ref updates', async (t) => {
   const root = await tempDir(t, 'operator-git-ref-hook-root-');
   await initRepo(root, 'safe content\n');
   const hooks = path.join(root, 'evil-ref-hooks');
@@ -212,7 +214,7 @@ test('Git checkpoint disables reference-transaction hooks during ref updates', a
   await assert.rejects(fs.access(marker));
 });
 
-test('Git checkpoint ignores an authorized cwd git.exe shadow binary', async (t) => {
+gitTest('Git checkpoint ignores an authorized cwd git.exe shadow binary', async (t) => {
   if (process.platform !== 'win32') return t.skip('Windows cwd-first executable lookup regression');
   const root = await tempDir(t, 'operator-git-shadow-root-');
   await initRepo(root, 'safe content\n');

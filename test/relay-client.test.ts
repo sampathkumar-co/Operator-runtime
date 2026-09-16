@@ -68,7 +68,8 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
           assert.equal(signatureOk, true);
           assert.equal(frame.sessionToken, 'ephemeral-session-token');
           assert.equal(frame.payload.resumeAfterSeq, connectionNumber === 1 ? 0 : 1);
-          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000 });
+          assert.deepEqual(frame.payload.capabilities, ['file.read', 'git.status']);
+          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000, capabilityBinding: 1, capabilities: ['file.read', 'git.status'] });
           if (connectionNumber === 1) {
             socket.server({ type: 'delivery', seq: 1, id: 'delivery-1', kind: 'task.dispatch', payload: { taskId: 't1' } });
           } else {
@@ -90,6 +91,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     identity,
     socketFactory: factory,
     getSessionToken: async () => 'ephemeral-session-token',
+    supportedCapabilities: ['git.status', 'file.read'],
     onDelivery: async (delivery) => { delivered.push(delivery); },
     sleep: async () => {}
   });
@@ -101,6 +103,31 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   assert.equal((await client.state()).processing, undefined);
   assert.equal(sockets.length, 2);
   assert.equal(sockets[0].sent.some((frame) => frame.type === 'ack' && frame.seq === 1), true);
+});
+
+
+test('capability-aware client rejects a relay that does not acknowledge signed capability binding', async (t) => {
+  const state = await stateDir(t, 'operator-relay-capability-binding-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Capability Binding PC');
+  const socket = new FakeSocket();
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'old-relay', resumeFromSeq: 0, heartbeatMs: 60_000 });
+    }
+  };
+  const client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_BINDING_REQUIRED');
 });
 
 test('uncertain delivery after a crash is reconciled instead of automatically replayed', async (t) => {

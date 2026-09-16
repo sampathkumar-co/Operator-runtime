@@ -97,6 +97,7 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: issueToken,
+    supportedCapabilities: ['file.read', 'git.write'],
     onDelivery: async (delivery) => { firstDeliveries.push(delivery.id); }
   });
   const firstRun = firstClient.run();
@@ -129,6 +130,7 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: issueToken,
+    supportedCapabilities: ['file.read', 'git.write'],
     onDelivery: async (delivery) => { replayed.push(delivery.id); }
   });
   const secondRun = secondClient.run();
@@ -158,7 +160,7 @@ test('real relay routes paired device delivery, durably ACKs it, and reconnects 
   await secondRun;
 });
 
-test('relay refuses account routing when connected token lacks required capability', async (t) => {
+test('relay intersects signed local capabilities with session scopes before routing', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-cap-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -177,7 +179,7 @@ test('relay refuses account routing when connected token lacks required capabili
   const token = (await sessions.issue({
     subjectDeviceId: device.deviceId,
     audience: 'operator-relay',
-    scopes: ['relay:connect', 'cap:file.read'],
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
     ttlMs: 60_000
   })).token;
   const client = new RelayClient({
@@ -187,10 +189,12 @@ test('relay refuses account routing when connected token lacks required capabili
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: async () => token,
+    supportedCapabilities: ['file.read'],
     onDelivery: async () => { throw new Error('no delivery expected'); }
   });
   const run = client.run();
   await waitFor(async () => (await hub.onlineDevices(account.accountId)).length === 1);
+  assert.deepEqual((await hub.onlineDevices(account.accountId))[0]?.capabilities, ['file.read']);
   await assert.rejects(
     hub.dispatch({
       accountId: account.accountId,
@@ -249,6 +253,7 @@ test('account release invalidates the live socket before a concurrent dispatch c
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: async () => issued.token,
+    supportedCapabilities: ['file.read'],
     onDelivery: async () => { throw new Error('no delivery expected after release starts'); }
   });
   const run = client.run();
@@ -305,6 +310,7 @@ async function liveRevocationFixture(t: test.TestContext, prefix: string) {
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: async () => issued.token,
+    supportedCapabilities: ['file.read'],
     onDelivery: async () => undefined
   });
   const run = client.run();
@@ -409,6 +415,7 @@ test('dispatch paused before enqueue fails after account erasure and leaves no q
     identity: deviceIdentity,
     socketFactory,
     getSessionToken: async () => issued.token,
+    supportedCapabilities: ['file.read'],
     onDelivery: async (delivery) => { received.push(delivery.id); }
   });
   const run = client.run();
@@ -467,6 +474,7 @@ test('device transfer preserves relay cursor continuity without exposing old-own
   const clientA = new RelayClient({
     stateDir: deviceState, url, allowLoopbackInsecureWs: true, identity: deviceIdentity, socketFactory,
     getSessionToken: async () => ownerAToken,
+    supportedCapabilities: ['file.read'],
     onDelivery: async (delivery) => { seenA.push(delivery.seq); }
   });
   const runA = clientA.run();
@@ -495,6 +503,7 @@ test('device transfer preserves relay cursor continuity without exposing old-own
   const clientB = new RelayClient({
     stateDir: deviceState, url, allowLoopbackInsecureWs: true, identity: deviceIdentity, socketFactory,
     getSessionToken: async () => ownerBToken,
+    supportedCapabilities: ['file.read'],
     onDelivery: async (delivery) => { seenB.push(delivery.seq); }
   });
   const runB = clientB.run();
@@ -657,6 +666,7 @@ test('authority lease prevents release purge from overtaking an in-flight delive
   const client = new RelayClient({
     stateDir: deviceState, url: `ws://127.0.0.1:${port}/device`, allowLoopbackInsecureWs: true,
     identity: deviceIdentity, socketFactory, getSessionToken: async () => issued.token,
+    supportedCapabilities: ['file.read'],
     onDelivery: async () => undefined
   });
   const run = client.run();

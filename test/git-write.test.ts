@@ -4,8 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { supportedGitAvailable } from './git-test-support.ts';
 import { GitCheckpointProvider } from '../src/capabilities/git-checkpoint.ts';
 import { GitWriteProvider } from '../src/capabilities/git-write.ts';
+const gitTest = supportedGitAvailable() ? test : test.skip;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -33,7 +35,7 @@ async function fingerprint(checkpoint: GitCheckpointProvider, root: string): Pro
   return String((inspected.output as any).current.fingerprint);
 }
 
-test('structured Git write stages, unstages, and commits with checkpoints while repository hooks stay disabled', async (t) => {
+gitTest('structured Git write stages, unstages, and commits with checkpoints while repository hooks stay disabled', async (t) => {
   const root = await createRepo(t);
   const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
   const writer = new GitWriteProvider({ allowedRoots: [root] });
@@ -91,7 +93,7 @@ test('structured Git write stages, unstages, and commits with checkpoints while 
   assert.match(git(root, 'status', '--porcelain=v1'), /\?\? b\.txt/);
 });
 
-test('structured Git write rejects stale fingerprints and pathspec magic before mutation', async (t) => {
+gitTest('structured Git write rejects stale fingerprints and pathspec magic before mutation', async (t) => {
   const root = await createRepo(t);
   const checkpoint = new GitCheckpointProvider({ allowedRoots: [root] });
   const writer = new GitWriteProvider({ allowedRoots: [root] });

@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { supportedGitAvailable } from './git-test-support.ts';
 import { GitProvider } from '../src/capabilities/git.ts';
+const gitTest = supportedGitAvailable() ? test : test.skip;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -23,7 +25,7 @@ async function createRepo(t: test.TestContext): Promise<string> {
   return root;
 }
 
-test('public Git diff accepts an explicit literal file and rejects directory expansion', async (t) => {
+gitTest('public Git diff accepts an explicit literal file and rejects directory expansion', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   await fs.writeFile(path.join(root, 'src', 'a.txt'), 'changed\n');
@@ -53,7 +55,7 @@ async function publicDiff(provider: GitProvider, root: string, paths: string[]) 
   });
 }
 
-test('public Git diff rejects the complete magic, traversal, absolute, directory, and empty corpus', async (t) => {
+gitTest('public Git diff rejects the complete magic, traversal, absolute, directory, and empty corpus', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   const invalid = [
@@ -75,7 +77,7 @@ test('public Git diff rejects the complete magic, traversal, absolute, directory
   assert.equal(empty.error?.code, 'GIT_PUBLIC_PATH_FILTER_REQUIRED');
 });
 
-test('public Git diff rejects credential-bearing literal paths at the provider boundary', async (t) => {
+gitTest('public Git diff rejects credential-bearing literal paths at the provider boundary', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   for (const candidate of [
@@ -91,7 +93,7 @@ test('public Git diff rejects credential-bearing literal paths at the provider b
   }
 });
 
-test('read-only Git status disables repository post-index-change hooks', async (t) => {
+gitTest('read-only Git status disables repository post-index-change hooks', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   const hooks = path.join(root, 'operator-hooks');
@@ -106,7 +108,7 @@ test('read-only Git status disables repository post-index-change hooks', async (
   await assert.rejects(fs.access(marker));
 });
 
-test('read-only Git diff rejects repository content filters before they can execute', async (t) => {
+gitTest('read-only Git diff rejects repository content filters before they can execute', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   const marker = path.join(root, 'local-filter.marker');
@@ -122,7 +124,7 @@ test('read-only Git diff rejects repository content filters before they can exec
   await assert.rejects(fs.access(marker));
 });
 
-test('read-only Git diff ignores HOME global filter configuration', async (t) => {
+gitTest('read-only Git diff ignores HOME global filter configuration', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   const marker = path.join(root, 'global-filter.marker');
@@ -163,7 +165,7 @@ async function writeFilterScript(root: string, marker: string): Promise<string> 
   return `${quoteGitCommandPath(process.execPath)} ${quoteGitCommandPath(script)}`;
 }
 
-test('read-only Git diff disables lazy promisor fetch helpers', async (t) => {
+gitTest('read-only Git diff disables lazy promisor fetch helpers', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   const marker = path.join(root, 'lazy-fetch.marker');
@@ -183,7 +185,7 @@ test('read-only Git diff disables lazy promisor fetch helpers', async (t) => {
   await assert.rejects(fs.access(marker));
 });
 
-test('public Git diff keeps literal filenames literal even when they resemble pathspec syntax', async (t) => {
+gitTest('public Git diff keeps literal filenames literal even when they resemble pathspec syntax', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
   await fs.writeFile(path.join(root, 'src', 'safe.txt'), 'base\n');

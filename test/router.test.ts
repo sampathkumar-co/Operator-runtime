@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CapabilityRouter } from '../src/core/router.ts';
+import { OperatorRuntime } from '../src/core/runtime.ts';
 import type { CapabilityProvider } from '../src/core/types.ts';
 
 function provider(name: string, reliability: number, latency: number): CapabilityProvider {
@@ -18,4 +19,14 @@ test('router prefers stronger semantic capability by weighted quality', async ()
   router.register(provider('git.native', 0.99, 0.05));
   const selected = await router.select({ id: 'x', capability: 'git.status', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } });
   assert.equal(selected.name, 'git.native');
+});
+
+test('runtime advertises only locally supported capabilities in stable order', async () => {
+  const runtime = new OperatorRuntime();
+  runtime.register({
+    ...provider('local.dynamic', 0.9, 0.1),
+    supports: (action) => ['file.read', 'git.status'].includes(action.capability)
+  });
+  const supported = await runtime.supportedCapabilities(['git.diff', 'file.read', 'git.status', 'file.read']);
+  assert.deepEqual(supported, ['file.read', 'git.status']);
 });

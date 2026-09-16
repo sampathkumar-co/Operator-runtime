@@ -326,6 +326,7 @@ export class RelayHub {
     const sentAt = validIso(String(payload.sentAt ?? ''), 'sentAt');
     if (Math.abs(this.#clock().getTime() - Date.parse(sentAt)) > HELLO_CLOCK_SKEW_MS) throw new OperatorError('RELAY_HELLO_STALE', 'Relay hello timestamp is outside the accepted clock-skew window.');
     validNonce(String(payload.nonce ?? ''));
+    const locallySupportedCapabilities = validCapabilityList(payload.capabilities);
     const signature = String(frame.signature ?? '');
     if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello signature is invalid.');
     const token = String(frame.sessionToken ?? '');
@@ -343,7 +344,8 @@ export class RelayHub {
     const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
     const sessionId = crypto.randomUUID();
     const now = this.#clock().toISOString();
-    const capabilities = session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean).sort();
+    const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
+    const capabilities = locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability));
     const previous = this.#connections.get(deviceId);
     if (previous) {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
@@ -356,7 +358,9 @@ export class RelayHub {
       connectionId: sessionId,
       resumeFromSeq: reconciled.lastAckedSeq,
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
-      heartbeatMs: HEARTBEAT_MS
+      heartbeatMs: HEARTBEAT_MS,
+      capabilityBinding: 1,
+      capabilities: [...capabilities]
     });
     return connection;
   }
@@ -422,6 +426,23 @@ function send(socket: WebSocket, frame: JsonObject): void {
 function boundedCloseReason(value: string): string {
   const text = String(value ?? 'authority revoked').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   return (text || 'authority revoked').slice(0, 120);
+}
+
+
+function validCapabilityList(input: unknown): string[] {
+  if (input === undefined) return [];
+  if (!Array.isArray(input) || input.length > 128) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capabilities are invalid.');
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const capability = String(item ?? '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(capability) || seen.has(capability)) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capabilities are invalid.');
+    }
+    seen.add(capability);
+    output.push(capability);
+  }
+  return output.sort();
 }
 
 function validNonce(value: string): string {

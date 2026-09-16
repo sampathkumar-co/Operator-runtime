@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { supportedGitAvailable } from './git-test-support.ts';
 import { GitCheckpointProvider } from '../src/capabilities/git-checkpoint.ts';
+const gitTest = supportedGitAvailable() ? test : test.skip;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -24,7 +26,7 @@ async function createRepo(t: test.TestContext): Promise<string> {
   return root;
 }
 
-test('Git checkpoint creation is non-mutating and restore reproduces staged, unstaged, and untracked state', async (t) => {
+gitTest('Git checkpoint creation is non-mutating and restore reproduces staged, unstaged, and untracked state', async (t) => {
   const root = await createRepo(t);
   const provider = new GitCheckpointProvider({ allowedRoots: [root] });
 
@@ -100,7 +102,7 @@ test('Git checkpoint creation is non-mutating and restore reproduces staged, uns
   assert.equal((after.output as any).current.fingerprint, checkpoint.fingerprint);
 });
 
-test('Git checkpoint restore rejects a stale repository-state fingerprint before mutation', async (t) => {
+gitTest('Git checkpoint restore rejects a stale repository-state fingerprint before mutation', async (t) => {
   const root = await createRepo(t);
   const provider = new GitCheckpointProvider({ allowedRoots: [root] });
   await fs.writeFile(path.join(root, 'base.txt'), 'checkpoint state\n');
@@ -132,7 +134,7 @@ test('Git checkpoint restore rejects a stale repository-state fingerprint before
   assert.equal(await fs.readFile(path.join(root, 'base.txt'), 'utf8'), 'newer work that must survive\n');
 });
 
-test('Git checkpoint fails closed before a repository-local content filter can execute', async (t) => {
+gitTest('Git checkpoint fails closed before a repository-local content filter can execute', async (t) => {
   const root = await createRepo(t);
   const provider = new GitCheckpointProvider({ allowedRoots: [root] });
   const marker = path.join(root, 'filter-ran.marker');

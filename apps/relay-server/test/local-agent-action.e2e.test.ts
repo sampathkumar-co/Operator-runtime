@@ -93,6 +93,7 @@ test('relay action executes through the real local policy boundary and returns a
     identity: deviceIdentity,
     localAgentBaseUrl: `http://127.0.0.1:${agentBound.port}`,
     agentToken,
+    supportedCapabilities: ['computer.inspect', 'browser.interact'],
     allowLoopbackInsecure: true
   });
   const run = runner.run();

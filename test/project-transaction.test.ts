@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { supportedGitAvailable } from './git-test-support.ts';
 import { ProjectTransactionProvider } from '../src/capabilities/project-transaction.ts';
+const gitTest = supportedGitAvailable() ? test : test.skip;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -32,7 +34,7 @@ async function setup(t: test.TestContext, commands: unknown[]): Promise<{ projec
   return { projectRoot, registryPath };
 }
 
-test('project transaction keeps verified mutation and retains a manual recovery checkpoint', async (t) => {
+gitTest('project transaction keeps verified mutation and retains a manual recovery checkpoint', async (t) => {
   const { projectRoot, registryPath } = await setup(t, [{
     id: 'verified-local-write',
     kind: 'build',
@@ -59,7 +61,7 @@ test('project transaction keeps verified mutation and retains a manual recovery 
   assert.match(git(projectRoot, 'status', '--porcelain=v1'), /^ M app\.txt\n$/);
 });
 
-test('project transaction restores exact Git state when command exits zero but artifact verification fails', async (t) => {
+gitTest('project transaction restores exact Git state when command exits zero but artifact verification fails', async (t) => {
   const script = [
     "const fs=require('fs')",
     "fs.writeFileSync('app.txt','broken-but-zero-exit\\n')",
@@ -92,7 +94,7 @@ test('project transaction restores exact Git state when command exits zero but a
   assert.equal(git(projectRoot, 'status', '--porcelain=v1'), '');
 });
 
-test('project transaction rejects non-destructive authorization before command execution', async (t) => {
+gitTest('project transaction rejects non-destructive authorization before command execution', async (t) => {
   const marker = 'should-not-run.marker';
   const { projectRoot, registryPath } = await setup(t, [{
     id: 'local-write',
@@ -116,7 +118,7 @@ test('project transaction rejects non-destructive authorization before command e
   await assert.rejects(fs.access(path.join(projectRoot, marker)));
 });
 
-test('project transaction refuses external trusted commands because their effects are not Git-reversible', async (t) => {
+gitTest('project transaction refuses external trusted commands because their effects are not Git-reversible', async (t) => {
   const marker = 'external-should-not-run.marker';
   const { projectRoot, registryPath } = await setup(t, [{
     id: 'external-command',

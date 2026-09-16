@@ -15,6 +15,7 @@ import { RelaySessionCredentialManager, deriveRelayDeviceResetUrl, deriveRelaySe
 import { LocalDeviceResetCoordinator } from './device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
+import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -81,6 +82,7 @@ const runtime = createRuntime({
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
 });
+const relaySupportedCapabilities = await runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES);
 
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
@@ -130,6 +132,7 @@ function startRelay(): void {
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
+    supportedCapabilities: relaySupportedCapabilities,
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
   const runner = relayRunner;
@@ -223,6 +226,7 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
+if (relayUrl) console.error(`[operator] relay capabilities: ${relaySupportedCapabilities.join(', ') || 'none'}`);
 
 const emergencyStatus = await emergencyStop.status();
 if (relayUrl && emergencyStatus.engaged) {
