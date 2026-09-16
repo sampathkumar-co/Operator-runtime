@@ -197,11 +197,19 @@ export async function verifyRuntimePayload() {
   return manifest;
 }
 
+export function assertSerializableAuthorizedRoot(root) {
+  const value = String(root ?? '');
+  if (value.includes(path.win32.delimiter)) {
+    throw new Error(`Authorized root cannot contain the Windows path-list delimiter '${path.win32.delimiter}'.`);
+  }
+  return value;
+}
+
 async function canonicalDirectory(input) {
   const resolved = path.resolve(input);
   const stat = await fs.stat(resolved).catch(() => null);
   if (!stat?.isDirectory()) throw new Error(`Authorized root is not a directory: ${resolved}`);
-  return await fs.realpath(resolved);
+  return assertSerializableAuthorizedRoot(await fs.realpath(resolved));
 }
 
 function randomSecret() {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   assertSupportedRuntime,
+  assertSerializableAuthorizedRoot,
   parseArgs,
   safeRuntimeEnvironment,
   validateRuntimeManifest
@@ -36,6 +37,11 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['doctor']), { command: 'doctor' });
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
+  assert.equal(assertSerializableAuthorizedRoot('C:\\work\\repo'), 'C:\\work\\repo');
+  assert.throws(
+    () => assertSerializableAuthorizedRoot('C:\\projects;\\repo'),
+    /cannot contain the Windows path-list delimiter/
+  );
 });
 
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
@@ -90,6 +96,7 @@ test('relay-only entrypoint derives executable roots independently of npm enviro
   assert.match(source, /\['system-roots'\]/);
   assert.match(source, /env:\s*\{\}/);
   assert.match(source, /OPERATOR_RELAY_REQUIRED = '1'/);
+  assert.match(source, /OPERATOR_ALLOWED_ROOTS\.includes\(path\.win32\.delimiter\)/);
   assert.match(source, /wss:\/\/operator\.splcart\.in\/device/);
   assert.match(source, /https:\/\/operator\.splcart\.in\/v1\/device-result/);
   assert.doesNotMatch(source, /process\.env\.(?:SYSTEMROOT|WINDIR|PROGRAMFILES)\s*\|\|/);

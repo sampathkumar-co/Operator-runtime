@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 export const REQUIRED_RELEASE_WORKFLOWS = Object.freeze([
   'CI',
   'Platform Matrix',
-  'Windows Signing Smoke'
+  'Windows Signing Smoke',
+  'NPM Remote Runtime CI'
 ]);
 
 function fail(message) {

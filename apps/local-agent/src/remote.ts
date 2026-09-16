@@ -21,6 +21,9 @@ if (!process.env.OPERATOR_RECOVERY_TOKEN || process.env.OPERATOR_RECOVERY_TOKEN.
 if (!process.env.OPERATOR_ALLOWED_ROOTS) {
   throw new Error('Operator remote requires an explicit authorized root from the trusted launcher.');
 }
+if (process.env.OPERATOR_ALLOWED_ROOTS.includes(path.win32.delimiter)) {
+  throw new Error(`Operator remote authorized root cannot contain the Windows path-list delimiter '${path.win32.delimiter}'.`);
+}
 for (const [name, expected] of Object.entries(expectedHelpers)) {
   const configured = process.env[name];
   if (!configured || !sameWindowsPath(configured, expected)) {
