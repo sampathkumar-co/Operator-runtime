@@ -14,8 +14,16 @@ const SCORE: CapabilityScore = {
   interactionCost: 0.01
 };
 
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false'];
+const NULL_GIT_CONFIG = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${NULL_GIT_CONFIG}`];
 const PUBLIC_GIT_PREFIX = [...SAFE_GIT_PREFIX, '--literal-pathspecs'];
+const READ_ONLY_GIT_ENV = Object.freeze({
+  GIT_CONFIG_GLOBAL: NULL_GIT_CONFIG,
+  GIT_CONFIG_SYSTEM: NULL_GIT_CONFIG,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_ATTR_NOSYSTEM: '1',
+  GIT_OPTIONAL_LOCKS: '0'
+});
 const PATHSPEC_META = /[*?\[\]{}]/;
 
 export class GitProvider implements CapabilityProvider {
@@ -23,7 +31,11 @@ export class GitProvider implements CapabilityProvider {
   #process: ProcessProvider;
 
   constructor(options: { allowedRoots: string[] }) {
-    this.#process = new ProcessProvider({ allowedRoots: options.allowedRoots, allowedExecutables: ['git'] });
+    this.#process = new ProcessProvider({
+      allowedRoots: options.allowedRoots,
+      allowedExecutables: ['git'],
+      environmentOverrides: READ_ONLY_GIT_ENV
+    });
   }
 
   supports(action: ActionRequest): boolean {
@@ -36,6 +48,11 @@ export class GitProvider implements CapabilityProvider {
     const cwd = String(action.input.cwd ?? '');
     const paths = Array.isArray(action.input.paths) ? action.input.paths.map(String) : [];
     const publicLiteral = action.capability === 'git.diff' && action.input.publicLiteralFiles === true;
+
+    if (action.capability !== 'git.rev-parse') {
+      const filterFailure = await this.#rejectContentFilters(action, cwd);
+      if (filterFailure) return filterFailure;
+    }
 
     if (publicLiteral) {
       const validation = await validatePublicLiteralPaths(cwd, paths);
@@ -52,7 +69,7 @@ export class GitProvider implements CapabilityProvider {
       }
 
       const names = await this.#run(action, cwd, [
-        ...PUBLIC_GIT_PREFIX, 'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--', ...paths
+        ...PUBLIC_GIT_PREFIX, 'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths
       ]);
       if (!names.ok) return names;
       const changed = splitGitNul((names.output as Record<string, unknown> | undefined)?.stdout);
@@ -63,11 +80,33 @@ export class GitProvider implements CapabilityProvider {
 
     const prefix = publicLiteral ? PUBLIC_GIT_PREFIX : SAFE_GIT_PREFIX;
     const args = action.capability === 'git.status'
-      ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v2', '--branch']
+      ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v2', '--branch', '--ignore-submodules=all']
       : action.capability === 'git.diff'
-        ? [...prefix, 'diff', '--no-ext-diff', '--no-textconv', '--', ...paths]
+        ? [...prefix, 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths]
         : [...SAFE_GIT_PREFIX, 'rev-parse', '--show-toplevel'];
     return await this.#run(action, cwd, args);
+  }
+
+  async #rejectContentFilters(action: ActionRequest, cwd: string): Promise<ActionResult | undefined> {
+    const inspected = await this.#process.execute({
+      ...action,
+      capability: 'terminal.execute',
+      input: {
+        executable: 'git',
+        args: [...SAFE_GIT_PREFIX, 'config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'],
+        cwd,
+        timeoutMs: 30_000
+      }
+    });
+    const output = inspected.output as { exitCode?: number | null; stdout?: string; stderr?: string } | undefined;
+    if (!inspected.ok && output?.exitCode !== 1) {
+      return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED', String(output?.stderr ?? inspected.error?.message ?? 'Unable to inspect Git content-filter configuration.').trim());
+    }
+    const keys = String(output?.stdout ?? '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    if (keys.length > 0) {
+      return gitFailure(action, 'GIT_CONTENT_FILTER_DENIED', 'Git status/diff deny repository content filters because they can execute arbitrary commands.');
+    }
+    return undefined;
   }
 
   async #run(action: ActionRequest, cwd: string, args: string[]): Promise<ActionResult> {

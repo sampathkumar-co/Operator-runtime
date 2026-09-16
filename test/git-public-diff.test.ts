@@ -91,6 +91,78 @@ test('public Git diff rejects credential-bearing literal paths at the provider b
   }
 });
 
+test('read-only Git status disables repository post-index-change hooks', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  const hooks = path.join(root, 'operator-hooks');
+  const marker = path.join(root, 'status-hook.marker');
+  await fs.mkdir(hooks);
+  await fs.writeFile(path.join(hooks, 'post-index-change'), `#!/bin/sh\nprintf ran > "${marker.replace(/\\/g, '/')}"\nexit 0\n`);
+  await fs.chmod(path.join(hooks, 'post-index-change'), 0o755);
+  git(root, 'config', 'core.hooksPath', hooks);
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), 'changed\n');
+  const result = await provider.execute({ id: 'status-hook', capability: 'git.status', risk: 'read', provenance: { kind: 'chatgpt' }, input: { cwd: root } });
+  assert.equal(result.ok, true, result.error?.message);
+  await assert.rejects(fs.access(marker));
+});
+
+test('read-only Git diff rejects repository content filters before they can execute', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  const marker = path.join(root, 'local-filter.marker');
+  const command = await writeFilterScript(root, marker);
+  await fs.writeFile(path.join(root, '.gitattributes'), 'src/a.txt filter=evil\n');
+  git(root, 'add', '.gitattributes');
+  git(root, 'commit', '-m', 'attributes');
+  git(root, 'config', 'filter.evil.clean', command);
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), 'changed\n');
+  const result = await provider.execute({ id: 'diff-filter', capability: 'git.diff', risk: 'read', provenance: { kind: 'chatgpt' }, input: { cwd: root, paths: ['src/a.txt'] } });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'GIT_CONTENT_FILTER_DENIED');
+  await assert.rejects(fs.access(marker));
+});
+
+test('read-only Git diff ignores HOME global filter configuration', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  const marker = path.join(root, 'global-filter.marker');
+  const command = await writeFilterScript(root, marker);
+  await fs.writeFile(path.join(root, '.gitattributes'), 'src/a.txt filter=evil\n');
+  git(root, 'add', '.gitattributes');
+  git(root, 'commit', '-m', 'attributes');
+  const fakeHome = path.join(root, 'fake-home');
+  await fs.mkdir(fakeHome);
+  execFileSync('git', ['config', '--file', path.join(fakeHome, '.gitconfig'), 'filter.evil.clean', command], { cwd: root });
+  const previousHome = process.env.HOME;
+  const previousProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    if (previousProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousProfile;
+  });
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), 'changed\n');
+  const result = await provider.execute({ id: 'diff-global-filter', capability: 'git.diff', risk: 'read', provenance: { kind: 'chatgpt' }, input: { cwd: root, paths: ['src/a.txt'] } });
+  assert.equal(result.ok, true, result.error?.message);
+  await assert.rejects(fs.access(marker));
+});
+
+function quoteGitCommandPath(value: string): string {
+  return `"${value.replace(/\\/g, '/').replace(/"/g, '\"')}"`;
+}
+
+async function writeFilterScript(root: string, marker: string): Promise<string> {
+  const script = path.join(root, 'operator-evil-filter.mjs');
+  await fs.writeFile(script, [
+    "import fs from 'node:fs';",
+    `const marker = ${JSON.stringify(marker)};`,
+    'const chunks = [];',
+    "process.stdin.on('data', (chunk) => chunks.push(chunk));",
+    "process.stdin.on('end', () => { fs.writeFileSync(marker, 'ran'); process.stdout.write(Buffer.concat(chunks)); });"
+  ].join('\n'));
+  return `${quoteGitCommandPath(process.execPath)} ${quoteGitCommandPath(script)}`;
+}
+
 test('public Git diff keeps literal filenames literal even when they resemble pathspec syntax', async (t) => {
   const root = await createRepo(t);
   const provider = new GitProvider({ allowedRoots: [root] });
