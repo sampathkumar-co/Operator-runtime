@@ -216,6 +216,28 @@ export class RelayDeliveryStore {
     });
   }
 
+  async expireCapabilityIncompatibleHeads(deviceIdInput: string, supportedCapabilitiesInput: readonly string[]): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const supported = new Set(safeRequiredCapabilities([...supportedCapabilitiesInput]));
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+      if (!stream) return 0;
+      let expired = 0;
+      const expiredAt = this.#clock().toISOString();
+      while (true) {
+        const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
+        if (!next || next.status !== 'pending') break;
+        if (next.requiredCapabilities === undefined) throw new OperatorError('RELAY_DELIVERY_CAPABILITIES_MISSING', 'Pending relay delivery has no durable capability requirements.');
+        if (next.requiredCapabilities.every((capability) => supported.has(capability))) break;
+        expireDelivery(next, expiredAt);
+        stream.lastAckedSeq = next.seq;
+        expired += 1;
+      }
+      return expired;
+    });
+  }
+
   async expirePending(): Promise<number> {
     return await this.#mutate((state) => expirePending(state, this.#clock().getTime(), this.#retentionMs));
   }
@@ -298,13 +320,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
     while (true) {
       const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
       if (!next || next.status !== 'pending' || Date.parse(next.createdAt) > now - retentionMs) break;
-      next.status = 'expired';
-      next.expiredAt = expiredAt;
-      next.payload = {};
-      next.requiredCapabilities = undefined;
-      next.replayAuthority = next.idempotencyKey && next.authority ? { ...next.authority } : undefined;
-      next.authority = undefined;
-      next.idempotencyReleasedAt = undefined;
+      expireDelivery(next, expiredAt);
       stream.lastAckedSeq = next.seq;
       expired += 1;
     }
@@ -313,6 +329,17 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
     }
   }
   return expired;
+}
+
+function expireDelivery(delivery: StoredRelayDelivery, expiredAt: string): void {
+  delivery.status = 'expired';
+  delivery.expiredAt = expiredAt;
+  delivery.ackedAt = undefined;
+  delivery.payload = {};
+  delivery.requiredCapabilities = undefined;
+  delivery.replayAuthority = delivery.idempotencyKey && delivery.authority ? { ...delivery.authority } : undefined;
+  delivery.authority = undefined;
+  delivery.idempotencyReleasedAt = undefined;
 }
 
 function getOrCreateStream(state: RelayDeliveryState, deviceId: string): DeviceDeliveryStream {

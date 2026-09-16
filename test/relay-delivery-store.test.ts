@@ -54,6 +54,39 @@ test('relay delivery queue persists normalized capability requirements across re
   );
 });
 
+
+test('capability-incompatible queue heads expire contiguously while preserving idempotent replay authority', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 7 };
+  const first = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'git-old', capability: 'git.write' } },
+    authority,
+    'a'.repeat(64),
+    ['git.write']
+  );
+  const second = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'file-next', capability: 'file.read' } },
+    authority,
+    undefined,
+    ['file.read']
+  );
+
+  assert.equal(await store.expireCapabilityIncompatibleHeads(DEVICE, ['file.read']), 1);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 2 });
+  assert.deepEqual((await store.pending(DEVICE)).map((delivery) => delivery.id), [second.id]);
+  const retired = await store.retained(DEVICE, first.seq);
+  assert.equal(retired?.status, 'expired');
+  assert.deepEqual(retired?.payload, {});
+  assert.equal(retired?.requiredCapabilities, undefined);
+  assert.deepEqual(retired?.replayAuthority, authority);
+  assert.equal(await store.expireCapabilityIncompatibleHeads(DEVICE, ['file.read']), 0);
+});
+
 test('legacy pending action derives and persists its capability requirement during reload', async (t) => {
   const state = await temp(t);
   const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 5 };

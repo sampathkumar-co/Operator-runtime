@@ -210,7 +210,7 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
-test('queued delivery is not replayed when the same client reconnects after losing a required signed capability', async (t) => {
+test('capability downgrade retires an incompatible queued head and keeps the same reconnected client usable', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-queued-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-queued-cap-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -224,6 +224,7 @@ test('queued delivery is not replayed when the same client reconnects after losi
   await accounts.bindDevice(account.accountId, device.deviceId);
   const membership = (await accounts.listDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
   assert.ok(membership);
+  const authority = { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
 
   const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
   t.after(() => hub.close());
@@ -257,9 +258,7 @@ test('queued delivery is not replayed when the same client reconnects after losi
       return advertisedCapabilities;
     },
     onDelivery: async (delivery) => { seen.push(delivery.id); },
-    sleep: async () => {
-      if (capabilityReads >= 2) client.stop();
-    }
+    sleep: async () => undefined
   });
   const run = client.run();
   await waitFor(async () => {
@@ -267,25 +266,117 @@ test('queued delivery is not replayed when the same client reconnects after losi
     return online.some((entry) => entry.deviceId === device.deviceId && entry.capabilities.includes('git.write'));
   });
 
-  const queued = await deliveries.enqueue(
+  const incompatible = await deliveries.enqueue(
     device.deviceId,
     'action',
     { action: { id: 'queued-git', capability: 'git.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } } },
-    { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration },
+    authority,
     undefined,
     ['git.write']
+  );
+  const compatible = await deliveries.enqueue(
+    device.deviceId,
+    'action',
+    { action: { id: 'queued-file', capability: 'file.read', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } },
+    authority,
+    undefined,
+    ['file.read']
   );
 
   advertisedCapabilities = ['file.read'];
   sockets.at(-1)?.close(1012, 'simulate Git removal during network disconnect');
+  await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 2);
+  client.stop();
   await run;
 
-  assert.ok(capabilityReads >= 2, 'supported capabilities must be recomputed for the reconnect hello');
-  assert.deepEqual(seen, []);
-  assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
-  const [stillPending] = await deliveries.pending(device.deviceId);
-  assert.equal(stillPending?.id, queued.id);
-  assert.deepEqual(stillPending?.requiredCapabilities, ['git.write']);
+  assert.ok(capabilityReads >= 3, 'capabilities must be recomputed across downgrade and reconciliation reconnects');
+  assert.deepEqual(seen, [compatible.id]);
+  assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 2, highestEnqueuedSeq: 2 });
+  const retired = await deliveries.retained(device.deviceId, incompatible.seq);
+  assert.equal(retired?.status, 'expired');
+  assert.deepEqual(retired?.payload, {});
+  assert.equal(retired?.requiredCapabilities, undefined);
+  assert.equal((await deliveries.retained(device.deviceId, compatible.seq))?.status, 'acked');
+});
+
+test('dispatch racing a capability downgrade is retired instead of falsely accepted', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-cap-race-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-cap-race-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'cap-race-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
+    ttlMs: 60_000
+  })).token;
+
+  const sockets: RelaySocketLike[] = [];
+  let advertisedCapabilities: readonly string[] = ['file.read', 'git.write'];  let capabilityReads = 0;
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory: (url) => {
+      const socket = socketFactory(url);
+      sockets.push(socket);
+      return socket;
+    },
+    getSessionToken: async () => token,
+    getSupportedCapabilities: async () => {
+      capabilityReads += 1;
+      return advertisedCapabilities;
+    },
+    onDelivery: async () => { throw new Error('retired stale capability delivery must never execute'); },
+    sleep: async () => undefined
+  });
+  const run = client.run();
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.capabilities.includes('git.write')));
+
+  const originalEnqueue = deliveries.enqueue.bind(deliveries);
+  let releaseEnqueue!: () => void;
+  let enteredEnqueue!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredEnqueue = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseEnqueue = resolve; });  (deliveries as any).enqueue = async (...args: any[]) => {
+    enteredEnqueue();
+    await gate;
+    return await (originalEnqueue as any)(...args);
+  };
+
+  const dispatching = hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['git.write'],
+    kind: 'action',
+    payload: { action: { id: 'stale-git-race', capability: 'git.write' } }
+  });
+  const rejected = assert.rejects(dispatching, (error: any) => error?.code === 'RELAY_DELIVERY_CAPABILITY_RETIRED');
+  await entered;
+  advertisedCapabilities = ['file.read'];
+  sockets.at(-1)?.close(1012, 'downgrade while enqueue is paused');
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.capabilities.length === 1 && entry.capabilities[0] === 'file.read'));
+  releaseEnqueue();
+  await rejected;
+  await waitFor(async () => capabilityReads >= 3 && (await hub.onlineDevices(account.accountId)).some((entry) => entry.capabilities.includes('file.read')));
+
+  assert.deepEqual(await deliveries.pending(device.deviceId), []);
+  assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
+  assert.equal((await deliveries.retained(device.deviceId, 1))?.status, 'expired');
+  client.stop();
+  await run;
 });
 
 test('account release invalidates the live socket before a concurrent dispatch can route', async (t) => {

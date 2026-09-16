@@ -216,6 +216,10 @@ export class RelayHub {
       throw error;
     }
     await this.#pump(route.deviceId);
+    const retained = await this.#deliveries.retained(route.deviceId, delivery.seq);
+    if (retained?.status === 'expired') {
+      throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
+    }
     return { route, delivery };
   }
 
@@ -341,11 +345,11 @@ export class RelayHub {
     const signatureOk = await this.#devices.verifyDeviceSignature(deviceId, Buffer.from(JSON.stringify(payload), 'utf8'), signature);
     if (!signatureOk) throw new OperatorError('RELAY_HELLO_SIGNATURE_INVALID', 'Relay hello signature could not be verified.');
 
+    const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
+    const capabilities = locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability));
     const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
     const sessionId = crypto.randomUUID();
     const now = this.#clock().toISOString();
-    const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
-    const capabilities = locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability));
     const previous = this.#connections.get(deviceId);
     if (previous) {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
@@ -399,6 +403,17 @@ export class RelayHub {
     if (!next) return;
     if (!next.authority) throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Pending relay delivery has no durable authorization generation.');
     if (next.requiredCapabilities === undefined) throw new OperatorError('RELAY_DELIVERY_CAPABILITIES_MISSING', 'Pending relay delivery has no durable capability requirements.');
+    const missingCapabilities = next.requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
+    if (missingCapabilities.length > 0) {
+      await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+      const retired = await this.#deliveries.expireCapabilityIncompatibleHeads(deviceId, connection.capabilities);
+      if (retired > 0 && this.#connections.get(deviceId)?.sessionId === connection.sessionId) {
+        this.#connections.delete(deviceId);
+        connection.inFlightSeq = undefined;
+        try { connection.socket.close(4009, 'capability queue reconciliation'); } catch { /* reconnect will reconcile the durable cursor */ }
+      }
+      return;
+    }
     await this.#assertDispatchAuthority(next.authority, connection.sessionId, next.requiredCapabilities);
     connection.inFlightSeq = next.seq;
     try {
