@@ -211,3 +211,20 @@ test('Git checkpoint disables reference-transaction hooks during ref updates', a
   assert.equal(created.ok, true, created.error?.message);
   await assert.rejects(fs.access(marker));
 });
+
+test('Git checkpoint ignores an authorized cwd git.exe shadow binary', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows cwd-first executable lookup regression');
+  const root = await tempDir(t, 'operator-git-shadow-root-');
+  await initRepo(root, 'safe content\n');
+  const systemRoot = process.env.SYSTEMROOT ?? process.env.WINDIR;
+  assert.ok(systemRoot, 'Windows system root is required for the shadow fixture');
+  await fs.copyFile(path.join(systemRoot, 'System32', 'where.exe'), path.join(root, 'git.exe'));
+  await fs.appendFile(path.join(root, '.git', 'info', 'exclude'), '\ngit.exe\n');
+
+  const provider = new GitCheckpointProvider({ allowedRoots: [root] });
+  const result = await provider.execute({
+    id: 'git-shadow-checkpoint', capability: 'git.checkpoint.create', risk: 'write',
+    input: { cwd: root, label: 'cwd shadow must be ignored' }, provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(result.ok, true, result.error?.message);
+});

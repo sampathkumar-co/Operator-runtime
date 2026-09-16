@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { readDurableStateText } from '../core/durable-state.ts';
 import { PathScope } from './path-scope.ts';
 
@@ -430,12 +431,14 @@ function psqlEnvironment(profile: Profile, timeoutMs: number): NodeJS.ProcessEnv
 
 async function runPsql(executable: string, args: string[], cwd: string, profile: Profile, timeoutMs: number): Promise<PsqlOutput> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const environment = psqlEnvironment(profile, timeoutMs);
+    const psqlExecutable = resolveTrustedExecutable(executable, environment);
+    const child = spawn(psqlExecutable, args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: psqlEnvironment(profile, timeoutMs)
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

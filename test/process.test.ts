@@ -111,3 +111,15 @@ test('process arguments reject NUL and excessive entries before spawn', async (t
   assert.equal(tooMany.ok, false);
   assert.equal(tooMany.error?.code, 'PROCESS_INPUT_INVALID');
 });
+
+test('Windows executable lookup ignores an authorized cwd shadow binary', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows cwd-first executable lookup regression');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-shadow-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.copyFile(process.execPath, path.join(root, 'git.exe'));
+
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['git'] });
+  const result = await provider.execute(request('git', ['--version'], root, 'write'));
+  assert.equal(result.ok, true, result.error?.message);
+  assert.match((result.output as { stdout: string }).stdout, /^git version /i);
+});

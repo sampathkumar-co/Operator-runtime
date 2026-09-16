@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -203,12 +204,14 @@ function safeEnvironment(): NodeJS.ProcessEnv {
 
 async function runCode(executable: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; truncated: boolean }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const environment = safeEnvironment();
+    const codeExecutable = resolveTrustedExecutable(executable, environment);
+    const child = spawn(codeExecutable, args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: safeEnvironment()
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

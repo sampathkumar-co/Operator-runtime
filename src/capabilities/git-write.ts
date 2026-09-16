@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { GitCheckpointProvider } from './git-checkpoint.ts';
 
 const SCORE: CapabilityScore = {
@@ -273,12 +274,14 @@ function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, allowNonZero = false): Promise<GitOutput> {
   return await new Promise((resolve, reject) => {
-    const child = spawn('git', [...SAFE_GIT_PREFIX, ...args], {
+    const environment = gitEnvironment(extraEnv);
+    const gitExecutable = resolveTrustedExecutable('git', environment);
+    const child = spawn(gitExecutable, [...SAFE_GIT_PREFIX, ...args], {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: gitEnvironment(extraEnv)
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

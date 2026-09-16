@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -362,11 +363,13 @@ function dockerEnvironment(): NodeJS.ProcessEnv {
 
 async function runDocker(executable: string, args: string[], timeoutMs: number): Promise<DockerOutput> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const environment = dockerEnvironment();
+    const dockerExecutable = resolveTrustedExecutable(executable, environment);
+    const child = spawn(dockerExecutable, args, {
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: dockerEnvironment()
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

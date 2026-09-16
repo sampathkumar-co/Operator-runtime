@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -164,12 +165,14 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
   truncated: boolean;
 }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const childEnvironment = safeChildEnvironment(process.env, environmentOverrides);
+    const trustedExecutable = resolveTrustedExecutable(executable, childEnvironment);
+    const child = spawn(trustedExecutable, args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: safeChildEnvironment(process.env, environmentOverrides)
+      env: childEnvironment
     });
 
     const stdout: Buffer[] = [];
