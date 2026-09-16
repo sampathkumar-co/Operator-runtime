@@ -38,12 +38,16 @@ test('remote CLI is explicit and bounded', () => {
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
 });
 
-test('runtime launcher allows only the certified Node 22 Windows x64 line', () => {
+test('runtime launcher allows only supported Windows x64 Node lines', () => {
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.14.0'));
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.23.2'));
-  assert.throws(() => assertSupportedRuntime('linux', 'x64', '22.23.2'), /Windows x64/);
-  assert.throws(() => assertSupportedRuntime('win32', 'arm64', '22.23.2'), /Windows x64/);
-  assert.throws(() => assertSupportedRuntime('win32', 'x64', '23.0.0'), /Node\.js 22\.14 through 22\.x/);
+  assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '24.21.0'));
+  assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '26.8.2'));
+  assert.throws(() => assertSupportedRuntime('linux', 'x64', '24.21.0'), /Windows x64/);
+  assert.throws(() => assertSupportedRuntime('win32', 'arm64', '24.21.0'), /Windows x64/);
+  for (const unsupported of ['22.13.1', '23.11.1', '25.8.1', '27.0.0']) {
+    assert.throws(() => assertSupportedRuntime('win32', 'x64', unsupported), /Node\.js 22\.14\+, 24\.x, or 26\.x/);
+  }
 });
 
 test('npx parent credentials are not inherited by the remote runtime', () => {
