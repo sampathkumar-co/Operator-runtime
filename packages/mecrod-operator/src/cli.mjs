@@ -299,6 +299,7 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   env.OPERATOR_RECOVERY_TOKEN = randomSecret();
   env.OPERATOR_RELAY_URL = RELAY_URL;
   env.OPERATOR_RELAY_RESULT_URL = RELAY_RESULT_URL;
+  env.OPERATOR_RELAY_REQUIRED = '1';
   env.OPERATOR_BROWSER_AUTO_LAUNCH = browser ? '1' : '0';
   env.OPERATOR_WINDOWS_DPAPI_PATH = helperPath('operator-windows-dpapi.exe');
   env.OPERATOR_WINDOWS_UIA_PATH = helperPath('operator-windows-uia.exe');

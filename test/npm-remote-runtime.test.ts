@@ -74,16 +74,28 @@ test('npx parent credentials are not inherited by the remote runtime', () => {
   assert.equal(env.OPERATOR_RELAY_URL, undefined);
 });
 
-test('relay-only entrypoint removes npm PATH authority before importing providers', async () => {
+test('relay-only entrypoint derives executable roots independently of npm environment', async () => {
   const source = await fs.readFile(path.resolve('apps/local-agent/src/remote.ts'), 'utf8');
-  const deleteUpper = source.indexOf('delete process.env.PATH;');
-  const deleteMixed = source.indexOf('delete process.env.Path;');
-  const setTrusted = source.indexOf('process.env.Path =');
+  const rootsCall = source.indexOf('const roots = trustedWindowsRoots(');
+  const clearPath = source.indexOf("'PATH', 'Path', 'SYSTEMROOT', 'WINDIR', 'PROGRAMFILES'");
+  const setTrusted = source.indexOf('process.env.SYSTEMROOT = roots.WINDOWS;');
   const loadMain = source.indexOf("await import('./main.ts')");
-  assert.ok(deleteUpper >= 0 && deleteMixed > deleteUpper && setTrusted > deleteMixed && loadMain > setTrusted);
+  assert.ok(rootsCall >= 0 && clearPath > rootsCall && setTrusted > clearPath && loadMain > setTrusted);
+  assert.match(source, /\['system-roots'\]/);
+  assert.match(source, /env:\s*\{\}/);
+  assert.match(source, /OPERATOR_RELAY_REQUIRED = '1'/);
   assert.match(source, /wss:\/\/operator\.splcart\.in\/device/);
   assert.match(source, /https:\/\/operator\.splcart\.in\/v1\/device-result/);
+  assert.doesNotMatch(source, /process\.env\.(?:SYSTEMROOT|WINDIR|PROGRAMFILES)\s*\|\|/);
   assert.doesNotMatch(source, /process\.env\.OPERATOR_RELAY_URL\s*\?\?/);
+});
+
+test('relay-only main treats terminal relay loss and emergency stop as fatal', async () => {
+  const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  assert.match(source, /process\.env\.OPERATOR_RELAY_REQUIRED === '1'/);
+  assert.match(source, /RELAY_REQUIRED_STOPPED/);
+  assert.match(source, /RELAY_REQUIRED_EMERGENCY_STOP/);
+  assert.match(source, /await failRequiredRelay\(error\)/);
 });
 
 test('npm publication fails closed unless exact source commit is supplied', async () => {
