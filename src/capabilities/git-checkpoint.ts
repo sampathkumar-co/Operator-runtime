@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
-import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
+import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -55,7 +55,8 @@ export class GitCheckpointProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    return ['git.checkpoint.create', 'git.checkpoint.inspect', 'git.checkpoint.restore'].includes(action.capability);
+    if (!['git.checkpoint.create', 'git.checkpoint.inspect', 'git.checkpoint.restore'].includes(action.capability)) return false;
+    try { resolveSupportedGitExecutable(gitEnvironment({})); return true; } catch { return false; }
   }
 
   score(): CapabilityScore { return SCORE; }
@@ -63,6 +64,7 @@ export class GitCheckpointProvider implements CapabilityProvider {
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      resolveSupportedGitExecutable(gitEnvironment({}));
       if (action.capability === 'git.checkpoint.create') return await this.#create(action, started);
       if (action.capability === 'git.checkpoint.inspect') return await this.#inspect(action, started);
       if (action.capability === 'git.checkpoint.restore') return await this.#restore(action, started);
@@ -370,7 +372,7 @@ async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, 
   return await new Promise((resolve, reject) => {
     const safeArgs = [...SAFE_GIT_PREFIX, ...args];
     const environment = gitEnvironment(extraEnv);
-    const gitExecutable = resolveTrustedExecutable('git', environment);
+    const gitExecutable = resolveSupportedGitExecutable(environment);
     const child = spawn(gitExecutable, safeArgs, {
       cwd,
       shell: false,

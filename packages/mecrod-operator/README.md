@@ -6,7 +6,7 @@ One-command Windows runtime for connecting a user-authorized computer to Operato
 npx @mecrod/operator@latest remote
 ```
 
-Requires Windows x64 with a supported Node.js line: 22.14+, 24.x, or 26.x.
+Requires Windows x64 with a supported Node.js line: 22.14+, 24.x, or 26.x. Git features additionally require Git 2.45 or newer; older or missing Git disables only the Git capabilities while the rest of Operator remains available.
 
 The command does **not** install an MSIX and does **not** start a local MCP server. It verifies the package's runtime manifest, starts the existing hardened local policy/runtime agent, and connects that agent to the pinned production relay at `wss://operator.splcart.in/device`. ChatGPT talks to the hosted MCP edge.
 

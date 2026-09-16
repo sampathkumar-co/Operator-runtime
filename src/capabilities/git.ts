@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { assertPublicSafePath } from '../core/public-restricted-data.ts';
+import { OperatorError } from '../core/errors.ts';
+import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
 import { ProcessProvider } from './process.ts';
 
 const SCORE: CapabilityScore = {
@@ -40,12 +42,19 @@ export class GitProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    return ['git.status', 'git.diff', 'git.rev-parse'].includes(action.capability);
+    if (!['git.status', 'git.diff', 'git.rev-parse'].includes(action.capability)) return false;
+    try { resolveSupportedGitExecutable(process.env); return true; } catch { return false; }
   }
 
   score(): CapabilityScore { return SCORE; }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
+    try { resolveSupportedGitExecutable(process.env); } catch (error) {
+      const op = error instanceof OperatorError
+        ? error
+        : new OperatorError('GIT_VERSION_CHECK_FAILED', error instanceof Error ? error.message : String(error));
+      return gitFailure(action, op.code, op.message);
+    }
     const cwd = String(action.input.cwd ?? '');
     const paths = Array.isArray(action.input.paths) ? action.input.paths.map(String) : [];
     const publicLiteral = action.capability === 'git.diff' && action.input.publicLiteralFiles === true;

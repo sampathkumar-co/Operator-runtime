@@ -1,8 +1,52 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 
 const WINDOWS_NATIVE_EXTENSIONS = ['.exe', '.com'] as const;
+const MIN_GIT_MAJOR = 2;
+const MIN_GIT_MINOR = 45;
+const GIT_VERSION_CACHE = new Map<string, { size: number; mtimeMs: number }>();
+
+export function assertSupportedGitVersionText(output: string): { major: number; minor: number; patch: number } {
+  const match = /^git version (\d+)\.(\d+)(?:\.(\d+))?(?:[.\-][^\s]+)?$/i.exec(String(output ?? '').trim());
+  if (!match) {
+    throw new OperatorError('GIT_VERSION_CHECK_FAILED', 'Operator could not parse the trusted Git executable version.');
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3] ?? 0);
+  if (major < MIN_GIT_MAJOR || (major === MIN_GIT_MAJOR && minor < MIN_GIT_MINOR)) {
+    throw new OperatorError(
+      'GIT_VERSION_UNSUPPORTED',
+      `Operator Git capabilities require Git ${MIN_GIT_MAJOR}.${MIN_GIT_MINOR} or newer so lazy promisor fetching can be disabled fail-closed.`
+    );
+  }
+  return { major, minor, patch };
+}
+
+export function resolveSupportedGitExecutable(source: NodeJS.ProcessEnv = process.env): string {
+  const executable = resolveTrustedExecutable('git', source);
+  const stat = fs.statSync(executable);
+  const cacheKey = process.platform === 'win32' ? executable.toLowerCase() : executable;
+  const cached = GIT_VERSION_CACHE.get(cacheKey);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return executable;
+
+  const result = spawnSync(executable, ['--version'], {
+    shell: false,
+    windowsHide: true,
+    encoding: 'utf8',
+    timeout: 5_000,
+    maxBuffer: 32 * 1024,
+    env: gitVersionProbeEnvironment(source)
+  });
+  if (result.error || result.status !== 0) {
+    throw new OperatorError('GIT_VERSION_CHECK_FAILED', 'Operator could not verify the trusted Git executable version.');
+  }
+  assertSupportedGitVersionText(String(result.stdout ?? ''));
+  GIT_VERSION_CACHE.set(cacheKey, { size: stat.size, mtimeMs: stat.mtimeMs });
+  return executable;
+}
 
 export function resolveTrustedExecutable(
   input: string,
@@ -67,4 +111,14 @@ function tryNativeExecutable(candidate: string): string | undefined {
 
 function stripOuterQuotes(value: string): string {
   return value.length >= 2 && value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
+}
+
+function gitVersionProbeEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { LANG: 'C', LC_ALL: 'C' };
+  if (process.platform === 'win32') {
+    for (const key of ['SYSTEMROOT', 'WINDIR']) {
+      if (source[key] !== undefined) env[key] = source[key];
+    }
+  }
+  return env;
 }
