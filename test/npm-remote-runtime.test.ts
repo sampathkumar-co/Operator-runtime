@@ -61,7 +61,10 @@ test('npx parent credentials are not inherited by the remote runtime', () => {
     AWS_SECRET_ACCESS_KEY: 'aws-secret',
     NPM_CONFIG_USERCONFIG: 'C:\\Users\\test\\.npmrc',
     NODE_OPTIONS: '--require malicious.js',
-    OPERATOR_RELAY_URL: 'wss://evil.example/device'
+    OPERATOR_RELAY_URL: 'wss://evil.example/device',
+    XDG_CONFIG_HOME: 'C:\\attacker\\config',
+    XDG_DATA_HOME: 'C:\\attacker\\data',
+    XDG_RUNTIME_DIR: 'C:\\attacker\\runtime'
   });
   assert.equal(env.USERPROFILE, 'C:\\Users\\test');
   assert.equal(env.TEMP, 'C:\\Temp');
@@ -72,6 +75,9 @@ test('npx parent credentials are not inherited by the remote runtime', () => {
   assert.equal(env.NPM_CONFIG_USERCONFIG, undefined);
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.OPERATOR_RELAY_URL, undefined);
+  assert.equal(env.XDG_CONFIG_HOME, undefined);
+  assert.equal(env.XDG_DATA_HOME, undefined);
+  assert.equal(env.XDG_RUNTIME_DIR, undefined);
 });
 
 test('relay-only entrypoint derives executable roots independently of npm environment', async () => {

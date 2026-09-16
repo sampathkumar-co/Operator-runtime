@@ -226,7 +226,7 @@ function success(
 
 function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
-  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_CONFIG_HOME']) {
+  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   for (const [key, value] of Object.entries(extraEnv)) {

@@ -47,7 +47,8 @@ const trustedPath = [
 for (const key of [
   'PATH', 'Path', 'SYSTEMROOT', 'WINDIR', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
   'PROGRAMW6432', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
-  'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'TEMP', 'TMP'
+  'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'TEMP', 'TMP',
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR'
 ]) delete process.env[key];
 process.env.SYSTEMROOT = roots.WINDOWS;
 process.env.WINDIR = roots.WINDOWS;
