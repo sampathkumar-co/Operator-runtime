@@ -1,0 +1,145 @@
+name: NPM Remote Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: npm dist-tag for @mecrod/operator
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  pull-requests: read
+
+concurrency:
+  group: mecrod-operator-production-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    name: Build and publish @mecrod/operator
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+
+      - name: Require PR-certified green main commit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-source.mjs
+
+      - name: Validate npm tag
+        shell: pwsh
+        env:
+          NPM_TAG: ${{ inputs.npm_tag }}
+        run: |
+          if ($env:NPM_TAG -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+            throw 'invalid npm dist-tag'
+          }
+
+      - name: Install certified Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          rustup component add clippy --toolchain 1.98.1
+          rustc --version
+          cargo --version
+
+      - name: Build Windows security helpers from locked source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo clippy --locked --manifest-path native/windows-dpapi/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI clippy failed' }
+          cargo clippy --locked --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'UIA clippy failed' }
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI release build failed' }
+          cargo build --locked --manifest-path native/windows-uia/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'UIA release build failed' }
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'path-lease release build failed' }
+
+      - name: Exercise native helper self-tests
+        shell: pwsh
+        run: |
+          & ./native/windows-dpapi/target/release/operator-windows-dpapi.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI self-test failed' }
+          & ./native/windows-path-lease/target/release/operator-windows-path-lease.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'path-lease self-test failed' }
+
+      - name: Build canonical runtime payload
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          node packages/mecrod-operator/scripts/build-runtime-payload.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'runtime payload build failed' }
+
+      - name: Remote CLI security tests
+        shell: pwsh
+        run: |
+          node --experimental-strip-types --test test/npm-remote-runtime.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'remote CLI tests failed' }
+          node packages/mecrod-operator/bin/operator.mjs doctor
+          if ($LASTEXITCODE -ne 0) { throw 'packaged runtime doctor failed' }
+
+      - name: Validate publishable tarball and installed-package doctor
+        id: pack
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packDir = Join-Path $env:RUNNER_TEMP 'operator-pack'
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'operator-pack-smoke'
+          New-Item -ItemType Directory -Force -Path $packDir, $smokeDir | Out-Null
+          $json = npm pack --json ./packages/mecrod-operator --pack-destination $packDir | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $json.Count -ne 1) { throw 'npm pack failed' }
+          $files = @($json[0].files | ForEach-Object { $_.path })
+          foreach ($required in @(
+            'bin/operator.mjs',
+            'src/cli.mjs',
+            'runtime/runtime-manifest.json',
+            'runtime/native/operator-windows-dpapi.exe',
+            'runtime/native/operator-windows-uia.exe',
+            'runtime/native/operator-windows-path-lease.exe',
+            'runtime/app/apps/local-agent/src/remote.ts'
+          )) {
+            if ($required -notin $files) { throw "npm tarball missing $required" }
+          }
+          $tgz = Join-Path $packDir $json[0].filename
+          npm install --prefix $smokeDir --ignore-scripts $tgz
+          if ($LASTEXITCODE -ne 0) { throw 'packed npm install failed' }
+          node (Join-Path $smokeDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
+          if ($LASTEXITCODE -ne 0) { throw 'installed tarball doctor failed' }
+          "package_version=$($json[0].version)" >> $env:GITHUB_OUTPUT
+
+      - name: Refuse duplicate npm version
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.pack.outputs.package_version }}
+        run: |
+          npm view "@mecrod/operator@$env:PACKAGE_VERSION" version *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "@mecrod/operator@$env:PACKAGE_VERSION is already published; refusing overwrite"
+          }
+          exit 0
+
+      - name: Publish npm runtime with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ inputs.npm_tag }}
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: npm publish ./packages/mecrod-operator --access public --tag "$env:NPM_TAG" --provenance
