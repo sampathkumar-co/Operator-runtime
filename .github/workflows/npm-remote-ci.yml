@@ -111,3 +111,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
           node (Join-Path $installDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact doctor failed' }
+
+  node-compatibility:
+    name: Node ${{ matrix.node }} launcher compatibility
+    runs-on: windows-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.23.2', '24.21.0', '26.8.2']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Exercise TypeScript stripping and launcher contract
+        shell: pwsh
+        run: |
+          node --version
+          node --experimental-strip-types --test test/npm-remote-runtime.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Node compatibility tests failed' }
+          node packages/mecrod-operator/bin/operator.mjs --help
+          if ($LASTEXITCODE -ne 0) { throw 'launcher help smoke failed' }
