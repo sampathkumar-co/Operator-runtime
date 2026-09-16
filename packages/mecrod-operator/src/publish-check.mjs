@@ -12,11 +12,11 @@ const manifest = await verifyRuntimePayload();
 if (manifest.version !== pkg.version) {
   throw new Error(`Runtime manifest version ${manifest.version} does not match package ${pkg.version}.`);
 }
-const expectedCommit = String(process.env.OPERATOR_SOURCE_COMMIT || process.env.GITHUB_SHA || '').trim().toLowerCase();
-if (expectedCommit) {
-  if (!/^[0-9a-f]{40}$/.test(expectedCommit)) throw new Error('Expected source commit is invalid.');
-  if (manifest.sourceCommit !== expectedCommit) {
-    throw new Error(`Runtime payload source ${manifest.sourceCommit} does not match publication source ${expectedCommit}.`);
-  }
+const expectedCommit = String(process.env.OPERATOR_SOURCE_COMMIT || '').trim().toLowerCase();
+if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
+  throw new Error('Refusing npm publish: OPERATOR_SOURCE_COMMIT must be the exact 40-character publication commit.');
+}
+if (manifest.sourceCommit !== expectedCommit) {
+  throw new Error(`Runtime payload source ${manifest.sourceCommit} does not match publication source ${expectedCommit}.`);
 }
 console.log(`mecrod-operator publish check: PASS (${pkg.version}, source ${manifest.sourceCommit}, ${manifest.files.length} runtime files)`);
