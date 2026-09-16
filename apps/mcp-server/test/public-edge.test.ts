@@ -52,7 +52,7 @@ test('public edge builds OAuth metadata and permits only explicit literal public
   assert.equal(config.writeScope, 'operator:write');
   assert.equal(config.challengeToken, 'openai-domain-proof');
   assert.deepEqual(config.authMetadata.oauthMetadata.scopes_supported, ['operator:read', 'operator:write']);
-  assert.equal(config.authMetadata.oauthMetadata.issuer, 'https://login.operator-runtime.dev/');
+  assert.equal(config.authMetadata.oauthMetadata.issuer, 'https://login.operator-runtime.dev');
   assert.equal(config.authMetadata.resourceServerUrl.toString(), 'https://edge.operator-runtime.dev/mcp');
   assert.equal(resolveMcpBindHost(env, config), '0.0.0.0');
   assert.throws(() => resolveMcpBindHost({ ...env, OPERATOR_MCP_HOST: 'edge.internal' }, config), /literal wildcard or loopback/);
@@ -78,7 +78,7 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
     endpoint: new URL('https://login.operator-runtime.dev/introspect'),
     clientId: 'edge-client',
     clientSecret: 'edge-secret',
-    issuer: 'https://login.operator-runtime.dev/',
+    issuer: 'https://login.operator-runtime.dev',
     audience: 'https://edge.operator-runtime.dev/mcp',
     resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
   }, {
@@ -91,6 +91,7 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
         active: true,
         exp: Math.floor(Date.now() / 1000) + 300,
         sub: 'user-123',
+        iss: 'https://login.operator-runtime.dev',
         client_id: 'chatgpt-client',
         aud: ['https://edge.operator-runtime.dev/mcp'],
         scope: 'operator:read operator:write profile'
@@ -102,7 +103,7 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
   assert.equal(auth.clientId, 'chatgpt-client');
   assert.deepEqual(auth.scopes, ['operator:read', 'operator:write', 'profile']);
   assert.equal(auth.resource?.toString(), 'https://edge.operator-runtime.dev/mcp');
-  assert.deepEqual(auth.extra, { issuer: 'https://login.operator-runtime.dev/', subject: 'user-123' });
+  assert.deepEqual(auth.extra, { issuer: 'https://login.operator-runtime.dev', subject: 'user-123' });
   assert.match(seenAuthorization, /^Basic /);
   assert.doesNotMatch(seenAuthorization, /opaque-token-value/);
   assert.match(seenBody, /token=opaque-token-value/);
@@ -111,16 +112,17 @@ test('introspection verifier returns bounded secret-free AuthInfo', async () => 
 test('introspection verifier rejects inactive, expired, or wrong-audience tokens', async () => {
   const make = (payload: Record<string, unknown>) => new OAuthIntrospectionVerifier({
     endpoint: new URL('https://login.operator-runtime.dev/introspect'),
-    clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev/',
+    clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev',
     audience: 'https://edge.operator-runtime.dev/mcp', resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
   }, { fetchFn: async () => Response.json(payload) });
   await assert.rejects(() => make({ active: false }).verifyAccessToken('x'), /inactive/);
   await assert.rejects(() => make({ active: true, exp: 1, sub: 'u', client_id: 'c', aud: 'https://edge.operator-runtime.dev/mcp' }).verifyAccessToken('x'), /expired/);
   await assert.rejects(() => make({ active: true, exp: Math.floor(Date.now() / 1000) + 60, sub: 'u', client_id: 'c', aud: 'other' }).verifyAccessToken('x'), /audience/);
+  await assert.rejects(() => make({ active: true, exp: Math.floor(Date.now() / 1000) + 60, sub: 'u', client_id: 'c', iss: 'https://login.operator-runtime.dev/', aud: 'https://edge.operator-runtime.dev/mcp' }).verifyAccessToken('x'), /issuer/);
 });
 test('introspection verifier binds credentials and audience to the issuer/resource authority', () => {
   const base = {
-    clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev/',
+    clientId: 'edge-client', clientSecret: 'edge-secret', issuer: 'https://login.operator-runtime.dev',
     audience: 'https://edge.operator-runtime.dev/mcp', resourceUrl: new URL('https://edge.operator-runtime.dev/mcp')
   };
   assert.throws(() => new OAuthIntrospectionVerifier({

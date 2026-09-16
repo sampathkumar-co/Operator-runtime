@@ -7,7 +7,7 @@ import {
 } from '../scripts/oauth-provider-preflight.ts';
 
 const config: OAuthProviderConfig = {
-  issuer: 'https://auth.operator.dev/',
+  issuer: 'https://auth.operator.dev',
   authorizationEndpoint: 'https://auth.operator.dev/authorize',
   tokenEndpoint: 'https://auth.operator.dev/token',
   introspectionEndpoint: 'https://auth.operator.dev/introspect',
@@ -97,6 +97,7 @@ test('live preflight falls back from OAuth metadata to OIDC and emits bounded ev
 
   const receipt = await runOAuthProviderPreflight(config, { fetchFn, timeoutMs: 1000 });
   assert.equal(receipt.registrationMode, 'cimd');
+  assert.equal(receipt.issuer, config.issuer);
   assert.equal(receipt.pkce, 'S256');
   assert.equal(receipt.metadataUrl, 'https://auth.operator.dev/.well-known/openid-configuration');
   assert.deepEqual(requests.map(({ redirect }) => redirect), ['error', 'error']);

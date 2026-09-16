@@ -85,7 +85,7 @@ function validateConfig(input: OAuthIntrospectionConfig): OAuthIntrospectionConf
   if (!Number.isInteger(timeoutMs) || timeoutMs < 500 || timeoutMs > 30_000) {
     throw new Error('OAuth introspection timeout must be between 500 and 30000 ms.');
   }
-  return { ...input, clientId, clientSecret, issuer: issuerUrl.toString(), audience, timeoutMs };
+  return { ...input, clientId, clientSecret, issuer, audience, timeoutMs };
 }
 
 function toAuthInfo(input: unknown, config: OAuthIntrospectionConfig): AuthInfo {

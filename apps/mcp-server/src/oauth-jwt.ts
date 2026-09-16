@@ -75,7 +75,8 @@ export class OAuthJwtVerifier implements OAuthTokenVerifier {
   }
 }
 function validateConfig(input: OAuthJwtConfig): Required<OAuthJwtConfig> {
-  const issuerUrl = strictHttps(new URL(input.issuer), 'OAuth issuer');
+  const issuer = bounded(input.issuer, 2048, 'OAuth issuer');
+  const issuerUrl = strictHttps(new URL(issuer), 'OAuth issuer');
   const jwksUrl = strictHttps(input.jwksUrl, 'OAuth JWKS endpoint');
   const resourceUrl = strictHttps(input.resourceUrl, 'Public MCP resource URL');
   if (jwksUrl.origin !== issuerUrl.origin) {
@@ -91,7 +92,7 @@ function validateConfig(input: OAuthJwtConfig): Required<OAuthJwtConfig> {
   }
   return {
     jwksUrl,
-    issuer: issuerUrl.toString(),
+    issuer,
     audience,
     resourceUrl,
     timeoutMs

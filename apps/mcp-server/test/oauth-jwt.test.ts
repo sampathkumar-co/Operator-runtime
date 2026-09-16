@@ -7,7 +7,7 @@ import {
 } from 'jose';
 import { OAuthJwtVerifier } from '../src/oauth-jwt.ts';
 
-const issuer = 'https://auth.operator.dev/';
+const issuer = 'https://auth.operator.dev';
 const resource = 'https://mcp.operator.dev/mcp';
 const jwksUrl = new URL('https://auth.operator.dev/.well-known/jwks.json');
 
@@ -53,7 +53,8 @@ test('JWT verifier validates RS256 signature, issuer, audience, expiry, and scop
 
 test('JWT verifier rejects issuer, audience, and expiry drift', async () => {
   const f = await fixture();
-  await assert.rejects(async () => f.verifier.verifyAccessToken(await f.sign({ issuer: 'https://other.operator.dev/' })), /invalid/i);
+  await assert.rejects(async () => f.verifier.verifyAccessToken(await f.sign({ issuer: `${issuer}/` })), /invalid/i);
+  await assert.rejects(async () => f.verifier.verifyAccessToken(await f.sign({ issuer: 'https://other.operator.dev' })), /invalid/i);
   await assert.rejects(async () => f.verifier.verifyAccessToken(await f.sign({ audience: 'https://other.operator.dev/mcp' })), /invalid/i);
   await assert.rejects(async () => f.verifier.verifyAccessToken(await f.sign({ exp: false })), /expiration/i);
 });

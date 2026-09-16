@@ -48,7 +48,8 @@ export function readPublicMcpEdgeConfig(
     throw new Error(`Public MCP edge requires OPERATOR_MCP_PUBLIC_BIND_ACK=${PUBLIC_BIND_ACK}.`);
   }
   const publicUrl = publicMcpUrl(requiredEnv(env, 'OPERATOR_MCP_PUBLIC_URL'));
-  const issuer = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_ISSUER'), 'OAuth issuer');
+  const issuerIdentifier = requiredEnv(env, 'OPERATOR_OAUTH_ISSUER');
+  const issuer = publicHttpsUrl(issuerIdentifier, 'OAuth issuer');
   const authorizationEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_AUTHORIZATION_URL'), 'OAuth authorization endpoint');
   const tokenEndpoint = publicHttpsUrl(requiredEnv(env, 'OPERATOR_OAUTH_TOKEN_URL'), 'OAuth token endpoint');
   const oauthVerificationMode = verificationMode(requiredEnv(env, 'OPERATOR_OAUTH_VERIFICATION_MODE'));
@@ -64,17 +65,17 @@ export function readPublicMcpEdgeConfig(
   const challengeToken = optionalChallengeToken(env.OPENAI_APPS_CHALLENGE_TOKEN);
   const oauthRegistrationMode = registrationMode(env.OPERATOR_OAUTH_CLIENT_REGISTRATION_MODE?.trim() || 'cimd');
   const verifier: OAuthTokenVerifier = oauthVerificationMode === 'jwks'
-    ? new OAuthJwtVerifier({ jwksUrl: jwksEndpoint!, issuer: issuer.toString(), audience, resourceUrl: publicUrl }, options)
+    ? new OAuthJwtVerifier({ jwksUrl: jwksEndpoint!, issuer: issuerIdentifier, audience, resourceUrl: publicUrl }, options)
     : new OAuthIntrospectionVerifier({
         endpoint: introspectionEndpoint!,
         clientId: bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_ID'), 512, 'OAuth introspection client ID'),
         clientSecret: bounded(requiredEnv(env, 'OPERATOR_OAUTH_INTROSPECTION_CLIENT_SECRET'), 4096, 'OAuth introspection client secret'),
-        issuer: issuer.toString(), audience, resourceUrl: publicUrl
+        issuer: issuerIdentifier, audience, resourceUrl: publicUrl
       }, options);
 
   const authMetadata: AuthMetadataOptions = {
     oauthMetadata: {
-      issuer: issuer.toString(),
+      issuer: issuerIdentifier,
       authorization_endpoint: authorizationEndpoint.toString(),
       token_endpoint: tokenEndpoint.toString(),
       response_types_supported: ['code'],

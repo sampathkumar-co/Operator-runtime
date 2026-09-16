@@ -12,6 +12,7 @@ export type OAuthVerificationMode = 'jwks' | 'introspection';
 
 export interface OAuthProviderAuthority {
   oauthIssuer: URL;
+  oauthIssuerIdentifier: string;
   oauthAuthorizationEndpoint: URL;
   oauthTokenEndpoint: URL;
   oauthIntrospectionEndpoint?: URL;
@@ -102,7 +103,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 }
 
 export function validateOAuthProviderMetadataDocument(metadata: Record<string, unknown>, config: OAuthProviderAuthority): void {
-  exactString(metadata.issuer, config.oauthIssuer.toString(), 'issuer');
+  exactString(metadata.issuer, config.oauthIssuerIdentifier, 'issuer');
   exactUrl(metadata.authorization_endpoint, config.oauthAuthorizationEndpoint, 'authorization_endpoint');
   exactUrl(metadata.token_endpoint, config.oauthTokenEndpoint, 'token_endpoint');
   if (config.oauthVerificationMode === 'jwks') {

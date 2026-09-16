@@ -45,7 +45,7 @@ export async function runOAuthProviderPreflight(
   return {
     schemaVersion: 1,
     generatedAtUtc: new Date().toISOString(),
-    issuer: authority.oauthIssuer.toString(),
+    issuer: authority.oauthIssuerIdentifier,
     metadataUrl: verified.discoveryUrl,
     pkce: 'S256',
     registrationMode: verified.registrationMode,
@@ -72,7 +72,8 @@ export function validateProviderMetadata(
   return { registrationMode: authority.oauthRegistrationMode };
 }
 function authorityFromConfig(config: OAuthProviderConfig): OAuthProviderAuthority {
-  const issuer = strictHttps(config.issuer, 'OAuth issuer');
+  const issuerIdentifier = requiredValue(config.issuer, 'OAuth issuer');
+  const issuer = strictHttps(issuerIdentifier, 'OAuth issuer');
   const authorization = strictHttps(config.authorizationEndpoint, 'OAuth authorization endpoint');
   const token = strictHttps(config.tokenEndpoint, 'OAuth token endpoint');
   const verification = verificationMode(config.verificationMode);
@@ -85,6 +86,7 @@ function authorityFromConfig(config: OAuthProviderConfig): OAuthProviderAuthorit
   if (readScope === writeScope) throw new Error('OAuth read and write scopes must be distinct.');
   return {
     oauthIssuer: issuer,
+    oauthIssuerIdentifier: issuerIdentifier,
     oauthAuthorizationEndpoint: authorization,
     oauthTokenEndpoint: token,
     oauthIntrospectionEndpoint: introspection,

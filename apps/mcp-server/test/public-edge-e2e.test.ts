@@ -108,7 +108,7 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
   assert.equal(metadata.status, 200, metadata.body);
   const document = JSON.parse(metadata.body) as Record<string, unknown>;
   assert.equal(document.resource, 'https://edge.operator-runtime.dev/mcp');
-  assert.deepEqual(document.authorization_servers, ['https://login.operator-runtime.dev/']);
+  assert.deepEqual(document.authorization_servers, ['https://login.operator-runtime.dev']);
 
   for (const [pagePath, expected] of [
     ['/', 'SPLCART Operator'],
