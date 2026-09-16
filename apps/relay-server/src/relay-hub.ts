@@ -208,7 +208,7 @@ export class RelayHub {
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
-        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey));
+        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey, request.requiredCapabilities ?? []));
     } catch (error) {
       if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
         throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
@@ -398,7 +398,8 @@ export class RelayHub {
     const [next] = await this.#deliveries.pending(deviceId, 1);
     if (!next) return;
     if (!next.authority) throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Pending relay delivery has no durable authorization generation.');
-    await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+    if (next.requiredCapabilities === undefined) throw new OperatorError('RELAY_DELIVERY_CAPABILITIES_MISSING', 'Pending relay delivery has no durable capability requirements.');
+    await this.#assertDispatchAuthority(next.authority, connection.sessionId, next.requiredCapabilities);
     connection.inFlightSeq = next.seq;
     try {
       send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });

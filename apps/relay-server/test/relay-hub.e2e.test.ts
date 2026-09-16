@@ -210,6 +210,63 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
+test('queued delivery is not replayed after reconnect loses a required signed capability', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-queued-cap-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-queued-cap-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'queued-cap-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const membership = (await accounts.listDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+  assert.ok(membership);
+
+  const queued = await deliveries.enqueue(
+    device.deviceId,
+    'action',
+    { action: { id: 'queued-git', capability: 'git.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } } },
+    { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration },
+    undefined,
+    ['git.write']
+  );
+
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
+    ttlMs: 60_000
+  })).token;
+
+  const seen: string[] = [];
+  let client!: RelayClient;
+  client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async (delivery) => { seen.push(delivery.id); },
+    sleep: async () => { client.stop(); }
+  });
+  await client.run();
+
+  assert.deepEqual(seen, []);
+  assert.deepEqual(await hub.deliveryCursor(device.deviceId), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
+  const [stillPending] = await deliveries.pending(device.deviceId);
+  assert.equal(stillPending?.id, queued.id);
+  assert.deepEqual(stillPending?.requiredCapabilities, ['git.write']);
+});
+
 test('account release invalidates the live socket before a concurrent dispatch can route', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-release-race-authority-');
   const deviceState = await tempDir(t, 'operator-relay-release-race-device-');
