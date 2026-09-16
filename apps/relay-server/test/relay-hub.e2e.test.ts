@@ -210,7 +210,7 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
-test('capability downgrade retires an incompatible queued head and keeps the same reconnected client usable', async (t) => {
+test('capability downgrade retires an incompatible queued head and keeps the same reconnected client usable', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-queued-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-queued-cap-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -299,7 +299,7 @@ test('capability downgrade retires an incompatible queued head and keeps the sam
   assert.equal((await deliveries.retained(device.deviceId, compatible.seq))?.status, 'acked');
 });
 
-test('stale downgraded session cannot retire work after a restored-capability session supersedes it', async (t) => {
+test('stale downgraded session cannot retire work after a restored-capability session supersedes it', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-cap-supersede-authority-');
   const lowState = await tempDir(t, 'operator-relay-cap-supersede-low-');
   const highState = await tempDir(t, 'operator-relay-cap-supersede-high-');
@@ -341,6 +341,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
   let finishRetirement!: () => void;
   const retirementEntered = new Promise<void>((resolve) => { enterRetirement = resolve; });
   const retirementGate = new Promise<void>((resolve) => { releaseRetirement = resolve; });
+  t.after(() => releaseRetirement());
   const retirementFinished = new Promise<void>((resolve) => { finishRetirement = resolve; });
   let retirementResult = -1;
   (deliveries as any).expireUnroutableHeads = async (...args: any[]) => {
@@ -353,6 +354,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
 
   let releaseLowReconnect!: () => void;
   const lowReconnectGate = new Promise<void>((resolve) => { releaseLowReconnect = resolve; });
+  t.after(() => releaseLowReconnect());
   const lowClient = new RelayClient({
     stateDir: lowState,
     url: `ws://127.0.0.1:${port}/device`,
@@ -365,12 +367,14 @@ test('stale downgraded session cannot retire work after a restored-capability se
     sleep: async () => { await lowReconnectGate; }
   });
   const lowRun = lowClient.run();
+  t.after(() => lowClient.stop());
   await retirementEntered;
 
   let highDeliverySeen!: () => void;
   let releaseHighDelivery!: () => void;
   const highDeliveryStarted = new Promise<void>((resolve) => { highDeliverySeen = resolve; });
   const highDeliveryGate = new Promise<void>((resolve) => { releaseHighDelivery = resolve; });
+  t.after(() => releaseHighDelivery());
   const seen: string[] = [];
   const highClient = new RelayClient({
     stateDir: highState,
@@ -388,6 +392,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
     sleep: async () => undefined
   });
   const highRun = highClient.run();
+  t.after(() => highClient.stop());
   await highDeliveryStarted;
 
   releaseRetirement();
@@ -407,7 +412,7 @@ test('stale downgraded session cannot retire work after a restored-capability se
   await Promise.all([lowRun, highRun]);
 });
 
-test('legacy unroutable queue head is terminalized and the device reconnects for compatible work', async (t) => {
+test('legacy unroutable queue head is terminalized and the device reconnects for compatible work', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-legacy-head-authority-');
   const deviceState = await tempDir(t, 'operator-relay-legacy-head-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -468,6 +473,7 @@ test('legacy unroutable queue head is terminalized and the device reconnects for
     sleep: async () => undefined
   });
   const run = client.run();
+  t.after(() => client.stop());
   await waitFor(async () => capabilityReads >= 2 && (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
   const retired = await deliveries.retained(device.deviceId, 1);
   assert.equal(retired?.status, 'expired');
@@ -488,7 +494,7 @@ test('legacy unroutable queue head is terminalized and the device reconnects for
   await run;
 });
 
-test('dispatch racing a capability downgrade is retired instead of falsely accepted', async (t) => {
+test('dispatch racing a capability downgrade is retired instead of falsely accepted', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-cap-race-authority-');
   const deviceState = await tempDir(t, 'operator-relay-cap-race-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -533,13 +539,16 @@ test('dispatch racing a capability downgrade is retired instead of falsely accep
     sleep: async () => undefined
   });
   const run = client.run();
+  t.after(() => client.stop());
   await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.capabilities.includes('git.write')));
 
   const originalEnqueue = deliveries.enqueue.bind(deliveries);
   let releaseEnqueue!: () => void;
   let enteredEnqueue!: () => void;
   const entered = new Promise<void>((resolve) => { enteredEnqueue = resolve; });
-  const gate = new Promise<void>((resolve) => { releaseEnqueue = resolve; });  (deliveries as any).enqueue = async (...args: any[]) => {
+  const gate = new Promise<void>((resolve) => { releaseEnqueue = resolve; });
+  t.after(() => releaseEnqueue());
+  (deliveries as any).enqueue = async (...args: any[]) => {
     enteredEnqueue();
     await gate;
     return await (originalEnqueue as any)(...args);
