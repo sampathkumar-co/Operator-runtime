@@ -14,6 +14,7 @@ This register records gaps discovered by the adversarial release-certification p
 | FG-008 | P2-release | BLOCKED-EXTERNAL | Real ChatGPT end-to-end read/write workflow has not run through production OAuth -> MCP -> relay -> paired PC. | Connect the draft in ChatGPT and execute at least one read-only and one write/approval flow, then revoke/reconnect and verify failure/recovery behavior. |
 | FG-009 | P2-release | BLOCKED-EXTERNAL | Publisher identity verification state is not proven. | Complete individual or business verification in the OpenAI Platform Dashboard for the exact directory publisher name. |
 | FG-010 | P3 | DOCUMENTED | Operator's convenience mirror at `/.well-known/oauth-authorization-server` does not echo `token_endpoint_auth_methods_supported`. | Not a blocker: protected-resource metadata points to `https://auth.splcart.in`, whose authoritative discovery advertises `none` and other accepted methods. Consider mirroring it in a later cleanup release. |
+| FG-011 | P1-release | BLOCKED-EXTERNAL | The documented clean-machine runtime `@mecrod/operator@1.0.0` is not published; npm registry returns E404 and this machine has no authenticated npm session to prove `@mecrod` scope ownership. | Use only `.github/workflows/npm-remote-release.yml` from green `main`: authenticate/configure the npm publisher or `NPM_TOKEN`, prove control of the `@mecrod` scope, dispatch the provenance release for tag `latest`, then verify registry install + `doctor` from a clean machine. Do not substitute a local ad-hoc publish. |
 
 ## Closed production drift
 

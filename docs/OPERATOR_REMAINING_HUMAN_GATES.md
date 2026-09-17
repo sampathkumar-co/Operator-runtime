@@ -123,7 +123,22 @@ Run from the connected draft using only the disposable reviewer fixture:
 
 For the write cases independently verify the local filesystem/Git postcondition. For every case confirm the public result excludes relay tokens, device private material, provider diagnostics and unnecessary host identifiers.
 
-## H8 — Submit
+## H8 — Publish the clean-machine runtime
+
+The registry currently returns E404 for `@mecrod/operator`; version `1.0.0` is not public yet. Do not run an ad-hoc local `npm publish`.
+
+Approved publication path:
+
+1. configure an npm publisher that controls the `@mecrod` user/organization scope;
+2. install the publish credential as the repository `NPM_TOKEN`/approved trusted-publishing identity without placing it in source or logs;
+3. dispatch `.github/workflows/npm-remote-release.yml` from exact green `main` with `npm_tag=latest`;
+4. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and provenance publish;
+5. from a clean Windows x64 machine verify `npx @mecrod/operator@latest doctor`;
+6. start `npx @mecrod/operator@latest remote --root <reviewer-demo-project>` and confirm the pairing code/relay path.
+
+Public npm publication is an external release action and must be explicitly authorized by the owner before dispatch.
+
+## H9 — Submit
 
 Before selecting **Submit for Review**, confirm:
 

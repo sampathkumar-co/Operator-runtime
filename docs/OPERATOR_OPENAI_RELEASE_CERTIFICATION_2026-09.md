@@ -97,6 +97,7 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 4. OpenAI Platform individual/business verification for the chosen publisher name.
 5. Portal domain verification if OpenAI issues a challenge token; never synthesize the token.
 6. OpenAI **Scan Tools** against the exact production endpoint, followed by reconciliation of the imported 10-tool snapshot.
+7. Public npm runtime publication through the provenance release workflow, followed by a clean-machine `doctor` and reviewer-root `remote` startup verification.
 
 Final submission itself is an external publication action and is not part of this certification pass unless explicitly authorized.
 

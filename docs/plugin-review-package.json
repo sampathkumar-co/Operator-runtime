@@ -124,7 +124,9 @@
     "reviewerCredentials": "BLOCKED_HUMAN: provision a disposable reviewer identity outside Git; use reviewer-only one-factor policy with two-factor default for normal users.",
     "publisherIdentity": "BLOCKED_OPENAI_PLATFORM: complete individual or business verification for the publishing name.",
     "toolScan": "BLOCKED_OPENAI_PORTAL: run Scan Tools against exact production MCP endpoint after draft creation.",
-    "demoRecording": "NOT_REQUIRED_BY_CURRENT_OPENAI_DOCS_OPTIONAL_IF_REQUESTED"
+    "demoRecording": "NOT_REQUIRED_BY_CURRENT_OPENAI_DOCS_OPTIONAL_IF_REQUESTED",
+    "npmRuntimePublication": "BLOCKED_EXTERNAL_RELEASE_ACTION: @mecrod/operator@1.0.0 returns npm E404; publish only through the provenance-enabled main-branch release workflow after npm scope/auth is configured.",
+    "reviewerFixture": "STAGED_LOCAL_AWAITING_IDENTITY_AND_PAIRING: deterministic non-sensitive demo project baseline commit ab658c353fc3e0ce79d71e2968f53eedbc247537; reset helper preserves one known modified file."
   },
   "releaseCandidate": {
     "name": "OCC-3M",

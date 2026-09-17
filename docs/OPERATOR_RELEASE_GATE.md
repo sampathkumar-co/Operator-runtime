@@ -33,8 +33,8 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G22 Legal / public docs | PASS | `/privacy`, `/terms`, `/support` return 200, are deployment-specific and placeholder-free, and expose support/security-contact guidance. |
 | G23 Real ChatGPT E2E | BLOCKED | Requires a ChatGPT plugin draft/connection plus completed OAuth login; no published/installed SPLCART Operator plugin exists yet. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
-| G25 Reviewer simulation | BLOCKED | Public pages, discovery, callback and failure paths pass. An authenticated reviewer fixture/account that works without MFA/SMS/email confirmation is still required. |
-| G26 Submission package | BLOCKED | Tool/test package is structurally ready, but publisher verification, portal domain challenge, Scan Tools, reviewer credentials and authenticated E2E remain outstanding. |
+| G25 Reviewer simulation | BLOCKED | Public pages, discovery, callback and failure paths pass. The deterministic reviewer project is staged, but an authenticated reviewer identity/pairing is still required; the documented npm runtime is also not yet publicly installable. |
+| G26 Submission package | BLOCKED | Tool/test package is structurally ready, but npm runtime publication, publisher verification, portal domain challenge, Scan Tools, reviewer credentials and authenticated E2E remain outstanding. |
 
 ## Remaining blocking actions
 
@@ -43,7 +43,8 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 3. Complete OpenAI Platform individual/business verification for the exact publisher name to be submitted.
 4. Create the OpenAI plugin draft; if the portal issues a domain challenge, set only the exact token through `OPENAI_APPS_CHALLENGE_TOKEN`, reload the edge environment, and verify the exact well-known response.
 5. Run **Scan Tools**, reconcile the imported 10-tool snapshot with the server metadata, then run a real ChatGPT read + write workflow through OAuth, relay and paired PC.
-6. Submit only after G10, G11, G23, G24, G25 and G26 change to PASS.
+6. Publish `@mecrod/operator@1.0.0` only through the provenance-enabled `NPM Remote Release` workflow after npm scope ownership/auth is configured; verify a clean-machine `npx ... doctor` and `remote --root <fixture>`.
+7. Submit only after G10, G11, G23, G24, G25 and G26 change to PASS.
 
 ## OCC-3M merge evidence
 

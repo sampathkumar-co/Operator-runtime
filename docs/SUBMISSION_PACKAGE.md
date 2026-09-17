@@ -113,6 +113,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
+- `@mecrod/operator@1.0.0` is published through the provenance release workflow and clean-machine `doctor`/reviewer-root startup pass;
 - business/developer identity is verified in the OpenAI Platform;
 - production Windows release is signed by the final trusted certificate;
 - all countries/regions are supported;
@@ -130,6 +131,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;
 - the exact five positive and three negative cases are reproducible;
+- the reviewer demo fixture is reset to baseline before the review run and the local runtime is installed from the public npm package, not a source checkout;
 - country/region availability is limited to places where support/legal obligations are ready;
 - release notes describe this as the initial public submission.
 
