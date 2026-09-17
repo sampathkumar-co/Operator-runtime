@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { VsCodeProvider } from '../src/capabilities/vscode.ts';
+import { VsCodeProvider, candidateVsCodeExecutablePaths, resolveVsCodeCliScript } from '../src/capabilities/vscode.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -159,4 +159,31 @@ test('VS Code data directory inside project is denied before filesystem mutation
   assert.equal(result.error?.code, 'VSCODE_DATA_DIR_INSIDE_PROJECT_DENIED');
   await assert.rejects(fs.access(path.join(root, '.operator-vscode')));
   assert.equal((await calls(fake.logPath)).length, 0);
+});
+
+test('VS Code discovery prefers bounded native install roots without trusting code.cmd', () => {
+  const paths = candidateVsCodeExecutablePaths({
+    LOCALAPPDATA: 'C:\\Users\\Test\\AppData\\Local',
+    PROGRAMFILES: 'C:\\Program Files',
+    PROGRAMW6432: 'C:\\Program Files'
+  });
+  assert.deepEqual(paths, [
+    'C:\\Users\\Test\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe',
+    'C:\\Program Files\\Microsoft VS Code\\Code.exe'
+  ]);
+});
+
+test('VS Code native CLI resolver accepts one bounded versioned cli.js and rejects ambiguity', async (t) => {
+  const install = await tempDir(t, 'operator-vscode-native-layout-');
+  const code = path.join(install, 'Code.exe');
+  await fs.writeFile(code, 'placeholder');
+  const first = path.join(install, '0123456789', 'resources', 'app', 'out');
+  await fs.mkdir(first, { recursive: true });
+  await fs.writeFile(path.join(first, 'cli.js'), 'console.log("ok")');
+  assert.equal(await resolveVsCodeCliScript(code), path.join(first, 'cli.js'));
+
+  const second = path.join(install, 'abcdef1234', 'resources', 'app', 'out');
+  await fs.mkdir(second, { recursive: true });
+  await fs.writeFile(path.join(second, 'cli.js'), 'console.log("stale")');
+  await assert.rejects(resolveVsCodeCliScript(code), /Multiple VS Code CLI entrypoints/);
 });

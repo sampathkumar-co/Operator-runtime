@@ -161,3 +161,25 @@ test('managed browser provider recovers a dead CDP endpoint through the launcher
   assert.equal((result.output as any).tabs[0].id, 'managed-1');
   assert.equal(result.evidence.some((item) => item.kind === 'browser_lifecycle' && item.status === 'pass'), true);
 });
+
+
+test('managed browser ignores healthy non-managed profile endpoints unless explicitly configured', async (t) => {
+  const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-user-profile-cdp-'));
+  const managedDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-managed-profile-'));
+  t.after(() => fs.rm(profileDir, { recursive: true, force: true }));
+  t.after(() => fs.rm(managedDir, { recursive: true, force: true }));
+  const endpoint = await listen(t, (req, res) => {
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(chromiumVersionResponse(req)));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const port = Number(new URL(endpoint).port);
+  await fs.writeFile(path.join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/user-profile\n`);
+
+  const launcher = new ManagedChromiumLauncher({ endpoint: 'http://127.0.0.1:1', autoLaunch: false, dataDir: managedDir });
+  t.after(() => launcher.close());
+  await assert.rejects(launcher.ensureEndpoint(), /managed auto-launch is disabled/);
+});

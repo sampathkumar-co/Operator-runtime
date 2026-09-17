@@ -254,7 +254,8 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
       }
       values.push(path.resolve(candidate));
     }
-    values.push(...candidateBrowserDataDirs(process.platform, process.env, os.homedir()));
+    // Do not auto-attach to normal Chrome/Edge user profiles. A configured CDP endpoint
+    // or an explicit discoveryDataDirs entry is required for non-managed profiles.
     return values;
   }
 

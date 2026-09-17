@@ -202,11 +202,65 @@ function safeEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
+export function candidateVsCodeExecutablePaths(source: NodeJS.ProcessEnv): string[] {
+  const candidates: string[] = [];
+  const add = (value: string | undefined) => {
+    if (!value || !path.win32.isAbsolute(value)) return;
+    const normalized = path.win32.normalize(value);
+    if (!candidates.some((item) => item.toLowerCase() === normalized.toLowerCase())) candidates.push(normalized);
+  };
+  if (source.LOCALAPPDATA) add(path.win32.join(source.LOCALAPPDATA, 'Programs', 'Microsoft VS Code', 'Code.exe'));
+  for (const root of [source.PROGRAMFILES, source['PROGRAMFILES(X86)'], source.PROGRAMW6432]) {
+    if (root) add(path.win32.join(root, 'Microsoft VS Code', 'Code.exe'));
+  }
+  return candidates;
+}
+
+function resolveVsCodeExecutable(executable: string, environment: NodeJS.ProcessEnv): string {
+  if (process.platform === 'win32' && executable.trim().toLowerCase() === 'code') {
+    for (const candidate of candidateVsCodeExecutablePaths(environment)) {
+      try {
+        return resolveTrustedExecutable(candidate, environment);
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'EXECUTABLE_NOT_FOUND') throw error;
+      }
+    }
+  }
+  return resolveTrustedExecutable(executable, environment);
+}
+
+export async function resolveVsCodeCliScript(codeExecutable: string): Promise<string> {
+  const realExecutable = await fs.realpath(codeExecutable);
+  const installRoot = path.dirname(realExecutable);
+  const realRoot = await fs.realpath(installRoot);
+  const entries = await fs.readdir(installRoot, { withFileTypes: true });
+  const candidates: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[0-9a-f]{10,40}$/i.test(entry.name)) continue;
+    const candidate = path.join(installRoot, entry.name, 'resources', 'app', 'out', 'cli.js');
+    try {
+      const stat = await fs.lstat(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      const realCandidate = await fs.realpath(candidate);
+      if (!inside(realCandidate, realRoot)) continue;
+      candidates.push(realCandidate);
+    } catch { /* stale or incomplete installation directory */ }
+  }
+  if (candidates.length === 0) throw new OperatorError('VSCODE_CLI_NOT_FOUND', 'VS Code native executable was found but its bounded CLI entrypoint was not.');
+  if (candidates.length > 1) throw new OperatorError('VSCODE_CLI_AMBIGUOUS', 'Multiple VS Code CLI entrypoints were found; complete or clean up the VS Code update first.');
+  return candidates[0]!;
+}
+
 async function runCode(executable: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string; truncated: boolean }> {
+  const baseEnvironment = safeEnvironment();
+  const codeExecutable = resolveVsCodeExecutable(executable, baseEnvironment);
+  const nativeCli = process.platform === 'win32' && path.win32.basename(codeExecutable).toLowerCase() === 'code.exe'
+    ? await resolveVsCodeCliScript(codeExecutable)
+    : undefined;
+  const environment = nativeCli ? { ...baseEnvironment, ELECTRON_RUN_AS_NODE: '1' } : baseEnvironment;
+  const invocationArgs = nativeCli ? [nativeCli, ...args] : args;
   return await new Promise((resolve, reject) => {
-    const environment = safeEnvironment();
-    const codeExecutable = resolveTrustedExecutable(executable, environment);
-    const child = spawn(codeExecutable, args, {
+    const child = spawn(codeExecutable, invocationArgs, {
       cwd,
       shell: false,
       windowsHide: true,
