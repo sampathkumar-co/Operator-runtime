@@ -42,7 +42,11 @@ export class GitProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    if (!['git.status', 'git.diff', 'git.rev-parse'].includes(action.capability)) return false;
+    return ['git.status', 'git.diff', 'git.rev-parse'].includes(action.capability);
+  }
+
+  advertises(action: ActionRequest): boolean {
+    if (!this.supports(action)) return false;
     try { resolveSupportedGitExecutable(process.env); return true; } catch { return false; }
   }
 

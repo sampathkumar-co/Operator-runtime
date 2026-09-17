@@ -55,7 +55,11 @@ export class GitCheckpointProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    if (!['git.checkpoint.create', 'git.checkpoint.inspect', 'git.checkpoint.restore'].includes(action.capability)) return false;
+    return ['git.checkpoint.create', 'git.checkpoint.inspect', 'git.checkpoint.restore'].includes(action.capability);
+  }
+
+  advertises(action: ActionRequest): boolean {
+    if (!this.supports(action)) return false;
     try { resolveSupportedGitExecutable(gitEnvironment({})); return true; } catch { return false; }
   }
 

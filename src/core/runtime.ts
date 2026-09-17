@@ -24,7 +24,7 @@ export class OperatorRuntime {
         input: {},
         provenance: { kind: 'runtime' }
       };
-      if (await this.router.supports(action)) supported.push(capability);
+      if (await this.router.advertises(action)) supported.push(capability);
     }
     return supported;
   }

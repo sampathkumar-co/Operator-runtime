@@ -38,6 +38,14 @@ export class CapabilityRouter {
     return false;
   }
 
+  async advertises(action: ActionRequest): Promise<boolean> {
+    for (const provider of this.#providers) {
+      if (!await provider.supports(action)) continue;
+      if (!provider.advertises || await provider.advertises(action)) return true;
+    }
+    return false;
+  }
+
   async rank(action: ActionRequest): Promise<Array<{ provider: CapabilityProvider; score: number }>> {
     const candidates: Array<{ provider: CapabilityProvider; score: number }> = [];
     for (const provider of this.#providers) {

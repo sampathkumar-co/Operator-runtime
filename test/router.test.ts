@@ -30,3 +30,32 @@ test('runtime advertises only locally supported capabilities in stable order', a
   const supported = await runtime.supportedCapabilities(['git.diff', 'file.read', 'git.status', 'file.read']);
   assert.deepEqual(supported, ['file.read', 'git.status']);
 });
+
+test('runtime keeps unavailable claimed capabilities routable while omitting them from advertisement', async () => {
+  const runtime = new OperatorRuntime();
+  runtime.register({
+    ...provider('git.mock', 0.99, 0.05),
+    supports: (action) => action.capability === 'git.status',
+    advertises: () => false,
+    execute: async (action) => ({
+      ok: false,
+      capability: action.capability,
+      provider: 'git.mock',
+      evidence: [],
+      error: { code: 'GIT_VERSION_UNSUPPORTED', message: 'Git 2.45+ is required.', retryable: false },
+      durationMs: 0
+    })
+  });
+
+  assert.deepEqual(await runtime.supportedCapabilities(['git.status']), []);
+  const result = await runtime.execute({
+    id: 'git-version-error',
+    capability: 'git.status',
+    risk: 'read',
+    input: {},
+    provenance: { kind: 'runtime' }
+  }, { allowedCapabilities: ['git.status'], allowedRoots: [] });
+  assert.equal(result.ok, false);
+  assert.equal(result.provider, 'git.mock');
+  assert.equal(result.error?.code, 'GIT_VERSION_UNSUPPORTED');
+});

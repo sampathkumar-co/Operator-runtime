@@ -42,7 +42,11 @@ export class GitWriteProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    if (action.capability !== 'git.write') return false;
+    return action.capability === 'git.write';
+  }
+
+  advertises(action: ActionRequest): boolean {
+    if (!this.supports(action)) return false;
     try { resolveSupportedGitExecutable(gitEnvironment({})); return true; } catch { return false; }
   }
   score(): CapabilityScore { return SCORE; }
