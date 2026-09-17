@@ -185,13 +185,14 @@ export class RelayHub {
   }
 
   async dispatch(request: RelayDispatchRequest): Promise<RelayDispatchResult> {
+    const requiredCapabilities = request.requiredCapabilities ?? [];
     const memberships = await this.#accounts.listDevices(request.accountId);
     const owned = new Set(memberships.map((membership) => membership.deviceId));
     const online = (await this.onlineDevices(request.accountId)).filter((device) => owned.has(device.deviceId));
     const route = await this.#routingFor(request.accountId).resolve({
       explicitDeviceId: request.explicitDeviceId,
       projectKey: request.projectKey,
-      requiredCapabilities: request.requiredCapabilities ?? []
+      requiredCapabilities
     }, online);
     const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
     if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
@@ -201,25 +202,32 @@ export class RelayHub {
       generation: membership.authorityGeneration
     };
     await this.#beforeEnqueue?.({ ...authority });
-    await this.#assertDispatchAuthority(authority, route.sessionId, request.requiredCapabilities ?? []);
+    await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
     const payload = request.kind === 'action'
       ? { ...request.payload, approvalAuthority: { ...authority } }
       : request.payload;
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
-        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey, request.requiredCapabilities ?? []));
+        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey, requiredCapabilities));
     } catch (error) {
       if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
         throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
       }
       throw error;
     }
+    let postEnqueueAuthorityError: unknown;
+    try {
+      await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
+    } catch (error) {
+      postEnqueueAuthorityError = error;
+    }
     await this.#pump(route.deviceId);
     const retained = await this.#deliveries.retained(route.deviceId, delivery.seq);
     if (retained?.status === 'expired') {
       throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
     }
+    if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
     return { route, delivery };
   }
 
