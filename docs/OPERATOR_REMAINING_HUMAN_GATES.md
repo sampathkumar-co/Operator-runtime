@@ -144,13 +144,15 @@ Before choosing the npm publish mechanism, classify the package against npm's cu
 
 Any license/package metadata edit changes the source SHA. Treat the result as a successor candidate to OCC-3M and rerun at minimum candidate identity, package/tarball inspection, supply-chain checks, package smoke install/doctor, clean-machine startup, legal/public-truthfulness review, and final publication-source binding.
 
+Draft PR #22 already implements the policy-neutral release machinery at head `fbd5e24542c81ca4f6bed4a5f8d49cf7f772e2da`: first-release artifact handoff, exact-tarball staging for later versions, `UNLICENSED` fail-closed behavior, shipped-license verification, and conditional dual-use `DISCLOSURE` enforcement. CI #659, Platform Matrix #429, NPM Runtime #98 and Signing Smoke #430 all pass on that exact head. Keep the PR draft until the owner decisions below are applied and the resulting final successor is re-certified.
+
 Approved publication path after that successor is green:
 
 1. configure an npm publisher that controls the `@mecrod` user/organization scope and has 2FA enabled;
 2. because npm requires a package to already exist before `npm stage` can be used, the successor workflow must build/hash/upload the exact first-release tarball without publishing it;
 3. after reviewing the CI artifact/hash, the owner publishes that exact tarball interactively with 2FA. This first-release path is compatible with both ordinary and declared dual-use packages;
 4. after `@mecrod/operator` exists, configure npm Trusted Publishing for this repository/workflow with stage-only permission and use `npm stage publish` for future versions, followed by human 2FA approval;
-5. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and the chosen staged/direct publication action;
+5. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and the applicable artifact-handoff or staged-publication path;
 6. from a clean Windows x64 machine verify `npx @mecrod/operator@latest doctor`;
 7. start `npx @mecrod/operator@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project` and confirm the pairing code/relay path;
 8. after the first package exists, set package access to require 2FA/disallow token publishing where supported, keep the trusted publisher limited to `npm stage publish`, and require human 2FA promotion for future releases.

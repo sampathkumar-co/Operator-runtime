@@ -36,6 +36,14 @@ All fresh post-merge workflows for OCC-3M completed successfully:
 
 A separate CI-equivalent local Windows run built the DPAPI and path-lease native helpers and completed 361 tests with 345 passes, 16 expected skips and zero failures.
 
+## OCC-3N package/publication successor
+
+Draft PR #22 is a narrowly scoped successor to OCC-3M for npm/public-distribution hardening. Its exact head `fbd5e24542c81ca4f6bed4a5f8d49cf7f772e2da` removes automatic direct `npm publish`, defaults the first release to a CI-built immutable tarball + SHA-256 artifact with no registry mutation, and provides exact-tarball staged publication for later versions after the package exists. It also fail-closes public release while `UNLICENSED`, requires the declared license file to ship in the tarball, and requires root `DISCLOSURE` if a later owner decision declares the package dual-use.
+
+Independent GitHub validation on this exact head is green: CI #659, Platform Matrix #429, NPM Remote Runtime CI #98 and Windows Signing Smoke #430 all PASS. Local release tests are 12/12 PASS and the full Windows suite is 361 tests / 345 pass / 16 expected skips / 0 failures with the required path-lease helper wired.
+
+PR #22 deliberately does **not** choose the software license or npm dual-use classification. It remains draft and must not be merged or published until FG-013 and FG-015 are resolved, npm scope ownership/2FA is proven, and affected certification is rerun on the final successor SHA.
+
 ## Production identity and isolation
 
 Production was promoted transactionally from the stale `60813bde...` edge to OCC-3M. Post-deploy inspection proves the running edge uses `operator-public-edge:405be7a0` and the exact image digest above; the production release checkout is clean at the OCC-3M commit.
@@ -101,9 +109,9 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 4. OpenAI Platform individual/business verification for the chosen publisher name.
 5. Portal domain verification if OpenAI issues a challenge token; never synthesize the token.
 6. OpenAI **Scan Tools** against the exact production endpoint, followed by reconciliation of the imported 10-tool snapshot.
-7. Public npm runtime first publication from a CI-built immutable tarball through owner-controlled interactive 2FA, followed by a clean-machine `doctor` and reviewer-root `remote` startup verification.
-8. Owner-approved software licensing for the public npm runtime. OCC-3M currently remains `UNLICENSED`; the license/package metadata fix must produce a successor source candidate and trigger affected recertification before publication.
-9. npm Dual-Use Content Policy classification for the shipped runtime, with the successor package/workflow matching the resulting declaration and 2FA/staged-publishing requirements.
+7. Resolve the remaining owner decisions on green draft successor PR #22: owner-approved software licensing plus explicit npm Dual-Use Content Policy classification, followed by affected recertification on the resulting exact successor SHA.
+8. Prove `@mecrod` scope ownership with 2FA, build the final immutable first-release tarball from the green successor, publish that exact tarball interactively with 2FA, then pass clean-machine `doctor` and reviewer-root `remote` startup verification.
+9. After `@mecrod/operator` exists, configure trusted publishing/staged promotion for future versions and verify the configured repository/workflow identity and stage-only release path.
 
 Final submission itself is an external publication action and is not part of this certification pass unless explicitly authorized.
 
