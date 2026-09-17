@@ -340,7 +340,16 @@ export class RelayHub {
     const sentAt = validIso(String(payload.sentAt ?? ''), 'sentAt');
     if (Math.abs(this.#clock().getTime() - Date.parse(sentAt)) > HELLO_CLOCK_SKEW_MS) throw new OperatorError('RELAY_HELLO_STALE', 'Relay hello timestamp is outside the accepted clock-skew window.');
     validNonce(String(payload.nonce ?? ''));
-    const locallySupportedCapabilities = validCapabilityList(payload.capabilities);
+    if (payload.capabilityBinding !== undefined && payload.capabilityBinding !== 1) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capability-binding negotiation is invalid.');
+    }
+    // During rollout, legacy clients send neither field. A short-lived pre-negotiation client may
+    // send capabilities without the explicit request, so presence of either signal opts into binding.
+    const capabilityBindingRequested = payload.capabilityBinding === 1 || payload.capabilities !== undefined;
+    if (payload.capabilityBinding === 1 && payload.capabilities === undefined) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Capability-binding negotiation requires an explicit capability list.');
+    }
+    const locallySupportedCapabilities = capabilityBindingRequested ? validCapabilityList(payload.capabilities) : [];
     const signature = String(frame.signature ?? '');
     if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello signature is invalid.');
     const token = String(frame.sessionToken ?? '');
@@ -356,7 +365,9 @@ export class RelayHub {
     if (!signatureOk) throw new OperatorError('RELAY_HELLO_SIGNATURE_INVALID', 'Relay hello signature could not be verified.');
 
     const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
-    const capabilities = locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability));
+    const capabilities = capabilityBindingRequested
+      ? locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability))
+      : [...authorizedCapabilities].sort();
     const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
     const sessionId = crypto.randomUUID();
     const now = this.#clock().toISOString();
@@ -373,8 +384,7 @@ export class RelayHub {
       resumeFromSeq: reconciled.lastAckedSeq,
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
       heartbeatMs: HEARTBEAT_MS,
-      capabilityBinding: 1,
-      capabilities: [...capabilities]
+      ...(capabilityBindingRequested ? { capabilityBinding: 1, capabilities: [...capabilities] } : {})
     });
     return connection;
   }

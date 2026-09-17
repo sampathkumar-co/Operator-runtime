@@ -210,6 +210,70 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
+test('new relay preserves legacy scope routing for clients without capability-binding negotiation', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-legacy-rollout-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-legacy-rollout-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'legacy-rollout-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
+    ttlMs: 60_000
+  })).token;
+
+  const identity = await deviceIdentity.loadOrCreate('Legacy Rollout Device');
+  const socket = new WebSocket(`ws://127.0.0.1:${port}/device`);
+  t.after(() => { try { socket.close(); } catch { /* noop */ } });
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+  const payload = {
+    protocol: 1,
+    deviceId: identity.deviceId,
+    deviceName: identity.deviceName,
+    fingerprint: identity.fingerprint,
+    resumeAfterSeq: 0,
+    pendingRecovery: null,
+    sentAt: new Date().toISOString(),
+    nonce: crypto.randomBytes(24).toString('base64url')
+  };
+  const signature = await deviceIdentity.sign(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const welcomePromise = new Promise<any>((resolve, reject) => {
+    socket.once('message', (data) => {
+      try { resolve(JSON.parse(String(data))); } catch (error) { reject(error); }
+    });
+    socket.once('error', reject);
+  });
+  socket.send(JSON.stringify({ type: 'hello', payload, signature, sessionToken: token }));
+  const welcome = await welcomePromise;
+  assert.equal(welcome.type, 'welcome');
+  assert.equal(Object.hasOwn(welcome, 'capabilityBinding'), false);
+  assert.equal(Object.hasOwn(welcome, 'capabilities'), false);
+
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).length === 1);
+  assert.deepEqual((await hub.onlineDevices(account.accountId))[0]?.capabilities, ['file.read', 'git.write']);
+  const dispatched = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['git.write'],
+    kind: 'task.dispatch',
+    payload: { compatibility: 'legacy-client-new-relay' }
+  });
+  assert.equal(dispatched.route.deviceId, device.deviceId);
+});
+
 test('capability downgrade retires an incompatible queued head and keeps the same reconnected client usable', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-queued-cap-authority-');
   const deviceState = await tempDir(t, 'operator-relay-queued-cap-device-');

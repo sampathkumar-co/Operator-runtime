@@ -199,7 +199,7 @@ export class RelayClient {
       fingerprint: identity.fingerprint,
       resumeAfterSeq: state.lastAckedServerSeq,
       pendingRecovery: state.processing ? { seq: state.processing.seq, id: state.processing.id } : null,
-      capabilities: [...supportedCapabilities],
+      ...(this.#requireCapabilityBinding ? { capabilityBinding: 1 as const, capabilities: [...supportedCapabilities] } : {}),
       sentAt: this.#clock().toISOString(),
       nonce: crypto.randomBytes(24).toString('base64url')
     };
@@ -271,13 +271,16 @@ export class RelayClient {
   async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<void> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
     if (this.#requireCapabilityBinding) {
-      if (frame.capabilityBinding !== 1) {
-        throw new OperatorError('RELAY_CAPABILITY_BINDING_REQUIRED', 'Relay did not acknowledge signed local capability binding.', { retryable: false });
-      }
-      const effective = validateSupportedCapabilities(frame.capabilities ?? []);
-      const advertised = new Set(supportedCapabilities);
-      if (effective.some((capability) => !advertised.has(capability))) {
-        throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
+      const legacyRelay = frame.capabilityBinding === undefined && frame.capabilities === undefined;
+      if (!legacyRelay) {
+        if (frame.capabilityBinding !== 1 || frame.capabilities === undefined) {
+          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay returned a partial or invalid capability-binding negotiation.', { retryable: false });
+        }
+        const effective = validateSupportedCapabilities(frame.capabilities);
+        const advertised = new Set(supportedCapabilities);
+        if (effective.some((capability) => !advertised.has(capability))) {
+          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
+        }
       }
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
