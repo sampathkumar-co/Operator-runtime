@@ -80,6 +80,26 @@ export class DeviceIdentityStore {
     return publicIdentity(stored);
   }
 
+  async loadExisting(): Promise<PublicDeviceIdentity | null> {
+    try { return publicIdentity(await this.#readAndMigrate()); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  async erase(): Promise<boolean> {
+    try {
+      const stat = await fs.lstat(this.#file);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new OperatorError('DEVICE_IDENTITY_ERASE_UNSAFE', 'Device identity reset refuses non-file or symbolic-link targets.');
+      await fs.rm(this.#file, { force: true });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+
   async sign(payload: Uint8Array): Promise<string> {
     let stored: StoredIdentity;
     try { stored = await this.#readAndMigrate(); }

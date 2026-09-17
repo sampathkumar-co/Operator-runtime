@@ -134,7 +134,7 @@ export async function bootstrapLocalReleaseForCi({ root, metadataPath, artifactP
 export async function verifyInstalledRelease(trustedSigners) {
   assertSupportedWindows();
   const installed = await getInstalledOperatorPackage();
-  if (!installed) throw new Error('Operator.Runtime is not installed. Run setup first.');
+  if (!installed) throw new Error('SPLCART.SplcartOperator is not installed. Run setup first.');
   const signers = trustedSigners ?? await trustedProductionSigners();
   const signature = await verifyInstalledOperatorSignature(installed);
   requireTrustedSigner(signature, signers);

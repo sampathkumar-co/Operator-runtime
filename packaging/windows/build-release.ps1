@@ -1,10 +1,15 @@
 param(
-  [string]$Version = '0.1.0.0',
-  [string]$Publisher = 'CN=Operator Development',
-  [string]$IdentityName = 'Operator.Runtime',
+  [string]$Version = '1.0.0.0',
+  [string]$Publisher = 'CN=6F726FAE-9AD9-4643-A991-7E86CBD7C967',
+  [string]$IdentityName = 'SPLCART.SplcartOperator',
   [string]$UpdateBaseUri = 'https://updates.example.invalid/operator',
   [string]$OutputDir = '',
-  [string]$NodeExe = ''
+  [string]$NodeExe = '',
+  [string]$MakeAppxExe = '',
+  [string]$AuditPrebuiltNativeDir = '',
+  [string]$AuditLauncherSha256 = '',
+  [string]$AuditUiaSha256 = '',
+  [string]$AuditDpapiSha256 = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,12 +48,13 @@ function New-Logo([string]$Path, [int]$Size) {
   } finally { $bitmap.Dispose() }
 }
 
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must be a four-part MSIX version such as 0.1.0.0.' }
+if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must be a four-part MSIX version such as 1.0.0.0.' }
 $base = [Uri]$UpdateBaseUri
 if ($base.Scheme -ne 'https' -or -not $base.IsAbsoluteUri -or $base.UserInfo -or $base.Query -or $base.Fragment) { throw 'UpdateBaseUri must be a credential-free absolute HTTPS URI without query or fragment.' }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $OutputDir) { $OutputDir = Join-Path $repo 'artifacts\windows-release' }
+elseif (-not [IO.Path]::IsPathRooted($OutputDir)) { $OutputDir = Join-Path $repo $OutputDir }
 $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $stage = Join-Path $OutputDir 'staging'
 Remove-Item -LiteralPath $OutputDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -57,21 +63,62 @@ New-Item -ItemType Directory -Force -Path $stage, (Join-Path $stage 'runtime'), 
 if (-not $NodeExe) { $NodeExe = (Get-Command node.exe -ErrorAction Stop).Source }
 $NodeExe = (Resolve-Path $NodeExe).Path
 if (-not (Test-Path -LiteralPath $NodeExe -PathType Leaf)) { throw 'NodeExe is not a file.' }
+$certifiedNodeVersion = 'v22.23.2'
+$certifiedNodeSha256 = '0d0f5e39f9f3d9587bc19f73eab3c2c9c4903fd02d6dbf9c853dd81b3d95fad4'
+$nodeVersion = (& $NodeExe --version).Trim()
+Assert-Exit 'Node runtime version query'
+if ($nodeVersion -ne $certifiedNodeVersion) { throw "NodeExe must be the certified $certifiedNodeVersion runtime; got $nodeVersion." }
+$nodeSha256 = (Get-FileHash -LiteralPath $NodeExe -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($nodeSha256 -ne $certifiedNodeSha256) { throw 'NodeExe SHA-256 does not match the certified Windows x64 Node runtime.' }
+$npmCli = Join-Path (Split-Path -Parent $NodeExe) 'node_modules\npm\bin\npm-cli.js'
+if (-not (Test-Path -LiteralPath $npmCli -PathType Leaf)) { throw 'Certified Node distribution is missing npm-cli.js.' }
 
-Write-Host '[operator-release] compiling native launcher from committed Cargo.lock'
-& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-launcher\Cargo.toml') --release
-Assert-Exit 'windows launcher build'
-Write-Host '[operator-release] compiling Windows UIA sidecar from committed Cargo.lock'
-& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-uia\Cargo.toml') --release
-Assert-Exit 'windows UIA build'
-Write-Host '[operator-release] compiling Windows DPAPI helper from committed Cargo.lock'
-& cargo build --locked --manifest-path (Join-Path $repo 'native\windows-dpapi\Cargo.toml') --release
-Assert-Exit 'windows DPAPI build'
+$auditHashArgs = @($AuditLauncherSha256, $AuditUiaSha256, $AuditDpapiSha256)
+$useAuditPrebuiltNative = -not [string]::IsNullOrWhiteSpace($AuditPrebuiltNativeDir)
+if (-not $useAuditPrebuiltNative -and ($auditHashArgs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+  throw 'Audit native hashes require -AuditPrebuiltNativeDir.'
+}
+if ($useAuditPrebuiltNative) {
+  if ($env:CI) { throw 'AuditPrebuiltNativeDir is local-audit-only and must not be used in CI.' }
+  foreach ($expectedHash in $auditHashArgs) {
+    if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') { throw 'All audit native SHA-256 values are required and must be 64 hex characters.' }
+  }
+  $AuditPrebuiltNativeDir = (Resolve-Path $AuditPrebuiltNativeDir).Path
+  $launcher = Join-Path $AuditPrebuiltNativeDir 'operator-windows-launcher.exe'
+  $uia = Join-Path $AuditPrebuiltNativeDir 'operator-windows-uia.exe'
+  $dpapi = Join-Path $AuditPrebuiltNativeDir 'operator-windows-dpapi.exe'
+  $auditNative = @(@($launcher, $AuditLauncherSha256), @($uia, $AuditUiaSha256), @($dpapi, $AuditDpapiSha256))
+  foreach ($entry in $auditNative) {
+    if (-not (Test-Path -LiteralPath $entry[0] -PathType Leaf)) { throw "Required audit native file missing: $($entry[0])" }
+    $actualHash = (Get-FileHash -LiteralPath $entry[0] -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $entry[1].ToLowerInvariant()) { throw "Audit native SHA-256 mismatch: $($entry[0])" }
+  }
+  Write-Host '[operator-release] using hash-verified local-audit native binaries; CI/source-build path remains unchanged'
+} else {
+  $rustcVersion = (& rustc --version).Trim()
+  Assert-Exit 'Rust compiler version query'
+  if ($rustcVersion -notmatch '^rustc 1\.98\.1 ') { throw "Release build requires certified rustc 1.98.1; got $rustcVersion." }
 
-$launcher = Join-Path $repo 'native\windows-launcher\target\release\operator-windows-launcher.exe'
-$uia = Join-Path $repo 'native\windows-uia\target\release\operator-windows-uia.exe'
-$dpapi = Join-Path $repo 'native\windows-dpapi\target\release\operator-windows-dpapi.exe'
-foreach ($file in @($launcher, $uia, $dpapi, $NodeExe)) {
+  Write-Host '[operator-release] compiling native launcher from committed Cargo.lock'
+  & cargo build --locked --manifest-path (Join-Path $repo 'native\windows-launcher\Cargo.toml') --release
+  Assert-Exit 'windows launcher build'
+  Write-Host '[operator-release] compiling Windows UIA sidecar from committed Cargo.lock'
+  & cargo build --locked --manifest-path (Join-Path $repo 'native\windows-uia\Cargo.toml') --release
+  Assert-Exit 'windows UIA build'
+  Write-Host '[operator-release] compiling Windows DPAPI helper from committed Cargo.lock'
+  & cargo build --locked --manifest-path (Join-Path $repo 'native\windows-dpapi\Cargo.toml') --release
+  Assert-Exit 'windows DPAPI build'
+  $launcher = Join-Path $repo 'native\windows-launcher\target\release\operator-windows-launcher.exe'
+  $uia = Join-Path $repo 'native\windows-uia\target\release\operator-windows-uia.exe'
+  $dpapi = Join-Path $repo 'native\windows-dpapi\target\release\operator-windows-dpapi.exe'
+}
+
+Write-Host '[operator-release] compiling Windows path-lease helper'
+& (Join-Path $repo 'native\windows-path-lease\build.ps1')
+Assert-Exit 'windows path-lease build'
+
+$pathLease = Join-Path $repo 'native\windows-path-lease\target\release\operator-windows-path-lease.exe'
+foreach ($file in @($launcher, $uia, $dpapi, $pathLease, $NodeExe)) {
   if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required release file missing: $file" }
 }
 
@@ -79,14 +126,23 @@ Copy-Item -LiteralPath $launcher -Destination (Join-Path $stage 'Operator.exe')
 Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $stage 'runtime\node.exe')
 Copy-Item -LiteralPath $uia -Destination (Join-Path $stage 'native\operator-windows-uia.exe')
 Copy-Item -LiteralPath $dpapi -Destination (Join-Path $stage 'native\operator-windows-dpapi.exe')
+Copy-Item -LiteralPath $pathLease -Destination (Join-Path $stage 'native\operator-windows-path-lease.exe')
 
 $mcpDeps = Join-Path $OutputDir 'mcp-runtime-deps'
 New-Item -ItemType Directory -Force -Path $mcpDeps | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package.json') -Destination (Join-Path $mcpDeps 'package.json')
 Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package-lock.json') -Destination (Join-Path $mcpDeps 'package-lock.json')
 Write-Host '[operator-release] installing locked MCP production dependencies in isolated staging'
-& npm.cmd ci --ignore-scripts --omit=dev --prefix $mcpDeps
+& $NodeExe $npmCli ci --ignore-scripts --omit=dev --prefix $mcpDeps
 Assert-Exit 'MCP production dependency install'
+
+$nonRuntimeDependencyDirs = @('test', 'tests', 'fixtures', 'benchmark', 'benchmarks', '.github')
+$dependencyRoot = Join-Path $mcpDeps 'node_modules'
+Get-ChildItem -LiteralPath $dependencyRoot -Directory -Recurse -Force |
+  Where-Object { $nonRuntimeDependencyDirs -contains $_.Name } |
+  Sort-Object { $_.FullName.Length } -Descending |
+  ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+Write-Host '[operator-release] pruned non-runtime test/benchmark metadata from production dependencies'
 
 Copy-Item -LiteralPath (Join-Path $repo 'package.json') -Destination (Join-Path $stage 'app\package.json')
 Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination (Join-Path $stage 'app\src') -Recurse
@@ -115,8 +171,8 @@ $manifest = @"
          IgnorableNamespaces="uap uap5 uap10 rescap">
   <Identity Name="$identityXml" Publisher="$publisherXml" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Operator</DisplayName>
-    <PublisherDisplayName>Operator</PublisherDisplayName>
+    <DisplayName>SPLCART Operator</DisplayName>
+    <PublisherDisplayName>SPLCART</PublisherDisplayName>
     <Description>Semantic execution runtime for user-authorized computers.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
     <uap10:PackageIntegrity><uap10:Content Enforcement="on" /></uap10:PackageIntegrity>
@@ -125,7 +181,7 @@ $manifest = @"
   <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
   <Applications>
     <Application Id="Operator" Executable="Operator.exe" uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
-      <uap:VisualElements DisplayName="Operator" Description="Operate authorized computers through semantic, policy-gated capabilities."
+      <uap:VisualElements DisplayName="SPLCART Operator" Description="Operate authorized computers through semantic, policy-gated capabilities."
                           BackgroundColor="transparent" Square44x44Logo="Assets\Square44x44Logo.png" Square150x150Logo="Assets\Square150x150Logo.png" />
       <Extensions>
         <uap5:Extension Category="windows.appExecutionAlias">
@@ -141,8 +197,14 @@ $manifest = @"
 "@
 Write-Utf8NoBom (Join-Path $stage 'AppxManifest.xml') $manifest
 
-$makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" -ErrorAction Stop | Sort-Object FullName -Descending | Select-Object -First 1
-if (-not $makeAppx) { throw 'makeappx.exe was not found in the Windows SDK.' }
+if ($MakeAppxExe) {
+  $MakeAppxExe = (Resolve-Path $MakeAppxExe).Path
+  if (-not (Test-Path -LiteralPath $MakeAppxExe -PathType Leaf)) { throw 'MakeAppxExe is not a file.' }
+  $makeAppx = Get-Item -LiteralPath $MakeAppxExe
+} else {
+  $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" -ErrorAction Stop | Sort-Object FullName -Descending | Select-Object -First 1
+  if (-not $makeAppx) { throw 'makeappx.exe was not found in the Windows SDK; pass -MakeAppxExe to a verified SDK BuildTools copy.' }
+}
 $msixName = "Operator-$Version-x64.msix"
 $msixPath = Join-Path $OutputDir $msixName
 Write-Host "[operator-release] packing $msixName"

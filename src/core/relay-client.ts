@@ -46,6 +46,13 @@ export interface RelayRecoveryContext {
 
 export type RelayRecoveryDecision = 'ack' | 'retry' | 'stop';
 
+export interface RelayExpiredRecoveryContext {
+  processing: RelayRecoveryContext['processing'];
+  expiredThroughSeq: number;
+}
+
+export type RelayExpiredRecoveryDecision = 'ack' | 'stop';
+
 interface RelayState {
   version: 1;
   lastAckedServerSeq: number;
@@ -61,6 +68,7 @@ interface WelcomeFrame {
   protocol: 1;
   connectionId: string;
   resumeFromSeq: number;
+  expiredThroughSeq?: number;
   heartbeatMs?: number;
 }
 
@@ -84,6 +92,7 @@ export interface RelayClientOptions {
   getSessionToken: () => Promise<string>;
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
+  onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   allowLoopbackInsecureWs?: boolean;
   random?: () => number;
   clock?: () => Date;
@@ -99,6 +108,7 @@ export class RelayClient {
   #getSessionToken: () => Promise<string>;
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
+  #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
@@ -117,6 +127,7 @@ export class RelayClient {
     this.#getSessionToken = options.getSessionToken;
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
+    this.#onExpiredRecovery = options.onExpiredRecovery;
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -211,7 +222,7 @@ export class RelayClient {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          this.#validateWelcome(frame, state);
+          await this.#validateWelcome(frame, state);
           welcomed = true;
           this.#attempt = 0;
           this.#lastPongAt = Date.now();
@@ -241,13 +252,31 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  #validateWelcome(frame: WelcomeFrame, state: RelayState): void {
+  async #validateWelcome(frame: WelcomeFrame, state: RelayState): Promise<void> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
     if (!Number.isSafeInteger(frame.resumeFromSeq) || frame.resumeFromSeq < 0) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay resume sequence is invalid.');
-    if (frame.resumeFromSeq !== state.lastAckedServerSeq) {
+    const expiredThroughSeq = frame.expiredThroughSeq;
+    if (expiredThroughSeq !== undefined && (!Number.isSafeInteger(expiredThroughSeq) || expiredThroughSeq < 1 || expiredThroughSeq !== frame.resumeFromSeq)) {
+      throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay expired-history reconciliation proof is invalid.');
+    }
+    if (frame.resumeFromSeq === state.lastAckedServerSeq) {
+      if (expiredThroughSeq !== undefined) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay supplied an unnecessary expired-history reconciliation proof.');
+      return;
+    }
+    if (frame.resumeFromSeq < state.lastAckedServerSeq || expiredThroughSeq !== frame.resumeFromSeq) {
       throw new OperatorError('RELAY_RESUME_MISMATCH', 'Relay resume cursor does not match the durable local acknowledgement cursor.', { retryable: true });
     }
+    if (state.processing) {
+      if (state.processing.seq > frame.resumeFromSeq || !this.#onExpiredRecovery) {
+        throw new OperatorError('RELAY_RECOVERY_CONFLICT', 'Relay cannot skip expired history while a local delivery remains in uncertain processing state.', { retryable: false });
+      }
+      const decision = await this.#onExpiredRecovery({ processing: { ...state.processing }, expiredThroughSeq: frame.resumeFromSeq });
+      if (decision !== 'ack') {
+        throw new OperatorError('RELAY_RECOVERY_REQUIRED', 'Expired delivery recovery callback refused to reconcile the durable processing result.', { retryable: false });
+      }
+    }
+    await this.#writeState({ version: 1, lastAckedServerSeq: frame.resumeFromSeq });
   }
 
   async #handleDelivery(socket: RelaySocketLike, frame: DeliveryFrame): Promise<void> {

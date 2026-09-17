@@ -19,7 +19,7 @@ export const TOOL_SURFACE: ReadonlyArray<{ name: string; risk: ToolSurfaceRisk; 
   { name: 'vscode.open', risk: 'system', description: 'Open an authorized target in an isolated VS Code window with extensions disabled.' },
   { name: 'terminal.execute', risk: 'destructive', description: 'Execute an allowlisted executable with argv and no command shell under destructive local policy.' },
   { name: 'browser.inspect', risk: 'read', description: 'Inspect Chromium tabs or a bounded semantic page snapshot through loopback CDP.' },
-  { name: 'browser.navigate', risk: 'read', description: 'Navigate a Chromium tab through CDP and verify the resulting destination.' },
+  { name: 'browser.navigate', risk: 'write', description: 'Navigate a Chromium tab through CDP and verify the resulting destination.' },
   { name: 'browser.interact', risk: 'external', description: 'Semantically interact with a browser control and verify element/page state.' },
   { name: 'app.inspect', risk: 'read', description: 'Inspect bounded Windows UI Automation state.' },
   { name: 'app.operate', risk: 'external', description: 'Operate a Windows control through a closed semantic UI Automation operation set.' }

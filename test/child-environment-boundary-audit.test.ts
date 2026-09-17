@@ -37,10 +37,22 @@ test('sensitive production spawns explicitly use scrubbed child environments', a
   const cases = [
     ['src/capabilities/browser-managed.ts', "env: safeChildEnvironment('desktop')"],
     ['src/capabilities/windows-uia.ts', "env: safeChildEnvironment('windows-native')"],
-    ['src/core/device-identity.ts', "env: safeChildEnvironment('windows-native')"]
+    ['src/core/device-identity.ts', "env: safeChildEnvironment('windows-native')"],
+    ['src/core/windows-path-lease.ts', "env: safeChildEnvironment('windows-native')"]
   ] as const;
   for (const [relative, expected] of cases) {
     const source = await fs.readFile(path.join(root, relative), 'utf8');
     assert.equal(source.includes(expected), true, `${relative} must scrub inherited environment`);
+  }
+});
+test('detached local runtime forwards every packaged Windows authority helper explicitly', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const source = await fs.readFile(path.join(root, 'apps/local-agent/src/cli.ts'), 'utf8');
+  for (const name of [
+    'OPERATOR_WINDOWS_DPAPI_PATH',
+    'OPERATOR_WINDOWS_UIA_PATH',
+    'OPERATOR_WINDOWS_PATH_LEASE_PATH'
+  ]) {
+    assert.equal(source.includes(`${name}:`), true, `${name} must be forwarded to the detached runtime`);
   }
 });

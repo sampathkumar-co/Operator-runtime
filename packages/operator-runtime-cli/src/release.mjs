@@ -5,7 +5,8 @@ import { Readable } from 'node:stream';
 
 export const DEFAULT_MANIFEST_URL =
   'https://github.com/sampathkumar-co/Operator-runtime/releases/latest/download/release-metadata.json';
-export const MINIMUM_RELEASE_VERSION = '0.1.0.0';
+export const CLI_VERSION = '1.0.0';
+export const MINIMUM_RELEASE_VERSION = '1.0.0.0';
 
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
@@ -60,7 +61,7 @@ export function validateReleaseMetadata(input, { allowUntimestamped = false } = 
   if (input.schemaVersion !== 1) fail('Unsupported release metadata schemaVersion.');
   if (input.product !== 'operator-runtime') fail('Release metadata product must be operator-runtime.');
   if (input.platform !== 'win32' || input.arch !== 'x64') fail('Release metadata must target win32 x64.');
-  if (input.identityName !== 'Operator.Runtime') fail('Release metadata identityName must be Operator.Runtime.');
+  if (input.identityName !== 'SPLCART.SplcartOperator') fail('Release metadata identityName must be SPLCART.SplcartOperator.');
   if (input.signed !== true) fail('Operator bootstrap refuses unsigned release metadata.');
   if (!allowUntimestamped && input.timestamped !== true) fail('Operator bootstrap requires a timestamped production signature.');
   const version = String(input.version ?? '');
@@ -87,7 +88,7 @@ export function validateReleaseMetadata(input, { allowUntimestamped = false } = 
     version,
     platform: 'win32',
     arch: 'x64',
-    identityName: 'Operator.Runtime',
+    identityName: 'SPLCART.SplcartOperator',
     artifact,
     sha256: asSha256(input.sha256),
     sizeBytes,
@@ -151,7 +152,7 @@ async function fetchChecked(url, label, timeoutMs) {
       redirect: 'follow',
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
-        'user-agent': 'operator-runtime-cli/0.1.0',
+        'user-agent': `operator-runtime-cli/${CLI_VERSION}`,
         accept: 'application/octet-stream, application/json'
       }
     });

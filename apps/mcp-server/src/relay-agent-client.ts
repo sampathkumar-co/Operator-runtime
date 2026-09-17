@@ -1,5 +1,7 @@
 import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
+import { OperatorError } from '../../../src/core/errors.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
+import { currentMcpTaskId } from './request-context.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
 
@@ -11,6 +13,7 @@ export interface RelayAgentClientOptions {
   deviceId?: string;
   projectKey?: string;
   waitMs?: number;
+  publicBoundary?: boolean;
 }
 
 export class RelayAgentClient {
@@ -21,6 +24,7 @@ export class RelayAgentClient {
   #deviceId?: string;
   #projectKey?: string;
   #waitMs: number;
+  #publicBoundary: boolean;
 
   constructor(options: RelayAgentClientOptions) {
     this.#url = validateLoopbackControlUrl(options.baseUrl);
@@ -34,9 +38,27 @@ export class RelayAgentClient {
     const waitMs = options.waitMs ?? MAX_TIMEOUT_MS;
     if (!Number.isInteger(waitMs) || waitMs < 1_000 || waitMs > MAX_TIMEOUT_MS) throw new Error(`Relay wait must be between 1000 and ${MAX_TIMEOUT_MS} ms.`);
     this.#waitMs = waitMs;
+    this.#publicBoundary = options.publicBoundary === true;
+  }
+
+  async claimDevice(userCodeInput: string): Promise<{ status: 'claimed' }> {
+    const userCode = validUserCode(userCodeInput);
+    const response = await fetch(new URL('/v1/device-enrollment/claim', this.#url), {
+      redirect: 'error', method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify({ ...(this.#accountId ? { accountId: this.#accountId } : {}), ...(this.#principal ? { principal: this.#principal } : {}), userCode }),
+      signal: AbortSignal.timeout(15_000)
+    });
+    const body = await response.json() as any;
+    if (!response.ok || body?.ok !== true || body?.enrollment?.status !== 'claimed') {
+      throw new OperatorError(typeof body?.error?.code === 'string' ? body.error.code : 'DEVICE_ENROLLMENT_CLAIM_FAILED', 'Device enrollment claim was not accepted.');
+    }
+    return { status: 'claimed' };
   }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
+    const taskId = action.taskId ?? currentMcpTaskId();
+    const outboundAction = taskId ? { ...action, taskId } : action;
     const response = await fetch(this.#url, {
       redirect: 'error',
       method: 'POST',
@@ -49,7 +71,8 @@ export class RelayAgentClient {
         ...(this.#principal ? { principal: this.#principal } : {}),
         ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
         ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
-        action,
+        ...(this.#publicBoundary ? { publicBoundary: true } : {}),
+        action: outboundAction,
         waitMs: this.#waitMs
       }),
       signal: AbortSignal.timeout(this.#waitMs + 5_000)
@@ -90,4 +113,10 @@ function validProjectKey(value: string): string {
   const text = String(value ?? '');
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(text)) throw new Error('OPERATOR_RELAY_PROJECT_KEY is invalid.');
   return text;
+}
+
+function validUserCode(input: string): string {
+  const compact = String(input ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(compact)) throw new OperatorError('DEVICE_ENROLLMENT_CODE_INVALID', 'Device enrollment code is invalid or expired.');
+  return `${compact.slice(0, 4)}-${compact.slice(4)}`;
 }

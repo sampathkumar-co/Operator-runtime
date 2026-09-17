@@ -8,13 +8,18 @@ import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore, type DeviceRouteDecision, type OnlineDeviceDescriptor } from '../../../src/core/device-routing.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
-import { RelayDeliveryStore, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
+import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
+import { RelayDeliveryStore, type RelayDeliveryAuthority, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 
 const MAX_FRAME_BYTES = 256 * 1024;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const HELLO_CLOCK_SKEW_MS = 2 * 60_000;
 const HEARTBEAT_MS = 20_000;
+const DEFAULT_UPGRADE_LIMIT_PER_MINUTE = 120;
+const DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES = 60;
+const DEFAULT_MAX_LIVE_CONNECTIONS = 5_000;
+const DEFAULT_MAX_LIVE_CONNECTIONS_PER_CLIENT = 64;
 
 type JsonObject = Record<string, unknown>;
 
@@ -22,6 +27,7 @@ type Connection = {
   socket: WebSocket;
   deviceId: string;
   sessionId: string;
+  sessionJti: string;
   capabilities: string[];
   connectedAt: string;
   lastSeenAt: string;
@@ -36,6 +42,11 @@ export interface RelayHubOptions {
   accounts?: AccountDeviceRegistry;
   deliveries?: RelayDeliveryStore;
   clock?: () => Date;
+  beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
+  upgradeLimitPerMinute?: number;
+  deviceHelloLimitPerFiveMinutes?: number;
+  maxLiveConnections?: number;
+  maxLiveConnectionsPerClient?: number;
 }
 
 export interface RelayDispatchRequest {
@@ -45,6 +56,7 @@ export interface RelayDispatchRequest {
   requiredCapabilities?: string[];
   kind: string;
   payload: JsonObject;
+  idempotencyKey?: string;
 }
 
 export interface RelayDispatchResult {
@@ -60,10 +72,17 @@ export class RelayHub {
   #accounts: AccountDeviceRegistry;
   #deliveries: RelayDeliveryStore;
   #clock: () => Date;
+  #beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
   #server: http.Server | null = null;
   #wss: WebSocketServer | null = null;
   #connections = new Map<string, Connection>();
   #routing = new Map<string, DeviceRoutingStore>();
+  #upgradeLimiter: FixedWindowRateLimiter;
+  #deviceHelloLimiter: FixedWindowRateLimiter;
+  #maxLiveConnections: number;
+  #maxLiveConnectionsPerClient: number;
+  #liveByClientKey = new Map<string, number>();
+  #socketWork = new Set<Promise<void>>();
 
   constructor(options: RelayHubOptions) {
     this.#stateDir = path.resolve(options.stateDir);
@@ -73,6 +92,13 @@ export class RelayHub {
     this.#accounts = options.accounts ?? new AccountDeviceRegistry(this.#stateDir, this.#devices);
     this.#deliveries = options.deliveries ?? new RelayDeliveryStore(this.#stateDir);
     this.#clock = options.clock ?? (() => new Date());
+    this.#beforeEnqueue = options.beforeEnqueue;
+    const upgradeLimit = boundedPositiveInt(options.upgradeLimitPerMinute, DEFAULT_UPGRADE_LIMIT_PER_MINUTE, 100_000, 'upgradeLimitPerMinute');
+    const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
+    this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
+    this.#maxLiveConnectionsPerClient = boundedPositiveInt(options.maxLiveConnectionsPerClient, DEFAULT_MAX_LIVE_CONNECTIONS_PER_CLIENT, this.#maxLiveConnections, 'maxLiveConnectionsPerClient');
+    this.#upgradeLimiter = new FixedWindowRateLimiter({ limit: upgradeLimit, windowMs: 60_000 });
+    this.#deviceHelloLimiter = new FixedWindowRateLimiter({ limit: helloLimit, windowMs: 5 * 60_000 });
   }
 
   async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
@@ -92,9 +118,24 @@ export class RelayHub {
       let url: URL;
       try { url = new URL(request.url ?? '/', 'http://relay.invalid'); } catch { socket.destroy(); return; }
       if (url.pathname !== '/device') { socket.destroy(); return; }
+      const clientKey = requestClientKey(request);
+      const decision = this.#upgradeLimiter.hit(clientKey);
+      if (!decision.allowed) { rejectUpgrade(socket, 429, 'Too Many Requests', decision.retryAfterSeconds); return; }
+      if (wss.clients.size >= this.#maxLiveConnections || (this.#liveByClientKey.get(clientKey) ?? 0) >= this.#maxLiveConnectionsPerClient) {
+        rejectUpgrade(socket, 429, 'Connection limit reached', 5);
+        return;
+      }
       wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
     });
-    wss.on('connection', (socket) => this.#accept(socket));
+    wss.on('connection', (socket, request) => {
+      const clientKey = requestClientKey(request);
+      this.#liveByClientKey.set(clientKey, (this.#liveByClientKey.get(clientKey) ?? 0) + 1);
+      socket.once('close', () => {
+        const remaining = (this.#liveByClientKey.get(clientKey) ?? 1) - 1;
+        if (remaining > 0) this.#liveByClientKey.set(clientKey, remaining); else this.#liveByClientKey.delete(clientKey);
+      });
+      this.#accept(socket);
+    });
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, resolve);
@@ -117,6 +158,9 @@ export class RelayHub {
     this.#server = null;
     if (wss) await new Promise<void>((resolve) => wss.close(() => resolve()));
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    while (this.#socketWork.size > 0) {
+      await Promise.allSettled([...this.#socketWork]);
+    }
   }
 
   async onlineDevices(accountId?: string): Promise<OnlineDeviceDescriptor[]> {
@@ -149,13 +193,58 @@ export class RelayHub {
       projectKey: request.projectKey,
       requiredCapabilities: request.requiredCapabilities ?? []
     }, online);
-    const delivery = await this.#deliveries.enqueue(route.deviceId, request.kind, request.payload);
+    const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
+    if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
+    const authority: RelayDeliveryAuthority = {
+      accountId: request.accountId,
+      deviceId: route.deviceId,
+      generation: membership.authorityGeneration
+    };
+    await this.#beforeEnqueue?.({ ...authority });
+    await this.#assertDispatchAuthority(authority, route.sessionId, request.requiredCapabilities ?? []);
+    const payload = request.kind === 'action'
+      ? { ...request.payload, approvalAuthority: { ...authority } }
+      : request.payload;
+    let delivery: StoredRelayDelivery;
+    try {
+      delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
+        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey));
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
+      }
+      throw error;
+    }
     await this.#pump(route.deviceId);
     return { route, delivery };
   }
 
+  async recoverIdempotent(idempotencyKey: string): Promise<{ deviceId: string; delivery: StoredRelayDelivery } | null> {
+    return await this.#deliveries.findIdempotent(idempotencyKey);
+  }
+
   async deliveryCursor(deviceId: string): Promise<{ lastAckedSeq: number; highestEnqueuedSeq: number }> {
     return await this.#deliveries.cursor(deviceId);
+  }
+
+  invalidateDevice(deviceIdInput: string, reason = 'device authority revoked'): boolean {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const connection = this.#connections.get(deviceId);
+    if (!connection) return false;
+    this.#connections.delete(deviceId);
+    connection.inFlightSeq = undefined;
+    try { connection.socket.close(4004, boundedCloseReason(reason)); } catch { /* authority is already removed locally */ }
+    return true;
+  }
+
+  invalidateSession(jtiInput: string, reason = 'session authority revoked'): number {
+    const jti = validUuid(jtiInput, 'session jti');
+    let closed = 0;
+    for (const connection of [...this.#connections.values()]) {
+      if (connection.sessionJti !== jti) continue;
+      if (this.invalidateDevice(connection.deviceId, reason)) closed += 1;
+    }
+    return closed;
   }
 
   #routingFor(accountId: string): DeviceRoutingStore {
@@ -182,7 +271,7 @@ export class RelayHub {
     };
 
     socket.on('message', (data, isBinary) => {
-      messageQueue = messageQueue.then(async () => {
+      const work = messageQueue.then(async () => {
         if (isBinary) throw new OperatorError('RELAY_FRAME_INVALID', 'Binary relay frames are not accepted.');
         const frame = parseFrame(data.toString('utf8'));
         if (!authenticated) {
@@ -210,7 +299,10 @@ export class RelayHub {
         }
         throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Unsupported authenticated relay frame.');
       });
-      void messageQueue.catch(fail);
+      messageQueue = work;
+      this.#socketWork.add(work);
+      void work.finally(() => this.#socketWork.delete(work)).catch(() => undefined);
+      void work.catch(fail);
     });
 
     socket.on('close', () => {
@@ -226,6 +318,8 @@ export class RelayHub {
     const payload = frame.payload;
     if (!payload || typeof payload !== 'object' || payload.protocol !== 1) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello payload is invalid.');
     const deviceId = validUuid(String(payload.deviceId ?? ''), 'deviceId');
+    const helloDecision = this.#deviceHelloLimiter.hit(`device:${deviceId}`);
+    if (!helloDecision.allowed) throw new OperatorError('RELAY_RATE_LIMITED', 'Relay device authentication attempts are rate limited.', { retryable: true });
     const fingerprint = String(payload.fingerprint ?? '');
     const resumeAfterSeq = Number(payload.resumeAfterSeq ?? 0);
     if (!Number.isSafeInteger(resumeAfterSeq) || resumeAfterSeq < 0) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay resume cursor is invalid.');
@@ -254,15 +348,43 @@ export class RelayHub {
     if (previous) {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
     }
-    const connection: Connection = { socket, deviceId, sessionId, capabilities, connectedAt: now, lastSeenAt: now };
+    const connection: Connection = { socket, deviceId, sessionId, sessionJti: session.jti, capabilities, connectedAt: now, lastSeenAt: now };
     this.#connections.set(deviceId, connection);
     send(socket, {
       type: 'welcome',
       protocol: 1,
       connectionId: sessionId,
       resumeFromSeq: reconciled.lastAckedSeq,
+      ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
       heartbeatMs: HEARTBEAT_MS
     });
+    return connection;
+  }
+
+  async #assertDispatchAuthority(authority: RelayDeliveryAuthority, expectedSessionId?: string, requiredCapabilities: string[] = []): Promise<Connection> {
+    let memberships;
+    try {
+      memberships = await this.#accounts.listDevices(authority.accountId);
+    } catch (error) {
+      if (error instanceof OperatorError && ['ACCOUNT_NOT_FOUND', 'ACCOUNT_DISABLED'].includes(error.code)) {
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account authority changed before relay delivery could be authorized.');
+      }
+      throw error;
+    }
+    const current = memberships.find((membership) => membership.deviceId === authority.deviceId && membership.status === 'active');
+    if (!current || current.authorityGeneration !== authority.generation) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery could be authorized.');
+    }
+    const connection = this.#connections.get(authority.deviceId);
+    if (!connection || connection.socket.readyState !== WebSocket.OPEN || (expectedSessionId && connection.sessionId !== expectedSessionId)) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection changed before delivery could be authorized.', { retryable: true });
+    }
+    if (!(await this.#sessions.isActive(connection.sessionJti, authority.deviceId))) {
+      this.invalidateSession(connection.sessionJti, 'session no longer active');
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay session is no longer active.');
+    }
+    const missing = requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
+    if (missing.length > 0) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before delivery authorization.');
     return connection;
   }
 
@@ -271,6 +393,8 @@ export class RelayHub {
     if (!connection || connection.socket.readyState !== WebSocket.OPEN || connection.inFlightSeq !== undefined) return;
     const [next] = await this.#deliveries.pending(deviceId, 1);
     if (!next) return;
+    if (!next.authority) throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Pending relay delivery has no durable authorization generation.');
+    await this.#assertDispatchAuthority(next.authority, connection.sessionId);
     connection.inFlightSeq = next.seq;
     try {
       send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
@@ -295,6 +419,11 @@ function send(socket: WebSocket, frame: JsonObject): void {
   socket.send(text);
 }
 
+function boundedCloseReason(value: string): string {
+  const text = String(value ?? 'authority revoked').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return (text || 'authority revoked').slice(0, 120);
+}
+
 function validNonce(value: string): string {
   if (!/^[A-Za-z0-9_-]{16,128}$/.test(value)) throw new OperatorError('RELAY_NONCE_INVALID', 'Relay nonce is invalid.');
   return value;
@@ -309,4 +438,21 @@ function validIso(value: string, label: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('RELAY_TIME_INVALID', `${label} must be an ISO timestamp.`);
   return value;
+}
+function rejectUpgrade(socket: { write(data: string): unknown; destroy(): unknown }, status: number, message: string, retryAfterSeconds: number): void {
+  const body = `${status} ${message}\n`;
+  const retry = Math.max(1, Math.min(Math.trunc(retryAfterSeconds), 3600));
+  try {
+    socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nRetry-After: ${retry}\r\n\r\n${body}`);
+  } finally {
+    socket.destroy();
+  }
+}
+
+function boundedPositiveInt(value: number | undefined, fallback: number, max: number, label: string): number {
+  const selected = value ?? fallback;
+  if (!Number.isInteger(selected) || selected < 1 || selected > max) {
+    throw new OperatorError('RELAY_LIMIT_CONFIG_INVALID', `${label} must be an integer between 1 and ${max}.`);
+  }
+  return selected;
 }

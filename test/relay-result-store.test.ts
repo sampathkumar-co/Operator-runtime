@@ -71,3 +71,51 @@ test('relay results expire by TTL and are physically pruned from durable state',
   assert.equal(persisted.includes('sensitive result'), false);
   assert.deepEqual(JSON.parse(persisted).streams, []);
 });
+
+
+test('successful result consumption returns one copy and persists only a payload-free tombstone', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const store = new RelayResultStore(state);
+  await store.put(deviceId, 9, deliveryId, { ok: true, output: { content: 'consume-me-now' } });
+
+  const consumed = await store.consume(deviceId, 9, deliveryId);
+  assert.equal(consumed?.result?.output?.content, 'consume-me-now');
+  assert.equal(await store.get(deviceId, 9), null);
+  assert.equal(await store.consume(deviceId, 9, deliveryId), null);
+
+  const persistedText = await fs.readFile(path.join(state, 'relay-results.json'), 'utf8');
+  assert.equal(persistedText.includes('consume-me-now'), false);
+  const entry = JSON.parse(persistedText).streams[0].results[0];
+  assert.equal(entry.seq, 9);
+  assert.equal(entry.deliveryId, deliveryId);
+  assert.match(entry.resultSha256, /^[0-9a-f]{64}$/);
+  assert.equal(typeof entry.consumedAt, 'string');
+  assert.equal('result' in entry, false);
+
+  const duplicate = await store.put(deviceId, 9, deliveryId, { ok: true, output: { content: 'consume-me-now' } });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.result.result, undefined);
+});
+
+
+test('completed replay authority remains available for the full result retention window', async (t) => {
+  const state = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const key = 'a'.repeat(64);
+  const authority = { accountId: crypto.randomUUID(), deviceId, generation: 3 };
+  let now = new Date('2026-09-13T00:00:50.000Z');
+  const store = new RelayResultStore(state, { clock: () => now, retentionMs: 60_000 });
+  await store.put(deviceId, 7, deliveryId, { ok: true, output: { value: 'late-complete' } }, key, authority);
+  const firstReplay = await store.findByIdempotencyKey(key);
+  assert.equal(firstReplay?.result.deliveryId, deliveryId);
+  assert.deepEqual(firstReplay?.result.replayAuthority, authority);
+
+  now = new Date('2026-09-13T00:01:00.001Z');
+  assert.equal((await store.findByIdempotencyKey(key))?.result.result?.output?.value, 'late-complete');
+
+  now = new Date('2026-09-13T00:01:50.001Z');
+  assert.equal(await store.findByIdempotencyKey(key), null);
+});

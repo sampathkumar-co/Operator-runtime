@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { AccountDeviceRegistry } from '../../../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
+import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
@@ -48,25 +49,56 @@ export function readRelayServiceConfig(env: NodeJS.ProcessEnv = process.env): Re
 }
 
 function createRelayStores(stateDir: string) {
+  let liveHub: RelayHub | null = null;
   const identity = new DeviceIdentityStore(stateDir);
-  const devices = new DeviceRegistryStore(stateDir);
-  const sessions = new DeviceSessionTokenStore(stateDir, identity, devices);
+  const devices = new DeviceRegistryStore(stateDir, {
+    onRevoke: async (deviceId) => { liveHub?.invalidateDevice(deviceId, 'device revoked'); }
+  });
+  const sessions = new DeviceSessionTokenStore(stateDir, identity, devices, {
+    onRevoke: async (jti) => { liveHub?.invalidateSession(jti, 'session revoked'); }
+  });
   const deliveries = new RelayDeliveryStore(stateDir);
   const results = new RelayResultStore(stateDir);
+  const enrollments = new DeviceEnrollmentStore(stateDir);
   const accounts = new AccountDeviceRegistry(stateDir, devices, {
-    onReleaseDevice: async (deviceId, accountId) => {
+    onReleaseDevice: async (deviceId, accountId, reason) => {
+      liveHub?.invalidateDevice(deviceId, `account authority ${reason}`);
       await deliveries.purgeDevice(deviceId);
       await results.purgeDevice(deviceId);
       await sessions.purgeForDevice(deviceId);
+      if (reason === 'rebind') await enrollments.purgeDeviceForAccount(deviceId, accountId);
+      else await enrollments.purgeDevice(deviceId);
       await new DeviceRoutingStore(path.join(stateDir, 'accounts', accountId), devices).unbindDevice(deviceId);
+    },
+    onErasurePhase: async (phase, accountId, deviceIds) => {
+      if (phase === 'LIVE_CONNECTIONS_CLOSED') {
+        for (const deviceId of deviceIds) liveHub?.invalidateDevice(deviceId, 'account erased');
+      } else if (phase === 'ROUTING_DISABLED') {
+        const routing = new DeviceRoutingStore(path.join(stateDir, 'accounts', accountId), devices);
+        for (const deviceId of deviceIds) await routing.unbindDevice(deviceId);
+      } else if (phase === 'DELIVERY_SESSION_RESULT_PURGE') {
+        for (const deviceId of deviceIds) {
+          await deliveries.purgeDevice(deviceId);
+          await results.purgeDevice(deviceId);
+          await sessions.purgeForDevice(deviceId);
+          await enrollments.purgeDevice(deviceId);
+        }
+      }
     }
   });
-  return { identity, devices, sessions, deliveries, results, accounts };
+  return {
+    identity, devices, sessions, deliveries, results, accounts, enrollments,
+    attachHub(hub: RelayHub) { liveHub = hub; }
+  };
 }
 
 export async function runRelayService(config = readRelayServiceConfig()): Promise<RelayHub> {
-  const { identity, devices, sessions, deliveries, accounts } = createRelayStores(config.stateDir);
+  const stores = createRelayStores(config.stateDir);
+  const { identity, devices, sessions, deliveries, accounts } = stores;
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
+  stores.attachHub(hub);
+  await accounts.recoverReleases();
+  await accounts.recoverErasures();
   const listening = await hub.listen(config.host, config.port);
   logListening('operator-relay', listening.host, listening.port, config.stateDir, isLoopbackHost(config.host) ? 'local-plain-websocket' : 'plain-websocket-behind-required-tls-proxy');
   return hub;
@@ -81,10 +113,14 @@ export async function runRelayResultService(config = readRelayServiceConfig()): 
 
 async function main(): Promise<void> {
   const config = readRelayServiceConfig();
-  const { identity, devices, sessions, deliveries, results, accounts } = createRelayStores(config.stateDir);
+  const stores = createRelayStores(config.stateDir);
+  const { identity, devices, sessions, deliveries, results, accounts, enrollments } = stores;
 
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
-  const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, deliveries, results });
+  stores.attachHub(hub);
+  await accounts.recoverReleases();
+  await accounts.recoverErasures();
+  const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, results, enrollments });
   let controlService: RelayControlService | null = null;
 
   try {
@@ -93,7 +129,7 @@ async function main(): Promise<void> {
     const resultListening = await resultService.listen(config.resultHost, config.resultPort);
     logListening('operator-relay-results', resultListening.host, resultListening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     if (config.controlToken) {
-      controlService = new RelayControlService({ hub, results, accounts, token: config.controlToken });
+      controlService = new RelayControlService({ hub, results, accounts, enrollments, devices, token: config.controlToken });
       const controlListening = await controlService.listen(config.controlHost, config.controlPort);
       logListening('operator-relay-control', controlListening.host, controlListening.port, config.stateDir, 'internal-loopback-http');
     } else {
