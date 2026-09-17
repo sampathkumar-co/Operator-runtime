@@ -114,7 +114,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- `@mecrod/operator@1.0.0` is published through the provenance release workflow and clean-machine `doctor`/reviewer-root startup pass;
+- the public runtime has an owner-approved software license (not `UNLICENSED`), npm dual-use classification is explicitly resolved and reflected in package/workflow metadata, the successor candidate passes affected packaging/legal certification, and `@mecrod/operator@1.0.0` is published through the policy-compatible release flow with clean-machine `doctor`/reviewer-root startup passing;
 - business/developer identity is verified in the OpenAI Platform;
 - production Windows release is signed by the final trusted certificate;
 - all countries/regions are supported;

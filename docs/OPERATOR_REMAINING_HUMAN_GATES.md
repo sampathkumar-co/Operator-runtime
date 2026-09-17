@@ -134,16 +134,22 @@ Optionally request `file.replace` only as a policy demonstration and expect `APP
 
 For the write cases independently verify the local filesystem/Git postcondition. For every case confirm the public result excludes relay tokens, device private material, provider diagnostics and unnecessary host identifiers.
 
-## H8 — Publish the clean-machine runtime
+## H8 — Resolve npm licensing and publish the clean-machine runtime
 
-The registry currently returns E404 for `@mecrod/operator`; version `1.0.0` is not public yet. Do not run an ad-hoc local `npm publish`.
+The registry currently returns E404 for `@mecrod/operator`; version `1.0.0` is not public yet. The current package also declares `license: UNLICENSED`, the public repository has no license file, and the hosted service Terms do not explicitly grant software installation/use rights. Do not publish until the owner chooses the runtime licensing model.
 
-Approved publication path:
+If distribution is proprietary, add an owner-approved software license/EULA and set `license` to `SEE LICENSE IN <filename>`. If distribution is open source, choose the intended SPDX license and add that license file. Do not infer this business/legal choice from the codebase.
 
-1. configure an npm publisher that controls the `@mecrod` user/organization scope;
-2. for the **first** package publication, use a temporary owner-authorized npm automation/access token because package-level Trusted Publishing cannot be configured until `@mecrod/operator` exists; store it only as the repository `NPM_TOKEN`, never in source or logs;
-3. dispatch `.github/workflows/npm-remote-release.yml` from exact green `main` with `npm_tag=latest`;
-4. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and provenance publish;
+Before choosing the npm publish mechanism, classify the package against npm's current Dual-Use Content Policy. The policy examples are non-exhaustive; because Operator ships security-sensitive remote-computer automation, do not assume either classification. If declared dual-use, add `contentPolicy.class: dual-use` plus a root `DISCLOSURE`, and use interactive 2FA or staged publishing with 2FA promotion. Direct trusted-publishing/OIDC or bypass-2FA publication is not permitted for declared dual-use packages. If the owner concludes it is not dual-use, retain the rationale in release evidence.
+
+Any license/package metadata edit changes the source SHA. Treat the result as a successor candidate to OCC-3M and rerun at minimum candidate identity, package/tarball inspection, supply-chain checks, package smoke install/doctor, clean-machine startup, legal/public-truthfulness review, and final publication-source binding.
+
+Approved publication path after that successor is green:
+
+1. configure an npm publisher that controls the `@mecrod` user/organization scope and has 2FA enabled;
+2. make the successor release workflow match the chosen npm policy classification. Prefer staged publishing for the first release so a human reviews/promotes the exact staged tarball with 2FA; if dual-use is declared, staged/2FA (or interactive 2FA direct publish) is mandatory and direct OIDC/bypass-2FA publish is forbidden;
+3. dispatch only the policy-compatible successor workflow from exact green `main`;
+4. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and the chosen staged/direct publication action;
 5. from a clean Windows x64 machine verify `npx @mecrod/operator@latest doctor`;
 6. start `npx @mecrod/operator@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project` and confirm the pairing code/relay path;
 7. immediately after the first package exists, configure npm Trusted Publishing for this GitHub repository/workflow using OIDC, prove a subsequent dry/release path can use it, then revoke and remove the bootstrap `NPM_TOKEN`.
@@ -164,4 +170,4 @@ Before selecting **Submit for Review**, confirm:
 - country availability is limited to regions actually supported by the publisher/legal/support process;
 - release notes describe this as the initial public submission.
 
-Do not mark Operator `CONFIRMED FOR RELEASE` until G10, G11, G23, G24, G25 and G26 in `OPERATOR_RELEASE_GATE.md` are all PASS.
+Do not mark Operator `CONFIRMED FOR RELEASE` until G10, G11, G19, G22, G23, G24, G25 and G26 in `OPERATOR_RELEASE_GATE.md` are all PASS.

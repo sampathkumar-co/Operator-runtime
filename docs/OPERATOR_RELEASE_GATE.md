@@ -27,10 +27,10 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |
-| G19 Packaging / supply chain | PASS | Dependency audit + CycloneDX SBOM, NPM Remote Runtime CI #88, MSIX packaging and Signing Smoke #414 all passed. |
+| G19 Packaging / supply chain | BLOCKED | Build/dependency/SBOM/MSIX/signing evidence passes, but the public npm publication policy path is not final: npm dual-use classification is unresolved and the current workflow performs direct publication. A successor candidate must encode the chosen policy-compatible publish path before release. |
 | G20 Production edge | PASS | TLS 1.3, valid certificate, HSTS/CSP, wrong Host -> 421, evil Origin -> 403, missing/invalid bearer -> 401, oversized header -> 431, oversized body -> 413. |
 | G21 Performance / resource control | PASS | Performance regression suite passed; hostile bounded-input probes left the exact edge healthy with no crash/error signatures. |
-| G22 Legal / public docs | PASS | `/privacy`, `/terms`, `/support` return 200, are deployment-specific and placeholder-free, and expose support/security-contact guidance. |
+| G22 Legal / public docs | BLOCKED | Hosted `/privacy`, `/terms`, `/support` pages pass, but the intended public npm package is `UNLICENSED` and the public repository ships no software license granting installation/use rights. Owner licensing decision + successor package metadata are required before public distribution. |
 | G23 Real ChatGPT E2E | BLOCKED | Requires a ChatGPT plugin draft/connection plus completed OAuth login; no published/installed SPLCART Operator plugin exists yet. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
 | G25 Reviewer simulation | BLOCKED | The deterministic reviewer project is locally certified: exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2, with additional `APPROVAL_REQUIRED` and duplicate-create checks. Remaining blockers are reviewer identity/pairing, public npm runtime, and real production OAuth/ChatGPT execution. |
@@ -43,8 +43,9 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 3. Complete OpenAI Platform individual/business verification for the exact publisher name to be submitted.
 4. Create the OpenAI plugin draft; if the portal issues a domain challenge, set only the exact token through `OPENAI_APPS_CHALLENGE_TOKEN`, reload the edge environment, and verify the exact well-known response.
 5. Run **Scan Tools**, reconcile the imported 10-tool snapshot with the server metadata, then run a real ChatGPT read + write workflow through OAuth, relay and paired PC.
-6. Publish `@mecrod/operator@1.0.0` only through the provenance-enabled `NPM Remote Release` workflow after npm scope ownership/auth is configured; verify a clean-machine `npx ... doctor` and `remote --root <fixture>`.
-7. Submit only after G10, G11, G23, G24, G25 and G26 change to PASS.
+6. Resolve FG-013: choose the runtime software license, add the correct license file/metadata, create a narrowly scoped successor candidate from OCC-3M, and rerun affected packaging/legal/clean-machine certification.
+7. Publish `@mecrod/operator@1.0.0` only through the provenance-enabled `NPM Remote Release` workflow after npm scope ownership/auth is configured; verify a clean-machine `npx ... doctor` and `remote --root <fixture>`.
+8. Submit only after G10, G11, G19, G22, G23, G24, G25 and G26 change to PASS.
 
 ## OCC-3M merge evidence
 
