@@ -79,7 +79,7 @@ Positive coverage:
 - read a safe source file;
 - inspect Git status;
 - create a previously absent safe file;
-- read then replace a disposable file using the fresh SHA precondition.
+- inspect a bounded Git diff for the known modified fixture file.
 
 Negative coverage:
 
@@ -100,9 +100,10 @@ If a recording is made, use this sequence:
 3. read a safe source file;
 4. demonstrate `.env` credential-path refusal;
 5. create a new file;
-6. read and replace the disposable fixture using the fresh SHA;
-7. show a stale-SHA or missing-write-scope refusal;
-8. show that the result contains task-relevant data but not internal relay/provider telemetry.
+6. inspect the bounded Git diff for the known modified fixture file;
+7. show a missing-write-scope refusal;
+8. optionally demonstrate that file.replace correctly requests local approval rather than bypassing policy;
+9. show that the result contains task-relevant data but not internal relay/provider telemetry.
 
 Never expose OAuth tokens, recovery credentials, device private keys, absolute personal home paths, signing material or real user data in the recording.
 

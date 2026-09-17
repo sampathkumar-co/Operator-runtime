@@ -49,6 +49,7 @@ Before activating the change:
 6. verify the reviewer can authorize the ChatGPT client with username/password only.
 
 PASS evidence: disposable reviewer credentials complete the submitted tests without secondary verification.
+
 ## H3 — Create or reconcile the OpenAI MCP plugin draft
 
 Use the production server URL `https://operator.splcart.in/mcp`. Select the predefined OAuth-client path.
@@ -94,6 +95,14 @@ Until OpenAI supplies a real token, `/.well-known/openai-apps-challenge` must re
 
 No source rebuild is required for this step.
 
+## Reviewer fixture already prepared
+
+The non-sensitive reviewer fixture is staged locally at baseline commit `ab658c353fc3e0ce79d71e2968f53eedbc247537`. `C:\Users\Public\OperatorReviewerFixture\reset-fixture.ps1` restores the exact submitted-test state. The authorized root is `C:\Users\Public\OperatorReviewerFixture\demo-project`, and the negative outside-root fixture is exactly `C:\Users\Public\outside-project.txt`.
+
+Local certification on Node 22.23.2, through the production `invokePublicWithAgent` safety boundary and an isolated local agent, passes all submitted five positive and three negative reviewer cases. Additional assertions prove `file.replace` returns `APPROVAL_REQUIRED` without local one-time approval and duplicate `file.create` returns `TARGET_EXISTS`.
+
+Keep positive #5 as bounded `git.diff`. Do not change it back to destructive `file.replace`: that action intentionally requires local approval and remains an internal security demonstration rather than a self-service reviewer success case. This local pass does not replace production OAuth, device pairing, or real ChatGPT E2E.
+
 ## H6 — Scan Tools reconciliation
 
 Run **Scan Tools** against the exact production MCP URL after OAuth is configured in the draft. OpenAI imports server-advertised metadata; reviewer prose does not override it.
@@ -116,10 +125,12 @@ Run from the connected draft using only the disposable reviewer fixture:
 2. `file.read` on the safe fixture;
 3. `git.status` on the demo repository;
 4. `file.create` on a previously absent disposable file;
-5. `file.read` + `file.replace` using the fresh SHA-256;
+5. `git.diff` on `src/known-modified.ts`;
 6. `.env` / credential-path refusal;
-7. outside-authorized-root refusal;
+7. `C:/Users/Public/outside-project.txt` outside-authorized-root refusal;
 8. read-only-token mutation refusal.
+
+Optionally request `file.replace` only as a policy demonstration and expect `APPROVAL_REQUIRED` unless a local owner intentionally grants the one-time approval.
 
 For the write cases independently verify the local filesystem/Git postcondition. For every case confirm the public result excludes relay tokens, device private material, provider diagnostics and unnecessary host identifiers.
 
@@ -130,11 +141,12 @@ The registry currently returns E404 for `@mecrod/operator`; version `1.0.0` is n
 Approved publication path:
 
 1. configure an npm publisher that controls the `@mecrod` user/organization scope;
-2. install the publish credential as the repository `NPM_TOKEN`/approved trusted-publishing identity without placing it in source or logs;
+2. for the **first** package publication, use a temporary owner-authorized npm automation/access token because package-level Trusted Publishing cannot be configured until `@mecrod/operator` exists; store it only as the repository `NPM_TOKEN`, never in source or logs;
 3. dispatch `.github/workflows/npm-remote-release.yml` from exact green `main` with `npm_tag=latest`;
 4. require the workflow to pass the release-source gate, locked native-helper builds/self-tests, runtime payload build, tarball install/doctor, duplicate-version refusal, final source-binding check and provenance publish;
 5. from a clean Windows x64 machine verify `npx @mecrod/operator@latest doctor`;
-6. start `npx @mecrod/operator@latest remote --root <reviewer-demo-project>` and confirm the pairing code/relay path.
+6. start `npx @mecrod/operator@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project` and confirm the pairing code/relay path;
+7. immediately after the first package exists, configure npm Trusted Publishing for this GitHub repository/workflow using OIDC, prove a subsequent dry/release path can use it, then revoke and remove the bootstrap `NPM_TOKEN`.
 
 Public npm publication is an external release action and must be explicitly authorized by the owner before dispatch.
 

@@ -87,6 +87,10 @@ OpenAI publisher identity verification is a separate portal gate. The live wordi
 
 The outer SPLCART deployment source that produced the running `c100a4e...` release was recovered locally at `C:/Users/SAMPATH/OneDrive/Desktop/splcart new`. Commit `e1d2207cf8ff05de7954b69480ef8a77e3f7077b` now persists the exact production Operator/Auth vhosts, `strict_sni_host on`, and external `operator_ingress` address `172.16.3.10`. A dependency-free contract check is wired into deployment-readiness CI so those invariants fail before a future storefront deployment. The local SPLCART Git repository currently has no configured remote; obtaining a remote/off-device backup remains an operational resilience task, not an unresolved public-release behavior defect.
 
+## Reviewer fixture certification
+
+A deterministic non-sensitive reviewer fixture is available at baseline commit `ab658c353fc3e0ce79d71e2968f53eedbc247537`. Using Node 22.23.2, an isolated local agent with the Windows path-lease helper, and the production `invokePublicWithAgent` boundary, all submitted five positive and three negative reviewer cases pass. Additional assertions prove destructive `file.replace` returns `APPROVAL_REQUIRED` without local approval and duplicate `file.create` returns `TARGET_EXISTS`. Reviewer positive #5 was changed from approval-gated `file.replace` to bounded `git.diff` so the submitted suite is self-service while the destructive approval boundary remains intact. This does not replace real production OAuth/ChatGPT reviewer execution.
+
 ## Remaining blockers before submission
 
 The release is **not yet fully OpenAI-review certified**. The following evidence is still mandatory:

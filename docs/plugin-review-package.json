@@ -32,11 +32,11 @@
       "fixture": "reviewer-created.ts does not exist before the test."
     },
     {
-      "id": "positive-5-file-replace",
-      "prompt": "Read demo-project/src/replace-me.ts, then replace its text with export const version = 2; using the fresh SHA precondition.",
-      "expectedBehavior": "Use file.read followed by destructive file.replace with the exact returned SHA-256 and local approval when required.",
-      "expectedResult": "One verified replacement; a stale SHA must never be accepted.",
-      "fixture": "replace-me.ts is disposable and contains export const version = 1;."
+      "id": "positive-5-git-diff",
+      "prompt": "Show me the Git diff for demo-project/src/known-modified.ts.",
+      "expectedBehavior": "Use git.diff with a project-relative literal path filter and do not modify the repository.",
+      "expectedResult": "A bounded diff for the known modified fixture file with no secrets, absolute home path, or internal telemetry.",
+      "fixture": "demo-project/src/known-modified.ts has one known non-sensitive modification."
     }
   ],
   "negativeTests": [
@@ -126,7 +126,7 @@
     "toolScan": "BLOCKED_OPENAI_PORTAL: run Scan Tools against exact production MCP endpoint after draft creation.",
     "demoRecording": "NOT_REQUIRED_BY_CURRENT_OPENAI_DOCS_OPTIONAL_IF_REQUESTED",
     "npmRuntimePublication": "BLOCKED_EXTERNAL_RELEASE_ACTION: @mecrod/operator@1.0.0 returns npm E404; publish only through the provenance-enabled main-branch release workflow after npm scope/auth is configured.",
-    "reviewerFixture": "STAGED_LOCAL_AWAITING_IDENTITY_AND_PAIRING: deterministic non-sensitive demo project baseline commit ab658c353fc3e0ce79d71e2968f53eedbc247537; reset helper preserves one known modified file."
+    "reviewerFixture": "LOCAL_SEMANTICS_PASS_AWAITING_IDENTITY_PAIRING: baseline ab658c353fc3e0ce79d71e2968f53eedbc247537; exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2. Additional local checks: file.replace -> APPROVAL_REQUIRED without local approval; duplicate file.create -> TARGET_EXISTS."
   },
   "releaseCandidate": {
     "name": "OCC-3M",
