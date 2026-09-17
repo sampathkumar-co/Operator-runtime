@@ -83,6 +83,10 @@ The production privacy, terms and support pages are deployment-specific, dated/c
 
 OpenAI publisher identity verification is a separate portal gate. The live wording does not imply OpenAI endorsement or approval.
 
+## Shared ingress persistence
+
+The outer SPLCART deployment source that produced the running `c100a4e...` release was recovered locally at `C:/Users/SAMPATH/OneDrive/Desktop/splcart new`. Commit `e1d2207cf8ff05de7954b69480ef8a77e3f7077b` now persists the exact production Operator/Auth vhosts, `strict_sni_host on`, and external `operator_ingress` address `172.16.3.10`. A dependency-free contract check is wired into deployment-readiness CI so those invariants fail before a future storefront deployment. The local SPLCART Git repository currently has no configured remote; obtaining a remote/off-device backup remains an operational resilience task, not an unresolved public-release behavior defect.
+
 ## Remaining blockers before submission
 
 The release is **not yet fully OpenAI-review certified**. The following evidence is still mandatory:
@@ -96,4 +100,4 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 
 Final submission itself is an external publication action and is not part of this certification pass unless explicitly authorized.
 
-See `OPERATOR_RELEASE_GATE.md` for the binary 26-gate verdict and `OPERATOR_FEATURE_GAPS.md` for discovered/resolved/open gaps.
+See `OPERATOR_RELEASE_GATE.md` for the binary 26-gate verdict, `OPERATOR_FEATURE_GAPS.md` for discovered/resolved/open gaps, and `OPERATOR_REMAINING_HUMAN_GATES.md` for the exact owner/portal procedure.

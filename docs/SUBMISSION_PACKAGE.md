@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The public endpoint must not be submitted until the target HTTPS origin, OAuth provider, legal/support pages, domain challenge, reviewer account, demo recording and Scan Tools snapshot are live and verified.
+The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. Do not submit until the remaining external gates are complete: real OAuth token-audience proof, reviewer credentials, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation and real ChatGPT end-to-end testing.
 
 ## What the public plugin does
 
@@ -61,7 +61,7 @@ The production MCP edge requires OAuth. `operator:read` is required to connect a
 
 The edge also provides:
 
-- exact `/.well-known/openai-apps-challenge` domain verification;
+- a fail-closed `/.well-known/openai-apps-challenge` route that remains 404 until the OpenAI portal supplies an exact verification token;
 - host/origin validation;
 - per-client request throttling;
 - repeated-auth-failure throttling;
@@ -89,11 +89,11 @@ Negative coverage:
 
 Reviewer credentials must work without MFA, SMS, email confirmation or private-network access. The review account should already have one dedicated demo device paired and one non-sensitive fixture project authorized.
 
-## Demo recording
+## Optional internal evidence recording
 
-The submission needs a real recording from the production path. Because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
+The current documented OpenAI submission fields do not require a demo recording for this MCP-only plugin. A production-path recording may still be retained internally or supplied if the portal/reviewer explicitly requests one. Because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
 
-Recommended recording sequence:
+If a recording is made, use this sequence:
 
 1. connect the reviewer/demo account through production OAuth;
 2. inspect the demo project and Git status;
@@ -111,11 +111,9 @@ Never expose OAuth tokens, recovery credentials, device private keys, absolute p
 Do not claim any of the following until the external gate is actually complete:
 
 - OpenAI marketplace/plugin approval;
-- production MCP origin is live;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
 - business/developer identity is verified in the OpenAI Platform;
-- demo recording URL exists;
 - production Windows release is signed by the final trusted certificate;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
@@ -129,7 +127,6 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
 - website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS; the repository-root privacy/terms/support documents are drafts and are never production inputs. The canonical edge requires git-ignored deployment files `production-notices/{privacy,terms,support}.md` plus an explicit finalization acknowledgement before it will start; publisher/contact, jurisdiction, hosting/region, actual retention, subprocessors and the private security-reporting path must be real deployment values before submission;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
-- the demo recording URL is reachable by reviewers;
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;
 - the exact five positive and three negative cases are reproducible;

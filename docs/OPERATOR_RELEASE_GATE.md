@@ -39,9 +39,9 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 ## Remaining blocking actions
 
 1. Complete one real OAuth authorization with the production predefined client and verify the issued access token has `aud=https://operator.splcart.in/mcp`, the required scopes, valid issuer/expiry, and succeeds against `/mcp`.
-2. Create a dedicated reviewer/demo account and fixture that can execute all submitted tests without MFA, SMS, email confirmation, or private-network access.
+2. Create a dedicated reviewer/demo account and fixture using the reviewer-only one-factor design in `OPERATOR_REMAINING_HUMAN_GATES.md`; normal users remain two-factor.
 3. Complete OpenAI Platform individual/business verification for the exact publisher name to be submitted.
-4. Create the OpenAI plugin draft; if the portal issues a domain challenge, install only that exact token at `/.well-known/openai-apps-challenge` and verify it.
+4. Create the OpenAI plugin draft; if the portal issues a domain challenge, set only the exact token through `OPENAI_APPS_CHALLENGE_TOKEN`, reload the edge environment, and verify the exact well-known response.
 5. Run **Scan Tools**, reconcile the imported 10-tool snapshot with the server metadata, then run a real ChatGPT read + write workflow through OAuth, relay and paired PC.
 6. Submit only after G10, G11, G23, G24, G25 and G26 change to PASS.
 

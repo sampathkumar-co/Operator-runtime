@@ -6,16 +6,16 @@ This procedure covers the remaining external M1 gate after repository CI is gree
 
 Do not begin the certification run until all of the following are true:
 
-- the intended ChatGPT workspace/account supports the required MCP capability level
-- Developer mode / custom MCP app access is enabled where required
-- a supported Secure MCP Tunnel or other officially supported remote MCP reachability mechanism is available
-- Operator's MCP server remains private/local according to the supported tunnel design rather than being casually exposed as an unauthenticated public service
+- the OpenAI plugin draft points to the production MCP endpoint `https://operator.splcart.in/mcp`
+- the production predefined OAuth client uses the callback shown by the OpenAI app-management page
+- OCC-3M production TLS, protected-resource metadata and OAuth discovery are healthy
+- the public edge remains authenticated and the local agent/relay-control ports remain non-public
 - the Windows release build under test is installed on the dedicated demo machine
 - the demo device is paired and online
 - only non-sensitive demo projects/data are authorized
 - emergency-stop recovery authority is available out of band
 
-Current OpenAI product guidance states that ChatGPT connects to remote MCP servers, not directly to local MCP servers; private/local servers should use Secure MCP Tunnel. Product availability and permission behavior can change, so re-check the official OpenAI developer/help documentation immediately before the release run.
+Current OpenAI plugin guidance supports public production MCP servers protected by OAuth. ChatGPT discovers the resource server metadata, follows the advertised authorization server, performs authorization-code + S256 PKCE, and sends the MCP resource identifier through OAuth. Re-check the official OpenAI plugin documentation immediately before the release run because portal requirements may change.
 
 ## Test environment record
 
@@ -30,12 +30,12 @@ Record these values in the certification receipt without including secrets:
 - ChatGPT client surface (web/desktop)
 - device public identifier/display label
 - logical project key
-- tunnel/connection type
+- production MCP URL and OAuth registration mode
 - whether the test is read-only or includes write/modify capability
 
 Never record bearer tokens, relay-control credentials, OAuth tokens, private keys, PFX material or database passwords.
 
-## Local preflight ? required before opening the tunnel
+## Local preflight — required before the live ChatGPT run
 
 From `apps/mcp-server`, with the authenticated local agent and loopback MCP server running, execute:
 
@@ -52,7 +52,7 @@ The receipt intentionally records `secureMcpTunnel` and `realChatGPTReadWorkflow
 
 Success criteria:
 
-1. ChatGPT connects through the supported remote/tunnel path.
+1. ChatGPT connects to `https://operator.splcart.in/mcp` through the production OAuth flow.
 2. Operator's MCP server completes protocol initialization.
 3. ChatGPT can enumerate the expected Operator tool surface.
 4. No direct public unauthenticated local-agent endpoint is introduced to make the test work.
@@ -151,7 +151,7 @@ Package: <version>
 MSIX SHA-256: <hash>
 ChatGPT surface: <surface>
 Workspace capability: <read-only or full MCP>
-Connection: <Secure MCP Tunnel / supported mechanism>
+Connection: public HTTPS MCP + production OAuth
 Device: <public demo label>
 Project key: <logical key>
 
@@ -170,7 +170,7 @@ No secrets in captured evidence: PASS/FAIL
 
 Only after Gate A and Gate B pass may these M1 items be checked:
 
-- Secure MCP Tunnel test
+- production MCP OAuth connection test
 - real ChatGPT read workflow test
 
 Write/modify demonstrations are additional publication evidence and must not be claimed if the ChatGPT account/workspace used for testing does not support full MCP write/modify actions.
