@@ -134,3 +134,18 @@ docker compose -f deploy/public-edge/compose.yml ps
 ```
 
 The container runs as the unprivileged `node` user with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a bounded PID limit, a small no-exec tmpfs, and one persistent relay-state volume. The image is pinned to the current certified Node 22 security baseline rather than a floating runtime tag.
+
+## Shared VPS with an existing public TLS proxy
+
+When Operator shares a host with an existing reverse proxy that already owns ports 80/443, use `compose.shared-vps.example.yml` plus `Caddyfile.shared-vps-internal.example` instead of publishing Operator ports on the host.
+
+The certified example uses the external Docker bridge `operator_ingress` with these fixed addresses:
+
+- existing public TLS proxy: `172.16.3.10`
+- Operator edge + internal gateway network namespace: `172.16.3.20`
+
+The public proxy must join `operator_ingress` at `172.16.3.10` and reverse-proxy the Operator hostname to `http://172.16.3.20:8080`. TLS, strict SNI/Host policy, certificate automation, and public-domain routing remain owned by the public proxy. The internal Caddy trusts forwarded client addresses only from `172.16.3.10/32` and never exposes relay control `8790`.
+
+Do not remove `NET_BIND_SERVICE` from the `operator-gateway` service. The pinned official Caddy binary carries the corresponding file capability; if the container drops the capability from its bounding set without adding it back, Linux can reject the Caddy executable before startup even though the internal listener is on port 8080.
+
+Before activation, validate both files and verify the outer proxy can reach `172.16.3.20:8080` with the canonical Operator `Host` header. Recreate only the affected proxy/gateway services, then confirm the outer proxy remains healthy and external HTTPS succeeds before proceeding with OAuth or OpenAI review.

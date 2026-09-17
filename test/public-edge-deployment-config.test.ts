@@ -118,3 +118,22 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.equal(mcpPackage.scripts?.['certify:production-edge'], 'tsx scripts/production-edge-preflight.ts');
   assert.doesNotMatch(caddy, /8790/);
 });
+test('shared-VPS profile preserves the trusted ingress and Caddy exec capability contract', () => {
+  const compose = text('deploy/public-edge/compose.shared-vps.example.yml');
+  const caddy = text('deploy/public-edge/Caddyfile.shared-vps-internal.example');
+  assert.match(compose, /operator_ingress:\r?\n\s+ipv4_address: 172\.16\.3\.20/);
+  assert.match(compose, /network_mode: service:operator-edge/);
+  assert.match(compose, /image: caddy:2\.11\.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648/);
+  assert.match(compose, /cap_drop:\r?\n\s+- ALL[\s\S]*cap_add:\r?\n\s+- NET_BIND_SERVICE/);
+  assert.match(compose, /external: true\r?\n\s+name: operator_ingress/);
+  assert.doesNotMatch(compose, /ports:/);
+  assert.doesNotMatch(compose, /network_mode:\s*host|privileged:\s*true/);
+  assert.match(caddy, /auto_https off/);
+  assert.match(caddy, /trusted_proxies static 172\.16\.3\.10\/32/);
+  assert.match(caddy, /trusted_proxies_strict/);
+  assert.match(caddy, /^:8080 \{/m);
+  assert.match(caddy, /reverse_proxy 127\.0\.0\.1:47200/);
+  assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8788/);
+  assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
+  assert.doesNotMatch(caddy, /8790/);
+});
