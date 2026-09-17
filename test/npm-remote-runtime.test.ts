@@ -139,14 +139,24 @@ test('npm publication fails closed unless exact source commit is supplied', asyn
   assert.match(source, /manifest\.sourceCommit !== expectedCommit/);
 });
 
-test('npm release revalidates source binding outside suppressible lifecycle hooks', async () => {
+test('npm release uses immutable first-release artifact and staged future publication', async () => {
   const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-release.yml'), 'utf8');
-  const directGate = workflow.indexOf('Revalidate exact source binding immediately before publish');
-  const directCommand = workflow.indexOf('node packages/mecrod-operator/src/publish-check.mjs', directGate);
-  const ignoreScripts = workflow.indexOf("NPM_CONFIG_IGNORE_SCRIPTS: 'false'", directCommand);
-  const publish = workflow.indexOf('npm publish ./packages/mecrod-operator', directCommand);
-  assert.ok(directGate >= 0 && directCommand > directGate && ignoreScripts > directCommand && publish > ignoreScripts);
-  assert.match(workflow.slice(publish), /--ignore-scripts=false/);
+  const sourceGate = workflow.indexOf('Revalidate exact source binding before release handoff');
+  const sourceCommand = workflow.indexOf('node packages/mecrod-operator/src/publish-check.mjs', sourceGate);
+  const upload = workflow.indexOf('Upload immutable npm release artifact');
+  const handoff = workflow.indexOf('First-release artifact handoff');
+  const npm11 = workflow.indexOf('npm@11.19.1');
+  const existsGate = workflow.indexOf('Require existing package before staged release');
+  const stage = workflow.indexOf('npm stage publish \"$env:PACKAGE_PATH\"');
+  assert.ok(sourceGate >= 0 && sourceCommand > sourceGate && upload > sourceCommand && handoff > upload);
+  assert.ok(npm11 > handoff && existsGate > npm11 && stage > existsGate);
+  assert.match(workflow, /default: artifact/);
+  assert.match(workflow, /UNLICENSED is blocked/);
+  assert.match(workflow, /npm tarball missing a root license file/);
+  assert.match(workflow, /declared dual-use npm tarball is missing root DISCLOSURE/);
+  assert.match(workflow, /release tarball hash changed before staging/);
+  assert.match(workflow.slice(stage), /--access public[\s\S]*--provenance[\s\S]*--ignore-scripts=false/);
+  assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecrod-operator/);
 });
 
 test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
@@ -181,4 +191,11 @@ test('npm package metadata is canonical before publication', async () => {
   const pkg = JSON.parse(await fs.readFile(path.resolve('packages/mecrod-operator/package.json'), 'utf8'));
   assert.equal(pkg.bin?.operator, 'bin/operator.mjs');
   assert.equal(pkg.repository?.url, 'git+https://github.com/sampathkumar-co/Operator-runtime.git');
+  assert.equal(pkg.bugs?.url, 'https://github.com/sampathkumar-co/Operator-runtime/issues');
+  assert.equal(pkg.bugs?.email, 'support@splcart.in');
+  assert.deepEqual(pkg.keywords, ['chatgpt', 'mcp', 'windows', 'automation', 'developer-tools']);
+  const readme = await fs.readFile(path.resolve('packages/mecrod-operator/README.md'), 'utf8');
+  assert.match(readme, /https:\/\/operator\.splcart\.in\/support/);
+  assert.match(readme, /https:\/\/operator\.splcart\.in\/privacy/);
+  assert.match(readme, /https:\/\/operator\.splcart\.in\/terms/);
 });

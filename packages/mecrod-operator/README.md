@@ -33,3 +33,10 @@ npx @mecrod/operator@latest doctor
 The npm launcher deliberately rebuilds the child environment from a small desktop allowlist. npm/GitHub/cloud tokens, `.npmrc` pointers, `NODE_OPTIONS`, caller-supplied Operator relay variables, and other ambient credentials are not inherited by the long-running runtime. The public package pins its relay/result authority to `operator.splcart.in`; callers cannot redirect a paired device by setting environment variables.
 
 The runtime payload is produced from the canonical repository sources at publication time, and includes the native DPAPI, UI Automation, and Windows path-lease helpers compiled in the Windows release workflow. The payload manifest records the exact Git commit and hashes every shipped file.
+
+## Support and policies
+
+- Support: https://operator.splcart.in/support
+- Privacy: https://operator.splcart.in/privacy
+- Terms: https://operator.splcart.in/terms
+- Issues: https://github.com/sampathkumar-co/Operator-runtime/issues
