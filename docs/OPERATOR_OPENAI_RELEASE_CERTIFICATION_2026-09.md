@@ -42,7 +42,7 @@ Draft PR #22 is a narrowly scoped successor to OCC-3M for npm/public-distributio
 
 Independent GitHub validation on this exact head is green: CI #659, Platform Matrix #429, NPM Remote Runtime CI #98 and Windows Signing Smoke #430 all PASS. Local release tests are 12/12 PASS and the full Windows suite is 361 tests / 345 pass / 16 expected skips / 0 failures with the required path-lease helper wired.
 
-PR #22 deliberately does **not** choose the software license or npm dual-use classification. It remains draft and must not be merged or published until FG-013 and FG-015 are resolved, npm scope ownership/2FA is proven, and affected certification is rerun on the final successor SHA.
+PR #22 deliberately does **not** choose the software license or npm dual-use classification. `OPERATOR_NPM_LICENSE_DECISION.md` records the licensing options and recommends a proprietary custom runtime license when the commercial intent is a publicly installable connector for the hosted Operator service without broad redistribution rights. `OPERATOR_NPM_POLICY_CLASSIFICATION.md` recommends the conservative engineering posture of treating Operator as dual-use unless npm Trust & Safety confirms otherwise. Both remain owner/npm decisions. PR #22 stays draft and must not be merged or published until FG-013 and FG-015 are resolved, npm scope ownership/2FA is proven, and affected certification is rerun on the final successor SHA.
 
 ## Production identity and isolation
 
