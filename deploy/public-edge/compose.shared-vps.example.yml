@@ -1,0 +1,98 @@
+name: operator-production
+services:
+  operator-edge:
+    build:
+      context: ../..
+      dockerfile: deploy/public-edge/Dockerfile
+    image: operator-public-edge:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - ./operator-edge.env
+    environment:
+      OPERATOR_RELAY_STATE_DIR: /var/lib/operator-relay
+      OPERATOR_RELAY_HOST: 127.0.0.1
+      OPERATOR_RELAY_PORT: "8788"
+      OPERATOR_RELAY_RESULT_HOST: 127.0.0.1
+      OPERATOR_RELAY_RESULT_PORT: "8789"
+      OPERATOR_RELAY_CONTROL_PORT: "8790"
+      OPERATOR_EXECUTION_MODE: relay
+      OPERATOR_RELAY_CONTROL_URL: http://127.0.0.1:8790
+      OPERATOR_MCP_PUBLIC_EDGE: "1"
+      OPERATOR_MCP_PUBLIC_BIND_ACK: TLS_TERMINATES_UPSTREAM
+      OPERATOR_MCP_HOST: 127.0.0.1
+      OPERATOR_MCP_PORT: "47200"
+      OPERATOR_PUBLIC_NOTICES_DIR: /run/operator-public-notices
+    volumes:
+      - operator_relay_state:/var/lib/operator-relay
+      - type: bind
+        source: ./production-notices
+        target: /run/operator-public-notices
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      operator_ingress:
+        ipv4_address: 172.16.3.20
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1536m
+    cpus: 1.5
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  operator-gateway:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    network_mode: service:operator-edge
+    depends_on:
+      operator-edge:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - type: bind
+        source: ./Caddyfile.shared-vps-internal.example
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /config:rw,noexec,nosuid,nodev,size=16m
+      - /data:rw,noexec,nosuid,nodev,size=16m
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    # The official Caddy binary carries cap_net_bind_service. If the bounding
+    # set drops that capability entirely, Linux rejects exec before Caddy starts.
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"
+
+networks:
+  operator_ingress:
+    external: true
+    name: operator_ingress
+
+volumes:
+  operator_relay_state:
+    name: operator_relay_state
