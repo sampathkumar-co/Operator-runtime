@@ -475,6 +475,7 @@ test('legacy unroutable queue head is terminalized and the device reconnects for
   const run = client.run();
   t.after(() => client.stop());
   await waitFor(async () => capabilityReads >= 2 && (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.deviceId === device.deviceId && entry.capabilities.includes('file.read')));
   const retired = await deliveries.retained(device.deviceId, 1);
   assert.equal(retired?.status, 'expired');
   assert.deepEqual(retired?.payload, {});
@@ -693,6 +694,124 @@ test('dispatch queued behind in-flight work revalidates a downgraded route befor
   releaseLowDelivery();
   await waitFor(async () => (await deliveries.retained(device.deviceId, 2))?.status === 'expired');
   await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 2);
+  lowClient.stop();
+  await lowRun;
+});
+
+test('dispatch success is bound to the exact routed session after the final async authority check', { timeout: 20_000 }, async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-final-session-authority-');
+  const highState = await tempDir(t, 'operator-relay-final-session-high-');
+  const lowState = await tempDir(t, 'operator-relay-final-session-low-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(highState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'final-session-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read', 'cap:git.write'],
+    ttlMs: 60_000
+  })).token;
+
+  let highDeliveryStarted!: () => void;
+  let releaseHighDelivery!: () => void;
+  const highStarted = new Promise<void>((resolve) => { highDeliveryStarted = resolve; });
+  const highGate = new Promise<void>((resolve) => { releaseHighDelivery = resolve; });
+  const highClient = new RelayClient({
+    stateDir: highState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['file.read', 'git.write'],
+    onDelivery: async () => { highDeliveryStarted(); await highGate; },
+    sleep: async () => undefined
+  });
+  const highRun = highClient.run();
+  t.after(() => { releaseHighDelivery(); highClient.stop(); });
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.capabilities.includes('git.write')));
+
+  const first = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { action: { id: 'final-session-head', capability: 'file.read' } }
+  });
+  await highStarted;
+  assert.equal(first.delivery.seq, 1);
+
+  const originalIsActive = sessions.isActive.bind(sessions);
+  let activeChecks = 0;
+  let enteredFinalCheck!: () => void;
+  let releaseFinalCheck!: () => void;
+  const finalCheckEntered = new Promise<void>((resolve) => { enteredFinalCheck = resolve; });
+  const finalCheckGate = new Promise<void>((resolve) => { releaseFinalCheck = resolve; });
+  t.after(() => releaseFinalCheck());
+  (sessions as any).isActive = async (...args: any[]) => {
+    activeChecks += 1;
+    if (activeChecks === 3) {
+      enteredFinalCheck();
+      await finalCheckGate;
+    }
+    return await (originalIsActive as any)(...args);
+  };
+
+  const delayed = hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['git.write'],
+    kind: 'action',
+    payload: { action: { id: 'final-session-git', capability: 'git.write' } }
+  });
+  const rejected = assert.rejects(delayed, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
+  await finalCheckEntered;
+
+  highClient.stop();
+  releaseHighDelivery();
+  await highRun;
+
+  let lowDeliveryStarted!: () => void;
+  let releaseLowDelivery!: () => void;
+  const lowStarted = new Promise<void>((resolve) => { lowDeliveryStarted = resolve; });
+  const lowGate = new Promise<void>((resolve) => { releaseLowDelivery = resolve; });
+  const lowClient = new RelayClient({
+    stateDir: lowState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      lowDeliveryStarted();
+      await lowGate;
+    },
+    sleep: async () => undefined
+  });
+  const lowRun = lowClient.run();
+  t.after(() => { releaseLowDelivery(); lowClient.stop(); });
+  await lowStarted;
+
+  releaseFinalCheck();
+  await rejected;
+  assert.ok(activeChecks >= 3);
+  assert.equal((await deliveries.retained(device.deviceId, 2))?.status, 'pending');
+
+  releaseLowDelivery();
+  await waitFor(async () => (await deliveries.retained(device.deviceId, 2))?.status === 'expired');
   lowClient.stop();
   await lowRun;
 });

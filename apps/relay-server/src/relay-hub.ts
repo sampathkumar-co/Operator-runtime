@@ -228,6 +228,8 @@ export class RelayHub {
       throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
     }
     if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
+    const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
+    this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
     return { route, delivery };
   }
 
@@ -402,6 +404,17 @@ export class RelayHub {
     const missing = requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
     if (missing.length > 0) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before delivery authorization.');
     return connection;
+  }
+
+  #assertCurrentDispatchConnection(expected: Connection, requiredCapabilities: string[]): void {
+    const current = this.#connections.get(expected.deviceId);
+    if (current !== expected || current.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection changed before dispatch success could be committed.', { retryable: true });
+    }
+    const missing = requiredCapabilities.filter((capability) => !current.capabilities.includes(capability));
+    if (missing.length > 0) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before dispatch success could be committed.', { retryable: true });
+    }
   }
 
   async #pump(deviceId: string): Promise<void> {
