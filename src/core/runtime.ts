@@ -14,6 +14,21 @@ export class OperatorRuntime {
     return this;
   }
 
+  async supportedCapabilities(capabilities: readonly string[]): Promise<string[]> {
+    const supported: string[] = [];
+    for (const capability of [...new Set(capabilities)].sort()) {
+      const action: ActionRequest = {
+        id: `capability-probe:${capability}`,
+        capability,
+        risk: 'read',
+        input: {},
+        provenance: { kind: 'runtime' }
+      };
+      if (await this.router.advertises(action)) supported.push(capability);
+    }
+    return supported;
+  }
+
   async execute(action: ActionRequest, permissions: PermissionProfile): Promise<ActionResult> {
     const start = performance.now();
     let canonicalAction = action;

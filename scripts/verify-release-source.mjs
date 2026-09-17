@@ -2,10 +2,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REQUIRED_RELEASE_WORKFLOWS = Object.freeze([
-  'CI',
-  'Platform Matrix',
-  'Windows Signing Smoke'
-]);
+  { name: 'CI', path: '.github/workflows/ci.yml' },
+  { name: 'Platform Matrix', path: '.github/workflows/platform-matrix.yml' },
+  { name: 'Windows Signing Smoke', path: '.github/workflows/windows-signing-smoke.yml' },
+  { name: 'NPM Remote Runtime CI', path: '.github/workflows/npm-remote-ci.yml' }
+].map((item) => Object.freeze(item)));
 
 function fail(message) {
   throw new Error(message);
@@ -28,17 +29,19 @@ export function validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns 
   }
 
   const acceptedRuns = {};
-  for (const workflowName of REQUIRED_RELEASE_WORKFLOWS) {
+  for (const requirement of REQUIRED_RELEASE_WORKFLOWS) {
+    const { name: workflowName, path: workflowPath } = requirement;
     const candidates = workflowRuns
       .filter((run) =>
         run?.name === workflowName &&
+        run?.path === workflowPath &&
         run?.event === 'push' &&
         run?.head_branch === 'main' &&
         String(run?.head_sha ?? '').toLowerCase() === commitSha
       )
       .sort((a, b) => String(b?.created_at ?? '').localeCompare(String(a?.created_at ?? '')));
     const run = candidates[0];
-    if (!run) fail(`Release source is missing required ${workflowName} push evidence.`);
+    if (!run) fail(`Release source is missing required ${workflowName} push evidence from ${workflowPath}.`);
     if (run.status !== 'completed' || run.conclusion !== 'success') {
       fail(`Required ${workflowName} run is not green (status=${run.status ?? 'unknown'}, conclusion=${run.conclusion ?? 'unknown'}).`);
     }

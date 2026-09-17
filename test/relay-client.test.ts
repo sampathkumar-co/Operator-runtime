@@ -68,7 +68,9 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
           assert.equal(signatureOk, true);
           assert.equal(frame.sessionToken, 'ephemeral-session-token');
           assert.equal(frame.payload.resumeAfterSeq, connectionNumber === 1 ? 0 : 1);
-          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000 });
+          assert.equal(frame.payload.capabilityBinding, 1);
+          assert.deepEqual(frame.payload.capabilities, ['file.read', 'git.status']);
+          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000, capabilityBinding: 1, capabilities: ['file.read', 'git.status'] });
           if (connectionNumber === 1) {
             socket.server({ type: 'delivery', seq: 1, id: 'delivery-1', kind: 'task.dispatch', payload: { taskId: 't1' } });
           } else {
@@ -90,6 +92,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     identity,
     socketFactory: factory,
     getSessionToken: async () => 'ephemeral-session-token',
+    supportedCapabilities: ['git.status', 'file.read'],
     onDelivery: async (delivery) => { delivered.push(delivery); },
     sleep: async () => {}
   });
@@ -103,6 +106,114 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   assert.equal(sockets[0].sent.some((frame) => frame.type === 'ack' && frame.seq === 1), true);
 });
 
+
+test('relay recomputes signed capabilities before every reconnect hello', async (t) => {
+  const state = await stateDir(t, 'operator-relay-dynamic-capabilities-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Dynamic Capability PC');
+  const sockets: FakeSocket[] = [];
+  const snapshots = [
+    ['file.read', 'git.write'],
+    ['file.read']
+  ];
+  let capabilityReads = 0;
+  let client!: RelayClient;
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket = new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type !== 'hello') return;
+      const expected = connectionNumber === 1 ? ['file.read', 'git.write'] : ['file.read'];
+      assert.equal(frame.payload.capabilityBinding, 1);
+      assert.deepEqual(frame.payload.capabilities, expected);
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: `dynamic-${connectionNumber}`,
+        resumeFromSeq: 0,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: expected
+      });
+      setTimeout(() => {
+        if (connectionNumber === 1) socket.close(1012, 'simulate network reconnect');
+        else { client.stop(); socket.close(); }
+      }, 0);
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    getSupportedCapabilities: async () => snapshots[Math.min(capabilityReads++, snapshots.length - 1)],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(capabilityReads, 2);
+  assert.equal(sockets.length, 2);
+});
+
+
+test('capability-aware client negotiates binding but remains compatible with a legacy relay welcome', async (t) => {
+  const state = await stateDir(t, 'operator-relay-capability-binding-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Capability Binding PC');
+  const socket = new FakeSocket();
+  let client!: RelayClient;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    assert.equal(frame.payload.capabilityBinding, 1);
+    assert.deepEqual(frame.payload.capabilities, ['file.read']);
+    socket.server({ type: 'welcome', protocol: 1, connectionId: 'old-relay', resumeFromSeq: 0, heartbeatMs: 60_000 });
+    setTimeout(() => { client.stop(); socket.close(); }, 0);
+  };
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+  await client.run();
+});
+
+test('capability-aware client rejects partial capability-binding negotiation', async (t) => {
+  const state = await stateDir(t, 'operator-relay-capability-binding-partial-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Partial Binding PC');
+  const socket = new FakeSocket();
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'partial-relay', resumeFromSeq: 0, heartbeatMs: 60_000, capabilities: ['file.read'] });
+    }
+  };
+  const client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_BINDING_INVALID');
+});
 test('uncertain delivery after a crash is reconciled instead of automatically replayed', async (t) => {
   const state = await stateDir(t, 'operator-relay-recovery-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });

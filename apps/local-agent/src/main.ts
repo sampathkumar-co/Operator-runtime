@@ -15,6 +15,7 @@ import { RelaySessionCredentialManager, deriveRelayDeviceResetUrl, deriveRelaySe
 import { LocalDeviceResetCoordinator } from './device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
+import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -59,6 +60,10 @@ const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
 const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
 const relayTokenFile = path.resolve(process.env.OPERATOR_RELAY_SESSION_TOKEN_FILE?.trim() || path.join(stateDir, 'relay-session.token'));
 const relayAllowInsecureLoopback = process.env.OPERATOR_RELAY_ALLOW_INSECURE_LOOPBACK === '1';
+const relayRequired = process.env.OPERATOR_RELAY_REQUIRED === '1';
+if (relayRequired && !relayUrl) {
+  throw new OperatorError('RELAY_REQUIRED_CONFIGURATION_MISSING', 'Relay-only mode requires an explicit relay URL.');
+}
 
 const runtime = createRuntime({
   allowedRoots,
@@ -77,7 +82,6 @@ const runtime = createRuntime({
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
 });
-
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
@@ -86,6 +90,17 @@ let shuttingDown = false;
 
 function stopRelay(): void {
   relayRunner?.stop();
+}
+
+async function failRequiredRelay(error: unknown): Promise<void> {
+  if (!relayRequired || shuttingDown) return;
+  shuttingDown = true;
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[operator] required relay failed: ${message}`);
+  stopRelay();
+  await Promise.allSettled([agent.close(), runtime.close()]);
+  process.exitCode = 1;
+  setImmediate(() => process.exit(1));
 }
 
 function startRelay(): void {
@@ -115,12 +130,19 @@ function startRelay(): void {
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
+    getSupportedCapabilities: () => runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES),
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
   const runner = relayRunner;
   relayRun = runner.run()
-    .catch((error) => {
+    .then(async () => {
+      if (relayRequired && !shuttingDown) {
+        await failRequiredRelay(new OperatorError('RELAY_REQUIRED_STOPPED', 'The required relay connection stopped.'));
+      }
+    })
+    .catch(async (error) => {
       console.error(`[operator] relay connection stopped: ${error instanceof Error ? error.message : String(error)}`);
+      await failRequiredRelay(error);
     })
     .finally(() => {
       runner.stop();
@@ -202,10 +224,25 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
+if (relayUrl) {
+  const relayCapabilities = await runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES);
+  console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
+}
 
-if (relayUrl && !(await emergencyStop.status()).engaged) {
+const emergencyStatus = await emergencyStop.status();
+if (relayUrl && emergencyStatus.engaged) {
+  if (relayRequired) {
+    await failRequiredRelay(new OperatorError(
+      'RELAY_REQUIRED_EMERGENCY_STOP',
+      'The required relay cannot start while the local emergency stop is engaged.'
+    ));
+  }
+} else if (relayUrl) {
   try { startRelay(); }
-  catch (error) { console.error(`[operator] relay startup failed: ${error instanceof Error ? error.message : String(error)}`); }
+  catch (error) {
+    console.error(`[operator] relay startup failed: ${error instanceof Error ? error.message : String(error)}`);
+    await failRequiredRelay(error);
+  }
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

@@ -10,9 +10,16 @@ const pullRequests = [{
   merge_commit_sha: sha,
   base: { ref: 'main' }
 }];
-const workflowRuns = ['CI', 'Platform Matrix', 'Windows Signing Smoke'].map((name, index) => ({
+const workflowRequirements = [
+  ['CI', '.github/workflows/ci.yml'],
+  ['Platform Matrix', '.github/workflows/platform-matrix.yml'],
+  ['Windows Signing Smoke', '.github/workflows/windows-signing-smoke.yml'],
+  ['NPM Remote Runtime CI', '.github/workflows/npm-remote-ci.yml']
+] as const;
+const workflowRuns = workflowRequirements.map(([name, workflowPath], index) => ({
   id: index + 1,
   name,
+  path: workflowPath,
   event: 'push',
   head_branch: 'main',
   head_sha: sha,
@@ -27,6 +34,17 @@ test('release source requires an exact merged PR and all required green main pus
   assert.equal(result.workflowRunIds.CI, 1);
   assert.equal(result.workflowRunIds['Platform Matrix'], 2);
   assert.equal(result.workflowRunIds['Windows Signing Smoke'], 3);
+  assert.equal(result.workflowRunIds['NPM Remote Runtime CI'], 4);
+});
+
+test('release source rejects same-name workflow evidence from the wrong workflow file', () => {
+  const decoy = workflowRuns.map((run) => run.name === 'NPM Remote Runtime CI'
+    ? { ...run, path: '.github/workflows/decoy-runtime.yml' }
+    : run);
+  assert.throws(
+    () => validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns: decoy }),
+    /missing required NPM Remote Runtime CI push evidence from \.github\/workflows\/npm-remote-ci\.yml/
+  );
 });
 
 test('release source rejects a direct-push commit without an associated merged PR', () => {
@@ -40,6 +58,18 @@ test('release source rejects missing, pending, or failed required workflow evide
   assert.throws(
     () => validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns: workflowRuns.filter((run) => run.name !== 'CI') }),
     /missing required CI push evidence/
+  );
+  assert.throws(
+    () => validateReleaseSourceEvidence({ sha, pullRequests, workflowRuns: workflowRuns.filter((run) => run.name !== 'NPM Remote Runtime CI') }),
+    /missing required NPM Remote Runtime CI push evidence/
+  );
+  assert.throws(
+    () => validateReleaseSourceEvidence({
+      sha,
+      pullRequests,
+      workflowRuns: workflowRuns.map((run) => run.name === 'NPM Remote Runtime CI' ? { ...run, conclusion: 'failure' } : run)
+    }),
+    /NPM Remote Runtime CI run is not green/
   );
   assert.throws(
     () => validateReleaseSourceEvidence({

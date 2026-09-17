@@ -70,6 +70,7 @@ export interface CapabilityScore {
 export interface CapabilityProvider {
   name: string;
   supports(action: ActionRequest): boolean | Promise<boolean>;
+  advertises?(action: ActionRequest): boolean | Promise<boolean>;
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore>;
   resolveRisk?(action: ActionRequest): ActionRisk | Promise<ActionRisk>;
   execute(action: ActionRequest): Promise<ActionResult>;

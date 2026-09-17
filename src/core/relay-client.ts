@@ -70,6 +70,8 @@ interface WelcomeFrame {
   resumeFromSeq: number;
   expiredThroughSeq?: number;
   heartbeatMs?: number;
+  capabilityBinding?: 1;
+  capabilities?: string[];
 }
 
 interface DeliveryFrame {
@@ -90,6 +92,8 @@ export interface RelayClientOptions {
   identity: DeviceIdentityStore;
   socketFactory?: RelaySocketFactory;
   getSessionToken: () => Promise<string>;
+  supportedCapabilities?: readonly string[];
+  getSupportedCapabilities?: () => Promise<readonly string[]>;
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
@@ -106,6 +110,8 @@ export class RelayClient {
   #identity: DeviceIdentityStore;
   #socketFactory: RelaySocketFactory;
   #getSessionToken: () => Promise<string>;
+  #getSupportedCapabilities: () => Promise<string[]>;
+  #requireCapabilityBinding: boolean;
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
@@ -125,6 +131,14 @@ export class RelayClient {
     this.#identity = options.identity;
     this.#socketFactory = options.socketFactory ?? nativeSocketFactory;
     this.#getSessionToken = options.getSessionToken;
+    if (options.supportedCapabilities !== undefined && options.getSupportedCapabilities) {
+      throw new OperatorError('RELAY_CAPABILITIES_CONFIGURATION_INVALID', 'Configure either static or dynamic relay capabilities, not both.');
+    }
+    this.#requireCapabilityBinding = options.supportedCapabilities !== undefined || options.getSupportedCapabilities !== undefined;
+    const staticCapabilities = validateSupportedCapabilities(options.supportedCapabilities ?? []);
+    this.#getSupportedCapabilities = options.getSupportedCapabilities
+      ? async () => validateSupportedCapabilities(await options.getSupportedCapabilities!())
+      : async () => [...staticCapabilities];
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
     this.#onExpiredRecovery = options.onExpiredRecovery;
@@ -163,6 +177,7 @@ export class RelayClient {
   async #connectOnce(): Promise<void> {
     const state = await this.#readState();
     const token = await this.#getSessionToken();
+    const supportedCapabilities = await this.#getSupportedCapabilities();
     if (!token || Buffer.byteLength(token, 'utf8') > 16 * 1024) {
       throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token is missing or exceeds the bounded size.');
     }
@@ -184,6 +199,7 @@ export class RelayClient {
       fingerprint: identity.fingerprint,
       resumeAfterSeq: state.lastAckedServerSeq,
       pendingRecovery: state.processing ? { seq: state.processing.seq, id: state.processing.id } : null,
+      ...(this.#requireCapabilityBinding ? { capabilityBinding: 1 as const, capabilities: [...supportedCapabilities] } : {}),
       sentAt: this.#clock().toISOString(),
       nonce: crypto.randomBytes(24).toString('base64url')
     };
@@ -222,7 +238,7 @@ export class RelayClient {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          await this.#validateWelcome(frame, state);
+          await this.#validateWelcome(frame, state, supportedCapabilities);
           welcomed = true;
           this.#attempt = 0;
           this.#lastPongAt = Date.now();
@@ -252,8 +268,21 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  async #validateWelcome(frame: WelcomeFrame, state: RelayState): Promise<void> {
+  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<void> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
+    if (this.#requireCapabilityBinding) {
+      const legacyRelay = frame.capabilityBinding === undefined && frame.capabilities === undefined;
+      if (!legacyRelay) {
+        if (frame.capabilityBinding !== 1 || frame.capabilities === undefined) {
+          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay returned a partial or invalid capability-binding negotiation.', { retryable: false });
+        }
+        const effective = validateSupportedCapabilities(frame.capabilities);
+        const advertised = new Set(supportedCapabilities);
+        if (effective.some((capability) => !advertised.has(capability))) {
+          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
+        }
+      }
+    }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
     if (!Number.isSafeInteger(frame.resumeFromSeq) || frame.resumeFromSeq < 0) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay resume sequence is invalid.');
     const expiredThroughSeq = frame.expiredThroughSeq;
@@ -369,6 +398,25 @@ export function reconnectDelay(attemptInput: number, randomInput = Math.random()
   const base = Math.min(MIN_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
   const jitter = 0.75 + random * 0.5;
   return Math.min(Math.max(Math.round(base * jitter), MIN_BACKOFF_MS), MAX_BACKOFF_MS);
+}
+
+
+function validateSupportedCapabilities(input: readonly string[]): string[] {
+  if (!Array.isArray(input) || input.length > 128) {
+    throw new OperatorError('RELAY_CAPABILITIES_INVALID', 'Relay supported capabilities must be a bounded array.');
+  }
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const capability = String(item ?? '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(capability)) {
+      throw new OperatorError('RELAY_CAPABILITIES_INVALID', 'Relay supported capability name is invalid.');
+    }
+    if (seen.has(capability)) continue;
+    seen.add(capability);
+    output.push(capability);
+  }
+  return output.sort();
 }
 
 function sameRelayDestination(expectedRaw: string, actualRaw: string): boolean {

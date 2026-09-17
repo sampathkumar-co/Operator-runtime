@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
 import { GitCheckpointProvider } from './git-checkpoint.ts';
 
 const SCORE: CapabilityScore = {
@@ -18,7 +19,8 @@ const SCORE: CapabilityScore = {
   interactionCost: 0.01
 };
 
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false', '--literal-pathspecs'];
+const DISABLED_HOOKS_PATH = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const SAFE_GIT_PREFIX = ['--no-pager', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${DISABLED_HOOKS_PATH}`, '--literal-pathspecs'];
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 type RepoState = {
@@ -39,12 +41,20 @@ export class GitWriteProvider implements CapabilityProvider {
     this.#checkpoint = new GitCheckpointProvider(options);
   }
 
-  supports(action: ActionRequest): boolean { return action.capability === 'git.write'; }
+  supports(action: ActionRequest): boolean {
+    return action.capability === 'git.write';
+  }
+
+  advertises(action: ActionRequest): boolean {
+    if (!this.supports(action)) return false;
+    try { resolveSupportedGitExecutable(gitEnvironment({})); return true; } catch { return false; }
+  }
   score(): CapabilityScore { return SCORE; }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      resolveSupportedGitExecutable(gitEnvironment({}));
       const operation = String(action.input.operation ?? '');
       if (!['stage', 'unstage', 'commit'].includes(operation)) {
         throw new OperatorError('INVALID_GIT_WRITE_OPERATION', 'operation must be stage, unstage, or commit.');
@@ -126,13 +136,14 @@ export class GitWriteProvider implements CapabilityProvider {
     if (staged.code === 0) throw new OperatorError('GIT_NOTHING_STAGED', 'No staged changes are available to commit.');
     if (staged.code !== 1) throw new OperatorError('GIT_STAGED_CHECK_FAILED', staged.stderr.trim() || `git diff exited ${staged.code}.`);
 
+    const identity = await commitIdentityEnv(before.root);
     const hooksDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-empty-hooks-'));
     try {
       await runGit(before.root, [
         '-c', `core.hooksPath=${hooksDir}`,
         '-c', 'commit.gpgSign=false',
         'commit', '--no-verify', '--no-gpg-sign', '-m', message
-      ], {});
+      ], identity);
     } finally {
       await fs.rm(hooksDir, { recursive: true, force: true });
     }
@@ -224,9 +235,43 @@ function success(
   };
 }
 
+async function commitIdentityEnv(root: string): Promise<NodeJS.ProcessEnv> {
+  const [nameResult, emailResult] = await Promise.all([
+    runGit(root, ['config', '--local', '--get', 'user.name'], {}, true),
+    runGit(root, ['config', '--local', '--get', 'user.email'], {}, true)
+  ]);
+  for (const result of [nameResult, emailResult]) {
+    if (![0, 1].includes(result.code)) {
+      throw new OperatorError('GIT_CONFIG_INSPECTION_FAILED', result.stderr.trim() || 'Unable to inspect repository-local Git identity.');
+    }
+  }
+  let name = 'Operator';
+  let email = 'operator@local.invalid';
+  if (nameResult.code === 0 && emailResult.code === 0) {
+    const localName = nameResult.stdout.trim();
+    const localEmail = emailResult.stdout.trim();
+    if (!localName || localName.length > 200 || /[\0\r\n]/.test(localName)) throw new OperatorError('GIT_IDENTITY_INVALID', 'Repository-local Git user.name is invalid.');
+    if (!localEmail || localEmail.length > 320 || /[\0\r\n]/.test(localEmail)) throw new OperatorError('GIT_IDENTITY_INVALID', 'Repository-local Git user.email is invalid.');
+    name = localName;
+    email = localEmail;
+  }
+  return {
+    GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email,
+    GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email
+  };
+}
+
 function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
-  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_CONFIG_HOME']) {
+  const nullConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const env: NodeJS.ProcessEnv = {
+    GIT_PAGER: '',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_GLOBAL: nullConfig,
+    GIT_CONFIG_SYSTEM: nullConfig,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_NO_LAZY_FETCH: '1'
+  };
+  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   for (const [key, value] of Object.entries(extraEnv)) {
@@ -237,12 +282,14 @@ function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, allowNonZero = false): Promise<GitOutput> {
   return await new Promise((resolve, reject) => {
-    const child = spawn('git', [...SAFE_GIT_PREFIX, ...args], {
+    const environment = gitEnvironment(extraEnv);
+    const gitExecutable = resolveSupportedGitExecutable(environment);
+    const child = spawn(gitExecutable, [...SAFE_GIT_PREFIX, ...args], {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: gitEnvironment(extraEnv)
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

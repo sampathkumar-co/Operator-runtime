@@ -1,0 +1,148 @@
+name: NPM Remote Runtime CI
+
+on:
+  # Every pushed SHA must produce release-source evidence; PR runs remain path-scoped below.
+  push:
+    branches: ['**']
+  pull_request:
+    paths:
+      - 'packages/mecrod-operator/**'
+      - 'apps/local-agent/**'
+      - 'src/**'
+      - 'native/windows-dpapi/**'
+      - 'native/windows-uia/**'
+      - 'native/windows-path-lease/**'
+      - 'test/npm-remote-runtime.test.ts'
+      - '.github/workflows/npm-remote-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-remote-runtime-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-runtime:
+    name: Windows npm runtime certification
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+
+      - name: Prove mismatched source commit fails closed
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: '0000000000000000000000000000000000000000'
+        run: |
+          node packages/mecrod-operator/scripts/build-runtime-payload.mjs *> $env:RUNNER_TEMP/source-mismatch.log
+          $code = $LASTEXITCODE
+          Get-Content $env:RUNNER_TEMP/source-mismatch.log
+          if ($code -eq 0) { throw 'runtime builder accepted a mismatched source commit' }
+          if ((Get-Content $env:RUNNER_TEMP/source-mismatch.log -Raw) -notmatch 'does not match the checked-out Git HEAD') {
+            throw 'runtime builder failed for an unexpected reason during source-mismatch regression'
+          }
+          exit 0
+
+      - name: Install certified Rust toolchain
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          rustup component add clippy --toolchain 1.98.1
+          rustc --version
+          cargo --version
+
+      - name: Compile hardened Windows helpers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo clippy --locked --manifest-path native/windows-dpapi/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI clippy failed' }
+          cargo clippy --locked --manifest-path native/windows-uia/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'UIA clippy failed' }
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'DPAPI build failed' }
+          cargo build --locked --manifest-path native/windows-uia/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'UIA build failed' }
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'path-lease build failed' }
+
+      - name: Build exact-source runtime payload
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          node packages/mecrod-operator/scripts/build-runtime-payload.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'runtime payload build failed' }
+
+      - name: Run npm runtime security and publication gates
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          node --experimental-strip-types --test test/npm-remote-runtime.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'npm remote security tests failed' }
+          node packages/mecrod-operator/bin/operator.mjs doctor
+          if ($LASTEXITCODE -ne 0) { throw 'runtime doctor failed' }
+          node packages/mecrod-operator/src/publish-check.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'publication source binding failed' }
+          node packages/mecrod-operator/scripts/test-required-relay-failure.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
+
+      - name: Certify packed npm artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packDir = Join-Path $env:RUNNER_TEMP 'mecrod-pack'
+          $installDir = Join-Path $env:RUNNER_TEMP 'mecrod-install'
+          New-Item -ItemType Directory -Force -Path $packDir, $installDir | Out-Null
+          $pack = npm pack --json ./packages/mecrod-operator --pack-destination $packDir | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $pack.Count -ne 1) { throw 'npm pack failed' }
+          $files = @($pack[0].files | ForEach-Object { $_.path })
+          foreach ($required in @(
+            'bin/operator.mjs',
+            'runtime/runtime-manifest.json',
+            'runtime/native/operator-windows-dpapi.exe',
+            'runtime/native/operator-windows-uia.exe',
+            'runtime/native/operator-windows-path-lease.exe',
+            'runtime/app/apps/local-agent/src/remote.ts'
+          )) {
+            if ($required -notin $files) { throw "packed artifact missing $required" }
+          }
+          $tgz = Join-Path $packDir $pack[0].filename
+          npm install --prefix $installDir --ignore-scripts $tgz
+          if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
+          node (Join-Path $installDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
+          if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
+          $shim = Join-Path $installDir 'node_modules/.bin/operator.cmd'
+          if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create operator.cmd bin shim' }
+          & $shim doctor
+          if ($LASTEXITCODE -ne 0) { throw 'installed npm bin shim doctor failed' }
+
+  node-compatibility:
+    name: Node ${{ matrix.node }} launcher compatibility
+    runs-on: windows-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.23.2', '24.21.0', '26.8.2']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Exercise TypeScript stripping and launcher contract
+        shell: pwsh
+        run: |
+          node --version
+          node --experimental-strip-types --test test/npm-remote-runtime.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Node compatibility tests failed' }
+          node packages/mecrod-operator/bin/operator.mjs --help
+          if ($LASTEXITCODE -ne 0) { throw 'launcher help smoke failed' }

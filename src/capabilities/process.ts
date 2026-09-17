@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -41,17 +42,20 @@ export class ProcessProvider implements CapabilityProvider {
   #allowedExecutables: Set<string>;
   #maxOutputBytes: number;
   #requiredRisk?: ActionRisk;
+  #environmentOverrides: Readonly<Record<string, string>>;
 
   constructor(options: {
     allowedRoots: string[];
     allowedExecutables: string[];
     maxOutputBytes?: number;
     requiredRisk?: ActionRisk;
+    environmentOverrides?: Readonly<Record<string, string>>;
   }) {
     this.#scope = new PathScope(options.allowedRoots);
     this.#allowedExecutables = new Set(options.allowedExecutables.map((item) => item.trim().toLowerCase()).filter(Boolean));
     this.#maxOutputBytes = boundedInteger(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
     this.#requiredRisk = options.requiredRisk;
+    this.#environmentOverrides = validateEnvironmentOverrides(options.environmentOverrides);
   }
 
   supports(action: ActionRequest): boolean { return action.capability === 'terminal.execute'; }
@@ -78,7 +82,7 @@ export class ProcessProvider implements CapabilityProvider {
 
     try {
       const cwd = await this.#scope.resolveExisting(String(action.input.cwd ?? ''));
-      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes);
+      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes, this.#environmentOverrides);
       const ok = output.exitCode === 0;
       return {
         ok,
@@ -131,17 +135,29 @@ function boundedInteger(value: unknown, fallback: number, min: number, max: numb
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
-function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env, overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const safe: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
     if (!SAFE_ENV_KEYS.has(key.toUpperCase())) continue;
     safe[key] = value;
   }
+  for (const [key, value] of Object.entries(overrides)) safe[key] = value;
   return safe;
 }
 
-async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number): Promise<{
+function validateEnvironmentOverrides(value: Readonly<Record<string, string>> | undefined): Readonly<Record<string, string>> {
+  const output: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value ?? {})) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof item !== 'string' || item.includes('\0')) {
+      throw new OperatorError('PROCESS_ENV_OVERRIDE_INVALID', 'Trusted process environment override is invalid.');
+    }
+    output[key] = item;
+  }
+  return Object.freeze(output);
+}
+
+async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number, environmentOverrides: Readonly<Record<string, string>>): Promise<{
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -149,12 +165,14 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
   truncated: boolean;
 }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
+    const childEnvironment = safeChildEnvironment(process.env, environmentOverrides);
+    const trustedExecutable = resolveTrustedExecutable(executable, childEnvironment);
+    const child = spawn(trustedExecutable, args, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: safeChildEnvironment()
+      env: childEnvironment
     });
 
     const stdout: Buffer[] = [];

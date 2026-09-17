@@ -27,6 +27,147 @@ test('relay delivery queue assigns monotonic sequences and survives store reload
   assert.deepEqual(await reloaded.cursor(DEVICE), { lastAckedSeq: 0, highestEnqueuedSeq: 2 });
 });
 
+test('relay delivery queue persists normalized capability requirements across reloads', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 3 };
+  const queued = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'git-queued', capability: 'git.write' } },
+    authority,
+    undefined,
+    ['git.write', 'file.read', 'git.write']
+  );
+  assert.deepEqual(queued.requiredCapabilities, ['file.read', 'git.write']);
+  queued.requiredCapabilities?.push('docker.run');
+
+  const reloaded = new RelayDeliveryStore(state);
+  const [pending] = await reloaded.pending(DEVICE);
+  assert.deepEqual(pending?.requiredCapabilities, ['file.read', 'git.write']);
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.deepEqual(persisted.streams[0].deliveries[0].requiredCapabilities, ['file.read', 'git.write']);
+
+  await assert.rejects(
+    store.enqueue(DEVICE, 'action', { action: { capability: 'file.read' } }, authority, undefined, ['bad\ncapability']),
+    (error: any) => error?.code === 'RELAY_CAPABILITY_REQUIREMENTS_INVALID'
+  );
+});
+
+
+test('capability-incompatible queue heads expire contiguously while preserving idempotent replay authority', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 7 };
+  const first = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'git-old', capability: 'git.write' } },
+    authority,
+    'a'.repeat(64),
+    ['git.write']
+  );
+  const second = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'file-next', capability: 'file.read' } },
+    authority,
+    undefined,
+    ['file.read']
+  );
+
+  assert.equal(await store.expireUnroutableHeads(DEVICE, ['file.read']), 1);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 2 });
+  assert.deepEqual((await store.pending(DEVICE)).map((delivery) => delivery.id), [second.id]);
+  const retired = await store.retained(DEVICE, first.seq);
+  assert.equal(retired?.status, 'expired');
+  assert.deepEqual(retired?.payload, {});
+  assert.equal(retired?.requiredCapabilities, undefined);
+  assert.deepEqual(retired?.replayAuthority, authority);
+  assert.equal(await store.expireUnroutableHeads(DEVICE, ['file.read']), 0);
+});
+
+test('queue retirement guard prevents stale capability snapshots from mutating the cursor', async (t) => {
+  const store = new RelayDeliveryStore(await temp(t));
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 8 };
+  const queued = await store.enqueue(
+    DEVICE,
+    'action',
+    { action: { id: 'git-stale-snapshot', capability: 'git.write' } },
+    authority,
+    undefined,
+    ['git.write']
+  );
+
+  assert.equal(await store.expireUnroutableHeads(DEVICE, ['file.read'], () => false), 0);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 0, highestEnqueuedSeq: 1 });
+  assert.equal((await store.pending(DEVICE))[0]?.id, queued.id);
+  assert.equal((await store.retained(DEVICE, queued.seq))?.status, 'pending');
+});
+
+test('legacy pending delivery without reconstructable capability metadata is safely terminalized', async (t) => {
+  const state = await temp(t);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 9 };
+  const legacy = {
+    version: 1,
+    streams: [{
+      deviceId: DEVICE,
+      nextSeq: 2,
+      lastAckedSeq: 0,
+      deliveries: [{
+        seq: 1,
+        id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        kind: 'task.dispatch',
+        payload: { taskId: 'legacy-task' },
+        authority,
+        createdAt: '2026-09-16T18:00:00.000Z',
+        status: 'pending'
+      }]
+    }]
+  };
+  await fs.writeFile(path.join(state, 'relay-deliveries.json'), JSON.stringify(legacy, null, 2));
+
+  const store = new RelayDeliveryStore(state, { clock: () => new Date('2026-09-16T18:00:30.000Z') });
+  const [before] = await store.pending(DEVICE);
+  assert.equal(before?.requiredCapabilities, undefined);
+  assert.equal(await store.expireUnroutableHeads(DEVICE, ['file.read']), 1);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
+  assert.deepEqual(await store.pending(DEVICE), []);
+  const retired = await store.retained(DEVICE, 1);
+  assert.equal(retired?.status, 'expired');
+  assert.deepEqual(retired?.payload, {});
+  assert.equal(retired?.authority, undefined);
+});
+
+test('legacy pending action derives and persists its capability requirement during reload', async (t) => {
+  const state = await temp(t);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 5 };
+  const legacy = {
+    version: 1,
+    streams: [{
+      deviceId: DEVICE,
+      nextSeq: 2,
+      lastAckedSeq: 0,
+      deliveries: [{
+        seq: 1,
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        kind: 'action',
+        payload: { action: { id: 'legacy-git', capability: 'git.write' } },
+        authority,
+        createdAt: '2026-09-16T18:00:00.000Z',
+        status: 'pending'
+      }]
+    }]
+  };
+  await fs.writeFile(path.join(state, 'relay-deliveries.json'), JSON.stringify(legacy, null, 2));
+
+  const store = new RelayDeliveryStore(state, { clock: () => new Date('2026-09-16T18:00:30.000Z') });
+  const [pending] = await store.pending(DEVICE);
+  assert.deepEqual(pending?.requiredCapabilities, ['git.write']);
+  const migrated = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.deepEqual(migrated.streams[0].deliveries[0].requiredCapabilities, ['git.write']);
+});
+
 test('acknowledgements are ID-bound, contiguous, and duplicate-safe', async (t) => {
   const state = await temp(t);
   const store = new RelayDeliveryStore(state);

@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -20,7 +21,8 @@ const SCORE: CapabilityScore = {
 
 const REF_PREFIX = 'refs/operator/checkpoints/';
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
-const SAFE_GIT_PREFIX = ['--no-pager', '-c', 'core.fsmonitor=false'];
+const DISABLED_HOOKS_PATH = process.platform === 'win32' ? 'NUL' : '/dev/null';
+const SAFE_GIT_PREFIX = ['--no-pager', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${DISABLED_HOOKS_PATH}`];
 
 type RepoState = {
   root: string;
@@ -56,11 +58,17 @@ export class GitCheckpointProvider implements CapabilityProvider {
     return ['git.checkpoint.create', 'git.checkpoint.inspect', 'git.checkpoint.restore'].includes(action.capability);
   }
 
+  advertises(action: ActionRequest): boolean {
+    if (!this.supports(action)) return false;
+    try { resolveSupportedGitExecutable(gitEnvironment({})); return true; } catch { return false; }
+  }
+
   score(): CapabilityScore { return SCORE; }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
     try {
+      resolveSupportedGitExecutable(gitEnvironment({}));
       if (action.capability === 'git.checkpoint.create') return await this.#create(action, started);
       if (action.capability === 'git.checkpoint.inspect') return await this.#inspect(action, started);
       if (action.capability === 'git.checkpoint.restore') return await this.#restore(action, started);
@@ -311,7 +319,7 @@ function parseNameStatus(raw: string): Array<{ status: string; path: string }> {
 }
 
 async function assertNoRepoLocalContentFilters(root: string): Promise<void> {
-  const configured = await runGit(root, ['config', '--local', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], {}, true);
+  const configured = await runGit(root, ['config', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], {}, true);
   if (configured.code === 0 && configured.stdout.trim()) {
     throw new OperatorError('GIT_LOCAL_FILTER_DENIED', 'Repository-local Git clean/smudge/process filters are disabled for checkpoint operations because they can execute arbitrary commands.', {
       details: { keys: configured.stdout.split(/\r?\n/).filter(Boolean).slice(0, 50) }
@@ -346,8 +354,16 @@ function checkpointIdentityEnv(): NodeJS.ProcessEnv {
 }
 
 function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { GIT_PAGER: '', GIT_TERMINAL_PROMPT: '0' };
-  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_CONFIG_HOME']) {
+  const nullConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  const env: NodeJS.ProcessEnv = {
+    GIT_PAGER: '',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_GLOBAL: nullConfig,
+    GIT_CONFIG_SYSTEM: nullConfig,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_NO_LAZY_FETCH: '1'
+  };
+  for (const key of ['PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USER', 'USERNAME', 'LOGNAME', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE']) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   for (const [key, value] of Object.entries(extraEnv)) {
@@ -359,12 +375,14 @@ function gitEnvironment(extraEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 async function runGit(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv, allowNonZero = false): Promise<GitOutput> {
   return await new Promise((resolve, reject) => {
     const safeArgs = [...SAFE_GIT_PREFIX, ...args];
-    const child = spawn('git', safeArgs, {
+    const environment = gitEnvironment(extraEnv);
+    const gitExecutable = resolveSupportedGitExecutable(environment);
+    const child = spawn(gitExecutable, safeArgs, {
       cwd,
       shell: false,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: gitEnvironment(extraEnv)
+      env: environment
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

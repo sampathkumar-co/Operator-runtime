@@ -185,13 +185,14 @@ export class RelayHub {
   }
 
   async dispatch(request: RelayDispatchRequest): Promise<RelayDispatchResult> {
+    const requiredCapabilities = request.requiredCapabilities ?? [];
     const memberships = await this.#accounts.listDevices(request.accountId);
     const owned = new Set(memberships.map((membership) => membership.deviceId));
     const online = (await this.onlineDevices(request.accountId)).filter((device) => owned.has(device.deviceId));
     const route = await this.#routingFor(request.accountId).resolve({
       explicitDeviceId: request.explicitDeviceId,
       projectKey: request.projectKey,
-      requiredCapabilities: request.requiredCapabilities ?? []
+      requiredCapabilities
     }, online);
     const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
     if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
@@ -201,21 +202,34 @@ export class RelayHub {
       generation: membership.authorityGeneration
     };
     await this.#beforeEnqueue?.({ ...authority });
-    await this.#assertDispatchAuthority(authority, route.sessionId, request.requiredCapabilities ?? []);
+    await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
     const payload = request.kind === 'action'
       ? { ...request.payload, approvalAuthority: { ...authority } }
       : request.payload;
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
-        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey));
+        await this.#deliveries.enqueue(route.deviceId, request.kind, payload, authority, request.idempotencyKey, requiredCapabilities));
     } catch (error) {
       if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
         throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
       }
       throw error;
     }
+    let postEnqueueAuthorityError: unknown;
+    try {
+      await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
+    } catch (error) {
+      postEnqueueAuthorityError = error;
+    }
     await this.#pump(route.deviceId);
+    const retained = await this.#deliveries.retained(route.deviceId, delivery.seq);
+    if (retained?.status === 'expired') {
+      throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
+    }
+    if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
+    const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
+    this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
     return { route, delivery };
   }
 
@@ -326,6 +340,16 @@ export class RelayHub {
     const sentAt = validIso(String(payload.sentAt ?? ''), 'sentAt');
     if (Math.abs(this.#clock().getTime() - Date.parse(sentAt)) > HELLO_CLOCK_SKEW_MS) throw new OperatorError('RELAY_HELLO_STALE', 'Relay hello timestamp is outside the accepted clock-skew window.');
     validNonce(String(payload.nonce ?? ''));
+    if (payload.capabilityBinding !== undefined && payload.capabilityBinding !== 1) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capability-binding negotiation is invalid.');
+    }
+    // During rollout, legacy clients send neither field. A short-lived pre-negotiation client may
+    // send capabilities without the explicit request, so presence of either signal opts into binding.
+    const capabilityBindingRequested = payload.capabilityBinding === 1 || payload.capabilities !== undefined;
+    if (payload.capabilityBinding === 1 && payload.capabilities === undefined) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Capability-binding negotiation requires an explicit capability list.');
+    }
+    const locallySupportedCapabilities = capabilityBindingRequested ? validCapabilityList(payload.capabilities) : [];
     const signature = String(frame.signature ?? '');
     if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello signature is invalid.');
     const token = String(frame.sessionToken ?? '');
@@ -340,10 +364,13 @@ export class RelayHub {
     const signatureOk = await this.#devices.verifyDeviceSignature(deviceId, Buffer.from(JSON.stringify(payload), 'utf8'), signature);
     if (!signatureOk) throw new OperatorError('RELAY_HELLO_SIGNATURE_INVALID', 'Relay hello signature could not be verified.');
 
+    const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
+    const capabilities = capabilityBindingRequested
+      ? locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability))
+      : [...authorizedCapabilities].sort();
     const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
     const sessionId = crypto.randomUUID();
     const now = this.#clock().toISOString();
-    const capabilities = session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean).sort();
     const previous = this.#connections.get(deviceId);
     if (previous) {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
@@ -356,7 +383,8 @@ export class RelayHub {
       connectionId: sessionId,
       resumeFromSeq: reconciled.lastAckedSeq,
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
-      heartbeatMs: HEARTBEAT_MS
+      heartbeatMs: HEARTBEAT_MS,
+      ...(capabilityBindingRequested ? { capabilityBinding: 1, capabilities: [...capabilities] } : {})
     });
     return connection;
   }
@@ -388,13 +416,45 @@ export class RelayHub {
     return connection;
   }
 
+  #assertCurrentDispatchConnection(expected: Connection, requiredCapabilities: string[]): void {
+    const current = this.#connections.get(expected.deviceId);
+    if (current !== expected || current.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection changed before dispatch success could be committed.', { retryable: true });
+    }
+    const missing = requiredCapabilities.filter((capability) => !current.capabilities.includes(capability));
+    if (missing.length > 0) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before dispatch success could be committed.', { retryable: true });
+    }
+  }
+
   async #pump(deviceId: string): Promise<void> {
     const connection = this.#connections.get(deviceId);
     if (!connection || connection.socket.readyState !== WebSocket.OPEN || connection.inFlightSeq !== undefined) return;
     const [next] = await this.#deliveries.pending(deviceId, 1);
     if (!next) return;
-    if (!next.authority) throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Pending relay delivery has no durable authorization generation.');
-    await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+    const requiredCapabilities = next.requiredCapabilities;
+    const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
+    const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
+    if (unroutable) {
+      if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+      const capabilitySnapshot = [...connection.capabilities];
+      const isCurrentSnapshot = () => {
+        const active = this.#connections.get(deviceId);
+        return active?.sessionId === connection.sessionId
+          && active.socket === connection.socket
+          && active.socket.readyState === WebSocket.OPEN
+          && active.capabilities.length === capabilitySnapshot.length
+          && active.capabilities.every((capability, index) => capability === capabilitySnapshot[index]);
+      };
+      const retired = await this.#deliveries.expireUnroutableHeads(deviceId, capabilitySnapshot, isCurrentSnapshot);
+      if (retired > 0 && isCurrentSnapshot()) {
+        this.#connections.delete(deviceId);
+        connection.inFlightSeq = undefined;
+        try { connection.socket.close(4009, 'capability queue reconciliation'); } catch { /* reconnect will reconcile the durable cursor */ }
+      }
+      return;
+    }
+    await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
     connection.inFlightSeq = next.seq;
     try {
       send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
@@ -422,6 +482,23 @@ function send(socket: WebSocket, frame: JsonObject): void {
 function boundedCloseReason(value: string): string {
   const text = String(value ?? 'authority revoked').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   return (text || 'authority revoked').slice(0, 120);
+}
+
+
+function validCapabilityList(input: unknown): string[] {
+  if (input === undefined) return [];
+  if (!Array.isArray(input) || input.length > 128) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capabilities are invalid.');
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of input) {
+    const capability = String(item ?? '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(capability) || seen.has(capability)) {
+      throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello capabilities are invalid.');
+    }
+    seen.add(capability);
+    output.push(capability);
+  }
+  return output.sort();
 }
 
 function validNonce(value: string): string {

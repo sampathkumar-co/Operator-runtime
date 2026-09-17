@@ -85,6 +85,19 @@ test('child process environment excludes ambient credentials and runtime injecti
   assert.equal(payload.hasPath, true);
 });
 
+test('trusted process environment overrides replace scrubbed ambient values', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-env-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const previous = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = 'ambient-should-not-cross';
+  t.after(() => { if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previous; });
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'], environmentOverrides: { GIT_CONFIG_GLOBAL: 'trusted-null', GIT_CONFIG_NOSYSTEM: '1' } });
+  const script = 'process.stdout.write(JSON.stringify({global:process.env.GIT_CONFIG_GLOBAL,nosystem:process.env.GIT_CONFIG_NOSYSTEM}))';
+  const result = await provider.execute(request('node', ['-e', script], root));
+  assert.equal(result.ok, true, result.error?.message);
+  assert.deepEqual(JSON.parse((result.output as { stdout: string }).stdout), { global: 'trusted-null', nosystem: '1' });
+});
+
 test('process arguments reject NUL and excessive entries before spawn', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -97,4 +110,16 @@ test('process arguments reject NUL and excessive entries before spawn', async (t
   const tooMany = await provider.execute(request('node', Array.from({ length: 201 }, () => 'x'), root));
   assert.equal(tooMany.ok, false);
   assert.equal(tooMany.error?.code, 'PROCESS_INPUT_INVALID');
+});
+
+test('Windows executable lookup ignores an authorized cwd shadow binary', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows cwd-first executable lookup regression');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-shadow-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.copyFile(process.execPath, path.join(root, 'git.exe'));
+
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['git'] });
+  const result = await provider.execute(request('git', ['--version'], root, 'write'));
+  assert.equal(result.ok, true, result.error?.message);
+  assert.match((result.output as { stdout: string }).stdout, /^git version /i);
 });

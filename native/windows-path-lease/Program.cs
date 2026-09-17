@@ -56,6 +56,7 @@ internal static class Program
         try
         {
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
+            if (args.Length == 1 && args[0] == "system-roots") return PrintSystemRoots();
             if (args.Length != 4 || args[0] != "lease")
                 throw new InvalidOperationException("usage: operator-windows-path-lease lease <existing|parent> <root> <target>");
             string mode = args[1];
@@ -147,6 +148,30 @@ internal static class Program
         return target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static int PrintSystemRoots()
+    {
+        Console.Out.WriteLine("WINDOWS=" + TrustedFolder(Environment.SpecialFolder.Windows, "Windows"));
+        Console.Out.WriteLine("SYSTEM=" + TrustedFolder(Environment.SpecialFolder.System, "System"));
+        Console.Out.WriteLine("PROGRAMFILES=" + TrustedFolder(Environment.SpecialFolder.ProgramFiles, "ProgramFiles"));
+        Console.Out.WriteLine("PROGRAMFILES_X86=" + TrustedFolder(Environment.SpecialFolder.ProgramFilesX86, "ProgramFilesX86"));
+        Console.Out.WriteLine("USERPROFILE=" + TrustedFolder(Environment.SpecialFolder.UserProfile, "UserProfile"));
+        Console.Out.WriteLine("LOCALAPPDATA=" + TrustedFolder(Environment.SpecialFolder.LocalApplicationData, "LocalApplicationData"));
+        Console.Out.WriteLine("APPDATA=" + TrustedFolder(Environment.SpecialFolder.ApplicationData, "ApplicationData"));
+        Console.Out.WriteLine("PROGRAMDATA=" + TrustedFolder(Environment.SpecialFolder.CommonApplicationData, "CommonApplicationData"));
+        return 0;
+    }
+
+    private static string TrustedFolder(Environment.SpecialFolder folder, string label)
+    {
+        string value = Environment.GetFolderPath(folder);
+        if (String.IsNullOrWhiteSpace(value)) throw new InvalidOperationException(label + " known folder is unavailable");
+        string full = Path.GetFullPath(value);
+        if (full.Length > Path.GetPathRoot(full).Length) full = full.TrimEnd('\\');
+        if (!Path.IsPathRooted(full) || !Directory.Exists(full)) throw new InvalidOperationException(label + " known folder is invalid");
+        if (full.IndexOfAny(new[] { '\r', '\n', '\0', ';' }) >= 0) throw new InvalidOperationException(label + " known folder contains unsafe characters");
+        return full;
+    }
+
     private static int SelfTest()
     {
         string baseDir = Path.Combine(Path.GetTempPath(), "operator-path-lease-" + Guid.NewGuid().ToString("N"));
@@ -156,6 +181,12 @@ internal static class Program
         try
         {
             using (Lease lease = Acquire(root, child, true)) { }
+            TrustedFolder(Environment.SpecialFolder.Windows, "Windows");
+            TrustedFolder(Environment.SpecialFolder.System, "System");
+            TrustedFolder(Environment.SpecialFolder.ProgramFiles, "ProgramFiles");
+            TrustedFolder(Environment.SpecialFolder.ProgramFilesX86, "ProgramFilesX86");
+            TrustedFolder(Environment.SpecialFolder.UserProfile, "UserProfile");
+            TrustedFolder(Environment.SpecialFolder.LocalApplicationData, "LocalApplicationData");
             Console.Out.WriteLine("operator-path-lease-self-test:ok");
             return 0;
         }

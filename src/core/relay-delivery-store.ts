@@ -8,6 +8,7 @@ const MAX_DELIVERIES_PER_STREAM = 10_000;
 const MAX_PAYLOAD_BYTES = 128 * 1024;
 const MAX_KIND = 128;
 const MAX_PENDING_RETURN = 500;
+const MAX_REQUIRED_CAPABILITIES = 128;
 const DEFAULT_RETENTION_MS = 24 * 60 * 60_000;
 const MAX_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
@@ -25,6 +26,7 @@ export interface StoredRelayDelivery {
   id: string;
   kind: string;
   payload: JsonObject;
+  requiredCapabilities?: string[];
   authority?: RelayDeliveryAuthority;
   replayAuthority?: RelayDeliveryAuthority;
   idempotencyKey?: string;
@@ -59,12 +61,13 @@ export class RelayDeliveryStore {
     this.#retentionMs = boundedRetention(options.retentionMs);
   }
 
-  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority, idempotencyKeyInput?: string): Promise<StoredRelayDelivery> {
+  async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority, idempotencyKeyInput?: string, requiredCapabilitiesInput: readonly string[] = []): Promise<StoredRelayDelivery> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const kind = validKind(kindInput);
     const payload = safePayload(payloadInput);
     const authority = authorityInput === undefined ? undefined : safeAuthority(authorityInput, deviceId);
     const idempotencyKey = idempotencyKeyInput === undefined ? undefined : validIdempotencyKey(idempotencyKeyInput);
+    const requiredCapabilities = safeRequiredCapabilities(requiredCapabilitiesInput);
     return await this.#mutate((state) => {
       expirePending(state, this.#clock().getTime(), this.#retentionMs);
       if (idempotencyKey) {
@@ -72,6 +75,9 @@ export class RelayDeliveryStore {
           const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
           if (!existing) continue;
           if (existingStream.deviceId !== deviceId) throw new OperatorError('RELAY_IDEMPOTENCY_ROUTE_CHANGED', 'An unacknowledged action retry resolved to a different device.');
+          if (existing.status === 'pending' && (existing.requiredCapabilities === undefined || !sameCapabilities(existing.requiredCapabilities, requiredCapabilities))) {
+            throw new OperatorError('RELAY_IDEMPOTENCY_CAPABILITY_CHANGED', 'An unacknowledged action retry changed its durable capability requirements.');
+          }
           return cloneDelivery(existing);
         }
       }
@@ -84,6 +90,7 @@ export class RelayDeliveryStore {
         id: crypto.randomUUID(),
         kind,
         payload,
+        requiredCapabilities,
         authority,
         idempotencyKey,
         createdAt: this.#clock().toISOString(),
@@ -160,6 +167,7 @@ export class RelayDeliveryStore {
       delivery.status = 'acked';
       delivery.ackedAt = this.#clock().toISOString();
       delivery.payload = {};
+      delivery.requiredCapabilities = undefined;
       delivery.authority = undefined;
       stream.lastAckedSeq = seq;
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
@@ -200,10 +208,39 @@ export class RelayDeliveryStore {
         delivery.status = 'acked';
         delivery.ackedAt = this.#clock().toISOString();
         delivery.payload = {};
+        delivery.requiredCapabilities = undefined;
         delivery.authority = undefined;
       }
       stream.lastAckedSeq = clientSeq;
       return { lastAckedSeq: clientSeq, advanced: clientSeq - from + 1 };
+    });
+  }
+
+  async expireUnroutableHeads(
+    deviceIdInput: string,
+    supportedCapabilitiesInput: readonly string[],
+    canCommit: () => boolean = () => true
+  ): Promise<number> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    const supported = new Set(safeRequiredCapabilities([...supportedCapabilitiesInput]));
+    return await this.#mutate((state) => {
+      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
+      if (!stream || !canCommit()) return 0;
+      let expired = 0;
+      const expiredAt = this.#clock().toISOString();
+      while (true) {
+        const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
+        if (!next || next.status !== 'pending') break;
+        const routable = next.authority !== undefined
+          && next.requiredCapabilities !== undefined
+          && next.requiredCapabilities.every((capability) => supported.has(capability));
+        if (routable) break;
+        expireDelivery(next, expiredAt);
+        stream.lastAckedSeq = next.seq;
+        expired += 1;
+      }
+      return expired;
     });
   }
 
@@ -223,6 +260,7 @@ export class RelayDeliveryStore {
         delivery.expiredAt = scrubbedAt;
         delivery.ackedAt = undefined;
         delivery.payload = {};
+        delivery.requiredCapabilities = undefined;
         delivery.authority = undefined;
         delivery.replayAuthority = undefined;
         delivery.idempotencyKey = undefined;
@@ -288,12 +326,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
     while (true) {
       const next = stream.deliveries.find((delivery) => delivery.seq === stream.lastAckedSeq + 1);
       if (!next || next.status !== 'pending' || Date.parse(next.createdAt) > now - retentionMs) break;
-      next.status = 'expired';
-      next.expiredAt = expiredAt;
-      next.payload = {};
-      next.replayAuthority = next.idempotencyKey && next.authority ? { ...next.authority } : undefined;
-      next.authority = undefined;
-      next.idempotencyReleasedAt = undefined;
+      expireDelivery(next, expiredAt);
       stream.lastAckedSeq = next.seq;
       expired += 1;
     }
@@ -302,6 +335,17 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
     }
   }
   return expired;
+}
+
+function expireDelivery(delivery: StoredRelayDelivery, expiredAt: string): void {
+  delivery.status = 'expired';
+  delivery.expiredAt = expiredAt;
+  delivery.ackedAt = undefined;
+  delivery.payload = {};
+  delivery.requiredCapabilities = undefined;
+  delivery.replayAuthority = delivery.idempotencyKey && delivery.authority ? { ...delivery.authority } : undefined;
+  delivery.authority = undefined;
+  delivery.idempotencyReleasedAt = undefined;
 }
 
 function getOrCreateStream(state: RelayDeliveryState, deviceId: string): DeviceDeliveryStream {
@@ -345,6 +389,9 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const createdAt = validIso(entry.createdAt, 'createdAt');
       const status = entry.status === 'pending' ? 'pending' : entry.status === 'acked' ? 'acked' : entry.status === 'expired' ? 'expired' : null;
       if (!status) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery status is invalid.');
+      const requiredCapabilities = entry.requiredCapabilities === undefined
+        ? legacyRequiredCapabilities(kind, payload, status, authority)
+        : safeRequiredCapabilities(entry.requiredCapabilities);
       const ackedAt = entry.ackedAt === undefined ? undefined : validIso(entry.ackedAt, 'ackedAt');
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
       if (status === 'pending' && (ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps or replay authority.');
@@ -352,7 +399,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || authority || idempotencyReleasedAt || (replayAuthority && !idempotencyKey))) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free live-authority-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, authority, replayAuthority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, requiredCapabilities, authority, replayAuthority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = 1; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');
@@ -363,7 +410,40 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
 }
 
 function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {
-  return { ...delivery, payload: structuredClone(delivery.payload), authority: delivery.authority ? { ...delivery.authority } : undefined, replayAuthority: delivery.replayAuthority ? { ...delivery.replayAuthority } : undefined };
+  return {
+    ...delivery,
+    payload: structuredClone(delivery.payload),
+    requiredCapabilities: delivery.requiredCapabilities ? [...delivery.requiredCapabilities] : undefined,
+    authority: delivery.authority ? { ...delivery.authority } : undefined,
+    replayAuthority: delivery.replayAuthority ? { ...delivery.replayAuthority } : undefined
+  };
+}
+
+function safeRequiredCapabilities(input: unknown): string[] {
+  if (!Array.isArray(input) || input.length > MAX_REQUIRED_CAPABILITIES) {
+    throw new OperatorError('RELAY_CAPABILITY_REQUIREMENTS_INVALID', `Relay capability requirements must be an array of at most ${MAX_REQUIRED_CAPABILITIES} entries.`);
+  }
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/*-]{0,127}$/.test(raw)) {
+      throw new OperatorError('RELAY_CAPABILITY_REQUIREMENTS_INVALID', 'Relay capability requirement is invalid.');
+    }
+    if (!seen.has(raw)) { seen.add(raw); output.push(raw); }
+  }
+  return output.sort();
+}
+
+function legacyRequiredCapabilities(kind: string, payload: JsonObject, status: StoredRelayDelivery['status'], authority?: RelayDeliveryAuthority): string[] | undefined {
+  if (status !== 'pending' || !authority || kind !== 'action') return undefined;
+  const action = payload.action;
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return undefined;
+  const capability = (action as Record<string, unknown>).capability;
+  return typeof capability === 'string' ? safeRequiredCapabilities([capability]) : undefined;
+}
+
+function sameCapabilities(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {
