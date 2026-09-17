@@ -144,7 +144,7 @@ Before choosing the npm publish mechanism, classify the package against npm's cu
 
 Any license/package metadata edit changes the source SHA. Treat the result as a successor candidate to OCC-3M and rerun at minimum candidate identity, package/tarball inspection, supply-chain checks, package smoke install/doctor, clean-machine startup, legal/public-truthfulness review, and final publication-source binding.
 
-Draft PR #22 already implements the policy-neutral release machinery at head `fbd5e24542c81ca4f6bed4a5f8d49cf7f772e2da`: first-release artifact handoff, exact-tarball staging for later versions, `UNLICENSED` fail-closed behavior, shipped-license verification, and conditional dual-use `DISCLOSURE` enforcement. CI #659, Platform Matrix #429, NPM Runtime #98 and Signing Smoke #430 all pass on that exact head. Keep the PR draft until the owner decisions below are applied and the resulting final successor is re-certified.
+Draft PR #22 already implements the policy-neutral release machinery at head `fbd5e24542c81ca4f6bed4a5f8d49cf7f772e2da`: first-release artifact handoff, exact-tarball staging for later versions, `UNLICENSED` fail-closed behavior, shipped-license verification, and conditional dual-use `DISCLOSURE` enforcement. CI #659, Platform Matrix #429, NPM Runtime #98 and Signing Smoke #430 all pass on that exact head. `OPERATOR_NPM_NAMESPACE_BOOTSTRAP.md` is the owner checklist for proving/creating the `mecrod` npm organization, enforcing 2FA, publishing the exact first tarball and retaining non-secret evidence. Keep the PR draft until the owner decisions below are applied and the resulting final successor is re-certified.
 
 Approved publication path after that successor is green:
 
