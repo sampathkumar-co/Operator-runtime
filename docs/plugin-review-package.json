@@ -112,14 +112,24 @@
     }
   },
   "externalGates": {
-    "productionMcpUrl": "https://operator.splcart.in/mcp (target; must be live before submission)",
-    "website": "https://operator.splcart.in (target; must be live before submission)",
-    "privacy": "https://operator.splcart.in/privacy (target; must be live before submission)",
-    "terms": "https://operator.splcart.in/terms (target; must be live before submission)",
-    "support": "https://operator.splcart.in/support (target; must be live before submission)",
-    "demoRecording": "PENDING_EXTERNAL_RECORDING",
-    "reviewerCredentials": "PENDING_PRODUCTION_OAUTH_REVIEW_ACCOUNT",
-    "publisherIdentity": "PENDING_OPENAI_PLATFORM_VERIFICATION",
-    "toolScan": "PENDING_LIVE_PRODUCTION_MCP_SCAN"
+    "productionMcpUrl": "PASS: https://operator.splcart.in/mcp is live on OCC-3M; unauthenticated requests fail closed with OAuth resource metadata.",
+    "website": "PASS: https://operator.splcart.in returns 200 with CSP, HSTS, nosniff, DENY framing, and no-referrer.",
+    "privacy": "PASS: https://operator.splcart.in/privacy is live, deployment-specific, and placeholder-free.",
+    "terms": "PASS: https://operator.splcart.in/terms is live, deployment-specific, and placeholder-free.",
+    "support": "PASS: https://operator.splcart.in/support is live, deployment-specific, and placeholder-free.",
+    "oauthProviderPreflight": "PASS: predefined public client, S256, authorization/token endpoints, JWKS, scopes and exact callback accepted.",
+    "realAccessTokenAudience": "BLOCKED_HUMAN_AUTHORIZATION: complete one real user authorization and verify aud=https://operator.splcart.in/mcp.",
+    "realChatGptE2E": "BLOCKED_HUMAN_AUTHORIZATION: requires a connected ChatGPT draft/plugin and completed OAuth flow.",
+    "domainChallenge": "BLOCKED_OPENAI_PORTAL: keep 404 until the portal issues the exact verification token.",
+    "reviewerCredentials": "BLOCKED_REVIEW_ACCOUNT: dedicated reviewer credentials must work without MFA/SMS/email confirmation.",
+    "publisherIdentity": "BLOCKED_OPENAI_PLATFORM: complete individual or business verification for the publishing name.",
+    "toolScan": "BLOCKED_OPENAI_PORTAL: run Scan Tools against exact production MCP endpoint after draft creation.",
+    "demoRecording": "PENDING_IF_REQUESTED_BY_SUBMISSION_SURFACE"
+  },
+  "releaseCandidate": {
+    "name": "OCC-3M",
+    "sourceCommit": "405be7a03270c6c7ced78cd0d0d58314048a1af7",
+    "productionImage": "sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18",
+    "certifiedAtUtc": "2026-09-17T21:10:40Z"
   }
 }
