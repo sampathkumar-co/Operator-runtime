@@ -101,7 +101,7 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 4. OpenAI Platform individual/business verification for the chosen publisher name.
 5. Portal domain verification if OpenAI issues a challenge token; never synthesize the token.
 6. OpenAI **Scan Tools** against the exact production endpoint, followed by reconciliation of the imported 10-tool snapshot.
-7. Public npm runtime publication through the provenance release workflow, followed by a clean-machine `doctor` and reviewer-root `remote` startup verification.
+7. Public npm runtime first publication from a CI-built immutable tarball through owner-controlled interactive 2FA, followed by a clean-machine `doctor` and reviewer-root `remote` startup verification.
 8. Owner-approved software licensing for the public npm runtime. OCC-3M currently remains `UNLICENSED`; the license/package metadata fix must produce a successor source candidate and trigger affected recertification before publication.
 9. npm Dual-Use Content Policy classification for the shipped runtime, with the successor package/workflow matching the resulting declaration and 2FA/staged-publishing requirements.
 
