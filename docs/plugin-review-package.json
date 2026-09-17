@@ -121,7 +121,7 @@
     "realAccessTokenAudience": "BLOCKED_HUMAN_AUTHORIZATION: complete one real user authorization and verify aud=https://operator.splcart.in/mcp.",
     "realChatGptE2E": "BLOCKED_HUMAN_AUTHORIZATION: requires a connected ChatGPT draft/plugin and completed OAuth flow.",
     "domainChallenge": "BLOCKED_OPENAI_PORTAL: OCC-3M is configuration-ready through OPENAI_APPS_CHALLENGE_TOKEN; keep 404 until the portal issues the exact token.",
-    "reviewerCredentials": "BLOCKED_HUMAN: provision a disposable reviewer identity outside Git; use reviewer-only one-factor policy with two-factor default for normal users.",
+    "reviewerCredentials": "BLOCKED_HUMAN: execute OPERATOR_REVIEWER_AUTH_EXECUTION.md against the real production Authelia mounts. Use a dedicated operator-reviewer identity, reviewer-only one-factor OIDC policy, two-factor default for everyone else, canonical fixture-only pairing, config validation and tested rollback. No credentials belong in Git.",
     "publisherIdentity": "BLOCKED_OPENAI_PLATFORM: complete individual or business verification for the publishing name.",
     "toolScan": "BLOCKED_OPENAI_PORTAL: run Scan Tools against exact production MCP endpoint after draft creation.",
     "demoRecording": "NOT_REQUIRED_BY_CURRENT_OPENAI_DOCS_OPTIONAL_IF_REQUESTED",

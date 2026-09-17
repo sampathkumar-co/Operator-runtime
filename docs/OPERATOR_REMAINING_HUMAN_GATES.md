@@ -42,11 +42,13 @@ Create an `operator-reviewer` user in `/config/users_database.yml` with no admin
 Before activating the change:
 
 1. back up `configuration.yml` and `users_database.yml`;
-2. run `authelia validate-config` against the complete candidate configuration;
+2. run `authelia config validate --config <candidate-configuration.yml>` against the complete candidate configuration using the same environment/secret inputs as production;
 3. restart only `operator-auth`;
 4. verify issuer discovery and login still work;
 5. verify the admin path still requires its normal stronger policy;
 6. verify the reviewer can authorize the ChatGPT client with username/password only.
+
+Execute `OPERATOR_REVIEWER_AUTH_EXECUTION.md` for the production-safe backup, candidate validation, activation, isolation and rollback sequence. The repository intentionally does not contain the live Authelia production configuration, so do not invent or commit a production config patch here.
 
 PASS evidence: disposable reviewer credentials complete the submitted tests without secondary verification.
 
