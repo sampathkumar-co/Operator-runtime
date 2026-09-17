@@ -5,13 +5,13 @@
 ```text
 Normal ChatGPT
    |
-   | MCP / Apps SDK
+   | MCP
    v
-MCP transport adapter
+Hosted/public MCP transport adapter
    |
-   | authenticated routing
+   | authenticated account/device routing
    v
-Relay / secure tunnel (next milestone)
+Relay / control / result services
    |
    | outbound paired-device session
    v
@@ -25,9 +25,10 @@ Local Agent
            +--> Process / Git
            +--> Project model
            +--> Browser CDP
-           +--> Windows UIA (next)
-           +--> App adapters (next)
-           +--> Vision fallback (later)
+           +--> Windows UIA
+           +--> Docker / PostgreSQL / VS Code adapters
+           +--> Managed browser lifecycle
+           +--> Vision fallback (future, only where semantic providers are insufficient)
 ```
 
 ## Intelligence boundary
@@ -60,4 +61,4 @@ This is machine-side durable state, not a claim that ChatGPT can execute indefin
 
 During development, the MCP server and local agent may run on the same computer and the MCP endpoint can be connected through OpenAI's supported secure tunneling path.
 
-Production multi-device operation will insert a minimal relay/account layer. Devices initiate outbound authenticated connections; the relay routes signed/session-bound requests to paired devices. No arbitrary inbound desktop port is required.
+Production multi-device operation uses the relay/account layer implemented in this repository. Devices initiate outbound authenticated connections; the relay routes session-bound requests to paired devices, while the hosted MCP edge remains separate from the local desktop authority. No arbitrary inbound desktop port is required. Deployment readiness is tracked separately from architecture completion.

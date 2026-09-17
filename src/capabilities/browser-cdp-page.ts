@@ -220,7 +220,15 @@ export function semanticSnapshotFunction() {
     }
     const control = element as Element & { labels?: ArrayLike<Element> | null; placeholder?: string; name?: string; id?: string };
     if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
-    return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id || element.getAttribute('title') || element.textContent);
+    const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
+    return trim(
+      element.getAttribute('placeholder')
+      || nativeText
+      || element.getAttribute('title')
+      || element.getAttribute('name')
+      || element.id
+      || element.textContent
+    );
   };
   const roleOf = (element: Element) => {
     const explicit = trim(element.getAttribute('role')).toLowerCase();
@@ -304,7 +312,15 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     }
     const control = element as Element & { labels?: ArrayLike<Element> | null };
     if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
-    return trim(element.getAttribute('placeholder') || element.getAttribute('name') || element.id || element.getAttribute('title') || element.textContent);
+    const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
+    return trim(
+      element.getAttribute('placeholder')
+      || nativeText
+      || element.getAttribute('title')
+      || element.getAttribute('name')
+      || element.id
+      || element.textContent
+    );
   };
   const roleOf = (element: Element) => {
     const explicit = trim(element.getAttribute('role')).toLowerCase();

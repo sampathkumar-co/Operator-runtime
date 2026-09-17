@@ -18,17 +18,18 @@ The public endpoint must not be submitted until the target HTTPS origin, OAuth p
 
 SPLCART Operator lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
-Public v1 exposes only these nine tools:
+Public v1 exposes only these ten tools:
 
-1. `computer.inspect`
-2. `project.inspect`
-3. `project.commands`
-4. `file.list`
-5. `file.read`
-6. `file.create`
-7. `file.replace`
-8. `git.status`
-9. `git.diff`
+1. `device.claim`
+2. `computer.inspect`
+3. `project.inspect`
+4. `project.commands`
+5. `file.list`
+6. `file.read`
+7. `file.create`
+8. `file.replace`
+9. `git.status`
+10. `git.diff`
 
 Generic terminal execution, browser automation, Windows UI Automation, arbitrary PostgreSQL row access and the legacy generic `file.write` tool are private-runtime capabilities and are **not** part of the public plugin.
 
@@ -129,8 +130,8 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS; the repository-root privacy/terms/support documents are drafts and are never production inputs. The canonical edge requires git-ignored deployment files `production-notices/{privacy,terms,support}.md` plus an explicit finalization acknowledgement before it will start; publisher/contact, jurisdiction, hosting/region, actual retention, subprocessors and the private security-reporting path must be real deployment values before submission;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - the demo recording URL is reachable by reviewers;
-- Scan Tools imports exactly the intended nine-tool public surface and current annotations;
-- all nine annotation justifications match the scanned server values;
+- Scan Tools imports exactly the intended ten-tool public surface and current annotations;
+- all ten annotation justifications match the scanned server values;
 - the exact five positive and three negative cases are reproducible;
 - country/region availability is limited to places where support/legal obligations are ready;
 - release notes describe this as the initial public submission.

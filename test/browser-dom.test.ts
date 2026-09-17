@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { interactionFunction } from '../src/capabilities/browser-cdp-page.ts';
+import { interactionFunction, semanticSnapshotFunction } from '../src/capabilities/browser-cdp-page.ts';
+import { semanticLocatorFunction } from '../src/capabilities/browser-cdp-frames.ts';
 
 class FakeEvent {
   readonly type: string;
@@ -147,4 +148,34 @@ test('cross-origin-style iframe access failure is isolated and does not escape t
   const result = interactionFunction({ operation: 'click', target: { role: 'button', name: 'Never visible' }, value: null }) as any;
   assert.equal(result.ok, false);
   assert.match(result.error, /No matching semantic element/);
+});
+
+
+test('native button text wins over implementation id for semantic name matching', (t) => {
+  const documentRoot = new FakeRoot();
+  const button = new FakeElement('button', 'Increment');
+  button.id = 'inc';
+  attach(documentRoot, button);
+  installDocument(t, documentRoot);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.equal(snapshot.controls[0].role, 'button');
+  assert.equal(snapshot.controls[0].name, 'Increment');
+
+  const clicked = interactionFunction({ operation: 'click', target: { role: 'button', name: 'Increment' }, value: null }) as any;
+  assert.equal(clicked.ok, true);
+  assert.equal(clicked.matched.name, 'Increment');
+  assert.equal(button.clicked, true);
+});
+
+test('cross-origin frame locator uses native button text instead of element id', (t) => {
+  const documentRoot = new FakeRoot();
+  const button = new FakeElement('button', 'Increment');
+  button.id = 'inc';
+  attach(documentRoot, button);
+  installDocument(t, documentRoot);
+
+  const located = semanticLocatorFunction({ role: 'button', name: 'Increment' }) as any;
+  assert.equal(located.count, 1);
+  assert.equal(located.matches[0].name, 'Increment');
 });

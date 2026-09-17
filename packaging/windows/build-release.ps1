@@ -114,7 +114,7 @@ if ($useAuditPrebuiltNative) {
 }
 
 Write-Host '[operator-release] compiling Windows path-lease helper'
-& (Join-Path $repo 'native\windows-path-lease\build.ps1')
+& (Join-Path $repo 'native\windows-path-lease\build.ps1') -RequireDeterministic
 Assert-Exit 'windows path-lease build'
 
 $pathLease = Join-Path $repo 'native\windows-path-lease\target\release\operator-windows-path-lease.exe'
