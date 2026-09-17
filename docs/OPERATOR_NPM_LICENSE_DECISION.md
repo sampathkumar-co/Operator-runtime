@@ -50,7 +50,7 @@ For the current Operator architecture, the **proprietary custom runtime license 
 
 If the actual strategy is to encourage third-party forks, integrations and independent reuse, Apache-2.0 is the stronger open-source default because it includes an explicit patent grant. MIT is the lightest-weight alternative when maximum simplicity matters more than patent-language coverage.
 
-This memo does not supply final legal wording. A proprietary `LICENSE` should be reviewed before first public publication, especially its permitted-use grant, redistribution/derivative restrictions, warranty/liability terms, termination, governing law and relationship to the hosted service Terms.
+This memo does not supply final legal wording. `OPERATOR_PROPRIETARY_RUNTIME_LICENSE_DRAFT.md` contains a non-effective proprietary runtime license draft to accelerate owner/legal review. It must not be shipped until the Licensor identity, governing law, liability cap, required exceptions and final business terms are approved and all draft markers are removed.
 
 ## Required implementation after decision
 

@@ -45,6 +45,8 @@ Conservative recommendation: **treat Operator as dual-use for npm publication un
 
 This recommendation is not a legal conclusion and is not applied automatically. The owner may instead retain a documented non-dual-use rationale or ask npm policy support for an explicit determination before first publication.
 
+`OPERATOR_NPM_DISCLOSURE_DRAFT.md` contains a ready, non-active `DISCLOSURE` draft that can be promoted to the package root only if the dual-use classification is accepted.
+
 ## Decision record to complete
 
 Record exactly one outcome before merging the final successor:
