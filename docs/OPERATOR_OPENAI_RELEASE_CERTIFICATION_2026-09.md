@@ -117,4 +117,4 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 
 Final submission itself is an external publication action and is not part of this certification pass unless explicitly authorized.
 
-See `OPERATOR_RELEASE_GATE.md` for the binary 26-gate verdict, `OPERATOR_FEATURE_GAPS.md` for discovered/resolved/open gaps, and `OPERATOR_REMAINING_HUMAN_GATES.md` for the exact owner/portal procedure.
+See `OPERATOR_MASTER_GATE_STATUS.md` for the canonical G0–G36 master-plan verdict, `OPERATOR_RELEASE_GATE.md` for the compact binary 26-gate submission verdict, `OPERATOR_FEATURE_GAPS.md` for discovered/resolved/open gaps, and `OPERATOR_REMAINING_HUMAN_GATES.md` for the exact owner/portal procedure.
