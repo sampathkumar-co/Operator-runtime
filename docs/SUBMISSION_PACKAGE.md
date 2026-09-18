@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. Do not submit until the remaining external gates are complete: real OAuth token-audience proof, reviewer credentials, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation and real ChatGPT end-to-end testing.
+The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. They are **not yet final for submission**: FG-017 requires an owner-approved exact legal publisher identity/jurisdiction/contact that matches the eventual OpenAI verified identity, and FG-018 is fixed only in draft PR #24 until the final successor is composed. Do not submit until those legal/source-reproducibility gates and the remaining external gates are complete: real OAuth token-audience proof, reviewer credentials, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation and real ChatGPT end-to-end testing.
 
 ## What the public plugin does
 
@@ -115,7 +115,7 @@ Do not claim any of the following until the external gate is actually complete:
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
 - the public runtime has an owner-approved software license (not `UNLICENSED`), npm dual-use classification is explicitly resolved and reflected in package/workflow metadata, the successor candidate passes affected packaging/legal certification, and `@mecrod/operator@1.0.0` is published through the policy-compatible release flow with clean-machine `doctor`/reviewer-root startup passing;
-- business/developer identity is verified in the OpenAI Platform;
+- the exact owner-approved publisher legal identity is reconciled across website/support/privacy/terms and verified in the OpenAI Platform;
 - production Windows release is signed by the final trusted certificate;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
@@ -127,7 +127,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
 - the OpenAI challenge token is served exactly at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS; the repository-root privacy/terms/support documents are drafts and are never production inputs. The canonical edge requires git-ignored deployment files `production-notices/{privacy,terms,support}.md` plus an explicit finalization acknowledgement before it will start; publisher/contact, jurisdiction, hosting/region, actual retention, subprocessors and the private security-reporting path must be real deployment values before submission;
+- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; draft PR #24 source-controls those exact live bytes under `deploy/public-edge/production-notices/` and regression-checks the bind-mount contract. The final successor must include that reproducibility fix plus the owner-approved FG-017 publisher/contact/jurisdiction wording before submission; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;
