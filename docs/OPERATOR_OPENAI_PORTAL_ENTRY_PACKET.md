@@ -24,7 +24,7 @@ This packet does **not** authorize submission. Fields marked `OWNER REQUIRED`, `
 
   Initial public submission. Exposes a restricted development-project MCP surface with secure device enrollment, credential/restricted-data guards, local policy enforcement, safe file concurrency controls, relay retention bounds, OAuth scope enforcement, and minimized public responses.
 
-- Logo / composer icon: **PASS_ENGINEERING_DRAFT via integrated PR #27** - current head `9f8947c2b233939bc8c89f03b90c55369111d4e1` carries the dedicated Mecord Connect square SVG mark as both required manifest branding assets. Exact-head CI #735, Platform Matrix #505, NPM Runtime #148 and Windows Signing Smoke #506 all pass. Final submission must use this rebranded successor (or a later certified descendant).
+- Branding identity: **PASS_ENGINEERING_DRAFT via integrated PR #27** - current head `c0a87af4166a626b4aaea250438caa9fdbb00b08` carries the dedicated Mecord Connect square SVG as both required logo/composer-icon assets and aligns the plugin manifest, OAuth protected-resource `resource_name`, public MCP initialize `name/title`, generated landing/legal-page titles, source notices and reviewer/submission naming. Exact-head CI #745, Platform Matrix #515, NPM Runtime #156 and Windows Signing Smoke #516 all pass. Final submission must use this successor (or a later certified descendant).
 - Developer / publisher identity: **OWNER + OPENAI VERIFICATION REQUIRED (FG-017)**.
   - Do not enter `SPLCART` merely because it is the product/brand name unless that is the exact identity verified by OpenAI.
   - The verified identity must match the reconciled public website/support/privacy/terms identity.

@@ -125,7 +125,7 @@ Do not invent the publisher identity from repository owners, email usernames, ac
 
 ### Source-reproducibility preparation already complete
 
-Integrated PR #27 now contains the source-controlled Privacy/Terms/Support notices, the shared-VPS bind-mount reproducibility fix, the npm hardening, and the Mecord Connect branding in one branch. Current head `9f8947c2b233939bc8c89f03b90c55369111d4e1` passes CI #735, Platform Matrix #505, NPM Runtime #148 and Windows Signing Smoke #506; local focused tests are 28/28 PASS and the full Windows-aware suite is 368 tests / 352 pass / 16 expected skips / 0 fail. The remaining notice change is the owner-approved FG-017 legal publisher identity before final deployment.
+Integrated PR #27 now contains the source-controlled Privacy/Terms/Support notices, shared-VPS bind-mount reproducibility, npm hardening, and the complete Mecord Connect public-plugin/MCP branding in one branch. Current head `c0a87af4166a626b4aaea250438caa9fdbb00b08` passes CI #745, Platform Matrix #515, NPM Runtime #156 and Windows Signing Smoke #516; modified MCP E2E is 7 pass / 1 expected Windows symlink skip / 0 fail, local focused release tests are 28/28 PASS, and the full Windows-aware suite is 368 tests / 352 pass / 16 expected skips / 0 fail. The remaining notice change is the owner-approved FG-017 legal publisher identity before final deployment.
 
 ## What happens immediately after the owner decisions
 
