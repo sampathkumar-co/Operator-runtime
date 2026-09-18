@@ -70,6 +70,8 @@ Current production client configuration is:
 
 The redirect URI shown by the OpenAI app-management page is authoritative. If a future draft displays a different redirect URI, update the predefined-client allowlist and validate it before continuing; do not assume either the stable URI or the existing callback-ID URI will always be selected.
 
+Current discovery also advertises `https://auth.splcart.in/api/oidc/userinfo`, the `openid` and `email` scopes, and both `email` and `email_verified` claims. That satisfies the discovery-side prerequisites OpenAI documents for optional workspace domain restrictions; actual authenticated UserInfo behavior should be verified during the real OAuth flow if that restriction is enabled for the submission.
+
 ## H4 — Complete the real OAuth proof
 
 From the draft, authorize the reviewer account. Retain only non-secret evidence.

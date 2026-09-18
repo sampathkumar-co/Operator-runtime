@@ -111,6 +111,10 @@ Also validate the user database structurally against the production Authelia ver
 
 Do not proceed on warnings/errors that affect OIDC, user-database parsing, secrets, sessions, or authorization policy.
 
+### Current pre-activation validation evidence — 2026-09-18
+
+Without creating a reviewer account or password, the proposed `chatgpt_reviewer_policy` structure and the ChatGPT client's switch to that named policy were applied to an offline candidate cloned from the exact production configuration. Validation ran with the production Authelia 4.39.26 image, the same read-only config/secret mounts, the same secret-file environment wiring, and no network access. `authelia config validate` returned success. The production file user database currently contains the expected `displayname`, `password`, `email`, `groups`, and `disabled` fields, so the dedicated reviewer record can follow the existing schema. Production authentication policy and users were not changed by this dry run.
+
 ## Phase F — Controlled production activation
 
 1. Enter a maintenance window where an immediate auth rollback is possible.

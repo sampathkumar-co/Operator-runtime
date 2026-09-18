@@ -47,7 +47,7 @@ Retain the metadata JSON only if it contains no secret or transient authorizatio
 
 ### Current redirect preflight evidence
 
-On 2026-09-18, the existing callback-ID URI entered the Authelia login flow while the stable OpenAI redirect initially failed with a redirect-URI mismatch. The stable URI was added alongside the existing callback-ID URI, the candidate Authelia configuration passed isolated validation, and only `operator-auth` was recreated. After activation, both redirect forms entered the login flow, OIDC discovery remained healthy, and unauthenticated MCP continued to return the expected 401 protected-resource challenge. This changed OAuth provider configuration only; the OCC-3M source SHA and production edge image did not change.
+On 2026-09-18, the existing callback-ID URI entered the Authelia login flow while the stable OpenAI redirect initially failed with a redirect-URI mismatch. The stable URI was added alongside the existing callback-ID URI, the candidate Authelia configuration passed isolated validation, and only `operator-auth` was recreated. After activation, both redirect forms entered the login flow, OIDC discovery remained healthy, and unauthenticated MCP continued to return the expected 401 protected-resource challenge. The rollback backup SHA-256 is `a72142e64efdc0974f8f71814081038bdffda4f60e886dbdfcef2bd36e9717cc`; the activated config SHA-256 is `0236ccba6808b109763c31b54308fb3687fb8691c18cb178ff37740a5d1e7300`, and a semantic comparison confirmed the stable redirect line is the only configuration difference. This changed OAuth provider configuration only; the OCC-3M source SHA and production edge image did not change.
 
 ## Phase B — Start the real ChatGPT authorization
 
