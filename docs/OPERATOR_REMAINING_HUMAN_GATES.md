@@ -17,7 +17,9 @@ Do not change runtime code while completing these gates. Any runtime/code change
 3. Complete individual/business verification using the exact publisher identity that will appear in the listing.
 4. Confirm the public website, support contact, privacy policy and terms identify that same publisher consistently.
 
-PASS evidence: verified publisher identity + permission to create/edit an MCP plugin draft.
+Current public preflight found a blocker that must be resolved before H1 can pass: Operator Privacy/Terms refer only to "the publisher of splcart.in"; SPLCART's own Terms say they still require review against the actual business entity/jurisdiction; and the SPLCART Contact page states that direct support details are not currently published. Operator itself does publish `support@splcart.in`, but no exact legal publisher person/entity is named. Do not infer that identity from repository/account names.
+
+PASS evidence: the exact verified publisher legal identity is named consistently in the public legal/support materials and the submitter has permission to create/edit the MCP plugin draft.
 
 ## H2 — Dedicated reviewer identity
 

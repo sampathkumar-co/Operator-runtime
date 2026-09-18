@@ -103,7 +103,26 @@ If the commercial intent is a controlled connector for the hosted Operator servi
 
 This is a decision-support recommendation only. It is not an applied license or policy classification.
 
-## What happens immediately after the two decisions
+## Decision 3 — exact publisher legal identity (FG-017)
+
+This is not inferred from GitHub/npm account names or the SPLCART brand.
+
+Owner must provide/approve:
+- exact legal person/entity that operates and publishes Operator;
+- governing jurisdiction/country/state as applicable;
+- approved public legal/support contact identity;
+- whether that same person/entity is the proprietary Runtime License Licensor if the proprietary path is selected.
+
+After approval:
+1. reconcile Operator Privacy/Terms/Support wording to name the exact publisher where legally appropriate;
+2. reconcile the main SPLCART Terms/Privacy/Contact pages so they no longer contain unresolved “actual business entity/jurisdiction” placeholder language;
+3. use the same identity in OpenAI publisher verification;
+4. use the same Licensor identity in the proprietary package license if applicable;
+5. verify the live public pages before submission.
+
+Do not invent the publisher identity from repository owners, email usernames, account profile names, or domain WHOIS guesses.
+
+## What happens immediately after the owner decisions
 
 Applying either decision changes the source SHA, so PR #22's current green SHA stops being the final successor.
 
@@ -150,9 +169,12 @@ Never store npm password, session token, OTP or recovery codes in Git, evidence 
 
 ## Minimal owner response needed
 
-To unblock engineering, record these two decisions:
+To unblock engineering, record these items:
 
 - **License:** `PROPRIETARY` / `APACHE-2.0` / `MIT`
 - **npm policy:** `DUAL_USE` / `NOT_DUAL_USE` / `NPM_CONFIRMATION`
+- **Publisher legal identity:** exact person/entity name
+- **Jurisdiction:** country/state or other legally appropriate governing jurisdiction
+- **Public legal/support contact identity:** approved contact/name/address as applicable
 
-If `PROPRIETARY` is selected, the legal fields listed above must also be approved before the license becomes effective.
+If `PROPRIETARY` is selected, the liability/dispute fields listed above must also be approved before the license becomes effective.

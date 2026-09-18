@@ -40,13 +40,13 @@ Current canonical count: **27 PASS / 10 BLOCKED / 0 NOT APPLICABLE**.
 | G26 Production Infrastructure | PASS | TLS/SNI/Host/origin/body/header/port hardening is live; production edge remains exact OCC-3M and healthy. |
 | G27 Resource Safety | PASS | Performance regression and bounded hostile input probes are green; live edge remained healthy under the certified probes. |
 | G28 CI Reliability | PASS | OCC-3M exact-source CI/platform/npm-runtime/signing runs and the 361-test Windows-aware suite are green; race-sensitive relay fixes were re-regressed. |
-| G29 Public Truthfulness | BLOCKED | Hosted privacy/terms/support pages are live and truthful, but public npm distribution still has no effective software license; public package claims cannot be finalized until FG-013 is resolved. |
+| G29 Public Truthfulness | BLOCKED | Hosted Operator privacy/terms/support pages are live, but public npm distribution still has no effective software license and the exact legal publisher identity is not yet named consistently across Operator/SPLCART legal materials. FG-013 and FG-017 must be resolved before public legal/package claims can be finalized. |
 | G30 Reviewer Usability | BLOCKED | Reviewer fixture/runbooks are prepared and the reviewer-only Authelia policy validates offline, but a real no-MFA reviewer identity, pairing and end-to-end journey are still missing. |
 | G31 Positive Reviewer Cases | PASS | All submitted five positive cases pass through the certified public boundary on the deterministic fixture; positive #5 is bounded `git.diff`. |
 | G32 Negative Reviewer Cases | PASS | All submitted three negative cases pass, with additional `APPROVAL_REQUIRED` and duplicate-create safety assertions. |
 | G33 Real ChatGPT E2E | BLOCKED | Requires the actual OpenAI draft/connection, completed OAuth login, relay/device execution, read/write results, revocation and reconnect. |
 | G34 OpenAI Metadata Match | BLOCKED | OpenAI Scan Tools has not yet imported/reconciled the exact production 10-tool surface. |
-| G35 Submission Readiness | BLOCKED | Publisher verification, reviewer credentials, npm release, domain challenge if issued, Scan Tools and authenticated E2E are still incomplete. |
+| G35 Submission Readiness | BLOCKED | Exact publisher legal-identity reconciliation/verification, reviewer credentials, npm release, domain challenge if issued, Scan Tools and authenticated E2E are still incomplete. |
 | G36 Hostile Release Simulation | BLOCKED | This must run only after the final successor is frozen and the real ChatGPT/reviewer path exists; release-blocking fixes would trigger affected recertification. |
 
 ## Blocking master gates
