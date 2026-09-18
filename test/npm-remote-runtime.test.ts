@@ -154,6 +154,7 @@ test('npm release uses immutable first-release artifact and staged future public
   assert.match(workflow, /UNLICENSED is blocked/);
   assert.match(workflow, /npm tarball missing a root license file/);
   assert.match(workflow, /declared dual-use npm tarball is missing root DISCLOSURE/);
+  assert.match(workflow, /node scripts\/verify-npm-policy-continuity\.mjs/);
   assert.match(workflow, /release tarball hash changed before staging/);
   assert.match(workflow.slice(stage), /--access public[\s\S]*--provenance[\s\S]*--ignore-scripts=false/);
   assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecrod-operator/);
