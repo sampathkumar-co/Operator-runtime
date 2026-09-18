@@ -1,9 +1,11 @@
 # Operator OpenAI Release Gate — OCC-3M
 
-Certification candidate: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
+Frozen production source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
+Current release successor: `c5cc9dd3156b857b51a0e35cafff346c1ca8d906`
+Current exact-head certification: CI #757 / Platform Matrix #527 / NPM Runtime #167 / Signing #528 ? all PASS
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
-Evidence cutoff: 2026-09-18 03:25 UTC
+Evidence date: 2026-09-18
 
 Status is deliberately binary: **PASS** means the OCC-3M release has direct evidence for the gate; **BLOCKED** means a required external/human step is still missing. Capabilities intentionally absent from the public MCP surface are treated as PASS only for public-release exposure and are called out explicitly. The canonical master-plan G0–G36 mapping is maintained separately in `OPERATOR_MASTER_GATE_STATUS.md`; neither numbering scheme overrides a blocker in the other.
 
@@ -27,25 +29,27 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |
-| G19 Packaging / supply chain | BLOCKED | PR #22 / OCC-3N head `bbcc12a7b5167345ab865af3f6c230580a2eda37` removes direct `npm publish`, provides an immutable artifact-only first-release path and exact-tarball staged path for later versions, makes root `DISCLOSURE` packable, enforces dual-use continuity across bounded published version history, and passes CI #700, Platform Matrix #470, NPM Runtime #128 and Signing Smoke #471. Local targeted release/policy tests are 18/18 PASS, the full Windows-aware suite is 367/351 pass/16 expected skips/0 fail, and npm 11.19.1 accepts the exact tarball form for staged publishing in dry-run. G19 remains BLOCKED until FG-013 licensing and FG-015 npm-policy classification are applied to the final successor, `@mecrod` ownership/2FA is proven, and affected publish/install certification is rerun. |
+| G19 Packaging / supply chain | BLOCKED | The owner-finalized candidate uses `@mecrod/connect`, proprietary `LICENSE`, mandatory dual-use `DISCLOSURE`, exact individual author metadata, immutable first-release artifact handling and staged future-release controls. Local owner-decision tests are green and GitHub NPM Runtime certifies the packed package/install path. G19 remains BLOCKED only until npm account/`@mecrod` scope ownership + 2FA are proven, the exact first tarball is published, and public-registry/clean-machine verification passes. |
 | G20 Production edge | PASS | TLS 1.3, valid certificate, HSTS/CSP, wrong Host -> 421, evil Origin -> 403, missing/invalid bearer -> 401, oversized header -> 431, oversized body -> 413. |
 | G21 Performance / resource control | PASS | Performance regression suite passed; hostile bounded-input probes left the exact edge healthy with no crash/error signatures. |
-| G22 Legal / public docs | BLOCKED | Mecord Connect source notices are ready in integrated PR #27, but production still serves pre-rebrand OCC-3M pages, the intended public npm package is UNLICENSED, and the exact legal publisher identity is not yet disclosed consistently. Owner-approved software licensing, exact publisher identity/legal-page reconciliation, and final Mecord Connect deployment are required before public distribution/submission. |
+| G22 Legal / public docs | BLOCKED | Source legal materials now identify **Kinthala Samuel Sampath Kumar**, Akkayapalem/Visakhapatnam/Andhra Pradesh/India, support@splcart.in, India governing law, and the proprietary Mecord Connect runtime license. Production still serves OCC-3M/pre-final pages, and OpenAI individual publisher verification is not yet complete. Final live deployment + identity-verification consistency are required before submission. |
 | G23 Real ChatGPT E2E | BLOCKED | Requires a ChatGPT plugin draft/connection plus completed OAuth login; no published/installed Mecord Connect plugin exists yet. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
 | G25 Reviewer simulation | BLOCKED | The deterministic reviewer project is locally certified: exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2, with additional `APPROVAL_REQUIRED` and duplicate-create checks. A dedicated production reviewer account and reviewer-only one-factor policy are now provisioned and Authelia is healthy. Remaining blockers are owner-side credential login verification, fixture-only pairing, public npm runtime, and real production OAuth/ChatGPT execution. |
-| G26 Submission package | BLOCKED | Tool/test package and Mecord Connect branding are structurally ready in integrated PR #27, but final live branding deployment, npm runtime publication, publisher/legal identity verification, portal domain challenge, Scan Tools, reviewer credential login/pairing, authenticated E2E, and the required reviewer-accessible demo recording URL remain outstanding. |
+| G26 Submission package | BLOCKED | Mecord Connect source/listing/package/legal metadata are owner-resolved, but final live deployment, npm publication, OpenAI individual verification, reviewer credential login/pairing, portal domain challenge if issued, Scan Tools, authenticated E2E, required demo recording, and final region selection in the portal remain outstanding. |
 
 ## Remaining blocking actions
 
-1. Complete one real OAuth authorization with the production predefined client and verify the issued access token has `aud=https://operator.splcart.in/mcp`, the required scopes, valid issuer/expiry, and succeeds against `/mcp`.
-2. Create a dedicated reviewer/demo account and fixture using the reviewer-only one-factor design in `OPERATOR_REMAINING_HUMAN_GATES.md`; normal users remain two-factor.
-3. Complete OpenAI Platform individual/business verification for the exact publisher name to be submitted.
-4. Create the OpenAI plugin draft; if the portal issues a domain challenge, set only the exact token through `OPENAI_APPS_CHALLENGE_TOKEN`, reload the edge environment, and verify the exact well-known response.
-5. Run **Scan Tools**, reconcile the imported 10-tool snapshot with the server metadata, then run a real ChatGPT read + write workflow through OAuth, relay and paired PC.
-6. Resolve FG-013 and FG-015 on draft successor PR #22: choose the runtime software license, explicitly classify the package under npm's current Dual-Use Content Policy, add the required license/`DISCLOSURE` metadata as applicable, and rerun affected packaging/legal/clean-machine certification on the resulting exact successor SHA.
-7. Prove `@mecrod` scope ownership with 2FA. For the first package release, use PR #22's CI-built immutable tarball and publish that exact artifact interactively with 2FA; after the package exists, configure trusted publishing with staged promotion for future versions. Then verify a clean-machine `npx ... doctor` and `remote --root <fixture>`.
-8. Submit only after G10, G11, G19, G22, G23, G24, G25 and G26 change to PASS.
+Only six owner/external categories remain:
+
+1. **npm account / @mecrod scope / 2FA** ? establish the publisher account/scope and 2FA required for `@mecrod/connect`.
+2. **OpenAI publisher/developer login + individual identity verification** ? verify the exact legal identity and reconcile spelling/order if OpenAI accepts a different form.
+3. **Reviewer credential entry + real pairing** ? verify the provisioned one-factor reviewer login and pair only the canonical fixture.
+4. **Portal domain challenge, if issued** ? use only the exact OpenAI-issued challenge token.
+5. **Real OpenAI/ChatGPT OAuth + Scan Tools + E2E + demo** ? prove issued-token resource/scopes, exact 10-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
+6. **Explicit publication/submission authorization** ? publish the exact certified npm tarball with owner 2FA and select OpenAI Submit for Review only after all final gates are green.
+
+Engineering tasks such as source fixes, CI, evidence synchronization, release-note preparation, deployment/rollback preparation and MSIX/Store work are not additional owner decisions. Final deployment remains sequenced behind the external gates above and must use the exact certified successor.
 
 ## OCC-3M merge evidence
 

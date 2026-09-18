@@ -1,185 +1,127 @@
-# Operator Owner Release Decision Packet
+# Mecord Connect Owner Release Decisions
 
 Status date: 2026-09-18
-Purpose: reduce FG-013 / FG-015 to explicit owner decisions without changing or publishing the certified runtime.
 
-## Frozen engineering state
+Purpose: authoritative record of the owner decisions that previously blocked FG-013, FG-015 and the owner-input portion of FG-017.
 
-- Production/main: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7`.
-- Frozen npm-hardening draft: PR #22 head `bbcc12a7b5167345ab865af3f6c230580a2eda37`.
-- PR #22 exact-head validation: CI #700 PASS, Platform Matrix #470 PASS, NPM Remote Runtime CI #128 PASS, Windows Signing Smoke #471 PASS.
-- Local Windows-aware suite: 367 tests / 351 pass / 16 expected skips / 0 fail.
-- Targeted release/policy suite: 18/18 PASS.
-- `@mecrod/operator@1.0.0` is not published.
-- This Windows machine is not authenticated to npm (`npm whoami -> ENEEDAUTH`).
-- The current public npm org lookup for `mecrod` returns 404 / `Scope not found`. Treat this only as a public signal; it does not prove the intended owner can claim the namespace.
+## Supplied owner decisions
 
-No choice below authorizes publication by itself.
+- **Product name:** Mecord Connect
+- **Publisher type:** Individual
+- **Publisher legal name for source/public metadata:** Kinthala Samuel Sampath Kumar
+- **Verification caveat:** before OpenAI publisher verification/submission, the spelling/order must match the identity document and the exact name accepted by OpenAI. If OpenAI verifies a different legal spelling/order, reconcile the source/public metadata before submission.
+- **Public locality:** Akkayapalem, Visakhapatnam, Andhra Pradesh, India
+- **Public support:** support@splcart.in
+- **Governing law:** India
+- **Dispute venue:** competent courts at Visakhapatnam, Andhra Pradesh, subject to mandatory consumer-protection/jurisdiction rules
+- **Software license:** PROPRIETARY
+- **npm Dual-Use classification:** DUAL_USE
+- **npm package:** @mecrod/connect
+- **npm account:** not created yet
+- **Availability:** global wherever supported and legally/service-operationally supportable
+- **v1 public domain:** operator.splcart.in
+- **Auth issuer:** auth.splcart.in
+- **Windows Store/MSIX:** not required for Mecord Connect v1; retain as a separate optional/future distribution lane, not a v1 submission gate
+- **OpenAI account:** owner/admin access exists, but publisher/developer submission verification/login has not yet been completed
+- **Reviewer credential:** provisioned; owner-side login/pairing verification remains required because certification tooling will not retrieve/expose the password
 
-## Decision 1 — software license (FG-013)
+## Final owner-decision source certification
 
-Choose exactly one.
+Current integrated PR #27 head: `c5cc9dd3156b857b51a0e35cafff346c1ca8d906`
 
-### A. Proprietary runtime license
+Exact-head certification: **CI #757 PASS / Platform Matrix #527 PASS / NPM Remote Runtime #167 PASS / Windows Signing Smoke #528 PASS**.
 
-Use when the intent is to let users install/run Operator while retaining control over redistribution, competing hosted use and derivative distribution.
+## Applied source state
 
-Required owner/legal fields before activation:
-- exact Licensor legal person/entity;
-- legal/contact address or approved contact;
-- governing law;
-- forum/dispute mechanism;
-- aggregate liability cap;
-- mandatory-law / non-excludable-liability exceptions;
-- confirmation that the grant/restrictions match the intended business model.
+Integrated PR #27 now applies these decisions in source:
 
-Engineering changes after approval:
-1. finalize `OPERATOR_PROPRIETARY_RUNTIME_LICENSE_DRAFT.md`;
-2. remove every draft marker/placeholder;
-3. copy approved text to package-root `LICENSE`;
-4. set package metadata to `"license": "SEE LICENSE IN LICENSE"`;
-5. add a short README license notice.
+- npm package renamed from @mecrod/operator to **@mecrod/connect**;
+- package folder renamed to packages/mecrod-connect;
+- npm bin shim renamed to **mecord-connect**;
+- package metadata uses **SEE LICENSE IN LICENSE**;
+- package-root proprietary **LICENSE** is present;
+- package-root **DISCLOSURE** is present;
+- package metadata requires `contentPolicy.class = "dual-use"`;
+- package author is **Kinthala Samuel Sampath Kumar** with support@splcart.in;
+- release guards fail closed if the package name, proprietary license, dual-use declaration, disclosure or publisher identity is changed/removed;
+- npm CI certifies the packed LICENSE/DISCLOSURE, installed @mecrod/connect runtime and mecord-connect.cmd shim;
+- plugin manifest `author.name` / `interface.developerName` use the individual publisher identity;
+- source-controlled Privacy/Terms/Support pages identify the individual publisher and India/Visakhapatnam jurisdiction while retaining Mecord Connect as the product name;
+- operator.splcart.in remains the v1 public endpoint.
 
-Do not activate this option from the existing draft without owner/legal approval.
+## License decision — PROPRIETARY
 
-### B. Apache-2.0
+The proprietary choice is intentional because Mecord Connect is presently a controlled connector/runtime for a hosted service rather than a general-purpose open-source redistribution project.
 
-Use when broad third-party reuse, modification and redistribution are intended and an explicit patent grant is desired.
+The package license grants limited authorized use while restricting redistribution/sublicensing and attempts to bypass security boundaries, subject to applicable law.
 
-Engineering changes:
-1. add canonical Apache-2.0 text as package-root `LICENSE`;
-2. set `"license": "Apache-2.0"`;
-3. add README license notice.
+This decision does not make the repository broadly open source.
 
-### C. MIT
+## npm policy decision — DUAL_USE
 
-Use when broad permissive reuse is intended with the simplest common license.
+Mecord Connect intentionally uses the conservative npm classification because the shipped runtime contains security-relevant remote-management capabilities even though the public ChatGPT plugin exposes a much narrower surface.
 
-Engineering changes:
-1. add canonical MIT text as package-root `LICENSE`;
-2. set `"license": "MIT"`;
-3. add README license notice.
+The release machinery therefore requires:
+- `contentPolicy.class = "dual-use"`;
+- root `DISCLOSURE`;
+- immutable first-release artifact;
+- interactive human npm publication with 2FA for the first release;
+- staged future releases with human 2FA promotion where applicable;
+- continuity checks so the declaration cannot silently disappear.
 
-## Decision 2 — npm Dual-Use Content Policy (FG-015)
+## Publisher identity
 
-Choose exactly one outcome.
+The product brand is **Mecord Connect**.
 
-### A. DUAL_USE
+The publisher/developer identity is **Kinthala Samuel Sampath Kumar**.
 
-Conservative engineering path for Operator's shipped remote-computer/runtime capabilities.
+Do not replace the legal publisher identity with “Mecord Connect” or “SPLCART” in fields that are meant to identify the verified individual.
 
-Engineering changes:
-1. add:
-   ```json
-   "contentPolicy": {
-     "class": "dual-use"
-   }
-   ```
-2. promote the reviewed disclosure draft to package-root `DISCLOSURE`;
-3. retain the declaration in every future published version unless npm Trust & Safety approves removal;
-4. first publication remains interactive with 2FA;
-5. future automation remains stage-only, followed by human 2FA promotion.
+Before final OpenAI submission:
+1. complete individual publisher verification;
+2. compare the exact verified name with the source/public legal name;
+3. reconcile any identity-document spelling/order difference before submission;
+4. deploy the final legal pages and verify the live website/support/privacy/terms match.
 
-PR #22 already proves `DISCLOSURE` can enter the tarball and fails closed if a declared dual-use tarball omits it.
+## npm account actions still required
 
-### B. NOT_DUAL_USE
+No npm account currently exists for the owner.
 
-Use only if the owner accepts the documented rationale that Operator is a user-authorized developer automation/runtime product rather than a security-research, exploit, evasion or malware tool.
+Do not create or publish with guessed credentials.
 
-Engineering/evidence changes:
-1. do not add `contentPolicy` or `DISCLOSURE`;
-2. record the owner decision and rationale in release evidence;
-3. keep the hardened artifact-first / stage-only future release machinery anyway.
+Owner/account actions:
+1. create/sign into the intended npm account;
+2. enable 2FA;
+3. obtain/control the `@mecrod` scope (organization if required and available);
+4. confirm the account is authorized to publish `@mecrod/connect`;
+5. build the immutable first-release artifact from the final green release SHA;
+6. verify its SHA-256;
+7. publish **that exact tarball** interactively with 2FA;
+8. verify registry metadata;
+9. from a clean Windows x64 machine run `npx @mecrod/connect@latest doctor`;
+10. run `npx @mecrod/connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project`;
+11. after the package exists, retain the staged/human-approval path for subsequent dual-use releases.
 
-### C. NPM_CONFIRMATION
+## OpenAI account actions still required
 
-Ask npm Trust & Safety / policy support for a determination and retain only the non-secret ticket/correspondence reference in evidence.
+- login to the real publisher/developer submission account;
+- complete individual publisher identity verification;
+- create/reconcile the Mecord Connect plugin draft;
+- use the current production MCP/OAuth endpoints;
+- complete a portal-issued domain challenge if one is issued;
+- run Scan Tools and verify the exact 10-tool public snapshot;
+- execute real ChatGPT OAuth read/write/refusal/revoke/reconnect testing;
+- enter reviewer credentials without secondary verification;
+- record and host the required production demo;
+- select global availability only where OpenAI supports the listing and the service can legally/operationally support users;
+- submit only after final deployment and every release gate is green.
 
-Engineering changes follow npm's written classification direction.
+## Domain and Store decisions
 
-## Lower-regret engineering combination
+For v1, keep:
+- https://operator.splcart.in
+- https://auth.splcart.in
 
-If the commercial intent is a controlled connector for the hosted Operator service rather than an open-source ecosystem package, the existing engineering memos identify **Proprietary + DUAL_USE** as the conservative combination.
+A later Mecord-branded domain migration can be considered after usage/revenue justifies the OAuth/resource/domain-verification migration cost.
 
-This is a decision-support recommendation only. It is not an applied license or policy classification.
-
-## Decision 3 — exact publisher legal identity (FG-017)
-
-This is not inferred from GitHub/npm account names, the Mecord Connect product name, or the SPLCART domain/brand.
-
-Owner must provide/approve:
-- exact legal person/entity that operates and publishes Operator;
-- governing jurisdiction/country/state as applicable;
-- approved public legal/support contact identity;
-- whether that same person/entity is the proprietary Runtime License Licensor if the proprietary path is selected.
-
-After approval:
-1. patch the Operator canonical notices in `deploy/public-edge/production-notices/privacy.md`, `terms.md`, and `support.md` (live equivalents currently reside under `/home/deploy/operator/ops/production-notices/`);
-2. patch SPLCART storefront legal/identity content in `frontend-new/src/lib/trust-content.ts` and `frontend-new/src/components/trust/PublicContentPage.tsx` so it no longer contains unresolved actual-business-entity/jurisdiction or unpublished-support wording;
-3. reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with the exact verified publisher identity if that identity differs from the Mecord Connect product brand;
-4. use the same identity in OpenAI publisher verification;
-5. use the same Licensor identity in the proprietary package license if applicable;
-6. verify the live public pages and final manifest metadata before submission.
-
-Do not invent the publisher identity from repository owners, email usernames, account profile names, or domain WHOIS guesses.
-
-### Source-reproducibility preparation already complete
-
-Integrated PR #27 now contains the source-controlled Privacy/Terms/Support notices, shared-VPS bind-mount reproducibility, npm hardening, and the complete Mecord Connect public-plugin/MCP branding in one branch. Current head `c0a87af4166a626b4aaea250438caa9fdbb00b08` passes CI #745, Platform Matrix #515, NPM Runtime #156 and Windows Signing Smoke #516; modified MCP E2E is 7 pass / 1 expected Windows symlink skip / 0 fail, local focused release tests are 28/28 PASS, and the full Windows-aware suite is 368 tests / 352 pass / 16 expected skips / 0 fail. The remaining notice change is the owner-approved FG-017 legal publisher identity before final deployment.
-
-## What happens immediately after the owner decisions
-
-Applying either decision changes the source SHA, so PR #22's current green SHA stops being the final successor.
-
-The resulting successor must rerun at minimum:
-
-1. candidate identity / clean worktree / exact source binding;
-2. package metadata validation;
-3. `npm pack --json` and tarball inventory;
-4. required `LICENSE` verification;
-5. conditional `DISCLOSURE` verification;
-6. npm policy-continuity tests;
-7. NPM Remote Runtime CI;
-8. full CI;
-9. Platform Matrix;
-10. Windows Signing Smoke;
-11. tarball install + `doctor`;
-12. full Windows-aware regression suite;
-13. secret-like scan;
-14. public/legal truthfulness review;
-15. clean-machine verification after first publication.
-
-Do not merge or publish merely because the metadata patch is small.
-
-## npm namespace / first publish owner action
-
-The engineering side cannot complete this without an authenticated owner session.
-
-Owner sequence:
-1. sign in to the intended npm publisher account and enable 2FA;
-2. verify whether organization `mecrod` can be created/claimed by that account;
-3. if available, create/verify the org and confirm owner/admin role;
-4. rerun:
-   ```powershell
-   npm whoami
-   npm org ls mecrod --json
-   ```
-5. after the final successor is green, build the immutable first-release artifact;
-6. recompute/compare SHA-256;
-7. publish that exact `.tgz` interactively with 2FA;
-8. verify registry metadata and run clean-machine `npx @mecrod/operator@latest doctor`;
-9. only after the package exists, configure trusted publishing with stage-only permission and human 2FA promotion.
-
-Never store npm password, session token, OTP or recovery codes in Git, evidence Markdown or chat.
-
-## Minimal owner response needed
-
-To unblock engineering, record these items:
-
-- **License:** `PROPRIETARY` / `APACHE-2.0` / `MIT`
-- **npm policy:** `DUAL_USE` / `NOT_DUAL_USE` / `NPM_CONFIRMATION`
-- **Publisher legal identity:** exact person/entity name
-- **Jurisdiction:** country/state or other legally appropriate governing jurisdiction
-- **Public legal/support contact identity:** approved contact/name/address as applicable
-
-If `PROPRIETARY` is selected, the liability/dispute fields listed above must also be approved before the license becomes effective.
+MSIX/Windows Store distribution is **not required for Mecord Connect v1**. Existing Store packaging/tests may remain as an optional/future engineering lane, but Store publication/name reservation is not a Mecord Connect v1 release prerequisite.

@@ -162,7 +162,7 @@ Reset the canonical fixture before pairing:
 After the public npm runtime exists, start it with only the fixture root:
 
 ```powershell
-npx @mecrod/operator@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project
+npx @mecrod/connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project
 ```
 
 Claim the resulting one-time device code only while authenticated as the disposable reviewer. The reviewer account must not inherit or claim any real personal/project device.

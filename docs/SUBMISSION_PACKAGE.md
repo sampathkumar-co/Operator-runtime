@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. They are **not yet final for submission**: integrated PR #27 is the green Mecord Connect source successor, but production still serves the pre-rebrand OCC-3M pages; FG-017 still requires the exact owner-approved publisher identity/jurisdiction/contact, and FG-021 requires final Mecord Connect deployment parity. Do not submit until those gates and the remaining external gates are complete: real OAuth token-audience proof, reviewer login/pairing, npm publication/clean-machine verification, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation, real ChatGPT end-to-end testing, and the required demo recording URL.
+The production HTTPS origin and OAuth provider are live on frozen OCC-3M, while PR #27 head `c5cc9dd3156b857b51a0e35cafff346c1ca8d906` is the fully green Mecord Connect release successor (CI #757 / Platform #527 / NPM Runtime #167 / Signing #528 PASS). Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the six external/account categories: npm account/publication, OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/submission authorization.
 
 ## What the public plugin does
 
@@ -114,9 +114,8 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- the public runtime has an owner-approved software license (not `UNLICENSED`), npm dual-use classification is explicitly resolved and reflected in package/workflow metadata, the successor candidate passes affected packaging/legal certification, and `@mecrod/operator@1.0.0` is published through the policy-compatible release flow with clean-machine `doctor`/reviewer-root startup passing;
-- the exact owner-approved publisher legal identity is reconciled across website/support/privacy/terms and verified in the OpenAI Platform;
-- production Windows release is signed by the final trusted certificate;
+- `@mecrod/connect@1.0.0` is publicly published and clean-machine `doctor` / reviewer-root startup have passed. (The proprietary license and DUAL_USE source decisions themselves are already resolved and certified.)
+- the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
 
@@ -125,9 +124,9 @@ Do not claim any of the following until the external gate is actually complete:
 Before pressing Submit for Review, verify all of these against the real deployment:
 
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
-- the OpenAI challenge token is served exactly at the required well-known path;
+- if the OpenAI portal issues a challenge token, that exact token is served only at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. Before submission, the final descendant must also contain the owner-approved FG-017 publisher/contact/jurisdiction wording and be deployed so all four live pages visibly match the Mecord Connect listing; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
+- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. The final descendant already contains the approved publisher/contact/jurisdiction source wording; before submission it must be deployed so all four live pages visibly match the Mecord Connect listing and the verified identity; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;
@@ -136,6 +135,6 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - country/region availability is limited to places where support/legal obligations are ready;
 - release notes describe this as the initial public submission.
 
-## Separate Microsoft Store flow
+## Microsoft Store / MSIX
 
-The Microsoft Store package identity/signing flow is independent from this public MCP submission. Public-plugin hardening may require a refreshed Windows binary if local-agent code changes, but it does not require a new Store identity reservation. Keep the Store identity and Partner Center work on its existing release branch and rebuild/re-certify the final MSIX only when the local runtime changes are frozen.
+Microsoft Store/MSIX distribution is **outside Mecord Connect v1 scope**. Existing packaging tests may remain as engineering coverage, but Store identity reservation, Partner Center submission, Store signing and MSIX publication are not prerequisites for the npm runtime or OpenAI plugin submission and must not create extra v1 owner work.
