@@ -4,7 +4,7 @@
 
 **NOT YET CONFIRMED FOR RELEASE.**
 
-Engineering work is substantially complete, but six external/account actions remain and are intentionally excluded from autonomous execution.
+Engineering work is substantially complete, but five external/account actions remain and are intentionally excluded from autonomous execution.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -26,7 +26,7 @@ Draft PR #27 / branch `release/occ3r-integrated-successor`.
 
 Current source head:
 
-`c5cc9dd3156b857b51a0e35cafff346c1ca8d906`
+`11abc578488f5deb4df83299554b6a4eae3bbe2e`
 
 This candidate includes:
 
@@ -41,7 +41,7 @@ This candidate includes:
 - public locality **Akkayapalem, Visakhapatnam, Andhra Pradesh, India**;
 - support **support@splcart.in**;
 - India governing law / Visakhapatnam venue wording subject to mandatory protections;
-- npm package renamed to **`@mecrod/connect`**;
+- npm package renamed to **`mecord-connect`**;
 - npm executable shim **`mecord-connect`**;
 - proprietary package license;
 - mandatory npm dual-use classification/disclosure;
@@ -58,12 +58,12 @@ Exact-head workflow set for this current candidate:
 - Windows Signing Smoke **#528**
 
 Exact-head result:
-- CI #757: **PASS**
-- Platform Matrix #527: **PASS**
-- NPM Runtime #167: **PASS**
-- Windows Signing Smoke #528: **PASS**
+- CI #765: **PASS**
+- Platform Matrix #535: **PASS**
+- NPM Runtime #174: **PASS**
+- Windows Signing Smoke #536: **PASS**
 
-CI #757 specifically confirms the previously flaky structured Git-write test now passes; Core runtime completed 368 tests with 0 failures on the Linux CI job.
+CI #765 specifically confirms the previously flaky structured Git-write test now passes; Core runtime completed 368 tests with 0 failures on the Linux CI job.
 
 ## Owner decisions already resolved in source
 
@@ -76,7 +76,7 @@ The following are **not** open decisions anymore:
 - locality: **Akkayapalem, Visakhapatnam, Andhra Pradesh, India**
 - software license: **PROPRIETARY**
 - npm classification: **DUAL_USE**
-- npm package: **`@mecrod/connect`**
+- npm package: **`mecord-connect`**
 - v1 domain: **operator.splcart.in**
 - auth issuer: **auth.splcart.in**
 - availability intent: **global wherever supported and legally/operationally supportable**
@@ -86,11 +86,11 @@ If OpenAI identity verification accepts a materially different legal-name spelli
 
 ## npm package truth
 
-The publishable runtime source is `packages/mecrod-connect`.
+The publishable runtime source is `packages/mecord-connect`.
 
 Required metadata and files:
 
-- `name = @mecrod/connect`
+- `name = mecord-connect`
 - `license = SEE LICENSE IN LICENSE`
 - `contentPolicy.class = dual-use`
 - author = **Kinthala Samuel Sampath Kumar**
@@ -103,7 +103,7 @@ Release guards fail closed if the package name, proprietary license, dual-use de
 
 GitHub NPM Runtime certification builds the native helpers, builds the exact-source runtime payload, packs the tarball, verifies required policy/runtime files, installs the tarball, runs the direct runtime doctor, and runs the installed `mecord-connect.cmd` doctor.
 
-The package is not yet public because the owner npm account/scope/2FA and publication authorization are external gates.
+The package is not yet public. npm account setup is resolved: `npm whoami` = **mecrod** and 2FA mode = **auth-and-writes**; because the package is unscoped, no npm organization/scope is required. Publication now waits only for explicit irreversible authorization plus post-publish verification.
 
 ## Public MCP surface
 
@@ -193,41 +193,22 @@ It is **not** a Mecord Connect v1 release, npm publication, OpenAI submission or
 
 Do not create extra owner work for Store naming/reservation/publication during v1.
 
-## Remaining six external/account gates
+## Remaining five external/account gates
 
-These are the only remaining owner/external categories.
+### 1. OpenAI publisher/developer login + individual identity verification
+Complete/verify the exact individual identity and reconcile the accepted spelling/order if needed.
 
-### 1. npm account / @mecrod scope / 2FA
+### 2. Reviewer credential entry + real pairing
+Owner enters the provisioned reviewer credential, proves no secondary verification and pairs only the canonical fixture.
 
-Owner must create/sign into npm, enable 2FA and obtain/control the `@mecrod` scope as required to publish `@mecrod/connect`.
+### 3. Portal-issued domain challenge, if issued
+Use only the exact OpenAI-issued challenge token.
 
-### 2. OpenAI publisher/developer login + identity verification
+### 4. Real OpenAI/ChatGPT OAuth + Scan Tools + E2E + demo
+Prove issued-token resource/scopes, exact 10-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
 
-Owner must sign into the real OpenAI publisher/developer account and complete individual verification. Exact verified legal-name spelling/order must be reconciled before submission if it differs from source.
-
-### 3. Reviewer credential entry + real pairing
-
-Owner must enter the provisioned reviewer credential through the approved path, prove no secondary verification, and pair only the canonical reviewer fixture.
-
-### 4. Portal-issued domain challenge, if issued
-
-Use only the exact token supplied by OpenAI. Never synthesize or retain it in evidence.
-
-### 5. Real ChatGPT/OpenAI OAuth + Scan Tools + E2E + demo
-
-Must be performed through the actual OpenAI-hosted flow. Includes:
-- PKCE/resource/audience/scope proof;
-- Scan Tools exact 10-tool snapshot;
-- five positive + three negative reviewer cases;
-- revoke/disconnect failure + reconnect success;
-- independent local write postconditions;
-- reviewer-accessible production demo recording.
-
-### 6. Explicit irreversible publication/submission authorization
-
-Owner must explicitly authorize:
-- publishing the exact first npm tarball with 2FA;
-- selecting OpenAI **Submit for Review** after all final gates pass.
+### 5. Explicit irreversible publication / deployment / submission authorization
+Authorize publication of the exact certified `mecord-connect` tarball with 2FA, final transactional deployment, then OpenAI Submit for Review only after the real review proof is green.
 
 ## Final deployment sequencing
 
@@ -245,7 +226,7 @@ When permitted:
 
 ## Release verdict
 
-Until the six external gates and final deployment verification close, the verdict remains:
+Until the five external gates and final deployment verification close, the verdict remains:
 
 **NOT CONFIRMED FOR RELEASE**
 
@@ -253,6 +234,6 @@ See:
 - `OPERATOR_MASTER_GATE_STATUS.md` — canonical G0–G36 verdict
 - `OPERATOR_RELEASE_GATE.md` — compact binary release sheet
 - `OPERATOR_FEATURE_GAPS.md` — discovered/resolved/open gaps
-- `OPERATOR_REMAINING_HUMAN_GATES.md` — exact six human/external gates
+- `OPERATOR_REMAINING_HUMAN_GATES.md` — exact five human/external gates
 - `OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md` — portal-entry source
 - `docs/plugin-review-package.json` — reviewer/tool package

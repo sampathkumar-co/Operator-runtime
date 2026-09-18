@@ -6,8 +6,8 @@ The earlier draft for `@mecrod/operator` is no longer authoritative.
 
 The active dual-use disclosure is:
 
-- package: `@mecrod/connect`
-- source of truth: `packages/mecrod-connect/DISCLOSURE`
+- package: `mecord-connect`
+- source of truth: `packages/mecord-connect/DISCLOSURE`
 - classification: `contentPolicy.class = "dual-use"`
 - publisher: **Kinthala Samuel Sampath Kumar**
 - contact: **support@splcart.in**

@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin and OAuth provider are live on frozen OCC-3M, while PR #27 head `c5cc9dd3156b857b51a0e35cafff346c1ca8d906` is the fully green Mecord Connect release successor (CI #757 / Platform #527 / NPM Runtime #167 / Signing #528 PASS). Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the six external/account categories: npm account/publication, OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/submission authorization.
+The production HTTPS origin and OAuth provider are live on frozen OCC-3M, while PR #27 head `11abc578488f5deb4df83299554b6a4eae3bbe2e` is the fully green Mecord Connect release successor (CI #765 / Platform #535 / NPM Runtime #174 / Signing #536 PASS). Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the five external/account categories: OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
 
 ## What the public plugin does
 
@@ -114,7 +114,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- `@mecrod/connect@1.0.0` is publicly published and clean-machine `doctor` / reviewer-root startup have passed. (The proprietary license and DUAL_USE source decisions themselves are already resolved and certified.)
+- `mecord-connect@1.0.0` is publicly published and clean-machine `doctor` / reviewer-root startup have passed. (The proprietary license and DUAL_USE source decisions themselves are already resolved and certified.)
 - the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.

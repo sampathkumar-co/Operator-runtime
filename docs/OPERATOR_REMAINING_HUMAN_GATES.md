@@ -2,21 +2,30 @@
 
 Status date: 2026-09-18
 
-This runbook intentionally contains only work that cannot be completed autonomously without the owner's account access, credential entry, platform-issued secret, or explicit release/submission authorization.
+This runbook contains only work that cannot be completed autonomously without the owner's account/credential entry, a platform-issued secret, or explicit irreversible authorization.
 
-Everything else belongs in the engineering/certification evidence and should be completed before this runbook is considered the only remaining blocker set.
+## Resolved external setup
+
+The npm account setup gate is now independently verified from the owner machine:
+
+- npm user: **mecrod**
+- authenticated `npm whoami`: **PASS**
+- npm 2FA mode: **auth-and-writes**
+- release package: **mecord-connect**
+- npm organization/scope: **not required** for the unscoped package
+- current registry state: **unpublished** before first release
+
+Do not ask for an `@mecrod` organization again.
 
 ## Frozen production baseline
 
-Production remains intentionally frozen on OCC-3M until these external gates close:
+Production remains intentionally frozen on OCC-3M:
 
 - main source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
 - production edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public MCP surface: exactly 10 tools
-
-The current release successor is **Mecord Connect**. The source candidate, evidence SHA and exact workflow numbers must be taken from the final certification ledger after the last engineering fix is green.
 
 ## Owner decisions already resolved — do not ask again
 
@@ -29,40 +38,16 @@ The current release successor is **Mecord Connect**. The source candidate, evide
 - product: Mecord Connect
 - software license: **PROPRIETARY**
 - npm policy: **DUAL_USE**
-- npm package: **@mecrod/connect**
+- npm package: **mecord-connect**
 - npm bin: **mecord-connect**
 - v1 public domain: `operator.splcart.in`
 - v1 auth issuer: `auth.splcart.in`
 - availability intent: global wherever supported and legally/operationally supportable
 - MSIX / Microsoft Store: **not a Mecord Connect v1 release requirement**
 
-If OpenAI identity verification accepts a different legal-name spelling/order than the source value above, reconcile source/public metadata before submission. That is identity reconciliation, not a new product/branding decision.
+# The only five remaining owner/external gates
 
-# The only six remaining owner/external gates
-
-## 1. npm account, @mecrod scope and 2FA
-
-The owner currently has no npm publisher account configured for this release.
-
-Required owner actions:
-
-1. create or sign into the intended npm account;
-2. enable npm 2FA;
-3. obtain/control the `@mecrod` scope, if available and required by npm;
-4. verify that account may publish `@mecrod/connect`.
-
-Do not paste passwords, OTP/2FA codes, auth tokens, session cookies or recovery codes into Git or ChatGPT.
-
-Engineering state already prepared:
-- package = `@mecrod/connect@1.0.0`;
-- proprietary LICENSE is included;
-- dual-use DISCLOSURE is included;
-- `contentPolicy.class = "dual-use"` is mandatory;
-- first release is an immutable artifact handoff;
-- future releases retain staged/human-approval controls;
-- package doctor and installed `mecord-connect.cmd` are CI-tested.
-
-## 2. OpenAI publisher/developer login and individual identity verification
+## 1. OpenAI publisher/developer login and individual identity verification
 
 Use the real OpenAI publisher/developer account with Apps Management write permission.
 
@@ -80,7 +65,7 @@ After verification, compare the exact verified spelling/order with:
 
 If verification accepts a materially different spelling/order, reconcile those source/public fields before final deployment/submission.
 
-## 3. Reviewer credential entry and real reviewer pairing
+## 2. Reviewer credential entry and real reviewer pairing
 
 A dedicated reviewer account and one-factor reviewer-only authorization policy are provisioned.
 
@@ -96,9 +81,7 @@ Canonical reviewer fixture:
 - baseline commit: `ab658c353fc3e0ce79d71e2968f53eedbc247537`
 - negative outside-root file: `C:\Users\Public\outside-project.txt`
 
-Do not reuse an administrator identity for reviewer access.
-
-## 4. OpenAI-issued domain challenge token, if the portal issues one
+## 3. OpenAI-issued domain challenge token, if the portal issues one
 
 The runtime already supports:
 - `OPENAI_APPS_CHALLENGE_TOKEN`
@@ -107,86 +90,89 @@ The runtime already supports:
 Without a real portal token the challenge route must stay 404.
 
 If OpenAI issues a token:
-1. enter that exact token into the approved production secret/environment field;
-2. recreate only the components required to reload it;
-3. verify the challenge URL returns exactly the issued value with no-store semantics;
+1. use that exact token only;
+2. place it in the approved production secret/environment path;
+3. verify the well-known challenge response;
 4. complete portal verification;
-5. remove or rotate the temporary value when no longer required.
+5. remove/rotate it when no longer required.
 
 Never commit or retain the raw challenge token in certification evidence.
 
-## 5. Real OpenAI/ChatGPT OAuth, Scan Tools and end-to-end review proof
+## 4. Real OpenAI/ChatGPT OAuth, Scan Tools and end-to-end review proof
 
-This gate requires the actual OpenAI-hosted flow and therefore cannot be replaced by locally minted tokens or simulated portal state.
+This gate requires the actual OpenAI-hosted flow.
 
 OAuth proof must verify:
 - S256 PKCE;
 - exact portal callback;
-- `resource=https://operator.splcart.in/mcp` in authorization and token flow;
+- `resource=https://operator.splcart.in/mcp`;
 - issuer `https://auth.splcart.in`;
 - audience/resource `https://operator.splcart.in/mcp`;
 - required read/write scopes;
 - wrong/expired/wrong-scope tokens rejected;
-- revocation/disconnect causes failure;
+- revoke/disconnect causes failure;
 - reconnect succeeds.
 
 Scan Tools must show exactly the 10 public tools and no private terminal/browser/UIA/PostgreSQL surface.
 
-Real ChatGPT reviewer cases:
-1. project.inspect;
-2. file.read;
-3. git.status;
-4. file.create on an absent fixture file;
-5. git.diff;
-6. credential/.env refusal;
-7. outside-root refusal;
-8. read-only-token mutation refusal.
+Run the canonical five positive + three negative reviewer cases.
 
-The required reviewer-accessible production demo recording must be captured from this real flow without exposing passwords, tokens, private keys, private filesystem identity or real user data.
+Capture the required reviewer-accessible production demo recording without exposing passwords, tokens, keys, private filesystem identity or real user data.
 
-## 6. Explicit release/publication/submission authorization
+## 5. Explicit irreversible publication / deployment / submission authorization
 
-Two irreversible/external actions require explicit owner authorization at the moment they are performed:
+This is the final owner-controlled release gate.
 
 ### npm first publication
 
-After all source/CI evidence is green:
-1. build the immutable first-release tarball from the exact final release SHA;
+The npm account prerequisite is already satisfied:
+- user = `mecrod`
+- 2FA = `auth-and-writes`
+
+After the final exact source SHA is green:
+1. build the immutable `mecord-connect@1.0.0` tarball;
 2. verify its SHA-256;
-3. publish **that exact tarball** interactively with owner npm 2FA;
+3. publish **that exact tarball** interactively with owner 2FA;
 4. verify public registry metadata;
-5. on a clean Windows x64 machine run:
-   - `npx @mecrod/connect@latest doctor`
-   - `npx @mecrod/connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project`
+5. from a clean Windows x64 environment run:
+   - `npx mecord-connect@latest doctor`
+   - `npx mecord-connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project`
+
+### final deployment
+
+After publication/clean-machine verification and before real OpenAI review proof:
+1. deploy the exact final Mecord Connect successor transactionally;
+2. verify `/`, `/privacy`, `/terms`, `/support`;
+3. verify OAuth discovery/protected-resource metadata;
+4. verify MCP unauthenticated/authenticated behavior;
+5. rerun hostile public-edge checks;
+6. keep rollback to OCC-3M.
 
 ### OpenAI Submit for Review
 
 Submit only after:
-- final Mecord Connect production deployment is complete;
-- publisher identity matches live legal pages;
-- npm clean-machine proof passes;
+- exact publisher identity is verified and matches live legal pages;
 - reviewer login/pairing passes;
 - domain challenge is complete if issued;
 - Scan Tools matches the 10-tool snapshot;
-- real OAuth/revoke/reconnect proof passes;
+- real OAuth read/write/refusal/revoke/reconnect proof passes;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible demo recording exists;
-- final region availability is set to supported/global availability as intended.
+- final region availability is set appropriately.
+
+Do not click Submit for Review until the final certification verdict is green.
 
 # Not an additional owner gate
 
 These are engineering/release tasks and must not be presented as extra owner decisions:
 
-- code fixes and regression testing;
+- source fixes and regression testing;
 - source/evidence synchronization;
-- CI, platform, npm-runtime and signing certification;
-- public-page/source branding consistency;
-- deployment scripting and rollback preparation;
-- security/red-team tests;
+- CI/platform/npm-runtime/signing certification;
 - package/tarball inspection;
 - release notes/reviewer packet preparation;
-- stale-process cleanup;
+- final deployment scripting and rollback preparation;
+- public-page/source branding consistency;
+- security/red-team tests;
 - production preflight/health checks;
-- MSIX/Store work, because it is outside Mecord Connect v1 scope.
-
-Production must remain frozen until the six external gates above permit final publication/deployment/submission sequencing.
+- MSIX/Store work outside v1 scope.

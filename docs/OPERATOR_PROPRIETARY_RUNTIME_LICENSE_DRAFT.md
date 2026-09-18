@@ -6,8 +6,8 @@ The earlier non-effective draft is no longer the release license.
 
 The active proprietary license is:
 
-- package: `@mecrod/connect`
-- source of truth: `packages/mecrod-connect/LICENSE`
+- package: `mecord-connect`
+- source of truth: `packages/mecord-connect/LICENSE`
 - package metadata: `"license": "SEE LICENSE IN LICENSE"`
 - Licensor: **Kinthala Samuel Sampath Kumar**
 - public locality: **Akkayapalem, Visakhapatnam, Andhra Pradesh, India**

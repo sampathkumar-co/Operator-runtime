@@ -56,12 +56,14 @@ If OpenAI verifies a materially different spelling/order, reconcile those source
 
 Current engineering source candidate:
 - PR #27 branch: `release/occ3r-integrated-successor`
-- current head: `c5cc9dd3156b857b51a0e35cafff346c1ca8d906`
-- exact-head workflows: **CI #757 PASS / Platform Matrix #527 PASS / NPM Remote Runtime #167 PASS / Windows Signing Smoke #528 PASS**
+- current head: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
+- exact-head workflows: **CI #765 PASS / Platform Matrix #535 PASS / NPM Remote Runtime #174 PASS / Windows Signing Smoke #536 PASS**
 
 ## 3. npm runtime distribution
 
-- package: **`@mecrod/connect`**
+- npm account status: **RESOLVED ? user `mecrod`, authenticated, 2FA `auth-and-writes`**
+- npm organization/scope: **not required** for the unscoped package
+- package: **`mecord-connect`**
 - intended first public version: **1.0.0**
 - executable shim: **`mecord-connect`**
 - license: **proprietary**
@@ -227,8 +229,8 @@ All must be true:
 - Mecord Connect logo/composer icon render correctly;
 - website/support/privacy/terms are live with final Mecord Connect product branding and approved publisher identity;
 - proprietary LICENSE and DUAL_USE classification are present in the public npm package;
-- `@mecrod/connect@1.0.0` exists;
-- clean-machine `npx @mecrod/connect@latest doctor` passes;
+- `mecord-connect@1.0.0` exists;
+- clean-machine `npx mecord-connect@latest doctor` passes;
 - clean-machine reviewer-root startup/pairing works;
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
@@ -242,10 +244,9 @@ All must be true:
 
 Only then select **Submit for Review**.
 
-## 14. Fields intentionally left for the six external gates
+## 14. Fields intentionally left for the five remaining external gates
 
 - OpenAI verified-identity result / account verification record
-- npm account / @mecrod scope / 2FA state
 - reviewer password and pairing result
 - portal-issued domain challenge token, if any
 - real OpenAI draft/plugin ID + authoritative redirect + OAuth/Scan/E2E results

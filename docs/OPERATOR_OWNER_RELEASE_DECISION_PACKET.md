@@ -16,8 +16,8 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 - **Dispute venue:** competent courts at Visakhapatnam, Andhra Pradesh, subject to mandatory consumer-protection/jurisdiction rules
 - **Software license:** PROPRIETARY
 - **npm Dual-Use classification:** DUAL_USE
-- **npm package:** @mecrod/connect
-- **npm account:** not created yet
+- **npm package:** mecord-connect
+- **npm account:** **mecrod** ? authenticated locally
 - **Availability:** global wherever supported and legally/service-operationally supportable
 - **v1 public domain:** operator.splcart.in
 - **Auth issuer:** auth.splcart.in
@@ -27,16 +27,16 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Current integrated PR #27 head: `c5cc9dd3156b857b51a0e35cafff346c1ca8d906`
+Current integrated PR #27 head: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
 
-Exact-head certification: **CI #757 PASS / Platform Matrix #527 PASS / NPM Remote Runtime #167 PASS / Windows Signing Smoke #528 PASS**.
+Exact-head certification: **CI #765 PASS / Platform Matrix #535 PASS / NPM Remote Runtime #174 PASS / Windows Signing Smoke #536 PASS**.
 
 ## Applied source state
 
 Integrated PR #27 now applies these decisions in source:
 
-- npm package renamed from @mecrod/operator to **@mecrod/connect**;
-- package folder renamed to packages/mecrod-connect;
+- npm package renamed from @mecrod/operator to **mecord-connect**;
+- package folder renamed to packages/mecord-connect;
 - npm bin shim renamed to **mecord-connect**;
 - package metadata uses **SEE LICENSE IN LICENSE**;
 - package-root proprietary **LICENSE** is present;
@@ -44,7 +44,7 @@ Integrated PR #27 now applies these decisions in source:
 - package metadata requires `contentPolicy.class = "dual-use"`;
 - package author is **Kinthala Samuel Sampath Kumar** with support@splcart.in;
 - release guards fail closed if the package name, proprietary license, dual-use declaration, disclosure or publisher identity is changed/removed;
-- npm CI certifies the packed LICENSE/DISCLOSURE, installed @mecrod/connect runtime and mecord-connect.cmd shim;
+- npm CI certifies the packed LICENSE/DISCLOSURE, installed mecord-connect runtime and mecord-connect.cmd shim;
 - plugin manifest `author.name` / `interface.developerName` use the individual publisher identity;
 - source-controlled Privacy/Terms/Support pages identify the individual publisher and India/Visakhapatnam jurisdiction while retaining Mecord Connect as the product name;
 - operator.splcart.in remains the v1 public endpoint.
@@ -83,24 +83,16 @@ Before final OpenAI submission:
 3. reconcile any identity-document spelling/order difference before submission;
 4. deploy the final legal pages and verify the live website/support/privacy/terms match.
 
-## npm account actions still required
+## npm account / 2FA status
 
-No npm account currently exists for the owner.
+npm setup is now resolved and independently verified on the owner machine:
 
-Do not create or publish with guessed credentials.
+- `npm whoami` -> **mecrod**
+- npm 2FA mode -> **auth-and-writes**
+- package -> **mecord-connect** (unscoped; no npm organization/scope required)
+- registry -> unpublished before first release
 
-Owner/account actions:
-1. create/sign into the intended npm account;
-2. enable 2FA;
-3. obtain/control the `@mecrod` scope (organization if required and available);
-4. confirm the account is authorized to publish `@mecrod/connect`;
-5. build the immutable first-release artifact from the final green release SHA;
-6. verify its SHA-256;
-7. publish **that exact tarball** interactively with 2FA;
-8. verify registry metadata;
-9. from a clean Windows x64 machine run `npx @mecrod/connect@latest doctor`;
-10. run `npx @mecrod/connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project`;
-11. after the package exists, retain the staged/human-approval path for subsequent dual-use releases.
+The remaining npm work belongs to the explicit irreversible release gate: build/hash the exact final tarball, obtain owner publication authorization, publish that exact tarball with 2FA, verify registry metadata, then run clean-machine `npx mecord-connect@latest doctor` and reviewer-root startup.
 
 ## OpenAI account actions still required
 

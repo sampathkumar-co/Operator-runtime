@@ -2,13 +2,13 @@
 
 Status: **RESOLVED**
 Decision date: 2026-09-18
-Package: `@mecrod/connect`
+Package: `mecord-connect`
 
 The owner selected the conservative **DUAL_USE** classification.
 
 Applied source:
-- `packages/mecrod-connect/package.json` requires `contentPolicy.class = "dual-use"`;
-- `packages/mecrod-connect/DISCLOSURE` is the active root disclosure;
+- `packages/mecord-connect/package.json` requires `contentPolicy.class = "dual-use"`;
+- `packages/mecord-connect/DISCLOSURE` is the active root disclosure;
 - the release guard fails closed if the dual-use declaration is absent, including on the first unpublished release;
 - published-version-history continuity checks remain enabled;
 - npm CI verifies the packed artifact contains `DISCLOSURE`;
