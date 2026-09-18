@@ -122,6 +122,10 @@ After approval:
 
 Do not invent the publisher identity from repository owners, email usernames, account profile names, or domain WHOIS guesses.
 
+### Source-reproducibility preparation already complete
+
+Draft PR #24 source-controls the exact currently live Operator Privacy/Terms/Support notice bytes under `deploy/public-edge/production-notices/` and removes the ignore rule that previously made the shared-VPS bind mount non-reproducible. Its exact head `6edd3ee8eca2f5b8096424bac8750f0c945cec94` passes CI #710, Platform Matrix #480 and Windows Signing Smoke #481. It is merge-compatible with frozen npm-hardening PR #22 and their disposable combined tree passes the full Windows-aware suite. The notice wording remains unchanged until the owner supplies the FG-017 identity inputs.
+
 ## What happens immediately after the owner decisions
 
 Applying either decision changes the source SHA, so PR #22's current green SHA stops being the final successor.
