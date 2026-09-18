@@ -113,7 +113,11 @@ Do not proceed on warnings/errors that affect OIDC, user-database parsing, secre
 
 ### Current pre-activation validation evidence — 2026-09-18
 
-Without creating a reviewer account or password, the proposed `chatgpt_reviewer_policy` structure and the ChatGPT client's switch to that named policy were applied to an offline candidate cloned from the exact production configuration. Validation ran with the production Authelia 4.39.26 image, the same read-only config/secret mounts, the same secret-file environment wiring, and no network access. `authelia config validate` returned success. The production file user database currently contains the expected `displayname`, `password`, `email`, `groups`, and `disabled` fields, so the dedicated reviewer record can follow the existing schema. Production authentication policy and users were not changed by this dry run.
+Without creating a live reviewer account or password, the proposed `chatgpt_reviewer_policy` structure and the ChatGPT client's switch to that named policy were applied to an offline candidate cloned from the exact production configuration. Validation ran with the production Authelia 4.39.26 image, the same read-only config/secret mounts, the same secret-file environment wiring, and no network access. `authelia config validate` returned success.
+
+A negative-control check proved that `authelia config validate` does **not** parse/validate the contents of the file-user database, so that command is not used as evidence for reviewer-user schema correctness. Separately, a disposable candidate cloned from the production `users_database.yml` was given a non-live reviewer test record with the intended non-privileged group/profile shape and validated against Authelia's published **v4.39 `user-database` JSON Schema**. That candidate passed. An intentionally malformed user database failed the same schema validator, proving the structural check is active rather than a no-op. No production user record, password or password hash was printed, committed or changed; the disposable candidate was deleted after validation.
+
+Production authentication policy and users were not changed by these dry runs. H2 still requires a real high-entropy reviewer credential, production activation, one-factor behavior through the ChatGPT client, isolation checks and reviewer-fixture pairing.
 
 ## Phase F — Controlled production activation
 

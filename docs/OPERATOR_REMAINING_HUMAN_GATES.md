@@ -50,6 +50,8 @@ Before activating the change:
 
 Execute `OPERATOR_REVIEWER_AUTH_EXECUTION.md` for the production-safe backup, candidate validation, activation, isolation and rollback sequence. The repository intentionally does not contain the live Authelia production configuration, so do not invent or commit a production config patch here.
 
+Pre-activation evidence already proves the custom reviewer authorization-policy candidate validates against production Authelia 4.39.26 and a disposable reviewer user record passes Authelia's published v4.39 user-database schema with a rejecting negative control. This does **not** create or activate reviewer credentials.
+
 PASS evidence: disposable reviewer credentials complete the submitted tests without secondary verification.
 
 ## H3 — Create or reconcile the OpenAI MCP plugin draft
