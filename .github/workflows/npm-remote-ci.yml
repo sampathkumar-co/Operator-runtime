@@ -6,7 +6,7 @@ on:
     branches: ['**']
   pull_request:
     paths:
-      - 'packages/mecrod-connect/**'
+      - 'packages/mecord-connect/**'
       - 'apps/local-agent/**'
       - 'src/**'
       - 'native/windows-dpapi/**'
@@ -42,7 +42,7 @@ jobs:
         env:
           OPERATOR_SOURCE_COMMIT: '0000000000000000000000000000000000000000'
         run: |
-          node packages/mecrod-connect/scripts/build-runtime-payload.mjs *> $env:RUNNER_TEMP/source-mismatch.log
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs *> $env:RUNNER_TEMP/source-mismatch.log
           $code = $LASTEXITCODE
           Get-Content $env:RUNNER_TEMP/source-mismatch.log
           if ($code -eq 0) { throw 'runtime builder accepted a mismatched source commit' }
@@ -79,7 +79,7 @@ jobs:
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          node packages/mecrod-connect/scripts/build-runtime-payload.mjs
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs
           if ($LASTEXITCODE -ne 0) { throw 'runtime payload build failed' }
 
       - name: Run npm runtime security and publication gates
@@ -89,11 +89,11 @@ jobs:
         run: |
           node --experimental-strip-types --test test/npm-remote-runtime.test.ts test/npm-policy-continuity.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'npm remote security/policy tests failed' }
-          node packages/mecrod-connect/bin/operator.mjs doctor
+          node packages/mecord-connect/bin/operator.mjs doctor
           if ($LASTEXITCODE -ne 0) { throw 'runtime doctor failed' }
-          node packages/mecrod-connect/src/publish-check.mjs
+          node packages/mecord-connect/src/publish-check.mjs
           if ($LASTEXITCODE -ne 0) { throw 'publication source binding failed' }
-          node packages/mecrod-connect/scripts/test-required-relay-failure.mjs
+          node packages/mecord-connect/scripts/test-required-relay-failure.mjs
           if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Certify packed npm artifact
@@ -103,11 +103,11 @@ jobs:
           $packDir = Join-Path $env:RUNNER_TEMP 'mecrod-pack'
           $installDir = Join-Path $env:RUNNER_TEMP 'mecrod-install'
           New-Item -ItemType Directory -Force -Path $packDir, $installDir | Out-Null
-          $pack = npm pack --json ./packages/mecrod-connect --pack-destination $packDir | ConvertFrom-Json
+          $pack = npm pack --json ./packages/mecord-connect --pack-destination $packDir | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $pack.Count -ne 1) { throw 'npm pack failed' }
           $files = @($pack[0].files | ForEach-Object { $_.path })
-          $pkg = Get-Content packages/mecrod-connect/package.json -Raw | ConvertFrom-Json
-          if ($pkg.name -ne '@mecrod/connect') { throw 'unexpected Mecord Connect npm package name' }
+          $pkg = Get-Content packages/mecord-connect/package.json -Raw | ConvertFrom-Json
+          if ($pkg.name -ne 'mecord-connect') { throw 'unexpected Mecord Connect npm package name' }
           if ($pkg.license -ne 'SEE LICENSE IN LICENSE') { throw 'Mecord Connect proprietary license metadata is missing' }
           if (-not $pkg.contentPolicy -or $pkg.contentPolicy.class -ne 'dual-use') { throw 'Mecord Connect dual-use declaration is missing' }
           foreach ($policyFile in @('LICENSE', 'DISCLOSURE')) {
@@ -126,7 +126,7 @@ jobs:
           $tgz = Join-Path $packDir $pack[0].filename
           npm install --prefix $installDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
-          node (Join-Path $installDir 'node_modules/@mecrod/connect/bin/operator.mjs') doctor
+          node (Join-Path $installDir 'node_modules/mecord-connect/bin/operator.mjs') doctor
           if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
           $shim = Join-Path $installDir 'node_modules/.bin/mecord-connect.cmd'
           if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create mecord-connect.cmd bin shim' }
@@ -153,5 +153,5 @@ jobs:
           node --version
           node --experimental-strip-types --test test/npm-remote-runtime.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Node compatibility tests failed' }
-          node packages/mecrod-connect/bin/operator.mjs --help
+          node packages/mecord-connect/bin/operator.mjs --help
           if ($LASTEXITCODE -ne 0) { throw 'launcher help smoke failed' }
