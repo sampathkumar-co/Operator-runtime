@@ -15,7 +15,7 @@ function git(cwd: string, ...args: string[]): string {
 
 async function createRepo(t: test.TestContext): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-git-write-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }));
   git(root, 'init', '-b', 'main');
   git(root, 'config', 'user.name', 'Operator CI');
   git(root, 'config', 'user.email', 'operator-ci@example.invalid');
