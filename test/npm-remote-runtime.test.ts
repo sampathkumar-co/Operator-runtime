@@ -60,6 +60,9 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(pushSection, /branches:\s*\['\*\*'\]/);
   assert.equal(pushSection.includes('\n    paths:'), false);
   assert.equal(workflow.slice(pullRequestStart).includes('\n    paths:'), true);
+  assert.match(workflow, /test\/npm-policy-continuity\.test\.ts/);
+  assert.match(workflow, /scripts\/verify-npm-policy-continuity\.mjs/);
+  assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
