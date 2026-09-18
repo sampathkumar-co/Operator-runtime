@@ -1,6 +1,6 @@
 # Operator npm Software License Decision Memo
 
-Status: decision support only — no software license has been applied.
+Status: decision support only — no software license has been applied. See `OPERATOR_OWNER_RELEASE_DECISION_PACKET.md` for the compact owner execution/decision record.
 Review date: 2026-09-18.
 Scope: public `@mecrod/operator` Windows runtime; this does not replace the hosted service Terms/Privacy documents.
 

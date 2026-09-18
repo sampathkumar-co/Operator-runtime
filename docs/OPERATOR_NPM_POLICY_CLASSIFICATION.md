@@ -1,6 +1,6 @@
 # Operator npm Dual-Use Classification Decision Memo
 
-Status: evidence memo only — no owner classification has been applied.
+Status: evidence memo only — no owner classification has been applied. See `OPERATOR_OWNER_RELEASE_DECISION_PACKET.md` for the compact owner execution/decision record.
 Policy review date: 2026-09-18.
 Candidate context: OCC-3M production baseline with draft OCC-3N package hardening in PR #22.
 

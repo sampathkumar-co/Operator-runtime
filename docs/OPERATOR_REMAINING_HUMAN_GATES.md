@@ -143,6 +143,8 @@ For the write cases independently verify the local filesystem/Git postcondition.
 
 ## H8 — Resolve npm licensing and publish the clean-machine runtime
 
+Use `OPERATOR_OWNER_RELEASE_DECISION_PACKET.md` as the compact owner decision record for FG-013/FG-015 before modifying PR #22.
+
 The registry currently returns E404 for `@mecrod/operator`; version `1.0.0` is not public yet. The current package also declares `license: UNLICENSED`, the public repository has no license file, and the hosted service Terms do not explicitly grant software installation/use rights. Do not publish until the owner chooses the runtime licensing model.
 
 If distribution is proprietary, add an owner-approved software license/EULA and set `license` to `SEE LICENSE IN <filename>`. If distribution is open source, choose the intended SPDX license and add that license file. Do not infer this business/legal choice from the codebase.
