@@ -39,4 +39,6 @@ The runtime payload is produced from the canonical repository sources at publica
 - Support: https://operator.splcart.in/support
 - Privacy: https://operator.splcart.in/privacy
 - Terms: https://operator.splcart.in/terms
+- License: proprietary Mecord Connect Runtime License in `LICENSE`
+- Dual-use disclosure: `DISCLOSURE`
 - Issues: https://github.com/sampathkumar-co/Operator-runtime/issues

@@ -215,4 +215,6 @@ test('npm package metadata is canonical before publication', async () => {
   assert.match(readme, /https:\/\/operator\.splcart\.in\/support/);
   assert.match(readme, /https:\/\/operator\.splcart\.in\/privacy/);
   assert.match(readme, /https:\/\/operator\.splcart\.in\/terms/);
+  assert.match(readme, /proprietary Mecord Connect Runtime License in `LICENSE`/);
+  assert.match(readme, /Dual-use disclosure: `DISCLOSURE`/);
 });
