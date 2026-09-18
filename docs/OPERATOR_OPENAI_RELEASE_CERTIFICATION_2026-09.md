@@ -89,9 +89,9 @@ A 2026-09-18 recheck found that Authelia advertises `authorization_response_iss_
 
 ## Legal and support surface
 
-The production privacy, terms and support pages are deployment-specific, dated/current for this release, and contain no known placeholder markers. They describe hosted infrastructure, local execution authority, retention, security controls, account/device requests and a private security-reporting path at `support@splcart.in`.
+The production privacy, terms and support pages are deployment-specific and live. They describe hosted infrastructure, local execution authority, retention, security controls, account/device requests and a private security-reporting path at `support@splcart.in`.
 
-OpenAI publisher identity verification is a separate portal gate. The live wording does not imply OpenAI endorsement or approval.
+A 2026-09-18 public-identity recheck found two release blockers that prevent treating this surface as final: **FG-017** because Operator names only "the publisher of splcart.in" while the SPLCART storefront still contains unresolved actual-business-entity/jurisdiction language, and **FG-018** because the canonical shared-VPS compose required `./production-notices` while that directory was ignored and absent from GitHub `main`. Draft PR #24 / OCC-3O source-controls the exact currently live notice bytes and regression-checks the bind-mount contract without changing their wording. OpenAI publisher identity verification remains a separate portal gate and must use the exact owner-approved legal identity after FG-017 is resolved.
 
 ## Shared ingress persistence
 
@@ -108,7 +108,7 @@ The release is **not yet fully OpenAI-review certified**. The following evidence
 1. Real OAuth authorization/code exchange and issued-token audience/scope verification.
 2. Real ChatGPT production E2E through OAuth -> MCP -> relay -> paired PC, including a read and a controlled write/approval flow.
 3. Dedicated reviewer/demo credentials and fixture usable without MFA/SMS/email/private network.
-4. OpenAI Platform individual/business verification for the chosen publisher name.
+4. Resolve FG-017 with the exact owner-approved legal publisher identity/jurisdiction/contact, reconcile the Operator/SPLCART public legal pages, then complete OpenAI Platform individual/business verification using that same publisher identity.
 5. Portal domain verification if OpenAI issues a challenge token; never synthesize the token.
 6. OpenAI **Scan Tools** against the exact production endpoint, followed by reconciliation of the imported 10-tool snapshot.
 7. Resolve the remaining owner decisions on green draft successor PR #22: owner-approved software licensing plus explicit npm Dual-Use Content Policy classification, followed by affected recertification on the resulting exact successor SHA.

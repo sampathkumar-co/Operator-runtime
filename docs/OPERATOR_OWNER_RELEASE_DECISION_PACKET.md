@@ -114,8 +114,8 @@ Owner must provide/approve:
 - whether that same person/entity is the proprietary Runtime License Licensor if the proprietary path is selected.
 
 After approval:
-1. reconcile Operator Privacy/Terms/Support wording to name the exact publisher where legally appropriate;
-2. reconcile the main SPLCART Terms/Privacy/Contact pages so they no longer contain unresolved “actual business entity/jurisdiction” placeholder language;
+1. patch the Operator canonical notices in `deploy/public-edge/production-notices/privacy.md`, `terms.md`, and `support.md` (live equivalents currently reside under `/home/deploy/operator/ops/production-notices/`);
+2. patch SPLCART storefront legal/identity content in `frontend-new/src/lib/trust-content.ts` and `frontend-new/src/components/trust/PublicContentPage.tsx` so it no longer contains unresolved actual-business-entity/jurisdiction or unpublished-support wording;
 3. use the same identity in OpenAI publisher verification;
 4. use the same Licensor identity in the proprietary package license if applicable;
 5. verify the live public pages before submission.
