@@ -178,7 +178,9 @@ The portal justification text must explain these server values; it must not cont
 
 ## 9. Reviewer credentials
 
-Status: **ACCOUNT / OWNER ACTION REQUIRED**.
+Status: **PROVISIONED, OWNER LOGIN/PAIRING VERIFICATION REQUIRED**.
+
+A dedicated production reviewer account and reviewer-only one-factor policy are provisioned and Authelia is healthy. The credential value is intentionally absent from this packet/Git/chat; owner-side retrieval and login verification remain required.
 
 Requirements:
 - dedicated reviewer/demo identity;
