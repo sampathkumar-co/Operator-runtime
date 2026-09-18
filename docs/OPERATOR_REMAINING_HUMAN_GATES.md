@@ -184,6 +184,8 @@ Before selecting **Submit for Review**, confirm:
 - all five positive and three negative cases are reproducible;
 - website/privacy/terms/support are the live OCC-3M pages;
 - country availability is limited to regions actually supported by the publisher/legal/support process;
-- release notes describe this as the initial public submission.
+- release notes describe this as the initial public submission;
+- the final successor contains the required `interface.logo` and `interface.composerIcon` branding assets (draft PR #26 currently supplies them);
+- a reviewer-accessible demo recording URL exists and demonstrates the real production ChatGPT/OAuth/MCP path without exposing credentials, tokens, private keys, personal filesystem identity or real user data.
 
 Do not mark Operator `CONFIRMED FOR RELEASE` until G10, G11, G19, G22, G23, G24, G25 and G26 in `OPERATOR_RELEASE_GATE.md` are all PASS.

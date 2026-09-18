@@ -34,7 +34,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G23 Real ChatGPT E2E | BLOCKED | Requires a ChatGPT plugin draft/connection plus completed OAuth login; no published/installed SPLCART Operator plugin exists yet. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
 | G25 Reviewer simulation | BLOCKED | The deterministic reviewer project is locally certified: exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2, with additional `APPROVAL_REQUIRED` and duplicate-create checks. Remaining blockers are reviewer identity/pairing, public npm runtime, and real production OAuth/ChatGPT execution. |
-| G26 Submission package | BLOCKED | Tool/test package is structurally ready, but npm runtime publication, publisher verification, portal domain challenge, Scan Tools, reviewer credentials and authenticated E2E remain outstanding. |
+| G26 Submission package | BLOCKED | Tool/test package is structurally ready, and branding-file requirements are fixed in draft PR #26, but npm runtime publication, publisher/legal identity verification, portal domain challenge, Scan Tools, reviewer credentials, authenticated E2E, and the now-required reviewer-accessible demo recording URL remain outstanding. |
 
 ## Remaining blocking actions
 

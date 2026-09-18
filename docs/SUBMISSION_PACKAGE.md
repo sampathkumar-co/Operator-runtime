@@ -89,11 +89,11 @@ Negative coverage:
 
 Reviewer credentials must work without MFA, SMS, email confirmation or private-network access. The review account should already have one dedicated demo device paired and one non-sensitive fixture project authorized.
 
-## Optional internal evidence recording
+## Required demo recording
 
-The current documented OpenAI submission fields do not require a demo recording for this MCP-only plugin. A production-path recording may still be retained internally or supplied if the portal/reviewer explicitly requests one. Because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
+Current OpenAI final submission validation for remote-MCP plugins requires a reviewer-accessible demo recording URL showing the plugin's major use cases across supported platforms. This is **not** satisfied by screenshots, and because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
 
-If a recording is made, use this sequence:
+Create the recording only after the real production ChatGPT OAuth/reviewer path works from the public package. Use this sequence:
 
 1. connect the reviewer/demo account through production OAuth;
 2. inspect the demo project and Git status;
@@ -105,7 +105,7 @@ If a recording is made, use this sequence:
 8. optionally demonstrate that file.replace correctly requests local approval rather than bypassing policy;
 9. show that the result contains task-relevant data but not internal relay/provider telemetry.
 
-Never expose OAuth tokens, recovery credentials, device private keys, absolute personal home paths, signing material or real user data in the recording.
+Never expose OAuth tokens, recovery credentials, reviewer passwords, device private keys, absolute personal home paths, signing material or real user data in the recording. Host the final recording at a URL the OpenAI reviewer can access without private-network access or additional authentication.
 
 ## Claims that must NOT be made yet
 

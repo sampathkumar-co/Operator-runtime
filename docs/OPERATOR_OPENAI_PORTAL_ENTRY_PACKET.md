@@ -24,7 +24,7 @@ This packet does **not** authorize submission. Fields marked `OWNER REQUIRED`, `
 
   Initial public submission. Exposes a restricted development-project MCP surface with secure device enrollment, credential/restricted-data guards, local policy enforcement, safe file concurrency controls, relay retention bounds, OAuth scope enforcement, and minimized public responses.
 
-- Logo: **OWNER REQUIRED** — no submission-ready image/logo asset is present in the Operator repository. Use the owner-approved SPLCART/Operator brand asset that matches the verified publisher/listing identity.
+- Logo / composer icon: **PASS_ENGINEERING_DRAFT via PR #26** — draft OCC-3Q head `f5a569e717ba504e0411ab9aedc0ed7ca2c1ae11` adds the existing public 64×64 SPLCART SVG favicon as both required manifest branding assets. Final submission must use the composed successor containing this patch.
 - Developer / publisher identity: **OWNER + OPENAI VERIFICATION REQUIRED (FG-017)**.
   - Do not enter `SPLCART` merely because it is the product/brand name unless that is the exact identity verified by OpenAI.
   - The verified identity must match the reconciled public website/support/privacy/terms identity.
@@ -245,17 +245,18 @@ No approved country/region availability set is recorded in the release evidence.
 Select only countries/regions where the owner is prepared to meet support, legal, privacy and distribution obligations.
 Do not infer availability from the developer's physical location or hosting location.
 
-## 14. Screenshots / UI
+## 14. Screenshots / UI and demo recording
 
-Public v1 is MCP-only and exposes no custom plugin UI.
-Current OpenAI review guidance says not to submit screenshots for a plugin that has no UI.
+Public v1 is MCP-only and exposes no custom plugin UI, so do not submit fabricated UI screenshots.
+
+**Demo recording URL: BLOCKED_REAL_E2E.** Current OpenAI final submission validation requires a demo recording URL for remote-MCP plugins. Produce it only after the real OAuth + reviewer + public-package path is working. The recording must show the major use cases and must not expose credentials, tokens, private keys, personal filesystem identity or real user data.
 
 ## 15. Final portal checks before Submit for Review
 
 All must be true:
 - verified publisher identity matches listing/legal pages;
 - app-management write permission is present;
-- logo is owner-approved and matches the listing identity;
+- final successor includes PR #26 branding assets and the listing logo/composer icon render correctly;
 - website/support/privacy/terms are publicly reachable and final;
 - FG-013 software license resolved;
 - FG-015 npm Dual-Use classification resolved;
@@ -267,6 +268,7 @@ All must be true:
 - reviewer credentials work without secondary verification;
 - domain challenge passes if issued;
 - Scan Tools imports exactly 10 expected tools with matching annotations;
+- required demo recording URL is reviewer-accessible and demonstrates the real production path;
 - 5 positive + 3 negative reviewer cases are reproducible from the real public package;
 - selected country/region availability is owner-approved;
 - final release notes match the submitted version;
@@ -279,8 +281,8 @@ Only then choose **Submit for Review**.
 - Exact verified publisher legal identity — **OWNER REQUIRED**
 - Jurisdiction — **OWNER REQUIRED**
 - Public legal identity/contact details to reconcile in notices — **OWNER REQUIRED**
-- Logo asset — **OWNER REQUIRED**
 - Country/region availability — **OWNER REQUIRED**
+- Demo recording URL — **BLOCKED until real E2E succeeds**
 - Reviewer password — **ACCOUNT REQUIRED / NEVER STORE HERE**
 - OpenAI domain challenge token — **PORTAL GENERATED**
 - OpenAI draft/plugin ID — **PORTAL GENERATED**
