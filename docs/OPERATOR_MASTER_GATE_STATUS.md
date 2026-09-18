@@ -47,7 +47,7 @@ Current canonical count: **27 PASS / 10 BLOCKED / 0 NOT APPLICABLE**.
 | G33 Real ChatGPT E2E | BLOCKED | Requires the actual OpenAI draft/connection, completed OAuth login, relay/device execution, read/write results, revocation and reconnect. |
 | G34 OpenAI Metadata Match | BLOCKED | OpenAI Scan Tools has not yet imported/reconciled the exact production 10-tool surface. |
 | G35 Submission Readiness | BLOCKED | Exact publisher legal-identity reconciliation/verification, reviewer credentials, npm release, final branding composition, domain challenge if issued, Scan Tools, authenticated E2E and the required reviewer-accessible demo recording URL are still incomplete. |
-| G36 Hostile Release Simulation | BLOCKED | This must run only after the final successor is frozen and the real ChatGPT/reviewer path exists; release-blocking fixes would trigger affected recertification. |
+| G36 Hostile Release Simulation | BLOCKED | A non-mutating OCC-3M pre-submission probe is recorded in `OPERATOR_HOSTILE_PRESUBMISSION_20260918.md` and is green for public pages, OAuth metadata/challenge fail-closed behavior, unauthenticated MCP, malicious Origin, forged Host and oversized JSON. Final G36 still requires the frozen final successor plus the real ChatGPT/reviewer/public-package path; release-blocking fixes would trigger affected recertification. |
 
 ## Blocking master gates
 

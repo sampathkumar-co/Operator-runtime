@@ -101,6 +101,10 @@ The outer SPLCART deployment source that produced the running `c100a4e...` relea
 
 A deterministic non-sensitive reviewer fixture is available at baseline commit `ab658c353fc3e0ce79d71e2968f53eedbc247537`. Using Node 22.23.2, an isolated local agent with the Windows path-lease helper, and the production `invokePublicWithAgent` boundary, all submitted five positive and three negative reviewer cases pass. Additional assertions prove destructive `file.replace` returns `APPROVAL_REQUIRED` without local approval and duplicate `file.create` returns `TARGET_EXISTS`. Reviewer positive #5 was changed from approval-gated `file.replace` to bounded `git.diff` so the submitted suite is self-service while the destructive approval boundary remains intact. `OPERATOR_REVIEWER_AUTH_EXECUTION.md` now defines the production-safe Authelia backup, interactive Argon2id hash generation, reviewer-only OIDC policy, validation, isolation, canonical-fixture pairing and rollback procedure. This preparation does not replace the still-required human-controlled production OAuth/ChatGPT reviewer execution.
 
+## Hostile public-edge pre-submission probe
+
+`OPERATOR_HOSTILE_PRESUBMISSION_20260918.md` records a fresh non-mutating OCC-3M probe. Public/legal/protected-resource endpoints remained available; the domain challenge remained fail-closed at 404 before a real token; unauthenticated MCP returned 401; malicious Origin returned 403; forged Host returned 421; non-JSON MCP input returned 415; and valid JSON above the 1 MiB request limit returned 413. This is useful pre-final evidence but does not close G36 because the final successor and real ChatGPT/reviewer/public-package path do not yet exist.
+
 ## Remaining blockers before submission
 
 The release is **not yet fully OpenAI-review certified**. The following evidence is still mandatory:

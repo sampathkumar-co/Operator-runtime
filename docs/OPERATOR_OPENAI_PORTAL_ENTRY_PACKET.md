@@ -249,7 +249,7 @@ Do not infer availability from the developer's physical location or hosting loca
 
 Public v1 is MCP-only and exposes no custom plugin UI, so do not submit fabricated UI screenshots.
 
-**Demo recording URL: BLOCKED_REAL_E2E.** Current OpenAI final submission validation requires a demo recording URL for remote-MCP plugins. Produce it only after the real OAuth + reviewer + public-package path is working. The recording must show the major use cases and must not expose credentials, tokens, private keys, personal filesystem identity or real user data.
+**Demo recording URL: BLOCKED_REAL_E2E.** Current OpenAI final submission validation requires a demo recording URL for remote-MCP plugins. Execute `OPERATOR_DEMO_RECORDING_RUNBOOK.md` only after the real OAuth + reviewer + public-package path is working. The recording must show the major use cases and must not expose credentials, tokens, private keys, personal filesystem identity or real user data.
 
 ## 15. Final portal checks before Submit for Review
 
