@@ -1,4 +1,4 @@
-# SPLCART Operator Support
+# Mecord Connect Support
 
 **Production target:** `https://operator.splcart.in/support`
 

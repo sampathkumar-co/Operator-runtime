@@ -1,8 +1,8 @@
-# SPLCART Operator Terms of Service
+# Mecord Connect Terms of Service
 
 **Status:** launch draft; becomes effective only when published on the production website.
 
-These Terms govern use of the hosted SPLCART Operator service and its public ChatGPT plugin. By using the service, a user confirms that they are legally permitted to control every computer, project, repository and account they connect to Operator.
+These Terms govern use of the hosted Mecord Connect service and its public ChatGPT plugin. By using the service, a user confirms that they are legally permitted to control every computer, project, repository and account they connect to Operator.
 
 ## Authorized use
 

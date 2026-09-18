@@ -8,9 +8,9 @@ type SourcePagePath = Exclude<PublicServicePagePath, '/'>;
 export const PUBLIC_NOTICES_FINAL_ACK = 'I_CONFIRM_OPERATOR_PUBLIC_NOTICES_ARE_FINAL';
 const MAX_NOTICE_BYTES = 256 * 1024;
 const PAGE_SOURCES: Record<SourcePagePath, { title: string; file: string }> = {
-  '/privacy': { title: 'SPLCART Operator Privacy', file: 'privacy.md' },
-  '/terms': { title: 'SPLCART Operator Terms of Service', file: 'terms.md' },
-  '/support': { title: 'SPLCART Operator Support', file: 'support.md' }
+  '/privacy': { title: 'Mecord Connect Privacy', file: 'privacy.md' },
+  '/terms': { title: 'Mecord Connect Terms of Service', file: 'terms.md' },
+  '/support': { title: 'Mecord Connect Support', file: 'support.md' }
 };
 const DRAFT_MARKERS = [
   'open-source/reference runtime',
@@ -146,5 +146,5 @@ function escapeHtml(value: string): string {
 }
 
 function renderLandingPage(): string {
-  return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>SPLCART Operator</title>\n<style>${PAGE_CSS}</style>\n</head>\n<body>\n<main><section><h1>SPLCART Operator</h1><p>Secure, user-authorized computer operations from ChatGPT through a paired local runtime.</p><nav><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/support">Support</a></nav></section></main>\n</body>\n</html>\n`;
+  return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Mecord Connect</title>\n<style>${PAGE_CSS}</style>\n</head>\n<body>\n<main><section><h1>Mecord Connect</h1><p>Secure, user-authorized computer operations from ChatGPT through a paired local runtime.</p><nav><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/support">Support</a></nav></section></main>\n</body>\n</html>\n`;
 }
