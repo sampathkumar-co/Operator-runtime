@@ -20,9 +20,42 @@ test('public plugin manifest satisfies final directory field limits', async () =
   assert.ok(ui.longDescription.length <= 4000);
   assert.ok(ui.developerName.length <= 80);
   assert.equal(manifest.author.name, ui.developerName);
+  assert.equal(manifest.author.name, 'Kinthala Samuel Sampath Kumar');
+  assert.equal(manifest.name, 'mecord-connect');
+  assert.equal(ui.displayName, 'Mecord Connect');
+  assert.equal(ui.developerName, 'Kinthala Samuel Sampath Kumar');
   assert.equal(ui.category, 'Developer Tools');
   assert.ok(ui.capabilities.length <= 20);
   for (const capability of ui.capabilities) assert.ok(capability.length > 0 && capability.length <= 120 && !/[\r\n]/.test(capability));
+});
+
+test('directory branding assets satisfy current image constraints', async () => {
+  const manifest = await json('.codex-plugin/plugin.json');
+  const ui = manifest.interface;
+
+  for (const key of ['logo', 'composerIcon']) {
+    const relative = String(ui[key] ?? '');
+    assert.ok(relative.length > 0, `${key} is required`);
+    assert.equal(relative, './assets/mecord-connect.svg');
+    assert.match(relative, /\.(?:png|jpe?g|webp|svg)$/i);
+
+    const file = path.resolve(root, '.codex-plugin', relative);
+    const stat = await fs.stat(file);
+    assert.ok(stat.isFile());
+    assert.ok(stat.size > 0 && stat.size <= 5 * 1024 * 1024);
+
+    if (/\.svg$/i.test(relative)) {
+      const svg = await fs.readFile(file, 'utf8');
+      assert.match(svg, /^\s*<svg\b/i);
+      const viewBox = svg.match(/\bviewBox=["']\s*([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s+([\d.+-]+)\s*["']/i);
+      assert.ok(viewBox, `${key} SVG must declare a numeric viewBox`);
+      const width = Number(viewBox[3]);
+      const height = Number(viewBox[4]);
+      assert.ok(Number.isFinite(width) && Number.isFinite(height));
+      assert.equal(width, height);
+      assert.ok(width >= 48 && width <= 4096);
+    }
+  }
 });
 
 test('MCP-backed listing URLs and starter prompts are submission-safe', async () => {

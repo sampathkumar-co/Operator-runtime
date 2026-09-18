@@ -33,7 +33,7 @@ test('finalized public notices load from fixed deployment files and escape HTML'
   try {
     writeFileSync(path.join(dir, 'privacy.md'), '# Production Privacy\n<script>alert(1)</script>');
     const pages = loadPublicServicePages(env(dir));
-    assert.match(pages['/'], /SPLCART Operator/);
+    assert.match(pages['/'], /Mecord Connect/);
     assert.match(pages['/'], /href="\/privacy"/);
     assert.match(pages['/privacy'], /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
     assert.doesNotMatch(pages['/privacy'], /<script>/);

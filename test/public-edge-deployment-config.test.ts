@@ -116,16 +116,26 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.equal(caddyImage, 'caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648');
   assert.equal(mcpPackage.scripts?.['certify:oauth-provider'], 'tsx scripts/oauth-provider-preflight.ts');
   assert.equal(mcpPackage.scripts?.['certify:production-edge'], 'tsx scripts/production-edge-preflight.ts');
+  assert.doesNotMatch(gitignore, /deploy\/public-edge\/production-notices/);
   assert.doesNotMatch(caddy, /8790/);
 });
 test('shared-VPS profile preserves the trusted ingress and Caddy exec capability contract', () => {
   const compose = text('deploy/public-edge/compose.shared-vps.example.yml');
   const caddy = text('deploy/public-edge/Caddyfile.shared-vps-internal.example');
+  const privacy = text('deploy/public-edge/production-notices/privacy.md');
+  const terms = text('deploy/public-edge/production-notices/terms.md');
+  const support = text('deploy/public-edge/production-notices/support.md');
   assert.match(compose, /operator_ingress:\r?\n\s+ipv4_address: 172\.16\.3\.20/);
   assert.match(compose, /network_mode: service:operator-edge/);
   assert.match(compose, /image: caddy:2\.11\.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648/);
   assert.match(compose, /cap_drop:\r?\n\s+- ALL[\s\S]*cap_add:\r?\n\s+- NET_BIND_SERVICE/);
   assert.match(compose, /external: true\r?\n\s+name: operator_ingress/);
+  assert.match(compose, /source: \.\/production-notices/);
+  assert.match(compose, /target: \/run\/operator-public-notices/);
+  assert.match(privacy, /^# Mecord Connect Privacy Notice$/m);
+  assert.match(terms, /^# Mecord Connect Terms of Service$/m);
+  assert.match(support, /^# Mecord Connect Support$/m);
+  for (const notice of [privacy, terms, support]) assert.match(notice, /support@splcart\.in/);
   assert.doesNotMatch(compose, /ports:/);
   assert.doesNotMatch(compose, /network_mode:\s*host|privileged:\s*true/);
   assert.match(caddy, /auto_https off/);

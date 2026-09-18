@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Mecord Connect">
+  <defs>
+    <linearGradient id="mc-bg" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B5BF7"/>
+      <stop offset="0.52" stop-color="#3668F5"/>
+      <stop offset="1" stop-color="#13B8D6"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#mc-bg)"/>
+  <path d="M16 42V24.5c0-3 2.4-5.5 5.5-5.5 1.8 0 3.5.9 4.5 2.4L32 30l6-8.6a5.5 5.5 0 0 1 10 3.1V42" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M25.5 39.5 32 46l6.5-6.5" fill="none" stroke="#DDF9FF" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="16" cy="44.5" r="3.5" fill="#fff"/>
+  <circle cx="48" cy="44.5" r="3.5" fill="#fff"/>
+  <circle cx="32" cy="48.5" r="3.5" fill="#DDF9FF"/>
+</svg>
