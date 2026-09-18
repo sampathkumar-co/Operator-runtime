@@ -10,7 +10,8 @@
     "bin",
     "src",
     "runtime",
-    "README.md"
+    "README.md",
+    "DISCLOSURE"
   ],
   "engines": {
     "node": ">=22.14.0 <23 || >=24.0.0 <25 || >=26.0.0 <27"
@@ -33,5 +34,16 @@
     "type": "git",
     "url": "git+https://github.com/sampathkumar-co/Operator-runtime.git"
   },
-  "homepage": "https://operator.splcart.in"
+  "homepage": "https://operator.splcart.in",
+  "keywords": [
+    "chatgpt",
+    "mcp",
+    "windows",
+    "automation",
+    "developer-tools"
+  ],
+  "bugs": {
+    "url": "https://github.com/sampathkumar-co/Operator-runtime/issues",
+    "email": "support@splcart.in"
+  }
 }

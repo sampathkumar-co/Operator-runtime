@@ -13,6 +13,8 @@ on:
       - 'native/windows-uia/**'
       - 'native/windows-path-lease/**'
       - 'test/npm-remote-runtime.test.ts'
+      - 'test/npm-policy-continuity.test.ts'
+      - 'scripts/verify-npm-policy-continuity.mjs'
       - '.github/workflows/npm-remote-ci.yml'
 
 permissions:
@@ -85,8 +87,8 @@ jobs:
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          node --experimental-strip-types --test test/npm-remote-runtime.test.ts
-          if ($LASTEXITCODE -ne 0) { throw 'npm remote security tests failed' }
+          node --experimental-strip-types --test test/npm-remote-runtime.test.ts test/npm-policy-continuity.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'npm remote security/policy tests failed' }
           node packages/mecrod-operator/bin/operator.mjs doctor
           if ($LASTEXITCODE -ne 0) { throw 'runtime doctor failed' }
           node packages/mecrod-operator/src/publish-check.mjs
