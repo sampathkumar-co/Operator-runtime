@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       npm_tag:
-        description: npm dist-tag for @mecrod/connect
+        description: npm dist-tag for mecord-connect
         required: true
         default: latest
         type: string
@@ -30,7 +30,7 @@ concurrency:
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
-    name: Build and hand off @mecrod/connect
+    name: Build and hand off mecord-connect
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -67,21 +67,21 @@ jobs:
       - name: Require resolved public distribution metadata
         shell: pwsh
         run: |
-          $pkg = Get-Content packages/mecrod-connect/package.json -Raw | ConvertFrom-Json
-          if ($pkg.name -ne '@mecrod/connect') {
-            throw 'public npm release package name must be @mecrod/connect'
+          $pkg = Get-Content packages/mecord-connect/package.json -Raw | ConvertFrom-Json
+          if ($pkg.name -ne 'mecord-connect') {
+            throw 'public npm release package name must be mecord-connect'
           }
           if ($pkg.license -ne 'SEE LICENSE IN LICENSE') {
             throw 'Mecord Connect public npm release requires the owner-approved proprietary LICENSE'
           }
-          if (-not (Test-Path -LiteralPath 'packages/mecrod-connect/LICENSE' -PathType Leaf)) {
-            throw 'Mecord Connect public npm release requires packages/mecrod-connect/LICENSE'
+          if (-not (Test-Path -LiteralPath 'packages/mecord-connect/LICENSE' -PathType Leaf)) {
+            throw 'Mecord Connect public npm release requires packages/mecord-connect/LICENSE'
           }
           if (-not $pkg.contentPolicy -or $pkg.contentPolicy.class -ne 'dual-use') {
             throw 'Mecord Connect public npm release must declare contentPolicy.class as dual-use'
           }
-          if (-not (Test-Path -LiteralPath 'packages/mecrod-connect/DISCLOSURE' -PathType Leaf)) {
-            throw 'declared dual-use package requires packages/mecrod-connect/DISCLOSURE'
+          if (-not (Test-Path -LiteralPath 'packages/mecord-connect/DISCLOSURE' -PathType Leaf)) {
+            throw 'declared dual-use package requires packages/mecord-connect/DISCLOSURE'
           }
           if ($pkg.author.name -ne 'Kinthala Samuel Sampath Kumar') {
             throw 'Mecord Connect npm author must match the approved individual publisher identity'
@@ -118,7 +118,7 @@ jobs:
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          node packages/mecrod-connect/scripts/build-runtime-payload.mjs
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs
           if ($LASTEXITCODE -ne 0) { throw 'runtime payload build failed' }
 
       - name: Remote CLI security tests
@@ -126,9 +126,9 @@ jobs:
         run: |
           node --experimental-strip-types --test test/npm-remote-runtime.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'remote CLI tests failed' }
-          node packages/mecrod-connect/bin/operator.mjs doctor
+          node packages/mecord-connect/bin/operator.mjs doctor
           if ($LASTEXITCODE -ne 0) { throw 'packaged runtime doctor failed' }
-          node packages/mecrod-connect/scripts/test-required-relay-failure.mjs
+          node packages/mecord-connect/scripts/test-required-relay-failure.mjs
           if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Validate publishable tarball and installed-package doctor
@@ -141,10 +141,10 @@ jobs:
           $packDir = Join-Path $env:RUNNER_TEMP 'operator-pack'
           $smokeDir = Join-Path $env:RUNNER_TEMP 'operator-pack-smoke'
           New-Item -ItemType Directory -Force -Path $packDir, $smokeDir | Out-Null
-          $json = npm pack --json ./packages/mecrod-connect --pack-destination $packDir | ConvertFrom-Json
+          $json = npm pack --json ./packages/mecord-connect --pack-destination $packDir | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $json.Count -ne 1) { throw 'npm pack failed' }
           $files = @($json[0].files | ForEach-Object { $_.path })
-          $pkg = Get-Content packages/mecrod-connect/package.json -Raw | ConvertFrom-Json
+          $pkg = Get-Content packages/mecord-connect/package.json -Raw | ConvertFrom-Json
           if ($pkg.license -like 'SEE LICENSE IN *') {
             $licenseFile = $pkg.license.Substring('SEE LICENSE IN '.Length).Trim()
             if ($licenseFile -notin $files) { throw "npm tarball missing declared license file $licenseFile" }
@@ -171,7 +171,7 @@ jobs:
           Set-Content -LiteralPath $checksumPath -Value "$tgzHash  $($json[0].filename)" -NoNewline -Encoding ascii
           npm install --prefix $smokeDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed npm install failed' }
-          node (Join-Path $smokeDir 'node_modules/@mecrod/connect/bin/operator.mjs') doctor
+          node (Join-Path $smokeDir 'node_modules/mecord-connect/bin/operator.mjs') doctor
           if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
           $shim = Join-Path $smokeDir 'node_modules/.bin/mecord-connect.cmd'
           if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create mecord-connect.cmd bin shim' }
@@ -188,16 +188,16 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ steps.pack.outputs.package_version }}
         run: |
-          npm view "@mecrod/connect@$env:PACKAGE_VERSION" version *> $null
+          npm view "mecord-connect@$env:PACKAGE_VERSION" version *> $null
           if ($LASTEXITCODE -eq 0) {
-            throw "@mecrod/connect@$env:PACKAGE_VERSION is already published; refusing overwrite"
+            throw "mecord-connect@$env:PACKAGE_VERSION is already published; refusing overwrite"
           }
           exit 0
 
       - name: Revalidate exact source binding before release handoff
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
-        run: node packages/mecrod-connect/src/publish-check.mjs
+        run: node packages/mecord-connect/src/publish-check.mjs
 
       - name: Upload immutable npm release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -238,8 +238,8 @@ jobs:
         if: inputs.publication_mode == 'stage'
         shell: pwsh
         run: |
-          npm view @mecrod/connect name --json *> $null
-          if ($LASTEXITCODE -ne 0) { throw 'npm stage requires @mecrod/connect to already exist; use artifact mode for the first release' }
+          npm view mecord-connect name --json *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'npm stage requires mecord-connect to already exist; use artifact mode for the first release' }
 
       - name: Stage npm runtime with provenance
         if: inputs.publication_mode == 'stage'
