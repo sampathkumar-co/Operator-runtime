@@ -193,6 +193,7 @@ test('npm package metadata is canonical before publication', async () => {
   assert.equal(pkg.repository?.url, 'git+https://github.com/sampathkumar-co/Operator-runtime.git');
   assert.equal(pkg.bugs?.url, 'https://github.com/sampathkumar-co/Operator-runtime/issues');
   assert.equal(pkg.bugs?.email, 'support@splcart.in');
+  assert.ok(pkg.files?.includes('DISCLOSURE'), 'package files allowlist must permit the required dual-use disclosure');
   assert.deepEqual(pkg.keywords, ['chatgpt', 'mcp', 'windows', 'automation', 'developer-tools']);
   const readme = await fs.readFile(path.resolve('packages/mecrod-operator/README.md'), 'utf8');
   assert.match(readme, /https:\/\/operator\.splcart\.in\/support/);
