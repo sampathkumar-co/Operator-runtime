@@ -6,17 +6,17 @@ test('new unpublished package may omit a dual-use declaration', () => {
   assert.equal(assertNpmPolicyContinuity(null, {}), false);
 });
 
-test('non-dual-use published history does not force a declaration', () => {
-  const packument = { versions: { '1.0.0': { name: '@mecrod/operator' } } };
-  assert.equal(assertNpmPolicyContinuity(packument, {}), false);
+test('currently published non-dual-use version does not force a declaration', () => {
+  const publishedLatest = { name: '@mecrod/operator', version: '1.0.0' };
+  assert.equal(assertNpmPolicyContinuity(publishedLatest, {}), false);
 });
 
-test('previously dual-use package must preserve the declaration', () => {
-  const packument = { versions: { '1.0.0': { contentPolicy: { class: 'dual-use' } } } };
-  assert.equal(assertNpmPolicyContinuity(packument, { contentPolicy: { class: 'dual-use' } }), true);
+test('currently published dual-use version must preserve the declaration', () => {
+  const publishedLatest = { name: '@mecrod/operator', version: '1.0.0', contentPolicy: { class: 'dual-use' } };
+  assert.equal(assertNpmPolicyContinuity(publishedLatest, { contentPolicy: { class: 'dual-use' } }), true);
   assert.throws(
-    () => assertNpmPolicyContinuity(packument, {}),
-    /dual-use declaration was present/
+    () => assertNpmPolicyContinuity(publishedLatest, {}),
+    /currently published version and must persist/
   );
 });
 
