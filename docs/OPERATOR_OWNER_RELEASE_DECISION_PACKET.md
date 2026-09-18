@@ -105,7 +105,7 @@ This is a decision-support recommendation only. It is not an applied license or 
 
 ## Decision 3 — exact publisher legal identity (FG-017)
 
-This is not inferred from GitHub/npm account names or the SPLCART brand.
+This is not inferred from GitHub/npm account names, the Mecord Connect product name, or the SPLCART domain/brand.
 
 Owner must provide/approve:
 - exact legal person/entity that operates and publishes Operator;
@@ -116,7 +116,7 @@ Owner must provide/approve:
 After approval:
 1. patch the Operator canonical notices in `deploy/public-edge/production-notices/privacy.md`, `terms.md`, and `support.md` (live equivalents currently reside under `/home/deploy/operator/ops/production-notices/`);
 2. patch SPLCART storefront legal/identity content in `frontend-new/src/lib/trust-content.ts` and `frontend-new/src/components/trust/PublicContentPage.tsx` so it no longer contains unresolved actual-business-entity/jurisdiction or unpublished-support wording;
-3. reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with the exact verified publisher identity if that identity differs from the SPLCART brand string;
+3. reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with the exact verified publisher identity if that identity differs from the Mecord Connect product brand;
 4. use the same identity in OpenAI publisher verification;
 5. use the same Licensor identity in the proprietary package license if applicable;
 6. verify the live public pages and final manifest metadata before submission.
@@ -125,7 +125,7 @@ Do not invent the publisher identity from repository owners, email usernames, ac
 
 ### Source-reproducibility preparation already complete
 
-Draft PR #24 source-controls the exact currently live Operator Privacy/Terms/Support notice bytes under `deploy/public-edge/production-notices/` and removes the ignore rule that previously made the shared-VPS bind mount non-reproducible. Its exact head `6edd3ee8eca2f5b8096424bac8750f0c945cec94` passes CI #710, Platform Matrix #480 and Windows Signing Smoke #481. It is merge-compatible with frozen npm-hardening PR #22 and their disposable combined tree passes the full Windows-aware suite. The notice wording remains unchanged until the owner supplies the FG-017 identity inputs.
+Integrated PR #27 now contains the source-controlled Privacy/Terms/Support notices, the shared-VPS bind-mount reproducibility fix, the npm hardening, and the Mecord Connect branding in one branch. Current head `9f8947c2b233939bc8c89f03b90c55369111d4e1` passes CI #735, Platform Matrix #505, NPM Runtime #148 and Windows Signing Smoke #506; local focused tests are 28/28 PASS and the full Windows-aware suite is 368 tests / 352 pass / 16 expected skips / 0 fail. The remaining notice change is the owner-approved FG-017 legal publisher identity before final deployment.
 
 ## What happens immediately after the owner decisions
 

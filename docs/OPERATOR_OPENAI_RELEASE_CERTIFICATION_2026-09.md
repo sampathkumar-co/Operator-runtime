@@ -23,7 +23,7 @@ Rechecked on 18 September 2026 against official OpenAI documentation:
 - App Developer Terms: `https://openai.com/policies/developer-apps-terms/`
 - Usage Policies: `https://openai.com/policies/usage-policies/`
 
-The submission baseline includes a publicly hosted production MCP server, accurate server-provided tool metadata/annotations, OAuth discovery for authenticated servers, domain verification when the portal issues a challenge, Scan Tools reconciliation, publisher identity verification, and at least five positive plus three negative reviewer tests.
+The submission baseline includes a publicly hosted production MCP server, accurate server-provided tool metadata/annotations, OAuth discovery for authenticated servers, required square logo/composer-icon assets, domain verification when the portal issues a challenge, Scan Tools reconciliation, publisher identity verification, at least five positive plus three negative reviewer tests, and the reviewer-accessible demo recording required by the current remote-MCP submission flow.
 
 ## Exact-source CI evidence
 
@@ -43,6 +43,14 @@ Draft PR #22 is a narrowly scoped successor to OCC-3M for npm/public-distributio
 Independent GitHub validation on this exact head is green: CI #700, Platform Matrix #470, NPM Remote Runtime CI #128 and Windows Signing Smoke #471 all PASS. GitHub's NPM Runtime logs explicitly show the policy-continuity cases ran and passed. Local targeted release/policy tests are 18/18 PASS. A real npm 11.19.1 `npm stage publish <tgz> --dry-run` accepted the exact local tarball package-spec, synthetic owner-path probes proved both licensed non-dual-use and licensed dual-use (`LICENSE` + `DISCLOSURE`) tarballs pack correctly, and a live npm `socket` package-history probe proved historical dual-use metadata is detected outside `latest`. The full Windows-aware suite on this head is 367 tests / 351 pass / 16 expected skips / 0 failures with the required path-lease helper wired.
 
 PR #22 deliberately does **not** choose the software license or npm dual-use classification. `OPERATOR_NPM_LICENSE_DECISION.md` records the licensing options and recommends a proprietary custom runtime license when the commercial intent is a publicly installable connector for the hosted Operator service without broad redistribution rights. `OPERATOR_NPM_POLICY_CLASSIFICATION.md` recommends the conservative engineering posture of treating Operator as dual-use unless npm Trust & Safety confirms otherwise. Both remain owner/npm decisions. PR #22 stays draft and must not be merged or published until FG-013 and FG-015 are resolved, npm scope ownership/2FA is proven, and affected certification is rerun on the final successor SHA.
+
+## OCC-3R integrated Mecord Connect successor
+
+Draft PR #27 is the current integrated release successor. Exact head `9f8947c2b233939bc8c89f03b90c55369111d4e1` combines the npm/publication hardening, source-controlled public notices, required OpenAI branding fields, and the final product rebrand from **SPLCART Operator** to **Mecord Connect**. The plugin manifest now uses `name: mecord-connect`, `displayName: Mecord Connect`, and a dedicated square SVG at `.codex-plugin/assets/mecord-connect.svg`; the old SPLCART favicon asset is removed. Source-controlled Privacy/Terms/Support product headings and submission/reviewer package naming are aligned to Mecord Connect while legal publisher identity remains separately blocked under FG-017.
+
+Exact-head GitHub validation is green: CI #735, Platform Matrix #505, NPM Remote Runtime CI #148 and Windows Signing Smoke #506 all PASS. Local combined release tests are 28/28 PASS, and the full Windows-aware suite is 368 tests / 352 pass / 16 expected skips / 0 failures.
+
+PR #27 remains draft, unmerged, unpublished and undeployed. Production intentionally remains OCC-3M until owner licensing/npm-policy/publisher-identity decisions and the remaining real OAuth/npm/OpenAI gates are completed. Because the live OCC-3M pages still carry the pre-rebrand product name, final deployment must include the Mecord Connect notice/landing branding before submission.
 
 ## Production identity and isolation
 
@@ -109,15 +117,18 @@ A deterministic non-sensitive reviewer fixture is available at baseline commit `
 
 The release is **not yet fully OpenAI-review certified**. The following evidence is still mandatory:
 
-1. Real OAuth authorization/code exchange and issued-token audience/scope verification.
-2. Real ChatGPT production E2E through OAuth -> MCP -> relay -> paired PC, including a read and a controlled write/approval flow.
-3. Dedicated reviewer/demo credentials and fixture usable without MFA/SMS/email/private network.
-4. Resolve FG-017 with the exact owner-approved legal publisher identity/jurisdiction/contact, reconcile the Operator/SPLCART public legal pages, then complete OpenAI Platform individual/business verification using that same publisher identity.
-5. Portal domain verification if OpenAI issues a challenge token; never synthesize the token.
-6. OpenAI **Scan Tools** against the exact production endpoint, followed by reconciliation of the imported 10-tool snapshot.
-7. Resolve the remaining owner decisions on green draft successor PR #22: owner-approved software licensing plus explicit npm Dual-Use Content Policy classification, followed by affected recertification on the resulting exact successor SHA.
-8. Prove `@mecrod` scope ownership with 2FA, build the final immutable first-release tarball from the green successor, publish that exact tarball interactively with 2FA, then pass clean-machine `doctor` and reviewer-root `remote` startup verification.
-9. After `@mecrod/operator` exists, configure trusted publishing/staged promotion for future versions and verify the configured repository/workflow identity and stage-only release path.
+1. Complete the real OAuth authorization/code exchange and issued-token audience/scope verification from the actual OpenAI draft.
+2. Retrieve and verify the provisioned reviewer credential, prove no secondary verification is required, and pair only the canonical reviewer fixture/device.
+3. Run real ChatGPT production E2E through OAuth -> MCP -> relay -> paired PC, including the submitted read/write cases, refusal cases, revoke/reconnect behavior, and independent local postcondition checks.
+4. Resolve FG-017 with the exact owner-approved legal publisher identity/jurisdiction/contact, reconcile the Mecord Connect/SPLCART public legal pages plus manifest publisher fields, then complete OpenAI Platform individual/business verification using that same identity.
+5. Resolve FG-013 and FG-015 on a descendant of green integrated PR #27: apply the owner-approved software license and npm Dual-Use Content Policy classification, then rerun affected exact-source/package/legal certification.
+6. Prove `@mecrod` scope ownership with 2FA, build the final immutable first-release tarball from that final successor, publish that exact tarball interactively with 2FA, then pass clean-machine `doctor` and reviewer-root `remote` startup verification.
+7. After `@mecrod/operator` exists, configure trusted publishing/staged promotion for future versions and verify the configured repository/workflow identity and stage-only release path.
+8. Deploy the final Mecord Connect successor transactionally so `/`, `/privacy`, `/terms`, and `/support` visibly match the Mecord Connect listing while preserving the approved legal publisher identity; rerun public hostile/health checks on the deployed final SHA.
+9. Complete portal domain verification if OpenAI issues a challenge token; never synthesize the token.
+10. Run OpenAI **Scan Tools** against the exact final production endpoint and reconcile the imported 10-tool snapshot.
+11. Execute `OPERATOR_DEMO_RECORDING_RUNBOOK.md`, host the required reviewer-accessible real-production demo recording, and add its URL to the submission package.
+12. Select only owner-approved supported countries/regions, verify final listing/release notes, and submit only after every compact/canonical release gate above is PASS.
 
 Final submission itself is an external publication action and is not part of this certification pass unless explicitly authorized.
 

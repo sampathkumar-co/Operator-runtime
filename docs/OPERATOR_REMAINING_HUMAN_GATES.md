@@ -187,7 +187,7 @@ Before selecting **Submit for Review**, confirm:
 - website/privacy/terms/support are the live OCC-3M pages;
 - country availability is limited to regions actually supported by the publisher/legal/support process;
 - release notes describe this as the initial public submission;
-- the final successor contains the required `interface.logo` and `interface.composerIcon` branding assets (draft PR #26 currently supplies them);
+- the final successor contains the required Mecord Connect `interface.logo` and `interface.composerIcon` assets from integrated PR #27;
 - `OPERATOR_DEMO_RECORDING_RUNBOOK.md` has been executed and a reviewer-accessible demo recording URL exists that demonstrates the real production ChatGPT/OAuth/MCP path without exposing credentials, tokens, private keys, personal filesystem identity or real user data.
 
 Do not mark Operator `CONFIRMED FOR RELEASE` until G10, G11, G19, G22, G23, G24, G25 and G26 in `OPERATOR_RELEASE_GATE.md` are all PASS.

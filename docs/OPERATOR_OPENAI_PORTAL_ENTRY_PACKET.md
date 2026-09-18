@@ -9,12 +9,12 @@ This packet does **not** authorize submission. Fields marked `OWNER REQUIRED`, `
 
 ## 1. Listing information
 
-- Plugin name: **SPLCART Operator**
+- Plugin name: **Mecord Connect**
 - Category: **Developer Tools**
 - Short description: **Operate your dev projects**
 - Long description:
 
-  SPLCART Operator connects ChatGPT to a paired computer for carefully bounded development workflows. The public plugin can inspect an authorized project, list and read safe project files, create new files without overwriting existing files, replace files only with a fresh SHA-256 precondition, inspect Git status and safe diffs, and list locally trusted project commands. High-power private capabilities such as generic terminal execution, unrestricted browser automation, Windows UI automation, and arbitrary database-row access are not exposed by the public plugin. Restricted-data guards reject credentials and other disallowed sensitive data before public relay execution, and public responses remove internal telemetry and identifiers.
+  Mecord Connect links ChatGPT to a paired computer for carefully bounded development workflows. The public plugin can inspect an authorized project, list and read safe project files, create new files without overwriting existing files, replace files only with a fresh SHA-256 precondition, inspect Git status and safe diffs, and list locally trusted project commands. High-power private capabilities such as generic terminal execution, unrestricted browser automation, Windows UI automation, and arbitrary database-row access are not exposed by the public plugin. Restricted-data guards reject credentials and other disallowed sensitive data before public relay execution, and public responses remove internal telemetry and identifiers.
 
 - Website: `https://operator.splcart.in`
 - Support: `https://operator.splcart.in/support`
@@ -24,11 +24,11 @@ This packet does **not** authorize submission. Fields marked `OWNER REQUIRED`, `
 
   Initial public submission. Exposes a restricted development-project MCP surface with secure device enrollment, credential/restricted-data guards, local policy enforcement, safe file concurrency controls, relay retention bounds, OAuth scope enforcement, and minimized public responses.
 
-- Logo / composer icon: **PASS_ENGINEERING_DRAFT via PR #26** — draft OCC-3Q head `f5a569e717ba504e0411ab9aedc0ed7ca2c1ae11` adds the existing public 64×64 SPLCART SVG favicon as both required manifest branding assets. Final submission must use the composed successor containing this patch.
+- Logo / composer icon: **PASS_ENGINEERING_DRAFT via integrated PR #27** - current head `9f8947c2b233939bc8c89f03b90c55369111d4e1` carries the dedicated Mecord Connect square SVG mark as both required manifest branding assets. Exact-head CI #735, Platform Matrix #505, NPM Runtime #148 and Windows Signing Smoke #506 all pass. Final submission must use this rebranded successor (or a later certified descendant).
 - Developer / publisher identity: **OWNER + OPENAI VERIFICATION REQUIRED (FG-017)**.
   - Do not enter `SPLCART` merely because it is the product/brand name unless that is the exact identity verified by OpenAI.
   - The verified identity must match the reconciled public website/support/privacy/terms identity.
-  - Before final packaging, reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with that exact verified identity if the current `SPLCART` value is only a brand name.
+  - Before final packaging, reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with that exact verified identity if the current `Mecord Connect` value is only the product brand rather than the verified legal publisher identity.
 
 ## 2. MCP server
 
@@ -259,8 +259,8 @@ Public v1 is MCP-only and exposes no custom plugin UI, so do not submit fabricat
 All must be true:
 - verified publisher identity matches listing/legal pages;
 - app-management write permission is present;
-- final successor includes PR #26 branding assets and the listing logo/composer icon render correctly;
-- website/support/privacy/terms are publicly reachable and final;
+- final successor includes the Mecord Connect branding assets from integrated PR #27 and the listing logo/composer icon render correctly;
+- website/support/privacy/terms are publicly reachable, final, and visibly use Mecord Connect product branding rather than the pre-rebrand SPLCART Operator name;
 - FG-013 software license resolved;
 - FG-015 npm Dual-Use classification resolved;
 - FG-017 publisher identity/legal wording resolved;

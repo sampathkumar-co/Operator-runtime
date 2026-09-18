@@ -7,7 +7,7 @@ Intended package-root filename if adopted: `DISCLOSURE`
 
 ## Purpose
 
-`@mecrod/operator` is a Windows runtime that lets a user connect a computer they control to SPLCART Operator so ChatGPT can perform explicitly authorized developer-project tasks through the hosted Operator MCP service.
+`@mecrod/operator` is a Windows runtime that lets a user connect a computer they control to Mecord Connect so ChatGPT can perform explicitly authorized developer-project tasks through the hosted Operator MCP service.
 
 The runtime is intended for legitimate local developer automation and remote-assistance workflows on computers the user is authorized to control. It is not intended to provide unauthorized access to third-party systems, bypass security controls, deploy malware, conceal malicious activity, steal credentials, or operate as a covert remote-access tool.
 

@@ -1,4 +1,4 @@
-# DRAFT — SPLCART Operator Runtime License
+# DRAFT — Mecord Connect Runtime License
 
 **Non-effective draft for owner/legal review. Do not ship as `LICENSE` until approved and all bracketed decisions are resolved.**
 
@@ -6,7 +6,7 @@ This Runtime License governs the `@mecrod/operator` software package and bundled
 
 ## 1. License grant
 
-Subject to this License and the applicable SPLCART Operator service Terms, Licensor grants You a limited, non-exclusive, non-transferable, non-sublicensable license to download, install and execute the Software on computers You own or are authorized to control, solely to use supported SPLCART Operator functionality and authorized integrations.
+Subject to this License and the applicable Mecord Connect service Terms, Licensor grants You a limited, non-exclusive, non-transferable, non-sublicensable license to download, install and execute the Software on computers You own or are authorized to control, solely to use supported Mecord Connect functionality and authorized integrations.
 
 You may make a reasonable number of backup copies solely for disaster recovery, provided all proprietary notices are preserved.
 
@@ -35,7 +35,7 @@ Public availability of source code does not, by itself, grant open-source rights
 
 ## 5. Service dependency and changes
 
-Some Software functionality depends on the hosted SPLCART Operator service, authentication infrastructure, relay services, supported OpenAI integrations, and compatible platform software. Availability of those external or hosted components is governed separately and is not guaranteed by this Runtime License.
+Some Software functionality depends on the hosted Mecord Connect service, authentication infrastructure, relay services, supported OpenAI integrations, and compatible platform software. Availability of those external or hosted components is governed separately and is not guaranteed by this Runtime License.
 
 Licensor may provide updates, security fixes or replacement versions. Updates may be required to maintain compatibility or security. A future version may be offered under updated license terms, subject to applicable law.
 
@@ -47,7 +47,7 @@ Security controls are designed to reduce risk but do not make automation error-f
 
 ## 7. Privacy
 
-Processing of personal data by the hosted SPLCART Operator service is governed by the applicable Privacy notice and service Terms. The Software may process local project/device information necessary to perform actions You request or authorize.
+Processing of personal data by the hosted Mecord Connect service is governed by the applicable Privacy notice and service Terms. The Software may process local project/device information necessary to perform actions You request or authorize.
 
 ## 8. Feedback
 
@@ -75,7 +75,7 @@ The final license must identify the actual Licensor legal identity, governing la
 
 ## 13. Entire agreement and precedence
 
-This Runtime License governs rights in the Software itself. The hosted service Terms govern use of the SPLCART Operator service. If the final documents conflict, the final approved text must state which provision controls for the relevant subject matter.
+This Runtime License governs rights in the Software itself. The hosted service Terms govern use of the Mecord Connect service. If the final documents conflict, the final approved text must state which provision controls for the relevant subject matter.
 
 ## Publication checklist for this draft
 

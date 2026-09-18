@@ -22,7 +22,7 @@ Staged publishing requires npm CLI 11.15+ and Node 22.14+. npm also states that 
 
 ## Operator capability evidence
 
-The public npm runtime is not malware and is intended to connect a user-authorized Windows computer to SPLCART Operator/ChatGPT. Its public MCP surface is deliberately restricted and does not expose generic terminal, browser or UIA tools directly to ChatGPT.
+The public npm runtime is not malware and is intended to connect a user-authorized Windows computer to Mecord Connect/ChatGPT. Its public MCP surface is deliberately restricted and does not expose generic terminal, browser or UIA tools directly to ChatGPT.
 
 However, the shipped runtime contains security-sensitive machinery that automated scanners may reasonably associate with remote-administration or dual-use software: authenticated remote relay control, local filesystem/project mutation, Windows UI Automation sidecar code, DPAPI credential protection, path-authority enforcement, device pairing/claiming and managed browser support in the private runtime.
 

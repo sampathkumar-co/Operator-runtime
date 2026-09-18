@@ -1,22 +1,22 @@
-# SPLCART Operator public plugin submission package
+# Mecord Connect public plugin submission package
 
 This document is the reviewer-facing source of truth for the public ChatGPT plugin. It intentionally describes the restricted public MCP surface, not the larger private/local Operator runtime.
 
 ## Publication identity
 
-- Display name: **SPLCART Operator**
-- Package name: `splcart-operator`
+- Display name: **Mecord Connect**
+- Package name: `mecord-connect`
 - Category: **Developer Tools**
 - Initial plugin version: `0.1.0`
 - Public MCP target: `https://operator.splcart.in/mcp`
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. They are **not yet final for submission**: FG-017 requires an owner-approved exact legal publisher identity/jurisdiction/contact that matches the eventual OpenAI verified identity, and FG-018 is fixed only in draft PR #24 until the final successor is composed. Do not submit until those legal/source-reproducibility gates and the remaining external gates are complete: real OAuth token-audience proof, reviewer credentials, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation and real ChatGPT end-to-end testing.
+The production HTTPS origin, OAuth provider and legal/support pages are live on OCC-3M. They are **not yet final for submission**: integrated PR #27 is the green Mecord Connect source successor, but production still serves the pre-rebrand OCC-3M pages; FG-017 still requires the exact owner-approved publisher identity/jurisdiction/contact, and FG-021 requires final Mecord Connect deployment parity. Do not submit until those gates and the remaining external gates are complete: real OAuth token-audience proof, reviewer login/pairing, npm publication/clean-machine verification, publisher identity verification, any portal-issued domain challenge, Scan Tools reconciliation, real ChatGPT end-to-end testing, and the required demo recording URL.
 
 ## What the public plugin does
 
-SPLCART Operator lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
+Mecord Connect lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
 Public v1 exposes only these ten tools:
 
@@ -127,7 +127,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
 - the OpenAI challenge token is served exactly at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; draft PR #24 source-controls those exact live bytes under `deploy/public-edge/production-notices/` and regression-checks the bind-mount contract. The final successor must include that reproducibility fix plus the owner-approved FG-017 publisher/contact/jurisdiction wording before submission; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
+- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. Before submission, the final descendant must also contain the owner-approved FG-017 publisher/contact/jurisdiction wording and be deployed so all four live pages visibly match the Mecord Connect listing; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;

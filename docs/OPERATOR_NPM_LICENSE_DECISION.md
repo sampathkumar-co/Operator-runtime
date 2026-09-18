@@ -20,7 +20,7 @@ Use a custom `LICENSE`/EULA and set:
 "license": "SEE LICENSE IN LICENSE"
 ```
 
-Best fit when the commercial intent is: anyone may install and run the Operator runtime for authorized use with the SPLCART Operator service, while ownership, redistribution, resale, competing hosted use, modification/derivative distribution and circumvention rights remain reserved except where law requires otherwise.
+Best fit when the commercial intent is: anyone may install and run the Operator runtime for authorized use with the Mecord Connect service, while ownership, redistribution, resale, competing hosted use, modification/derivative distribution and circumvention rights remain reserved except where law requires otherwise.
 
 Advantages:
 - preserves commercial/control rights despite the repository being publicly readable;

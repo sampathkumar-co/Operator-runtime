@@ -44,7 +44,7 @@ Do not record private Authelia/admin dashboards.
 ### 1. Show the public plugin connection
 
 Show:
-- SPLCART Operator name;
+- Mecord Connect name;
 - production connection is active;
 - no secret/auth values;
 - public MCP URL only if naturally visible and safe.
