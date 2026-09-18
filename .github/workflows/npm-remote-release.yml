@@ -75,6 +75,9 @@ jobs:
             throw 'declared dual-use package requires packages/mecrod-operator/DISCLOSURE'
           }
 
+      - name: Preserve npm dual-use declaration continuity
+        run: node scripts/verify-npm-policy-continuity.mjs
+
       - name: Build Windows security helpers from locked source
         shell: pwsh
         run: |
