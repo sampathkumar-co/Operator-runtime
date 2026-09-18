@@ -77,6 +77,8 @@ The production provider preflight passes on the certified Node 22.23.2 runtime. 
 
 A real authorization request containing the exact client ID, callback, S256 challenge, Operator scopes, `offline_access` and MCP `resource` is accepted and redirects into Authelia's OIDC login flow. This proves the predefined client, callback and authorization request are accepted.
 
+A 2026-09-18 recheck found that Authelia advertises `authorization_response_iss_parameter_supported: true`, while the predefined client initially allowlisted only the callback-ID redirect. Current OpenAI authentication guidance can select the stable `https://chatgpt.com/connector_platform_oauth_redirect` for issuer-identifying authorization servers. The stable redirect was therefore added **alongside** the existing callback-ID URI after isolated Authelia configuration validation. Post-change preflight proves both redirect forms enter the real login flow, OIDC discovery remains healthy, and unauthenticated MCP still returns the expected 401 protected-resource challenge. This provider-only configuration hardening did not change the OCC-3M source SHA or production edge image.
+
 **Still required:** complete one real user authorization and code exchange, then inspect the issued access token and prove the exact MCP audience, issuer, expiry and required scopes. This evidence cannot be substituted by configuration inspection.
 
 ## Public MCP surface and reviewer package

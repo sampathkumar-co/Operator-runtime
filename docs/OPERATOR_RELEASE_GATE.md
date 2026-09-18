@@ -3,7 +3,7 @@
 Certification candidate: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
-Evidence cutoff: 2026-09-17 21:10 UTC
+Evidence cutoff: 2026-09-18 03:25 UTC
 
 Status is deliberately binary: **PASS** means the OCC-3M release has direct evidence for the gate; **BLOCKED** means a required external/human step is still missing. Capabilities intentionally absent from the public MCP surface are treated as PASS only for public-release exposure and are called out explicitly.
 
@@ -18,7 +18,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed; public surface is allowlisted to 10 tools and local policy remains authoritative. |
 | G8 Approval integrity | PASS | Core runtime suite includes approval lifecycle, authority-generation, replay/expiry and recovery coverage; OCC-3M CI passed. |
 | G9 Prompt-injection resistance | PASS | Public surface has no open-world browser tool; restricted paths/data are blocked and cross-layer adversarial boundary tests passed. |
-| G10 Authentication | BLOCKED | Provider preflight, S256, predefined client, exact callback and authorization-request acceptance pass; one real human authorization/code exchange is still required. |
+| G10 Authentication | BLOCKED | Provider preflight, S256, predefined client, both currently documented OpenAI redirect forms are allowlisted and accepted into the real login flow, and authorization-request acceptance passes; one real human authorization/code exchange is still required. |
 | G11 Authorization / scopes | BLOCKED | Static scope enforcement and wrong/missing token rejection pass. Final `resource -> access-token aud` and issued-scope proof requires the same real authorization. |
 | G12 Device isolation | PASS | Account/device authority, A-B-A generation, release/rebind, disabled-account and quota tests passed; real paired-device relay E2E passed. |
 | G13 Relay integrity | PASS | Relay WebSocket E2E passed; direct relay/result/control ports 8788/8789/8790 are unreachable from the Internet. |

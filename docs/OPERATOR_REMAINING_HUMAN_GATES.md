@@ -58,14 +58,17 @@ Use the production server URL `https://operator.splcart.in/mcp`. Select the pred
 
 Current production client configuration is:
 
-- callback currently allowlisted: `https://chatgpt.com/connector/oauth/8HymKNOT2aqK`
+- redirect URIs currently allowlisted:
+  - `https://chatgpt.com/connector_platform_oauth_redirect`
+  - `https://chatgpt.com/connector/oauth/8HymKNOT2aqK`
+- the authorization server advertises `authorization_response_iss_parameter_supported: true`, so current OpenAI flows may select the stable redirect; the app-management page remains authoritative
 - public client; token endpoint auth method `none`
 - PKCE required, S256 only
 - requested scopes: `operator:read operator:write` plus OIDC/offline scopes as required by the provider
 - resource/audience: `https://operator.splcart.in/mcp`
 - authorization-code and refresh-token grants
 
-The callback shown by the OpenAI app-management page is authoritative. If a new draft displays a different callback ID, update the predefined client allowlist before continuing; do not assume the existing callback ID will be reused.
+The redirect URI shown by the OpenAI app-management page is authoritative. If a future draft displays a different redirect URI, update the predefined-client allowlist and validate it before continuing; do not assume either the stable URI or the existing callback-ID URI will always be selected.
 
 ## H4 — Complete the real OAuth proof
 
