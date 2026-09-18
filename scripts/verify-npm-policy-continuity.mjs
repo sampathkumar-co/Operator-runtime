@@ -8,13 +8,22 @@ const registryUrl = 'https://registry.npmjs.org/%40mecrod%2Foperator';
 const maxBytes = 8 * 1024 * 1024;
 
 export function assertNpmPolicyContinuity(packument, pkg) {
+  if (pkg?.name !== '@mecrod/operator') throw new Error('Unexpected npm package name.');
   const declaredClass = pkg?.contentPolicy?.class;
   if (pkg?.contentPolicy && declaredClass !== 'dual-use') {
     throw new Error('Unsupported npm contentPolicy.class; omit contentPolicy or use dual-use.');
   }
-  const versions = packument?.versions && typeof packument.versions === 'object'
-    ? Object.values(packument.versions)
-    : [];
+  if (packument === null) return false;
+  if (packument?.name !== '@mecrod/operator') throw new Error('npm registry metadata package name mismatch.');
+  if (!packument?.versions || typeof packument.versions !== 'object' || Array.isArray(packument.versions)) {
+    throw new Error('npm registry metadata is missing the versions map.');
+  }
+  const versions = Object.values(packument.versions);
+  for (const version of versions) {
+    if (version?.contentPolicy && version.contentPolicy.class !== 'dual-use') {
+      throw new Error('npm registry contains an unsupported published contentPolicy class.');
+    }
+  }
   const previouslyDualUse = versions.some((version) => version?.contentPolicy?.class === 'dual-use');
   if (previouslyDualUse && declaredClass !== 'dual-use') {
     throw new Error('Refusing release: npm dual-use declaration exists in published version history and must persist.');
@@ -34,9 +43,21 @@ async function fetchPackument() {
     if (!response.ok) throw new Error(`npm registry metadata request failed with HTTP ${response.status}`);
     const declaredLength = Number(response.headers.get('content-length') || 0);
     if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error('npm registry metadata exceeded size limit.');
-    const text = await response.text();
-    if (Buffer.byteLength(text) > maxBytes) throw new Error('npm registry metadata exceeded size limit.');
-    return JSON.parse(text);
+    if (!response.body) throw new Error('npm registry metadata response had no body.');
+    const reader = response.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        controller.abort();
+        throw new Error('npm registry metadata exceeded size limit.');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return JSON.parse(Buffer.concat(chunks, totalBytes).toString('utf8'));
   } finally {
     clearTimeout(timeout);
   }
