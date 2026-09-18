@@ -132,9 +132,9 @@ test('shared-VPS profile preserves the trusted ingress and Caddy exec capability
   assert.match(compose, /external: true\r?\n\s+name: operator_ingress/);
   assert.match(compose, /source: \.\/production-notices/);
   assert.match(compose, /target: \/run\/operator-public-notices/);
-  assert.match(privacy, /^# SPLCART Operator Privacy Notice$/m);
-  assert.match(terms, /^# SPLCART Operator Terms of Service$/m);
-  assert.match(support, /^# SPLCART Operator Support$/m);
+  assert.match(privacy, /^# Mecord Connect Privacy Notice$/m);
+  assert.match(terms, /^# Mecord Connect Terms of Service$/m);
+  assert.match(support, /^# Mecord Connect Support$/m);
   for (const notice of [privacy, terms, support]) assert.match(notice, /support@splcart\.in/);
   assert.doesNotMatch(compose, /ports:/);
   assert.doesNotMatch(compose, /network_mode:\s*host|privileged:\s*true/);

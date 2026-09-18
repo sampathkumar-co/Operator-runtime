@@ -1,12 +1,12 @@
-# SPLCART Operator Support
+# Mecord Connect Support
 
-SPLCART Operator support is available at support@splcart.in.
+Mecord Connect support is available at support@splcart.in.
 
 When requesting help, include a concise description of the issue, the approximate time it occurred, the affected feature, and any safe error code shown by Operator. Do not send passwords, OAuth tokens, device private keys, relay-control secrets, recovery credentials, private environment files, or other live secrets.
 
 ## Security reports
 
-For a private security report, email support@splcart.in with the subject "SPLCART Operator Security Report". Include reproduction steps and non-sensitive evidence. Do not test against other users or data you are not authorized to access.
+For a private security report, email support@splcart.in with the subject "Mecord Connect Security Report". Include reproduction steps and non-sensitive evidence. Do not test against other users or data you are not authorized to access.
 
 ## Account and privacy requests
 

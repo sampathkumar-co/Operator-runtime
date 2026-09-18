@@ -1,5 +1,5 @@
 {
-  "plugin": "SPLCART Operator",
+  "plugin": "Mecord Connect",
   "surfaceVersion": 1,
   "releaseNotes": "Initial public submission. Exposes a restricted development-project MCP surface with secure device enrollment, credential/restricted-data guards, local policy enforcement, safe file concurrency controls, relay retention bounds, OAuth scope enforcement, and minimized public responses.",
   "positiveTests": [

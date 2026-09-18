@@ -1,8 +1,8 @@
-# SPLCART Operator Privacy Notice
+# Mecord Connect Privacy Notice
 
 Effective: 17 September 2026
 
-SPLCART Operator is operated by the publisher of splcart.in. Privacy and support requests may be sent to support@splcart.in.
+Mecord Connect is operated by the publisher of splcart.in. Privacy and support requests may be sent to support@splcart.in.
 
 ## What the service processes
 
@@ -26,6 +26,6 @@ Operator does not sell personal data. Data is disclosed only as needed to operat
 
 ## Your choices and requests
 
-You can stop the local Operator runtime, revoke or reset a paired device, or request account/device erasure. For access, correction, deletion, privacy questions, or a private security report, email support@splcart.in. For a security report, use the subject "SPLCART Operator Security Report" and do not send passwords, private keys, access tokens, or other live credentials.
+You can stop the local Operator runtime, revoke or reset a paired device, or request account/device erasure. For access, correction, deletion, privacy questions, or a private security report, email support@splcart.in. For a security report, use the subject "Mecord Connect Security Report" and do not send passwords, private keys, access tokens, or other live credentials.
 
 Mandatory privacy and consumer rights that apply to you remain unaffected by this notice.

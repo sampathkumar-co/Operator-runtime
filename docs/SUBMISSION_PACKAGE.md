@@ -1,11 +1,11 @@
-# SPLCART Operator public plugin submission package
+# Mecord Connect public plugin submission package
 
 This document is the reviewer-facing source of truth for the public ChatGPT plugin. It intentionally describes the restricted public MCP surface, not the larger private/local Operator runtime.
 
 ## Publication identity
 
-- Display name: **SPLCART Operator**
-- Package name: `splcart-operator`
+- Display name: **Mecord Connect**
+- Package name: `mecord-connect`
 - Category: **Developer Tools**
 - Initial plugin version: `0.1.0`
 - Public MCP target: `https://operator.splcart.in/mcp`
@@ -16,7 +16,7 @@ The public endpoint must not be submitted until the target HTTPS origin, OAuth p
 
 ## What the public plugin does
 
-SPLCART Operator lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
+Mecord Connect lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
 Public v1 exposes only these ten tools:
 

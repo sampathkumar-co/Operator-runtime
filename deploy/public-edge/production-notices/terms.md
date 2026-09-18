@@ -1,8 +1,8 @@
-# SPLCART Operator Terms of Service
+# Mecord Connect Terms of Service
 
 Effective: 17 September 2026
 
-These terms govern use of SPLCART Operator, a service operated by the publisher of splcart.in. Support is available at support@splcart.in.
+These terms govern use of Mecord Connect, a service operated by the publisher of splcart.in. Support is available at support@splcart.in.
 
 ## Authorized use
 

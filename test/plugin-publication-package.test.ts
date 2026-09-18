@@ -20,6 +20,9 @@ test('public plugin manifest satisfies final directory field limits', async () =
   assert.ok(ui.longDescription.length <= 4000);
   assert.ok(ui.developerName.length <= 80);
   assert.equal(manifest.author.name, ui.developerName);
+  assert.equal(manifest.name, 'mecord-connect');
+  assert.equal(ui.displayName, 'Mecord Connect');
+  assert.equal(ui.developerName, 'Mecord Connect');
   assert.equal(ui.category, 'Developer Tools');
   assert.ok(ui.capabilities.length <= 20);
   for (const capability of ui.capabilities) assert.ok(capability.length > 0 && capability.length <= 120 && !/[\r\n]/.test(capability));
@@ -32,6 +35,7 @@ test('directory branding assets satisfy current image constraints', async () => 
   for (const key of ['logo', 'composerIcon']) {
     const relative = String(ui[key] ?? '');
     assert.ok(relative.length > 0, `${key} is required`);
+    assert.equal(relative, './assets/mecord-connect.svg');
     assert.match(relative, /\.(?:png|jpe?g|webp|svg)$/i);
 
     const file = path.resolve(root, '.codex-plugin', relative);
