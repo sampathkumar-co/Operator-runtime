@@ -4,17 +4,20 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packagePath = path.join(repoRoot, 'packages', 'mecrod-operator', 'package.json');
-const registryUrl = 'https://registry.npmjs.org/%40mecrod%2Foperator/latest';
-const maxBytes = 2 * 1024 * 1024;
+const registryUrl = 'https://registry.npmjs.org/%40mecrod%2Foperator';
+const maxBytes = 8 * 1024 * 1024;
 
-export function assertNpmPolicyContinuity(publishedLatest, pkg) {
+export function assertNpmPolicyContinuity(packument, pkg) {
   const declaredClass = pkg?.contentPolicy?.class;
   if (pkg?.contentPolicy && declaredClass !== 'dual-use') {
     throw new Error('Unsupported npm contentPolicy.class; omit contentPolicy or use dual-use.');
   }
-  const previouslyDualUse = publishedLatest?.contentPolicy?.class === 'dual-use';
+  const versions = packument?.versions && typeof packument.versions === 'object'
+    ? Object.values(packument.versions)
+    : [];
+  const previouslyDualUse = versions.some((version) => version?.contentPolicy?.class === 'dual-use');
   if (previouslyDualUse && declaredClass !== 'dual-use') {
-    throw new Error('Refusing release: npm dual-use declaration is present on the currently published version and must persist.');
+    throw new Error('Refusing release: npm dual-use declaration exists in published version history and must persist.');
   }
   return previouslyDualUse;
 }
