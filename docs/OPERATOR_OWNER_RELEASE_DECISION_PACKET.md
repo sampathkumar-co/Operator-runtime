@@ -116,9 +116,10 @@ Owner must provide/approve:
 After approval:
 1. patch the Operator canonical notices in `deploy/public-edge/production-notices/privacy.md`, `terms.md`, and `support.md` (live equivalents currently reside under `/home/deploy/operator/ops/production-notices/`);
 2. patch SPLCART storefront legal/identity content in `frontend-new/src/lib/trust-content.ts` and `frontend-new/src/components/trust/PublicContentPage.tsx` so it no longer contains unresolved actual-business-entity/jurisdiction or unpublished-support wording;
-3. use the same identity in OpenAI publisher verification;
-4. use the same Licensor identity in the proprietary package license if applicable;
-5. verify the live public pages before submission.
+3. reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with the exact verified publisher identity if that identity differs from the SPLCART brand string;
+4. use the same identity in OpenAI publisher verification;
+5. use the same Licensor identity in the proprietary package license if applicable;
+6. verify the live public pages and final manifest metadata before submission.
 
 Do not invent the publisher identity from repository owners, email usernames, account profile names, or domain WHOIS guesses.
 

@@ -28,6 +28,7 @@ This packet does **not** authorize submission. Fields marked `OWNER REQUIRED`, `
 - Developer / publisher identity: **OWNER + OPENAI VERIFICATION REQUIRED (FG-017)**.
   - Do not enter `SPLCART` merely because it is the product/brand name unless that is the exact identity verified by OpenAI.
   - The verified identity must match the reconciled public website/support/privacy/terms identity.
+  - Before final packaging, reconcile `.codex-plugin/plugin.json` `author.name` and `interface.developerName` with that exact verified identity if the current `SPLCART` value is only a brand name.
 
 ## 2. MCP server
 
