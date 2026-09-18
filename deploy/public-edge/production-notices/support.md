@@ -2,7 +2,9 @@
 
 Mecord Connect support is available at support@splcart.in.
 
-When requesting help, include a concise description of the issue, the approximate time it occurred, the affected feature, and any safe error code shown by Operator. Do not send passwords, OAuth tokens, device private keys, relay-control secrets, recovery credentials, private environment files, or other live secrets.
+Publisher: Kinthala Samuel Sampath Kumar, Akkayapalem, Visakhapatnam, Andhra Pradesh, India.
+
+When requesting help, include a concise description of the issue, the approximate time it occurred, the affected feature, and any safe error code shown by Mecord Connect. Do not send passwords, OAuth tokens, device private keys, relay-control secrets, recovery credentials, private environment files, or other live secrets.
 
 ## Security reports
 
@@ -14,6 +16,6 @@ The same address accepts device-reset, account-erasure, privacy, access, correct
 
 ## Service information
 
-Production service URLs are https://operator.splcart.in and https://auth.splcart.in. Operator requires a paired local runtime for computer actions; the hosted service cannot override local capability policy or approvals.
+Production service URLs are https://operator.splcart.in and https://auth.splcart.in. Mecord Connect requires a paired local runtime for computer actions; the hosted service cannot override local capability policy or approvals.
 
 Support response times are not guaranteed. Security-impacting and access-blocking issues are prioritized when practical.

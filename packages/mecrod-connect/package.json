@@ -1,17 +1,18 @@
 {
-  "name": "@mecrod/operator",
+  "name": "@mecrod/connect",
   "version": "1.0.0",
-  "description": "Secure one-command Operator runtime for connecting ChatGPT to a user-authorized Windows computer.",
+  "description": "Secure one-command Mecord Connect runtime for connecting ChatGPT to a user-authorized Windows computer.",
   "type": "module",
   "bin": {
-    "operator": "bin/operator.mjs"
+    "mecord-connect": "bin/operator.mjs"
   },
   "files": [
     "bin",
     "src",
     "runtime",
     "README.md",
-    "DISCLOSURE"
+    "DISCLOSURE",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22.14.0 <23 || >=24.0.0 <25 || >=26.0.0 <27"
@@ -25,7 +26,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "build:runtime": "node ./scripts/build-runtime-payload.mjs",
     "prepublishOnly": "node ./src/publish-check.mjs"
@@ -36,6 +37,7 @@
   },
   "homepage": "https://operator.splcart.in",
   "keywords": [
+    "mecord-connect",
     "chatgpt",
     "mcp",
     "windows",
@@ -44,6 +46,13 @@
   ],
   "bugs": {
     "url": "https://github.com/sampathkumar-co/Operator-runtime/issues",
+    "email": "support@splcart.in"
+  },
+  "contentPolicy": {
+    "class": "dual-use"
+  },
+  "author": {
+    "name": "Kinthala Samuel Sampath Kumar",
     "email": "support@splcart.in"
   }
 }

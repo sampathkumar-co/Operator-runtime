@@ -2,56 +2,65 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertNpmPolicyContinuity } from '../scripts/verify-npm-policy-continuity.mjs';
 
-test('new unpublished package may omit a dual-use declaration', () => {
-  assert.equal(assertNpmPolicyContinuity(null, { name: '@mecrod/operator' }), false);
-});
+const candidate = {
+  name: '@mecrod/connect',
+  contentPolicy: { class: 'dual-use' }
+};
 
-test('published non-dual-use history does not force a declaration', () => {
-  const packument = { name: '@mecrod/operator', versions: { '1.0.0': { name: '@mecrod/operator' } } };
-  assert.equal(assertNpmPolicyContinuity(packument, { name: '@mecrod/operator' }), false);
-});
-
-test('any historical dual-use version must preserve the declaration', () => {
-  const packument = {
-    name: '@mecrod/operator',
-    'dist-tags': { latest: '1.0.0' },
-    versions: {
-      '1.0.0': { name: '@mecrod/operator' },
-      '1.1.0-beta.1': { contentPolicy: { class: 'dual-use' } }
-    }
-  };
-  assert.equal(assertNpmPolicyContinuity(packument, { name: '@mecrod/operator', contentPolicy: { class: 'dual-use' } }), true);
+test('new unpublished Mecord Connect package requires dual-use declaration', () => {
+  assert.equal(assertNpmPolicyContinuity(null, candidate), false);
   assert.throws(
-    () => assertNpmPolicyContinuity(packument, { name: '@mecrod/operator' }),
-    /published version history and must persist/
+    () => assertNpmPolicyContinuity(null, { name: '@mecrod/connect' }),
+    /must declare npm contentPolicy\.class as dual-use/
   );
 });
 
-test('unsupported contentPolicy values fail closed', () => {
+test('published non-dual-use history is accepted when the new candidate declares dual-use', () => {
+  const packument = { name: '@mecrod/connect', versions: { '1.0.0': { name: '@mecrod/connect' } } };
+  assert.equal(assertNpmPolicyContinuity(packument, candidate), false);
+});
+
+test('any historical dual-use version is detected and the declaration remains present', () => {
+  const packument = {
+    name: '@mecrod/connect',
+    'dist-tags': { latest: '1.0.0' },
+    versions: {
+      '1.0.0': { name: '@mecrod/connect' },
+      '1.1.0-beta.1': { contentPolicy: { class: 'dual-use' } }
+    }
+  };
+  assert.equal(assertNpmPolicyContinuity(packument, candidate), true);
+});
+
+test('unsupported or missing candidate contentPolicy values fail closed', () => {
   assert.throws(
-    () => assertNpmPolicyContinuity(null, { name: '@mecrod/operator', contentPolicy: { class: 'not-dual-use' } }),
-    /Unsupported npm contentPolicy\.class/
+    () => assertNpmPolicyContinuity(null, { name: '@mecrod/connect', contentPolicy: { class: 'not-dual-use' } }),
+    /must declare npm contentPolicy\.class as dual-use/
+  );
+  assert.throws(
+    () => assertNpmPolicyContinuity(null, { name: '@mecrod/connect' }),
+    /must declare npm contentPolicy\.class as dual-use/
   );
 });
 
 test('malformed or mismatched registry metadata fails closed', () => {
   assert.throws(
-    () => assertNpmPolicyContinuity({ name: '@mecrod/operator' }, { name: '@mecrod/operator' }),
+    () => assertNpmPolicyContinuity({ name: '@mecrod/connect' }, candidate),
     /missing the versions map/
   );
   assert.throws(
-    () => assertNpmPolicyContinuity({ name: '@other/package', versions: {} }, { name: '@mecrod/operator' }),
+    () => assertNpmPolicyContinuity({ name: '@other/package', versions: {} }, candidate),
     /package name mismatch/
   );
 });
 
 test('unsupported historical contentPolicy classes fail closed', () => {
   const packument = {
-    name: '@mecrod/operator',
+    name: '@mecrod/connect',
     versions: { '1.0.0': { contentPolicy: { class: 'future-policy-class' } } }
   };
   assert.throws(
-    () => assertNpmPolicyContinuity(packument, { name: '@mecrod/operator' }),
+    () => assertNpmPolicyContinuity(packument, candidate),
     /unsupported published contentPolicy class/
   );
 });

@@ -2,11 +2,13 @@
 
 **Production target:** `https://operator.splcart.in/support`
 
+Publisher: Kinthala Samuel Sampath Kumar, Akkayapalem, Visakhapatnam, Andhra Pradesh, India. Public support contact: support@splcart.in.
+
 Use the production support page for account, pairing, installation, OAuth, plugin and deletion requests. Do not post bearer tokens, recovery credentials, device private keys, signing material, passwords, API keys or private project contents in support messages.
 
 ## Information safe to include
 
-- Operator/runtime version
+- Mecord Connect/runtime version
 - public plugin version
 - operating-system family
 - approximate time of the failure
@@ -20,4 +22,4 @@ The production support page must provide a dedicated private security-reporting 
 
 ## Account and data deletion
 
-Authenticated account erasure removes the hosted Operator account identity binding, account/device memberships and account routing state. Released devices also have retained relay deliveries, relay results and relevant session records purged before ownership can move to another account.
+Authenticated account erasure removes the hosted Mecord Connect account identity binding, account/device memberships and account routing state. Released devices also have retained relay deliveries, relay results and relevant session records purged before ownership can move to another account.

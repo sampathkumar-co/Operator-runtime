@@ -1,0 +1,47 @@
+MECORD CONNECT — DUAL-USE CONTENT DISCLOSURE
+
+Package: @mecrod/connect
+Publisher: Kinthala Samuel Sampath Kumar
+Contact: support@splcart.in
+
+Purpose
+
+@mecrod/connect is the Windows runtime used to pair a user-authorized computer with Mecord Connect for legitimate development and computer-automation workflows initiated through ChatGPT.
+
+Why this package is declared dual-use
+
+The package contains security-relevant remote-management capabilities because it can:
+- connect a local runtime to an authenticated remote relay;
+- inspect and modify files within locally authorized project roots;
+- expose bounded Git/project operations;
+- run locally trusted project commands subject to policy and approval controls;
+- interact with browser/UI automation capabilities that are available to the private local runtime but are not broadly exposed by the public plugin.
+
+These capabilities can be useful for legitimate development, administration, automation, support, and security work, but similar capabilities could be misused if operated without authorization. For that reason the package declares:
+
+  "contentPolicy": {
+    "class": "dual-use"
+  }
+
+Intended legitimate use
+
+The Runtime is intended only for computers, accounts, repositories, websites, data, and services the user owns or is authorized to control.
+
+Safeguards
+
+Mecord Connect is designed to reduce misuse through multiple independent controls, including:
+- authenticated OAuth access to the hosted MCP service;
+- explicit device pairing and signed device identity;
+- locally enforced capability policy and authorized filesystem roots;
+- approval requirements for risk-bearing operations;
+- restricted public plugin tooling rather than unrestricted terminal/browser/UIA exposure;
+- credential/restricted-data guards and minimized public responses;
+- fail-closed relay/session behavior;
+- ambient credential stripping in the npm launcher;
+- immutable source/payload binding, integrity hashes, and Windows-native helper self-tests.
+
+The package is not intended to provide stealth, persistence, credential theft, malware delivery, access-control bypass, or unauthorized surveillance.
+
+Security and abuse reports
+
+Report suspected abuse or security issues privately to support@splcart.in. Do not send live passwords, access tokens, private keys, recovery credentials, or other active secrets.

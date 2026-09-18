@@ -5,8 +5,8 @@ import { verifyRuntimePayload } from './cli.mjs';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(await fs.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
-if (pkg.name !== '@mecrod/operator') throw new Error('Unexpected npm package name.');
-if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('Operator npm version must be stable semantic versioning.');
+if (pkg.name !== '@mecrod/connect') throw new Error('Unexpected npm package name.');
+if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('Mecord Connect npm version must use stable semantic versioning.');
 
 const manifest = await verifyRuntimePayload();
 if (manifest.version !== pkg.version) {
@@ -19,4 +19,4 @@ if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
 if (manifest.sourceCommit !== expectedCommit) {
   throw new Error(`Runtime payload source ${manifest.sourceCommit} does not match publication source ${expectedCommit}.`);
 }
-console.log(`mecrod-operator publish check: PASS (${pkg.version}, source ${manifest.sourceCommit}, ${manifest.files.length} runtime files)`);
+console.log(`mecrod-connect publish check: PASS (${pkg.version}, source ${manifest.sourceCommit}, ${manifest.files.length} runtime files)`);

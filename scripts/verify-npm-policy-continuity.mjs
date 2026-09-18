@@ -3,18 +3,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const packagePath = path.join(repoRoot, 'packages', 'mecrod-operator', 'package.json');
-const registryUrl = 'https://registry.npmjs.org/%40mecrod%2Foperator';
+const packagePath = path.join(repoRoot, 'packages', 'mecrod-connect', 'package.json');
+const registryUrl = 'https://registry.npmjs.org/%40mecrod%2Fconnect';
 const maxBytes = 8 * 1024 * 1024;
 
 export function assertNpmPolicyContinuity(packument, pkg) {
-  if (pkg?.name !== '@mecrod/operator') throw new Error('Unexpected npm package name.');
+  if (pkg?.name !== '@mecrod/connect') throw new Error('Unexpected npm package name.');
   const declaredClass = pkg?.contentPolicy?.class;
-  if (pkg?.contentPolicy && declaredClass !== 'dual-use') {
-    throw new Error('Unsupported npm contentPolicy.class; omit contentPolicy or use dual-use.');
+  if (declaredClass !== 'dual-use') {
+    throw new Error('Mecord Connect releases must declare npm contentPolicy.class as dual-use.');
   }
   if (packument === null) return false;
-  if (packument?.name !== '@mecrod/operator') throw new Error('npm registry metadata package name mismatch.');
+  if (packument?.name !== '@mecrod/connect') throw new Error('npm registry metadata package name mismatch.');
   if (!packument?.versions || typeof packument.versions !== 'object' || Array.isArray(packument.versions)) {
     throw new Error('npm registry metadata is missing the versions map.');
   }

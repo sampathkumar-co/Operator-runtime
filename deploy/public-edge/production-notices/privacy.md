@@ -2,11 +2,11 @@
 
 Effective: 17 September 2026
 
-Mecord Connect is operated by the publisher of splcart.in. Privacy and support requests may be sent to support@splcart.in.
+Mecord Connect is operated by Kinthala Samuel Sampath Kumar, an individual based in Akkayapalem, Visakhapatnam, Andhra Pradesh, India. Privacy and support requests may be sent to support@splcart.in.
 
 ## What the service processes
 
-Operator processes the identity information needed to authenticate you, device enrollment and routing metadata, task instructions, and the minimum computer data required to perform an action you explicitly request on a paired device. OAuth access tokens are verified for authorization and are not intended to be stored as application data.
+Mecord Connect processes the identity information needed to authenticate you, device enrollment and routing metadata, task instructions, and the minimum computer data required to perform an action you explicitly request on a paired device. OAuth access tokens are verified for authorization and are not intended to be stored as application data.
 
 The paired local runtime remains the execution boundary. Local policy, authorized roots, capability permissions, emergency-stop state, and approval requirements are checked on the paired computer before an action is executed.
 
@@ -22,10 +22,10 @@ Operational container logs are size-rotated and are used for reliability and sec
 
 ## Sharing and security
 
-Operator does not sell personal data. Data is disclosed only as needed to operate the service, comply with law, protect the service or users, or use the infrastructure described above. Operator uses TLS at the public edge, scoped OAuth authorization, signed device identity, bounded relay authority, local approvals and capability checks, and restricted public result projection. No system can guarantee absolute security.
+Mecord Connect does not sell personal data. Data is disclosed only as needed to operate the service, comply with law, protect the service or users, or use the infrastructure described above. Mecord Connect uses TLS at the public edge, scoped OAuth authorization, signed device identity, bounded relay authority, local approvals and capability checks, and restricted public result projection. No system can guarantee absolute security.
 
 ## Your choices and requests
 
-You can stop the local Operator runtime, revoke or reset a paired device, or request account/device erasure. For access, correction, deletion, privacy questions, or a private security report, email support@splcart.in. For a security report, use the subject "Mecord Connect Security Report" and do not send passwords, private keys, access tokens, or other live credentials.
+You can stop the local Mecord Connect runtime, revoke or reset a paired device, or request account/device erasure. For access, correction, deletion, privacy questions, or a private security report, email support@splcart.in. For a security report, use the subject "Mecord Connect Security Report" and do not send passwords, private keys, access tokens, or other live credentials.
 
 Mandatory privacy and consumer rights that apply to you remain unaffected by this notice.

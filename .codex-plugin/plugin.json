@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Securely inspect and modify user-authorized development projects on a paired computer through a restricted public MCP surface.",
   "author": {
-    "name": "Mecord Connect",
+    "name": "Kinthala Samuel Sampath Kumar",
     "url": "https://operator.splcart.in"
   },
   "homepage": "https://operator.splcart.in",
@@ -11,7 +11,7 @@
     "displayName": "Mecord Connect",
     "shortDescription": "Operate your dev projects",
     "longDescription": "Mecord Connect links ChatGPT to a paired computer for carefully bounded development workflows. The public plugin can inspect an authorized project, list and read safe project files, create new files without overwriting existing files, replace files only with a fresh SHA-256 precondition, inspect Git status and safe diffs, and list locally trusted project commands. High-power private capabilities such as generic terminal execution, unrestricted browser automation, Windows UI automation, and arbitrary database-row access are not exposed by the public plugin. Restricted-data guards reject credentials and other disallowed sensitive data before public relay execution, and public responses remove internal telemetry and identifiers.",
-    "developerName": "Mecord Connect",
+    "developerName": "Kinthala Samuel Sampath Kumar",
     "category": "Developer Tools",
     "capabilities": [
       "Inspect authorized development projects",
