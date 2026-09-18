@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PACKAGE_NAME = '@mecrod/connect';
+const PACKAGE_NAME = 'mecord-connect';
 const RELAY_URL = 'wss://operator.splcart.in/device';
 const RELAY_RESULT_URL = 'https://operator.splcart.in/v1/device-result';
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -37,9 +37,9 @@ function usage() {
   return `Mecord Connect
 
 Usage:
-  npx @mecrod/connect@latest remote [--root <folder>] [--no-browser]
-  npx @mecrod/connect@latest doctor
-  npx @mecrod/connect@latest --help
+  npx mecord-connect@latest remote [--root <folder>] [--no-browser]
+  npx mecord-connect@latest doctor
+  npx mecord-connect@latest --help
 
 remote starts the local policy/runtime agent and its secure relay connection only.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.

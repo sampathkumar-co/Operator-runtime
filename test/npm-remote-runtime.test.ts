@@ -8,7 +8,7 @@ import {
   parseArgs,
   safeRuntimeEnvironment,
   validateRuntimeManifest
-} from '../packages/mecrod-connect/src/cli.mjs';
+} from '../packages/mecord-connect/src/cli.mjs';
 
 function manifest(overrides: Record<string, unknown> = {}) {
   const required = [
@@ -19,7 +19,7 @@ function manifest(overrides: Record<string, unknown> = {}) {
   ];
   return {
     schemaVersion: 1,
-    package: '@mecrod/connect',
+    package: 'mecord-connect',
     version: '1.0.0',
     platform: 'win32',
     arch: 'x64',
@@ -45,7 +45,7 @@ test('remote CLI is explicit and bounded', () => {
 });
 
 test('remote launcher binds its local agent to an ephemeral loopback port', async () => {
-  const source = await fs.readFile(path.resolve('packages/mecrod-connect/src/cli.mjs'), 'utf8');
+  const source = await fs.readFile(path.resolve('packages/mecord-connect/src/cli.mjs'), 'utf8');
   assert.match(source, /env\.OPERATOR_AGENT_HOST = '127\.0\.0\.1'/);
   assert.match(source, /env\.OPERATOR_AGENT_PORT = '0'/);
   assert.doesNotMatch(source, /env\.OPERATOR_AGENT_PORT = '47100'/);
@@ -138,7 +138,7 @@ test('relay-only main treats terminal relay loss and emergency stop as fatal', a
 });
 
 test('npm publication fails closed unless exact source commit is supplied', async () => {
-  const source = await fs.readFile(path.resolve('packages/mecrod-connect/src/publish-check.mjs'), 'utf8');
+  const source = await fs.readFile(path.resolve('packages/mecord-connect/src/publish-check.mjs'), 'utf8');
   assert.match(source, /process\.env\.OPERATOR_SOURCE_COMMIT/);
   assert.doesNotMatch(source, /process\.env\.GITHUB_SHA/);
   assert.match(source, /Refusing npm publish: OPERATOR_SOURCE_COMMIT/);
@@ -148,7 +148,7 @@ test('npm publication fails closed unless exact source commit is supplied', asyn
 test('npm release uses immutable first-release artifact and staged future publication', async () => {
   const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-release.yml'), 'utf8');
   const sourceGate = workflow.indexOf('Revalidate exact source binding before release handoff');
-  const sourceCommand = workflow.indexOf('node packages/mecrod-connect/src/publish-check.mjs', sourceGate);
+  const sourceCommand = workflow.indexOf('node packages/mecord-connect/src/publish-check.mjs', sourceGate);
   const upload = workflow.indexOf('Upload immutable npm release artifact');
   const handoff = workflow.indexOf('First-release artifact handoff');
   const npm11 = workflow.indexOf('npm@11.19.1');
@@ -157,7 +157,7 @@ test('npm release uses immutable first-release artifact and staged future public
   assert.ok(sourceGate >= 0 && sourceCommand > sourceGate && upload > sourceCommand && handoff > upload);
   assert.ok(npm11 > handoff && existsGate > npm11 && stage > existsGate);
   assert.match(workflow, /default: artifact/);
-  assert.match(workflow, /public npm release package name must be @mecrod\/connect/);
+  assert.match(workflow, /public npm release package name must be mecord-connect/);
   assert.match(workflow, /requires the owner-approved proprietary LICENSE/);
   assert.match(workflow, /must declare contentPolicy\.class as dual-use/);
   assert.match(workflow, /npm author must match the approved individual publisher identity/);
@@ -166,11 +166,11 @@ test('npm release uses immutable first-release artifact and staged future public
   assert.match(workflow, /node scripts\/verify-npm-policy-continuity\.mjs/);
   assert.match(workflow, /release tarball hash changed before staging/);
   assert.match(workflow.slice(stage), /--access public[\s\S]*--provenance[\s\S]*--ignore-scripts=false/);
-  assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecrod-connect/);
+  assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecord-connect/);
 });
 
 test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
-  const source = await fs.readFile(path.resolve('packages/mecrod-connect/scripts/build-runtime-payload.mjs'), 'utf8');
+  const source = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
   assert.match(source, /gitText\(\['status', '--porcelain=v1', '--untracked-files=no'/);
   assert.match(source, /resolveTrustedGitExecutable\(process\.env\)/);
   assert.match(source, /execFileSync\(gitExecutable, args/);
@@ -198,8 +198,8 @@ test('runtime manifest requires the complete hardened native boundary', () => {
 });
 
 test('npm package metadata is canonical before publication', async () => {
-  const pkg = JSON.parse(await fs.readFile(path.resolve('packages/mecrod-connect/package.json'), 'utf8'));
-  assert.equal(pkg.name, '@mecrod/connect');
+  const pkg = JSON.parse(await fs.readFile(path.resolve('packages/mecord-connect/package.json'), 'utf8'));
+  assert.equal(pkg.name, 'mecord-connect');
   assert.equal(pkg.bin?.['mecord-connect'], 'bin/operator.mjs');
   assert.equal(pkg.repository?.url, 'git+https://github.com/sampathkumar-co/Operator-runtime.git');
   assert.equal(pkg.bugs?.url, 'https://github.com/sampathkumar-co/Operator-runtime/issues');
@@ -211,7 +211,7 @@ test('npm package metadata is canonical before publication', async () => {
   assert.equal(pkg.author?.name, 'Kinthala Samuel Sampath Kumar');
   assert.equal(pkg.author?.email, 'support@splcart.in');
   assert.deepEqual(pkg.keywords, ['mecord-connect', 'chatgpt', 'mcp', 'windows', 'automation', 'developer-tools']);
-  const readme = await fs.readFile(path.resolve('packages/mecrod-connect/README.md'), 'utf8');
+  const readme = await fs.readFile(path.resolve('packages/mecord-connect/README.md'), 'utf8');
   assert.match(readme, /https:\/\/operator\.splcart\.in\/support/);
   assert.match(readme, /https:\/\/operator\.splcart\.in\/privacy/);
   assert.match(readme, /https:\/\/operator\.splcart\.in\/terms/);

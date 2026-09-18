@@ -1,12 +1,12 @@
 MECORD CONNECT — DUAL-USE CONTENT DISCLOSURE
 
-Package: @mecrod/connect
+Package: mecord-connect
 Publisher: Kinthala Samuel Sampath Kumar
 Contact: support@splcart.in
 
 Purpose
 
-@mecrod/connect is the Windows runtime used to pair a user-authorized computer with Mecord Connect for legitimate development and computer-automation workflows initiated through ChatGPT.
+mecord-connect is the Windows runtime used to pair a user-authorized computer with Mecord Connect for legitimate development and computer-automation workflows initiated through ChatGPT.
 
 Why this package is declared dual-use
 

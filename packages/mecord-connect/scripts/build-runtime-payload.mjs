@@ -126,7 +126,7 @@ for (const relative of paths) {
 
 const manifest = {
   schemaVersion: 1,
-  package: '@mecrod/connect',
+  package: 'mecord-connect',
   version: pkg.version,
   platform: 'win32',
   arch: 'x64',

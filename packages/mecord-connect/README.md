@@ -1,9 +1,9 @@
-# @mecrod/connect
+# mecord-connect
 
 One-command Windows runtime for connecting a user-authorized computer to Mecord Connect in ChatGPT.
 
 ```powershell
-npx @mecrod/connect@latest remote
+npx mecord-connect@latest remote
 ```
 
 Requires Windows x64 with a supported Node.js line: 22.14+, 24.x, or 26.x. Git features additionally require Git 2.45 or newer; older or missing Git disables only the Git capabilities while the rest of the Mecord Connect runtime remains available.
@@ -15,7 +15,7 @@ On first use the runtime prints a one-time device pairing code. Claim that code 
 By default the current directory is the authorized filesystem/project root. To authorize another folder explicitly:
 
 ```powershell
-npx @mecrod/connect@latest remote --root C:\path\to\project
+npx mecord-connect@latest remote --root C:\path\to\project
 ```
 
 Use `--no-browser` to disable automatic launch of Mecord Connect's managed-browser capability. Generic terminal execution remains disabled by default; project commands continue to use the existing policy/approval boundary.
@@ -23,7 +23,7 @@ Use `--no-browser` to disable automatic launch of Mecord Connect's managed-brows
 Before starting a session you can verify the package payload and all three Windows-native security helpers:
 
 ```powershell
-npx @mecrod/connect@latest doctor
+npx mecord-connect@latest doctor
 ```
 
 `doctor` verifies every packaged runtime file against SHA-256/size metadata, exercises the DPAPI and Windows path-lease self-tests, and performs a protocol health check against the UI Automation sidecar. It does not start the relay connection.
