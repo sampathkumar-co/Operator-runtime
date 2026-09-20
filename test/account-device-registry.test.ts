@@ -53,6 +53,40 @@ test('paired device can be bound to one active account and cannot silently cross
   await assert.rejects(accounts.bindDevice(b.accountId, peer.deviceId), (error: any) => error?.code === 'DEVICE_ACCOUNT_CONFLICT');
 });
 
+test('one authenticated account can own multiple independently registered devices', async (t) => {
+  const stateDir = await temp(t, 'operator-account-multi-device-');
+  const devices = new DeviceRegistryStore(stateDir);
+  const accounts = new AccountDeviceRegistry(stateDir, devices);
+  const principal = { issuer: 'https://issuer.example', subject: 'multi-device-user' };
+  const account = await accounts.resolveOrCreateAccount(principal);
+
+  const register = async (name: string) => {
+    const { publicKey } = crypto.generateKeyPairSync('ed25519');
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const peer = {
+      deviceId: crypto.randomUUID(),
+      deviceName: name,
+      createdAt: new Date(0).toISOString(),
+      publicKeyPem,
+      fingerprint: crypto.createHash('sha256').update(publicKeyPem).digest('base64url')
+    };
+    await devices.registerVerifiedPeer(peer);
+    return peer;
+  };
+
+  const laptop = await register('Laptop');
+  const desktop = await register('Desktop');
+  await accounts.bindDevice(account.accountId, laptop.deviceId);
+  await accounts.bindDevice(account.accountId, desktop.deviceId);
+
+  const sameAccount = await accounts.resolveOrCreateAccount(principal);
+  assert.equal(sameAccount.accountId, account.accountId);
+  const memberships = await accounts.listDevices(account.accountId);
+  assert.deepEqual(new Set(memberships.map((entry) => entry.deviceId)), new Set([laptop.deviceId, desktop.deviceId]));
+  assert.equal(await accounts.ownsDevice(account.accountId, laptop.deviceId), true);
+  assert.equal(await accounts.ownsDevice(account.accountId, desktop.deviceId), true);
+});
+
 test('explicit device removal permits deliberate rebinding but crypto revocation still blocks ownership', async (t) => {
   const { devices, accounts, peer } = await pairedFixture(t);
   const a = await accounts.resolveOrCreateAccount({ issuer: 'issuer', subject: 'alice' });
