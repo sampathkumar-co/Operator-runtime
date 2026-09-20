@@ -122,32 +122,32 @@ const page = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mecord Connect â€” Account</title>
+<title>Mecord Connect - Account</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}
-body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#242424;color:#f7f7f7;display:grid;min-height:100vh;place-items:center}
-.shell{width:min(92vw,470px)}
-.brand{text-align:center;margin-bottom:20px}.mark{width:68px;height:68px;margin:0 auto 12px;border:2px solid #d7d7d7;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:22px}
-.brand h1{margin:0;font-size:28px;font-weight:650}.brand p{margin:7px 0 0;color:#b8b8b8;font-size:14px}
-.card{background:#2e2e2e;border:1px solid #454545;border-radius:16px;padding:22px;box-shadow:0 22px 70px #0005}
-.tabs{display:grid;grid-template-columns:1fr 1fr;background:#242424;border-radius:10px;padding:4px;margin-bottom:22px}
-.tab{margin:0;border:0;border-radius:8px;padding:10px;background:transparent;color:#bbb;font-weight:700;cursor:pointer}
-.tab.active{background:#3b3b3b;color:#fff}
+:root{--ink:#111827;--muted:#697386;--panel:#fff;--bg:#f4f7fb;--brand:#2563eb;--brand2:#4f46e5;--good:#15803d;--bad:#c2414b}*{box-sizing:border-box}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:radial-gradient(circle at 12% 12%,#e9efff 0,transparent 28%),radial-gradient(circle at 90% 88%,#eef2ff 0,transparent 24%),var(--bg);display:grid;min-height:100vh;place-items:center;padding:32px}
+.shell{width:min(1080px,100%);min-height:650px;display:grid;grid-template-columns:.9fr 1.1fr;background:var(--panel);border:1px solid rgba(17,24,39,.08);border-radius:28px;overflow:hidden;box-shadow:0 30px 90px rgba(27,42,78,.16)}
+.brand{position:relative;padding:42px;background:linear-gradient(145deg,#0f172a 0%,#172554 45%,#1d4ed8 100%);color:#fff;text-align:left;margin:0;display:flex;flex-direction:column;justify-content:center;overflow:hidden}.brand:after{content:"";position:absolute;right:-90px;bottom:-110px;width:330px;height:330px;border-radius:50%;background:rgba(255,255,255,.07)}.mark{width:48px;height:48px;margin:0 0 28px;border:1px solid rgba(255,255,255,.25);border-radius:14px;display:grid;place-items:center;font-weight:850;font-size:15px;background:rgba(255,255,255,.12)}
+.brand h1{position:relative;margin:0 0 14px;font-size:42px;line-height:1.03;letter-spacing:-.045em;max-width:360px}.brand p{position:relative;margin:0;color:#dbe4ff;font-size:15px;line-height:1.65;max-width:365px}
+.brand-lockup{position:absolute;top:38px;left:42px;display:flex;align-items:center;gap:12px;font-size:18px;font-weight:800;z-index:2}.brand-lockup .mark{margin:0}.hero-copy{position:relative;z-index:2}.eyebrow{font-size:11px;letter-spacing:.12em;font-weight:800;color:#bfdbfe;margin-bottom:17px}.hero-proof{position:absolute;left:42px;bottom:40px;z-index:2;display:grid;gap:9px;font-size:12px;color:#dbeafe}.card{padding:56px 64px;background:#fff;border:0;border-radius:0;box-shadow:none;display:flex;flex-direction:column;justify-content:center}
+.tabs{display:grid;grid-template-columns:1fr 1fr;background:#f1f5f9;border-radius:12px;padding:4px;margin-bottom:28px}
+.tab{margin:0;border:0;border-radius:9px;padding:11px;background:transparent;color:#64748b;font-weight:750;cursor:pointer}
+.tab.active{background:#fff;color:#0f172a;box-shadow:0 1px 5px rgba(15,23,42,.09)}
 .pane{display:none}.pane.active{display:block}
-h2{margin:0 0 6px;font-size:22px}p.help{margin:0 0 18px;color:#bcbcbc;font-size:14px;line-height:1.45}
-label{display:block;margin:13px 0 6px;font-size:13px;font-weight:700;color:#ddd}
-input{width:100%;padding:12px 13px;border-radius:8px;border:1px solid #5a5a5a;background:#272727;color:#fff;font-size:15px;outline:none}
-input:focus{border-color:#2889df;box-shadow:0 0 0 2px #2889df33}
-.primary{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#2385d9;color:#fff;font-weight:800;font-size:15px;cursor:pointer}
-.primary:disabled{opacity:.65;cursor:wait}.secondary{background:transparent;border:0;color:#69b6ff;cursor:pointer;font-weight:700;padding:0}
-.row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#ccc;font-size:14px}.row input{width:auto}
+h2{margin:0 0 7px;font-size:29px;letter-spacing:-.035em}p.help{margin:0 0 22px;color:var(--muted);font-size:14px;line-height:1.5}
+label{display:block;margin:14px 0 7px;font-size:13px;font-weight:720;color:#334155}
+input{width:100%;height:48px;padding:0 13px;border-radius:11px;border:1px solid #dbe1ea;background:#fff;color:#0f172a;font-size:15px;outline:none;transition:.16s}
+input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
+.primary{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#2563eb;color:#fff;font-weight:800;font-size:15px;cursor:pointer}
+.primary:disabled{opacity:.65;cursor:wait}.secondary{background:transparent;border:0;color:#255edc;cursor:pointer;font-weight:700;padding:0}
+.row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#64748b;font-size:13px}.row input{width:auto}
 .msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
 .switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
-.footer{text-align:center;color:#888;font-size:12px;margin-top:18px}
-</style>
+.footer{grid-column:2;text-align:center;color:#94a3b8;font-size:11px;margin:-38px 0 20px}
+@media(max-width:820px){.shell{display:block}.brand{display:none}.brand-lockup{position:absolute;top:38px;left:42px;display:flex;align-items:center;gap:12px;font-size:18px;font-weight:800;z-index:2}.brand-lockup .mark{margin:0}.hero-copy{position:relative;z-index:2}.eyebrow{font-size:11px;letter-spacing:.12em;font-weight:800;color:#bfdbfe;margin-bottom:17px}.hero-proof{position:absolute;left:42px;bottom:40px;z-index:2;display:grid;gap:9px;font-size:12px;color:#dbeafe}.card{padding:34px 22px}.footer{grid-column:auto;margin:20px}}</style>
 </head>
 <body><main class="shell">
-<div class="brand"><div class="mark">MC</div><h1>Mecord Connect</h1><p>Securely connect ChatGPT to your authorized computer.</p></div>
+<div class="brand"><div class="brand-lockup"><div class="mark">MC</div><span>Mecord Connect</span></div><div class="hero-copy"><div class="eyebrow">SECURE DEVICE BRIDGE</div><h1>Your computer, available to ChatGPT.</h1><p>Work with your authorized projects while your device permissions and local policy stay in control.</p></div><div class="hero-proof"><span>✓ Device-scoped access</span><span>✓ Local approval boundary</span><span>✓ One account, multiple devices</span></div></div>
 <section class="card">
 <div class="tabs">
 <button id="signInTab" class="tab active" type="button">Sign in</button>
@@ -178,7 +178,7 @@ input:focus{border-color:#2889df;box-shadow:0 0 0 2px #2889df33}
 <div class="switch">Already have an account? <button id="signinInstead" class="secondary" type="button">Sign in</button></div>
 </div>
 </section>
-<div class="footer">Mecord Connect authentication Â· Password sign-in is handled by Authelia</div>
+<div class="footer">Mecord Connect · Secure account access</div>
 </main>
 <script>
 (function(){
@@ -212,7 +212,7 @@ input:focus{border-color:#2889df;box-shadow:0 0 0 2px #2889df33}
       const j=await r.json().catch(()=>({}));
       if(!r.ok||j.status==='KO') throw new Error('Incorrect username or password.');
       const redirect=(j.data&&j.data.redirect)||j.redirect;
-      msg.className='msg ok'; msg.textContent='Signed in. Continuingâ€¦';
+      msg.className='msg ok'; msg.textContent='Signed in. Continuing...';
       byId('loginPassword').value='';
       if(redirect){ location.assign(redirect); return; }
       const next=new URL(location.href);
@@ -230,7 +230,7 @@ input:focus{border-color:#2889df;box-shadow:0 0 0 2px #2889df33}
     const username=byId('signupUsername').value.trim();
     const password=byId('signupPassword').value;
     if(password!==byId('signupConfirm').value){msg.className='msg bad';msg.textContent='Passwords do not match.';return;}
-    msg.className='msg';msg.textContent='Creating accountâ€¦';btn.disabled=true;
+    msg.className='msg';msg.textContent='Creating account...';btn.disabled=true;
     try{
       const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:username,email:byId('signupEmail').value,password:password,invite:byId('signupInvite').value})});
       const j=await r.json().catch(()=>({}));
