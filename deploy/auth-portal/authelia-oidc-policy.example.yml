@@ -2,9 +2,10 @@
 # Merge under identity_providers.oidc in the production configuration.
 authorization_policies:
   chatgpt_reviewer_policy:
-    # Mecord Connect is deliberately password-authenticated for this client.
-    # Do not fall back to Authelia's MFA enrollment UI during OAuth.
-    default_policy: 'one_factor'
+    # Known Mecord groups are explicitly password-authenticated. Keep the
+    # stronger Authelia fallback for unrelated accounts; stale Mecord flows are
+    # intercepted by the branded recovery route before raw MFA UI is exposed.
+    default_policy: 'two_factor'
     rules:
       - policy: 'one_factor'
         subject: 'group:operator-reviewers'

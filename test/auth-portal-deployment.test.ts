@@ -102,9 +102,9 @@ test('stale Mecord auth-native routes are intercepted by branded recovery', () =
   assert.match(caddy, /rewrite \* \/recover/);
 });
 
-test('Mecord OIDC policy stays one-factor and does not expose consent or MFA fallbacks', () => {
+test('Mecord groups stay one-factor while unrelated accounts retain the stronger fallback', () => {
   const policy = text('deploy/auth-portal/authelia-oidc-policy.example.yml');
-  assert.match(policy, /default_policy: 'one_factor'/);
+  assert.match(policy, /default_policy: 'two_factor'/);
   assert.match(policy, /subject: 'group:operator-users'/);
   assert.match(policy, /subject: 'group:operator-reviewers'/);
   assert.match(policy, /consent_mode: 'implicit'/);
