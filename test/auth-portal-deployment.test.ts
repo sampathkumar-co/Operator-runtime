@@ -82,3 +82,12 @@ test('auth reverse-proxy source keeps OAuth entry, signup, and native Authelia r
   assert.ok(caddy.indexOf('@oauth_entry') < caddy.indexOf('@signup'));
   assert.ok(caddy.indexOf('@signup') < caddy.lastIndexOf('handle {'));
 });
+
+test('OAuth entry renders Mecord product UI rather than raw Authelia branding', () => {
+  const source = text('deploy/auth-portal/server.mjs');
+  assert.match(source, /Mecord Connect/);
+  assert.match(source, /Your computer, available to ChatGPT\./);
+  assert.match(source, /Create account/);
+  assert.match(source, /Sign in/);
+  assert.doesNotMatch(source, /Powered by Authelia/);
+});
