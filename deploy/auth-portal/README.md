@@ -1,8 +1,14 @@
 # Operator account signup portal
 
-This service provides the browser signup surface used in production at `/signup`.
-It is intentionally separate from Authelia and writes only to Authelia's file user
-database through a shared writable users directory.
+This service provides the browser account surface used in production at `/signup`
+and at the OpenID Connect login entry. The OAuth entry presents Sign in and
+Create account together, then sends password authentication directly from the
+browser to Authelia's `/api/firstfactor` endpoint while preserving the original
+OIDC flow parameters. The service itself never receives sign-in passwords.
+
+It is intentionally separate from Authelia and writes only newly registered
+accounts to Authelia's file user database through a shared writable users
+directory.
 
 ## Required deployment contract
 
@@ -11,8 +17,12 @@ database through a shared writable users directory.
 - `PORTAL_USERS_FILE`: shared Authelia user database path.
 - `PORTAL_DEFAULT_GROUP`: normal signup group; production uses
   `operator-users`.
-- Reverse proxy only `/signup` and `/signup/*` to this service. All other
-  auth routes remain owned by Authelia.
+- Reverse proxy `/signup` and `/signup/*` to this service.
+- For the root path only, proxy requests with `flow=openid_connect` to this
+  service unless `auth_native=1` is present. The native bypass is required so
+  Authelia can continue second-factor or other native portal stages.
+- All API endpoints (including `/api/firstfactor`) and all other auth routes
+  remain owned by Authelia.
 - Authelia must mount the same user database read-only and enable its file
   watcher so atomic portal updates reload without restarts.
 

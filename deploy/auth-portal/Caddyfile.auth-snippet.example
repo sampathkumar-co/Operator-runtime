@@ -1,0 +1,33 @@
+# Place these handlers before the catch-all Authelia reverse_proxy in the
+# auth.splcart.in site block. The auth portal is reachable only on the internal
+# operator_ingress network at 172.16.3.31:8090.
+
+@oauth_entry {
+	path /
+	query flow=openid_connect
+	not query auth_native=1
+}
+handle @oauth_entry {
+	reverse_proxy 172.16.3.31:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+@signup path /signup /signup/*
+handle @signup {
+	request_body {
+		max_size 16KB
+	}
+	reverse_proxy 172.16.3.31:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# All remaining auth routes, especially /api/firstfactor, stay with Authelia.
+handle {
+	reverse_proxy 172.16.3.30:9091 {
+		header_up X-Real-IP {remote_host}
+	}
+}

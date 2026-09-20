@@ -51,11 +51,34 @@ test('auth signup portal serializes writes and uses atomic replacement with back
   assert.match(source, /fs\.rename\(temp, usersFile\)/);
 });
 
-test('public signup surface stays isolated to explicit signup routes', () => {
+test('public auth surface exposes signup plus the OpenID Connect entry only', () => {
   const source = text('deploy/auth-portal/server.mjs');
-  assert.match(source, /req\.method === 'GET' && req\.url === '\/signup'/);
+  assert.match(source, /requestURL\.pathname === '\/' && requestURL\.searchParams\.get\('flow'\) === 'openid_connect'/);
+  assert.match(source, /requestURL\.pathname === '\/signup' \|\| oauthEntry/);
   assert.match(source, /req\.method === 'POST' && req\.url === '\/signup\/api'/);
   assert.match(source, /if \(!rateAllowed\(ip\)\) return send\(res, 429, \{ ok: false, error: 'Too many attempts\. Try again later\.' \}\);/);
   assert.match(source, /cache-control/);
   assert.match(source, /x-frame-options/);
+});
+
+test('OAuth login page preserves Authelia flow fields and has native second-factor fallback', () => {
+  const source = text('deploy/auth-portal/server.mjs');
+  assert.match(source, /fetch\('\/api\/firstfactor'/);
+  for (const field of ['rd', 'rm', 'flow_id', 'flow', 'subflow', 'user_code']) {
+    assert.match(source, new RegExp("q\\.get\\('" + field.replace('_', '\\_') + "'\\)"));
+  }
+  assert.match(source, /keepMeLoggedIn:byId\('remember'\)\.checked/);
+  assert.match(source, /next\.searchParams\.set\('auth_native','1'\)/);
+  assert.match(source, /Account created\. Sign in to continue\./);
+});
+
+test('auth reverse-proxy source keeps OAuth entry, signup, and native Authelia routing separated', () => {
+  const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
+  assert.match(caddy, /query flow=openid_connect/);
+  assert.match(caddy, /not query auth_native=1/);
+  assert.match(caddy, /@signup path \/signup \/signup\/\*/);
+  assert.match(caddy, /reverse_proxy 172\.16\.3\.31:8090/);
+  assert.match(caddy, /reverse_proxy 172\.16\.3\.30:9091/);
+  assert.ok(caddy.indexOf('@oauth_entry') < caddy.indexOf('@signup'));
+  assert.ok(caddy.indexOf('@signup') < caddy.lastIndexOf('handle {'));
 });

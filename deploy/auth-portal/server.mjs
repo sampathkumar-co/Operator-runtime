@@ -122,44 +122,137 @@ const page = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Create Operator account</title>
+<title>Mecord Connect â€” Account</title>
 <style>
-body{margin:0;font-family:Inter,system-ui,sans-serif;background:#0b1020;color:#eef2ff;display:grid;min-height:100vh;place-items:center}
-.card{width:min(92vw,460px);background:#111831;border:1px solid #26304f;border-radius:22px;padding:28px;box-shadow:0 24px 80px #0007}
-h1{margin:0 0 8px;font-size:28px}p{color:#aeb8d4;line-height:1.5}
-label{display:block;margin:16px 0 6px;font-weight:600}
-input{width:100%;box-sizing:border-box;padding:13px 14px;border-radius:12px;border:1px solid #33405f;background:#0a1124;color:white;font-size:15px}
-button{width:100%;margin-top:20px;padding:13px;border:0;border-radius:12px;background:#fff;color:#111831;font-weight:800;font-size:15px;cursor:pointer}
-#msg{min-height:24px;margin-top:14px}.ok{color:#7ee2a8}.bad{color:#ff9a9a}.small{font-size:13px}
+:root{color-scheme:dark}*{box-sizing:border-box}
+body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#242424;color:#f7f7f7;display:grid;min-height:100vh;place-items:center}
+.shell{width:min(92vw,470px)}
+.brand{text-align:center;margin-bottom:20px}.mark{width:68px;height:68px;margin:0 auto 12px;border:2px solid #d7d7d7;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:22px}
+.brand h1{margin:0;font-size:28px;font-weight:650}.brand p{margin:7px 0 0;color:#b8b8b8;font-size:14px}
+.card{background:#2e2e2e;border:1px solid #454545;border-radius:16px;padding:22px;box-shadow:0 22px 70px #0005}
+.tabs{display:grid;grid-template-columns:1fr 1fr;background:#242424;border-radius:10px;padding:4px;margin-bottom:22px}
+.tab{margin:0;border:0;border-radius:8px;padding:10px;background:transparent;color:#bbb;font-weight:700;cursor:pointer}
+.tab.active{background:#3b3b3b;color:#fff}
+.pane{display:none}.pane.active{display:block}
+h2{margin:0 0 6px;font-size:22px}p.help{margin:0 0 18px;color:#bcbcbc;font-size:14px;line-height:1.45}
+label{display:block;margin:13px 0 6px;font-size:13px;font-weight:700;color:#ddd}
+input{width:100%;padding:12px 13px;border-radius:8px;border:1px solid #5a5a5a;background:#272727;color:#fff;font-size:15px;outline:none}
+input:focus{border-color:#2889df;box-shadow:0 0 0 2px #2889df33}
+.primary{width:100%;margin-top:18px;padding:12px;border:0;border-radius:8px;background:#2385d9;color:#fff;font-weight:800;font-size:15px;cursor:pointer}
+.primary:disabled{opacity:.65;cursor:wait}.secondary{background:transparent;border:0;color:#69b6ff;cursor:pointer;font-weight:700;padding:0}
+.row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#ccc;font-size:14px}.row input{width:auto}
+.msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
+.switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
+.footer{text-align:center;color:#888;font-size:12px;margin-top:18px}
 </style>
 </head>
-<body><main class="card">
-<h1>Create your Operator account</h1>
-<p>Choose the username and password you want. No server editing is needed.</p>
-<form id="f">
-<label>Username</label><input id="u" autocomplete="username" required placeholder="sampath">
-<label>Email</label><input id="e" type="email" autocomplete="email" required placeholder="you@example.com">
-<label>Password</label><input id="p" type="password" autocomplete="new-password" required minlength="12">
-<label>Confirm password</label><input id="c" type="password" autocomplete="new-password" required minlength="12">
-<label>Registration code</label><input id="i" type="password" autocomplete="one-time-code" required>
-<button>Create account</button><div id="msg" class="small"></div>
+<body><main class="shell">
+<div class="brand"><div class="mark">MC</div><h1>Mecord Connect</h1><p>Securely connect ChatGPT to your authorized computer.</p></div>
+<section class="card">
+<div class="tabs">
+<button id="signInTab" class="tab active" type="button">Sign in</button>
+<button id="signUpTab" class="tab" type="button">Create account</button>
+</div>
+<div id="signInPane" class="pane active">
+<h2>Sign in</h2><p class="help">Use your Mecord Connect account to continue.</p>
+<form id="signInForm">
+<label for="loginUsername">Username</label><input id="loginUsername" autocomplete="username" required>
+<label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required>
+<div class="row"><input id="remember" type="checkbox"><label for="remember" style="margin:0;font-weight:500">Remember me</label></div>
+<button id="signInButton" class="primary" type="submit">Sign in</button>
+<div id="loginMsg" class="msg"></div>
 </form>
+<div class="switch">New here? <button id="createInstead" class="secondary" type="button">Create an account</button></div>
+</div>
+<div id="signUpPane" class="pane">
+<h2>Create account</h2><p class="help">Choose your own username and password. You only need the registration code once.</p>
+<form id="signUpForm">
+<label for="signupUsername">Username</label><input id="signupUsername" autocomplete="username" required placeholder="sampath">
+<label for="signupEmail">Email</label><input id="signupEmail" type="email" autocomplete="email" required placeholder="you@example.com">
+<label for="signupPassword">Password</label><input id="signupPassword" type="password" autocomplete="new-password" required minlength="12">
+<label for="signupConfirm">Confirm password</label><input id="signupConfirm" type="password" autocomplete="new-password" required minlength="12">
+<label for="signupInvite">Registration code</label><input id="signupInvite" type="password" autocomplete="one-time-code" required>
+<button id="signUpButton" class="primary" type="submit">Create account</button>
+<div id="signupMsg" class="msg"></div>
+</form>
+<div class="switch">Already have an account? <button id="signinInstead" class="secondary" type="button">Sign in</button></div>
+</div>
+</section>
+<div class="footer">Mecord Connect authentication Â· Password sign-in is handled by Authelia</div>
+</main>
 <script>
-const f=document.getElementById('f'),m=document.getElementById('msg');
-f.addEventListener('submit',async e=>{e.preventDefault();m.className='small';m.textContent='Creating account…';
-if(p.value!==c.value){m.className='small bad';m.textContent='Passwords do not match.';return}
-try{const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:u.value,email:e.value,password:p.value,invite:i.value})});
-const j=await r.json();m.className='small '+(r.ok?'ok':'bad');m.textContent=r.ok?'Account created. You can sign in now.':(j.error||'Could not create account.');
-if(r.ok){p.value='';c.value='';i.value=''}}catch{m.className='small bad';m.textContent='Could not reach the account service.'}});
+(function(){
+  const byId=(id)=>document.getElementById(id);
+  const signInTab=byId('signInTab'),signUpTab=byId('signUpTab');
+  const signInPane=byId('signInPane'),signUpPane=byId('signUpPane');
+  function show(which){
+    const login=which==='signin';
+    signInTab.classList.toggle('active',login); signUpTab.classList.toggle('active',!login);
+    signInPane.classList.toggle('active',login); signUpPane.classList.toggle('active',!login);
+    setTimeout(()=>{ const el=byId(login?'loginUsername':'signupUsername'); if(el) el.focus(); },0);
+  }
+  signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
+  byId('createInstead').onclick=()=>show('signup'); byId('signinInstead').onclick=()=>show('signin');
+  if(location.pathname==='/signup') show('signup');
+
+  byId('signInForm').addEventListener('submit',async(ev)=>{
+    ev.preventDefault();
+    const msg=byId('loginMsg'),btn=byId('signInButton');
+    msg.className='msg'; msg.textContent='Signing inâ€¦'; btn.disabled=true;
+    const q=new URLSearchParams(location.search);
+    const body={
+      username:byId('loginUsername').value.trim(),
+      password:byId('loginPassword').value,
+      keepMeLoggedIn:byId('remember').checked
+    };
+    const optional={targetURL:q.get('rd'),requestMethod:q.get('rm'),flowID:q.get('flow_id'),flow:q.get('flow'),subflow:q.get('subflow'),userCode:q.get('user_code')};
+    for(const k in optional){ if(optional[k]) body[k]=optional[k]; }
+    try{
+      const r=await fetch('/api/firstfactor',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||j.status==='KO') throw new Error('Incorrect username or password.');
+      const redirect=(j.data&&j.data.redirect)||j.redirect;
+      msg.className='msg ok'; msg.textContent='Signed in. Continuingâ€¦';
+      byId('loginPassword').value='';
+      if(redirect){ location.assign(redirect); return; }
+      const next=new URL(location.href);
+      next.pathname='/'; next.searchParams.set('auth_native','1');
+      location.assign(next.pathname+'?'+next.searchParams.toString());
+    }catch(err){
+      msg.className='msg bad'; msg.textContent=(err&&err.message)||'Sign in failed.';
+      byId('loginPassword').value=''; btn.disabled=false; byId('loginPassword').focus();
+    }
+  });
+
+  byId('signUpForm').addEventListener('submit',async(ev)=>{
+    ev.preventDefault();
+    const msg=byId('signupMsg'),btn=byId('signUpButton');
+    const username=byId('signupUsername').value.trim();
+    const password=byId('signupPassword').value;
+    if(password!==byId('signupConfirm').value){msg.className='msg bad';msg.textContent='Passwords do not match.';return;}
+    msg.className='msg';msg.textContent='Creating accountâ€¦';btn.disabled=true;
+    try{
+      const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:username,email:byId('signupEmail').value,password:password,invite:byId('signupInvite').value})});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error||'Could not create account.');
+      byId('loginUsername').value=username;
+      byId('signupPassword').value='';byId('signupConfirm').value='';byId('signupInvite').value='';
+      show('signin'); const lm=byId('loginMsg'); lm.className='msg ok'; lm.textContent='Account created. Sign in to continue.';
+    }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Could not create account.';}
+    finally{btn.disabled=false;}
+  });
+})();
 </script>
-</main></body></html>`;
+</body></html>`;
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/signup') {
+    const requestURL = new URL(req.url || '/', 'http://portal.internal');
+    const oauthEntry = requestURL.pathname === '/' && requestURL.searchParams.get('flow') === 'openid_connect';
+    if (req.method === 'GET' && (requestURL.pathname === '/signup' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
     }
-    if (req.method === 'GET' && req.url === '/health') {
+    if (req.method === 'GET' && requestURL.pathname === '/health') {
       return send(res, 200, { ok: true, configured: Boolean(inviteHash) });
     }
     if (req.method === 'POST' && req.url === '/signup/api') {
