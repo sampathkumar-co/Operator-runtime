@@ -1,20 +1,20 @@
-# SPLCART Operator Terms of Service
+# Mecord Connect Terms of Service
 
 **Status:** launch draft; becomes effective only when published on the production website.
 
-These Terms govern use of the hosted SPLCART Operator service and its public ChatGPT plugin. By using the service, a user confirms that they are legally permitted to control every computer, project, repository and account they connect to Operator.
+These Terms govern use of the hosted Mecord Connect service and its public ChatGPT plugin. By using the service, a user confirms that they are legally permitted to control every computer, project, repository and account they connect to Mecord Connect.
 
 ## Authorized use
 
-Operator may be used only on systems and data the user owns or is explicitly authorized to access. Users remain responsible for actions they request through ChatGPT and for maintaining appropriate backups, source control and local permissions.
+Mecord Connect may be used only on systems and data the user owns or is explicitly authorized to access. Users remain responsible for actions they request through ChatGPT and for maintaining appropriate backups, source control and local permissions.
 
-Users must not use Operator to obtain credentials or authentication secrets, bypass access controls, conduct covert surveillance, deploy malware or ransomware, gain unauthorized access, commit fraud, perform prohibited financial activity, or violate applicable law or third-party rights.
+Users must not use Mecord Connect to obtain credentials or authentication secrets, bypass access controls, conduct covert surveillance, deploy malware or ransomware, gain unauthorized access, commit fraud, perform prohibited financial activity, or violate applicable law or third-party rights.
 
 ## Public plugin scope
 
-The public ChatGPT plugin exposes a restricted development-project surface. It is not an unrestricted remote shell. Additional private/local Operator capabilities may exist outside the public plugin and are governed by local configuration and authorization.
+The public ChatGPT plugin exposes a restricted development-project surface. It is not an unrestricted remote shell. Additional private/local Mecord Connect runtime capabilities may exist outside the public plugin and are governed by local configuration and authorization.
 
-SPLCART may refuse or limit a request when required for security, privacy, abuse prevention, service integrity, legal compliance or platform-policy compliance.
+The Mecord Connect publisher may refuse or limit a request when required for security, privacy, abuse prevention, service integrity, legal compliance or platform-policy compliance.
 
 ## Security and user controls
 
@@ -32,12 +32,12 @@ The production Privacy Policy describes categories of data processed, purposes, 
 
 ## Warranty and liability
 
-Operator is automation software and can modify user-authorized project files when requested. Users should keep appropriate backups and source control. To the maximum extent allowed by applicable law, the service is provided without guarantees of uninterrupted or error-free operation and liability is limited as permitted by law.
+Mecord Connect is automation software and can modify user-authorized project files when requested. Users should keep appropriate backups and source control. To the maximum extent allowed by applicable law, the service is provided without guarantees of uninterrupted or error-free operation and liability is limited as permitted by law.
 
 ## Suspension and termination
 
-SPLCART may suspend or terminate access for abuse, security risk, policy violations or unlawful use. Users may request hosted account erasure through the production account/support flow; server-side account/device routing data is removed according to the published Privacy Policy.
+The Mecord Connect publisher may suspend or terminate access for abuse, security risk, policy violations or unlawful use. Users may request hosted account erasure through the production account/support flow; server-side account/device routing data is removed according to the published Privacy Policy.
 
 ## Publisher details
 
-The production website must publish the verified SPLCART publisher identity, contact method, governing-law/jurisdiction details and any legally required consumer disclosures before these Terms become effective. This repository copy is the source draft and must not be represented as final legal advice until that deployment-specific review is complete.
+Publisher: Kinthala Samuel Sampath Kumar, an individual based in Akkayapalem, Visakhapatnam, Andhra Pradesh, India. Support contact: support@splcart.in. These Terms are governed by the laws of India. Subject to mandatory consumer-protection and jurisdiction rules that cannot be waived, disputes relating to these Terms are subject to the competent courts at Visakhapatnam, Andhra Pradesh, India. This repository copy remains a source draft until the corresponding production page is deployed and verified.

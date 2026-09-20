@@ -176,7 +176,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   const server = new McpServer(
     publicMode
-      ? { name: 'splcart-operator', title: 'SPLCART Operator', version: '0.1.0' }
+      ? { name: 'mecord-connect', title: 'Mecord Connect', version: '0.1.0' }
       : { name: 'Operator', title: 'Operator', version: '0.1.0' },
     { capabilities: { tools: {} }, instructions: publicMode
       ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'

@@ -144,7 +144,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
 .switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
 .footer{grid-column:2;text-align:center;color:#94a3b8;font-size:11px;margin:-38px 0 20px}
-@media(max-width:820px){.shell{display:block}.brand{display:none}.brand-lockup{position:absolute;top:38px;left:42px;display:flex;align-items:center;gap:12px;font-size:18px;font-weight:800;z-index:2}.brand-lockup .mark{margin:0}.hero-copy{position:relative;z-index:2}.eyebrow{font-size:11px;letter-spacing:.12em;font-weight:800;color:#bfdbfe;margin-bottom:17px}.hero-proof{position:absolute;left:42px;bottom:40px;z-index:2;display:grid;gap:9px;font-size:12px;color:#dbeafe}.card{padding:34px 22px}.footer{grid-column:auto;margin:20px}}</style>
+@media(max-width:820px){body{padding:0;background:#fff}.shell{min-height:100vh;display:block;border:0;border-radius:0}.brand{display:none}.card{padding:34px 22px;min-height:calc(100vh - 48px)}.footer{grid-column:auto;margin:20px}}</style>
 </head>
 <body><main class="shell">
 <div class="brand"><div class="brand-lockup"><div class="mark">MC</div><span>Mecord Connect</span></div><div class="hero-copy"><div class="eyebrow">SECURE DEVICE BRIDGE</div><h1>Your computer, available to ChatGPT.</h1><p>Work with your authorized projects while your device permissions and local policy stay in control.</p></div><div class="hero-proof"><span>✓ Device-scoped access</span><span>✓ Local approval boundary</span><span>✓ One account, multiple devices</span></div></div>
@@ -194,11 +194,20 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
   signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
   byId('createInstead').onclick=()=>show('signup'); byId('signinInstead').onclick=()=>show('signin');
   if(location.pathname==='/signup') show('signup');
+  if(location.pathname==='/recover') {
+    show('signin');
+    const msg=byId('loginMsg');
+    msg.className='msg bad';
+    msg.textContent='This connection is no longer valid. Return to ChatGPT and click Connect again.';
+    byId('signInButton').disabled=true;
+    byId('loginUsername').disabled=true;
+    byId('loginPassword').disabled=true;
+  }
 
   byId('signInForm').addEventListener('submit',async(ev)=>{
     ev.preventDefault();
     const msg=byId('loginMsg'),btn=byId('signInButton');
-    msg.className='msg'; msg.textContent='Signing inâ€¦'; btn.disabled=true;
+    msg.className='msg'; msg.textContent='Signing in...'; btn.disabled=true;
     const q=new URLSearchParams(location.search);
     const body={
       username:byId('loginUsername').value.trim(),
@@ -249,7 +258,7 @@ const server = createServer(async (req, res) => {
   try {
     const requestURL = new URL(req.url || '/', 'http://portal.internal');
     const oauthEntry = requestURL.pathname === '/' && requestURL.searchParams.get('flow') === 'openid_connect';
-    if (req.method === 'GET' && (requestURL.pathname === '/signup' || oauthEntry)) {
+    if (req.method === 'GET' && (requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
     }
     if (req.method === 'GET' && requestURL.pathname === '/health') {

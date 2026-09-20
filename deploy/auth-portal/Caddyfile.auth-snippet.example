@@ -14,6 +14,18 @@ handle @oauth_entry {
 	}
 }
 
+@mecord_recover {
+	path /2fa/* /settings /settings/* /consent /consent/*
+	query auth_native=1
+}
+handle @mecord_recover {
+	rewrite * /recover
+	reverse_proxy 172.16.3.31:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
 @signup path /signup /signup/*
 handle @signup {
 	request_body {

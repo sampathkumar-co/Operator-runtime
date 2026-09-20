@@ -54,7 +54,7 @@ test('auth signup portal serializes writes and uses atomic replacement with back
 test('public auth surface exposes signup plus the OpenID Connect entry only', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /requestURL\.pathname === '\/' && requestURL\.searchParams\.get\('flow'\) === 'openid_connect'/);
-  assert.match(source, /requestURL\.pathname === '\/signup' \|\| oauthEntry/);
+  assert.match(source, /requestURL\.pathname === '\/signup' \|\| requestURL\.pathname === '\/recover' \|\| oauthEntry/);
   assert.match(source, /req\.method === 'POST' && req\.url === '\/signup\/api'/);
   assert.match(source, /if \(!rateAllowed\(ip\)\) return send\(res, 429, \{ ok: false, error: 'Too many attempts\. Try again later\.' \}\);/);
   assert.match(source, /cache-control/);
@@ -90,4 +90,24 @@ test('OAuth entry renders Mecord product UI rather than raw Authelia branding', 
   assert.match(source, /Create account/);
   assert.match(source, /Sign in/);
   assert.doesNotMatch(source, /Powered by Authelia/);
+});
+
+test('stale Mecord auth-native routes are intercepted by branded recovery', () => {
+  const source = text('deploy/auth-portal/server.mjs');
+  const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
+  assert.match(source, /requestURL\.pathname === '\/recover'/);
+  assert.match(source, /This connection is no longer valid\. Return to ChatGPT and click Connect again\./);
+  assert.match(caddy, /path \/2fa\/\* \/settings \/settings\/\* \/consent \/consent\/\*/);
+  assert.match(caddy, /query auth_native=1/);
+  assert.match(caddy, /rewrite \* \/recover/);
+});
+
+test('Mecord OIDC policy stays one-factor and does not expose consent or MFA fallbacks', () => {
+  const policy = text('deploy/auth-portal/authelia-oidc-policy.example.yml');
+  assert.match(policy, /default_policy: 'one_factor'/);
+  assert.match(policy, /subject: 'group:operator-users'/);
+  assert.match(policy, /subject: 'group:operator-reviewers'/);
+  assert.match(policy, /consent_mode: 'implicit'/);
+  assert.match(policy, /client_name: 'Mecord Connect'/);
+  assert.match(policy, /require_pkce: true/);
 });

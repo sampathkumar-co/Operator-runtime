@@ -1,0 +1,23 @@
+# Mecord Connect OIDC policy fragment for Authelia.
+# Merge under identity_providers.oidc in the production configuration.
+authorization_policies:
+  chatgpt_reviewer_policy:
+    # Mecord Connect is deliberately password-authenticated for this client.
+    # Do not fall back to Authelia's MFA enrollment UI during OAuth.
+    default_policy: 'one_factor'
+    rules:
+      - policy: 'one_factor'
+        subject: 'group:operator-reviewers'
+      - policy: 'one_factor'
+        subject: 'group:operator-users'
+
+clients:
+  - client_id: 'splcart-operator-chatgpt-prod-8HymKNOT2aqK'
+    client_name: 'Mecord Connect'
+    public: true
+    authorization_policy: 'chatgpt_reviewer_policy'
+    # The user already initiates this authorization by clicking Connect in
+    # ChatGPT. Avoid exposing the raw Authelia consent portal in the normal flow.
+    consent_mode: 'implicit'
+    require_pkce: true
+    pkce_challenge_method: 'S256'
