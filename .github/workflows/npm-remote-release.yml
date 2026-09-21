@@ -195,6 +195,7 @@ jobs:
           if ($remoteGuardCode -eq 0 -or ($remoteGuard -join "`n") -notmatch 'requires an ephemeral local agent token') {
             throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
           }
+          $global:LASTEXITCODE = 0
           "package_version=$($json[0].version)" >> $env:GITHUB_OUTPUT
           "package_filename=$($json[0].filename)" >> $env:GITHUB_OUTPUT
           "package_path=$tgz" >> $env:GITHUB_OUTPUT

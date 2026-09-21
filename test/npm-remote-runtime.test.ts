@@ -71,6 +71,7 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /requires an ephemeral local agent token/);
   assert.match(workflow, /previousErrorActionPreference/);
   assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
+  assert.match(workflow, /\$global:LASTEXITCODE = 0/);
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
@@ -175,6 +176,7 @@ test('npm release uses immutable first-release artifact and staged future public
   assert.match(workflow, /requires an ephemeral local agent token/);
   assert.match(workflow, /previousErrorActionPreference/);
   assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
+  assert.match(workflow, /\$global:LASTEXITCODE = 0/);
   assert.match(workflow.slice(stage), /--access public[\s\S]*--provenance[\s\S]*--ignore-scripts=false/);
   assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecord-connect/);
 });

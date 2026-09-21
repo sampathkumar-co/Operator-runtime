@@ -150,6 +150,7 @@ jobs:
           if ($remoteGuardCode -eq 0 -or ($remoteGuard -join "`n") -notmatch 'requires an ephemeral local agent token') {
             throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
           }
+          $global:LASTEXITCODE = 0
 
   node-compatibility:
     name: Node ${{ matrix.node }} launcher compatibility
