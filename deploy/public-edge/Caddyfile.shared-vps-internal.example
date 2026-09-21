@@ -44,6 +44,16 @@
 		}
 	}
 
+	@pair_claim path /pair/api/claim
+	handle @pair_claim {
+		request_body {
+			max_size 16KB
+		}
+		reverse_proxy 127.0.0.1:47200 {
+			header_up X-Forwarded-Proto https
+		}
+	}
+
 	@openai_challenge path /.well-known/openai-apps-challenge
 	handle @openai_challenge {
 		reverse_proxy 127.0.0.1:47200 {
