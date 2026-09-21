@@ -184,8 +184,14 @@ jobs:
           $env:OPERATOR_AGENT_TOKEN = ''
           $env:OPERATOR_RECOVERY_TOKEN = ''
           $installedRemote = Join-Path $smokeDir 'node_modules/mecord-connect/runtime/app/apps/local-agent/src/remote.js'
-          $remoteGuard = @(& node $installedRemote 2>&1)
-          $remoteGuardCode = $LASTEXITCODE
+          $previousErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            $remoteGuard = @(& node $installedRemote 2>&1)
+            $remoteGuardCode = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+          }
           if ($remoteGuardCode -eq 0 -or ($remoteGuard -join "`n") -notmatch 'requires an ephemeral local agent token') {
             throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
           }

@@ -69,6 +69,8 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /Mecord Connect dual-use declaration is missing/);
   assert.match(workflow, /must not contain TypeScript runtime files/);
   assert.match(workflow, /requires an ephemeral local agent token/);
+  assert.match(workflow, /previousErrorActionPreference/);
+  assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
@@ -171,6 +173,8 @@ test('npm release uses immutable first-release artifact and staged future public
   assert.match(workflow, /release tarball hash changed before staging/);
   assert.match(workflow, /must not contain TypeScript runtime files/);
   assert.match(workflow, /requires an ephemeral local agent token/);
+  assert.match(workflow, /previousErrorActionPreference/);
+  assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
   assert.match(workflow.slice(stage), /--access public[\s\S]*--provenance[\s\S]*--ignore-scripts=false/);
   assert.doesNotMatch(workflow, /npm publish \.\/packages\/mecord-connect/);
 });
