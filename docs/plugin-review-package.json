@@ -104,11 +104,6 @@
       "readOnlyHint": "true: reads a bounded local diff after path and restricted-data filtering.",
       "openWorldHint": "false: it does not push, fetch, publish, or contact remote Git services.",
       "destructiveHint": "false: diff inspection does not mutate repository state."
-    },
-    "device.claim": {
-      "readOnlyHint": "false: claims a short-lived device pairing code into the authenticated account and changes account-device authority.",
-      "openWorldHint": "false: the claim is sent only to the internal Operator relay control authority and cannot target arbitrary services.",
-      "destructiveHint": "false: claiming establishes revocable device authority but does not delete or overwrite project data."
     }
   },
   "externalGates": {

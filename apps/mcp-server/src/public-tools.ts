@@ -15,20 +15,8 @@ export const PUBLIC_TOOL_NAMES = PUBLIC_PLUGIN_TOOL_NAMES;
 export function registerPublicTools(
   server: McpServer,
   invoke: PublicInvoke,
-  auth: { readScope: string; writeScope: string },
-  bootstrap?: { claimDevice(userCode: string): Promise<any> }
+  auth: { readScope: string; writeScope: string }
 ): void {
-  server.registerTool('device.claim', {
-    title: 'Claim this Operator device',
-    description: 'Claim a fresh Operator desktop using the short code shown locally. This bootstrap tool never accepts device IDs, keys, relay tokens, paths, commands, or capability lists.',
-    inputSchema: z.object({ userCode: z.string().regex(/^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i) }),
-    _meta: { securitySchemes: oauthSchemes(auth.readScope, auth.writeScope) },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ userCode }) => {
-    if (!bootstrap) throw new Error('Device claim bootstrap is unavailable.');
-    return bootstrap.claimDevice(userCode);
-  });
-
   server.registerTool('computer.inspect', {
     title: 'Inspect computer capabilities',
     description: 'Inspect bounded capability and platform state for the authorized computer without reading project files or credentials.',

@@ -4,13 +4,13 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { McpServer } from '@modelcontextprotocol/server';
 import type { ActionResult } from '../../../src/core/types.ts';
 import type { LocalAgentClient } from '../src/local-agent-client.ts';
-import { invokePublicServerWrite, invokePublicWithAgent } from '../src/public-boundary.ts';
+import { invokePublicWithAgent } from '../src/public-boundary.ts';
 import { PUBLIC_TOOL_NAMES, registerPublicTools } from '../src/public-tools.ts';
 import { assertPublicSafePath, containsRestrictedData } from '../src/restricted-data.ts';
 
 test('public tool surface excludes generic high-power capabilities', () => {
   for (const denied of [
-    'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact',
+    'device.claim', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact',
     'app.inspect', 'app.operate', 'postgres.query', 'file.write'
   ]) assert.equal(PUBLIC_TOOL_NAMES.includes(denied), false, denied);
   assert.deepEqual(PUBLIC_TOOL_NAMES, [...PUBLIC_TOOL_NAMES].sort());
@@ -37,27 +37,12 @@ test('public tools/list advertises exact OAuth scopes at top level and compatibi
   const response = sent.find((message) => Array.isArray(message?.result?.tools));
   assert.ok(response, 'raw tools/list response was not observed');
   for (const tool of response.result.tools as Array<Record<string, any>>) {
-    const scopes = ['device.claim', 'file.create', 'file.replace'].includes(String(tool.name))
+    const scopes = ['file.create', 'file.replace'].includes(String(tool.name))
       ? ['operator:read', 'operator:write'] : ['operator:read'];
     const expected = [{ type: 'oauth2', scopes }];
     assert.deepEqual(tool.securitySchemes, expected, `${tool.name} top-level securitySchemes`);
     assert.deepEqual(tool._meta?.securitySchemes, expected, `${tool.name} compatibility securitySchemes`);
   }
-});
-
-test('device claim bootstrap requires write scope before calling server-side claim authority', async () => {
-  let claims = 0;
-  const auth = { writeScope: 'operator:write', resourceMetadataUrl: 'https://edge.operator-runtime.dev/.well-known/oauth-protected-resource/mcp' };
-  const denied = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read'] });
-  assert.equal(claims, 0);
-  assert.equal(denied.isError, true);
-  assert.equal((denied.structuredContent as any).error.code, 'OAUTH_SCOPE_REQUIRED');
-  assert.ok(Array.isArray((denied as any)._meta?.['mcp/www_authenticate']));
-
-  const allowed = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read', 'operator:write'] });
-  assert.equal(claims, 1);
-  assert.equal(allowed.isError, false);
-  assert.deepEqual((allowed.structuredContent as any).output, { status: 'claimed' });
 });
 
 test('restricted-data guard rejects credential paths and high-confidence secrets', () => {

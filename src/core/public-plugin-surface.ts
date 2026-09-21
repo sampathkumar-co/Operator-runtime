@@ -1,7 +1,6 @@
 // Dependency-free contract shared by root publication tests and the MCP adapter.
 // Keep this list limited to tools that are intentionally exposed by the public plugin.
 export const PUBLIC_PLUGIN_TOOL_NAMES = Object.freeze([
-  'device.claim',
   'computer.inspect',
   'project.inspect',
   'project.commands',

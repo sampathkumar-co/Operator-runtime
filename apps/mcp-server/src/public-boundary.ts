@@ -35,24 +35,6 @@ const PUBLIC_ERROR_MESSAGES = new Map<string, string>([
   ['PUBLIC_BOUNDARY_REJECTED', 'The request was rejected by the public safety boundary.']
 ]);
 
-export async function invokePublicServerWrite(
-  capability: string,
-  operation: () => Promise<unknown>,
-  auth?: { grantedScopes?: readonly string[]; writeScope?: string; resourceMetadataUrl?: string }
-) {
-  const requiredScope = auth?.writeScope;
-  try {
-    requirePublicScope(requiredScope, auth?.grantedScopes);
-    const output = await operation();
-    assertNoRestrictedData(output);
-    return { isError: false, content: [{ type: 'text' as const, text: `${capability}: verified.` }], structuredContent: { ok: true, capability, output: sanitizePublicValue(output) } };
-  } catch (error) {
-    const op = error instanceof OperatorError ? error : new OperatorError('PUBLIC_BOUNDARY_REJECTED', 'The public safety boundary rejected the request.');
-    if (op.code === 'OAUTH_SCOPE_REQUIRED' && requiredScope && auth?.resourceMetadataUrl) return publicMcpOAuthChallenge(capability, requiredScope, auth);
-    return publicMcpError(capability, op.code, op.retryable);
-  }
-}
-
 export async function invokePublicWithAgent(
   agent: LocalAgentClient,
   capability: string,

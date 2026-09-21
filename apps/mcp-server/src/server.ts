@@ -18,7 +18,7 @@ import { mcpInvocationScope, withMcpInvocation } from './request-context.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
-import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
+import { invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
@@ -252,7 +252,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   );
 
   if (publicMode) {
-    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope }, { claimDevice: (userCode) => invokePublicServerWrite('device.claim', () => agent.claimDevice(userCode), { grantedScopes: authInfo?.scopes, writeScope: publicEdge!.writeScope, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(publicEdge!.publicUrl).toString() }) });
+    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope });
     return server;
   }
 
