@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
 import { Algorithm, hash as argon2Hash } from '@node-rs/argon2';
 import YAML from 'yaml';
+import { createPairingService } from './pairing.mjs';
 
 const port = Number(process.env.PORT || 8090);
 const usersFile = process.env.PORTAL_USERS_FILE || '/data/users_database.yml';
@@ -10,6 +11,8 @@ const inviteHash = (process.env.PORTAL_INVITE_SHA256 || '').trim().toLowerCase()
 const defaultGroup = process.env.PORTAL_DEFAULT_GROUP || 'operator-users';
 const maxBody = 16 * 1024;
 const attempts = new Map();
+const pairAttempts = new Map();
+const pairing = createPairingService();
 let writeQueue = Promise.resolve();
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
@@ -46,6 +49,18 @@ function rateAllowed(ip) {
   item.count += 1;
   attempts.set(ip, item);
   return item.count <= 8;
+}
+
+function pairRateAllowed(ip) {
+  const now = Date.now();
+  const item = pairAttempts.get(ip) || { count: 0, reset: now + 15 * 60_000 };
+  if (now > item.reset) {
+    item.count = 0;
+    item.reset = now + 15 * 60_000;
+  }
+  item.count += 1;
+  pairAttempts.set(ip, item);
+  return item.count <= 20;
 }
 
 async function readJson(req) {
@@ -312,6 +327,53 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 </script>
 </body></html>`;
 
+const pairPage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mecord Connect - Pair Device</title>
+<style>
+:root{--ink:#0f172a;--muted:#64748b;--line:#dbe3ef;--brand:#2563eb;--bg:#f4f7fb;--good:#15803d;--bad:#b91c1c}*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 10% 10%,#e8efff 0,transparent 28%),var(--bg);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink)}
+.card{width:min(520px,100%);background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:24px;padding:34px;box-shadow:0 24px 70px rgba(30,41,59,.14)}
+.brand{display:flex;align-items:center;gap:11px;font-weight:850;font-size:18px;margin-bottom:30px}.mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#172554,#2563eb);color:white;font-size:13px}
+h1{margin:0 0 10px;font-size:30px;letter-spacing:-.035em}.help{color:var(--muted);line-height:1.55;font-size:14px;margin:0 0 24px}.notice{padding:13px 14px;border-radius:12px;background:#eff6ff;color:#1e3a8a;font-size:13px;line-height:1.5;margin-bottom:18px}
+label{display:block;font-size:13px;font-weight:750;margin:0 0 7px}input{width:100%;height:50px;border:1px solid var(--line);border-radius:11px;padding:0 14px;font:inherit;text-transform:uppercase;letter-spacing:.08em;outline:none}input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.1)}
+button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand);color:white;font-weight:800;font-size:15px;margin-top:18px;cursor:pointer}button:disabled{opacity:.65;cursor:wait}.msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.45}.bad{color:var(--bad)}.ok{color:var(--good)}
+.foot{margin-top:24px;color:#94a3b8;font-size:11px;text-align:center}
+</style></head><body><main class="card">
+<div class="brand"><div class="mark">MC</div><span>Mecord Connect</span></div>
+<h1>Pair this computer</h1>
+<p class="help">Enter the one-time code shown by <strong>mecord-connect remote</strong>. You will authenticate with Mecord before the device is attached to your account.</p>
+<div class="notice">Pairing is single-use and short-lived. The browser never receives the relay control credential or your internal Mecord account ID.</div>
+<form id="pairForm"><label for="code">Pairing code</label><input id="code" name="code" required maxlength="9" placeholder="ABCD-2345" autocomplete="one-time-code"><button id="pairButton" type="submit">Continue securely</button><div id="pairMsg" class="msg"></div></form>
+<div class="foot">Mecord Connect · Secure device enrollment</div>
+</main>
+<script>
+(function(){
+  const input=document.getElementById('code'),form=document.getElementById('pairForm'),button=document.getElementById('pairButton'),msg=document.getElementById('pairMsg');
+  const q=new URLSearchParams(location.search),prefill=q.get('code');
+  if(prefill)input.value=prefill;
+  input.addEventListener('input',()=>{let v=input.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);input.value=v.length>4?v.slice(0,4)+'-'+v.slice(4):v;});
+  form.addEventListener('submit',async(ev)=>{
+    ev.preventDefault();button.disabled=true;msg.className='msg';msg.textContent='Starting secure pairing...';
+    try{
+      const r=await fetch('/pair/start',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({userCode:input.value})});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||!j.ok||!j.authorizationUrl)throw new Error(j.error||'Pairing could not start.');
+      location.assign(j.authorizationUrl);
+    }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Pairing could not start.';button.disabled=false;}
+  });
+})();
+</script></body></html>`;
+
+function pairResultPage(success) {
+  const title = success ? 'Device paired' : 'Pairing failed';
+  const message = success
+    ? 'This computer is now attached to your Mecord account. You can close this page and return to ChatGPT.'
+    : 'The pairing request could not be completed. Generate a fresh code with mecord-connect remote and try again.';
+  const tone = success ? '#15803d' : '#b91c1c';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mecord Connect - ${title}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Inter,system-ui,sans-serif;color:#0f172a;padding:24px}.card{width:min(520px,100%);background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:36px;box-shadow:0 22px 70px rgba(30,41,59,.12)}.mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#172554;color:#fff;font-weight:850;margin-bottom:24px}h1{font-size:30px;letter-spacing:-.03em;margin:0 0 10px;color:${tone}}p{color:#64748b;line-height:1.6;margin:0}.foot{margin-top:24px;color:#94a3b8;font-size:11px}</style></head><body><main class="card"><div class="mark">MC</div><h1>${title}</h1><p>${message}</p><div class="foot">Mecord Connect · Secure device enrollment</div></main></body></html>`;
+}
+
 const server = createServer(async (req, res) => {
   try {
     const requestURL = new URL(req.url || '/', 'http://portal.internal');
@@ -319,8 +381,36 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
     }
+    if (req.method === 'GET' && requestURL.pathname === '/pair') {
+      return send(res, 200, pairPage, 'text/html; charset=utf-8');
+    }
     if (req.method === 'GET' && requestURL.pathname === '/health') {
-      return send(res, 200, { ok: true, configured: Boolean(inviteHash) });
+      return send(res, 200, { ok: true, configured: Boolean(inviteHash), pairing: true });
+    }
+    if (req.method === 'POST' && requestURL.pathname === '/pair/start') {
+      const forwardedIp = String(req.headers['x-real-ip'] || '').trim();
+      const ip = forwardedIp || req.socket.remoteAddress || 'unknown';
+      if (!pairRateAllowed(ip)) return send(res, 429, { ok: false, error: 'Too many pairing attempts. Try again later.' });
+      const payload = await readJson(req);
+      try {
+        const started = pairing.start(payload?.userCode);
+        return send(res, 200, { ok: true, authorizationUrl: started.authorizationUrl, expiresAt: started.expiresAt });
+      } catch {
+        return send(res, 400, { ok: false, error: 'Enter a valid pairing code.' });
+      }
+    }
+    if (req.method === 'GET' && requestURL.pathname === '/pair/callback') {
+      const oauthError = requestURL.searchParams.get('error');
+      const code = requestURL.searchParams.get('code');
+      const state = requestURL.searchParams.get('state');
+      if (oauthError || !code || !state) return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8');
+      try {
+        await pairing.complete({ code, state });
+        return send(res, 200, pairResultPage(true), 'text/html; charset=utf-8');
+      } catch (error) {
+        console.error('[auth-portal] pairing callback failed safely:', error instanceof Error ? error.message : 'UNKNOWN');
+        return send(res, 400, pairResultPage(false), 'text/html; charset=utf-8');
+      }
     }
     if (req.method === 'POST' && req.url === '/signup/api') {
       const forwardedIp = String(req.headers['x-real-ip'] || '').trim();

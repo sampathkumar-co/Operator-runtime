@@ -97,6 +97,74 @@ if (publicEdge) {
       return sendSdkResponse(reply, response);
     });
   }
+
+  app.post('/pair/api/claim', async (request, reply) => {
+    const webRequest = await toWebRequest(request.raw, request.body);
+    const rejected = validatePublicHeaders(webRequest);
+    if (rejected) return sendSdkResponse(reply, rejected);
+
+    const clientKey = requestClientKey(request.raw);
+    const requestDecision = publicRequestLimiter!.hit(clientKey);
+    if (!requestDecision.allowed) return sendRateLimit(reply, requestDecision);
+    const failureDecision = publicAuthFailureLimiter!.isLimited(clientKey);
+    if (!failureDecision.allowed) return sendRateLimit(reply, failureDecision);
+
+    const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
+    let authInfo: AuthInfo;
+    try {
+      authInfo = await verifyBearerToken(request.headers.authorization, {
+        verifier: publicEdge.verifier,
+        requiredScopes: [publicEdge.writeScope],
+        resourceMetadataUrl
+      });
+    } catch (error) {
+      const failed = publicAuthFailureLimiter!.hit(clientKey);
+      if (!failed.allowed) return sendRateLimit(reply, failed);
+      return sendSdkResponse(reply, bearerAuthChallengeResponse(error, {
+        requiredScopes: [publicEdge.writeScope],
+        resourceMetadataUrl
+      }));
+    }
+    publicAuthFailureLimiter!.clear(clientKey);
+
+    const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
+    const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
+    if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);
+
+    const body = request.body as { userCode?: unknown } | undefined;
+    const compact = typeof body?.userCode === 'string'
+      ? body.userCode.toUpperCase().replace(/[^A-Z0-9]/g, '')
+      : '';
+    if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(compact)) {
+      return reply.header('cache-control', 'no-store').code(400).send({
+        ok: false,
+        error: { code: 'DEVICE_ENROLLMENT_CODE_INVALID', message: 'Pairing code is invalid or expired.' }
+      });
+    }
+    const userCode = `${compact.slice(0, 4)}-${compact.slice(4)}`;
+
+    try {
+      const agent = new LocalAgentClient(agentUrl, agentToken, principal);
+      const result = await agent.claimDevice(userCode);
+      return reply.header('cache-control', 'no-store').code(200).send({ ok: true, status: result.status });
+    } catch (error) {
+      const code = typeof (error as { code?: unknown })?.code === 'string'
+        ? String((error as { code: string }).code)
+        : 'DEVICE_ENROLLMENT_CLAIM_FAILED';
+      const safeCode = [
+        'DEVICE_ENROLLMENT_CODE_INVALID',
+        'DEVICE_ENROLLMENT_EXPIRED',
+        'DEVICE_ENROLLMENT_ALREADY_CLAIMED',
+        'DEVICE_ALREADY_OWNED',
+        'ACCOUNT_DISABLED',
+        'ACCOUNT_ERASING'
+      ].includes(code) ? code : 'DEVICE_ENROLLMENT_CLAIM_FAILED';
+      return reply.header('cache-control', 'no-store').code(409).send({
+        ok: false,
+        error: { code: safeCode, message: 'Device pairing could not be completed.' }
+      });
+    }
+  });
 }
 
 app.all('/mcp', async (request, reply) => {

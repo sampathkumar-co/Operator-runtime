@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const PACKAGE_NAME = 'mecord-connect';
 const RELAY_URL = 'wss://operator.splcart.in/device';
 const RELAY_RESULT_URL = 'https://operator.splcart.in/v1/device-result';
+const PAIR_URL_BASE = 'https://auth.splcart.in/pair';
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = path.join(packageRoot, 'runtime');
 const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json');
@@ -307,6 +308,7 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   env.OPERATOR_RELAY_URL = RELAY_URL;
   env.OPERATOR_RELAY_RESULT_URL = RELAY_RESULT_URL;
   env.OPERATOR_RELAY_REQUIRED = '1';
+  env.OPERATOR_PAIR_URL_BASE = PAIR_URL_BASE;
   env.OPERATOR_BROWSER_AUTO_LAUNCH = browser ? '1' : '0';
   env.OPERATOR_WINDOWS_DPAPI_PATH = helperPath('operator-windows-dpapi.exe');
   env.OPERATOR_WINDOWS_UIA_PATH = helperPath('operator-windows-uia.exe');
@@ -316,7 +318,7 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   console.log('[mecord-connect] starting secure remote runtime');
   console.log(`[mecord-connect] authorized root: ${authorizedRoot}`);
   console.log('[mecord-connect] ChatGPT uses the hosted MCP edge; no local MCP server is started.');
-  console.log('[mecord-connect] if this device is not paired yet, claim the one-time code shown below from Mecord Connect in ChatGPT.');
+  console.log('[mecord-connect] if this device is not paired yet, open the secure pairing link shown below and confirm the device in your Mecord account.');
 
   const code = await runChild(process.execPath, [remoteEntrypoint], {
     cwd: authorizedRoot,

@@ -61,6 +61,14 @@ const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
 const relayTokenFile = path.resolve(process.env.OPERATOR_RELAY_SESSION_TOKEN_FILE?.trim() || path.join(stateDir, 'relay-session.token'));
 const relayAllowInsecureLoopback = process.env.OPERATOR_RELAY_ALLOW_INSECURE_LOOPBACK === '1';
 const relayRequired = process.env.OPERATOR_RELAY_REQUIRED === '1';
+const pairUrlBase = process.env.OPERATOR_PAIR_URL_BASE?.trim();
+let pairUrl: URL | undefined;
+if (pairUrlBase) {
+  pairUrl = new URL(pairUrlBase);
+  if (pairUrl.protocol !== 'https:' || pairUrl.username || pairUrl.password || pairUrl.hash || pairUrl.search || pairUrl.pathname !== '/pair') {
+    throw new OperatorError('PAIR_URL_INVALID', 'Device pairing URL must be credential-free HTTPS ending exactly at /pair.');
+  }
+}
 if (relayRequired && !relayUrl) {
   throw new OperatorError('RELAY_REQUIRED_CONFIGURATION_MISSING', 'Relay-only mode requires an explicit relay URL.');
 }
@@ -110,6 +118,11 @@ function startRelay(): void {
     allowLoopbackInsecure: relayAllowInsecureLoopback,
     onUserCode: ({ userCode, expiresAt }) => {
       console.error(`[operator] device pairing code: ${userCode} (expires ${expiresAt})`);
+      if (pairUrl) {
+        const url = new URL(pairUrl);
+        url.searchParams.set('code', userCode);
+        console.error(`[operator] pair this device: ${url.toString()}`);
+      }
     }
   });
   const sessionCredentials = new RelaySessionCredentialManager({

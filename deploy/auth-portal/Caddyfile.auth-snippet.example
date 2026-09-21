@@ -12,7 +12,7 @@ handle @oauth_entry {
 	}
 }
 
-@mecord_ui path /signup /signup/* /recover
+@mecord_ui path /signup /signup/* /recover /pair /pair/*
 handle @mecord_ui {
 	request_body {
 		max_size 16KB

@@ -51,11 +51,14 @@ test('auth signup portal serializes writes and uses atomic replacement with back
   assert.match(source, /fs\.rename\(temp, usersFile\)/);
 });
 
-test('public auth surface exposes signup plus the OpenID Connect entry only', () => {
+test('public auth surface exposes Mecord signup, pairing, recovery and active OpenID Connect entry only', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /requestURL\.pathname === '\/' \|\| requestURL\.pathname === '\/consent\/openid\/decision'/);
   assert.match(source, /requestURL\.searchParams\.get\('flow'\) === 'openid_connect'/);
   assert.match(source, /requestURL\.pathname === '\/signup' \|\| requestURL\.pathname === '\/recover' \|\| oauthEntry/);
+  assert.match(source, /requestURL\.pathname === '\/pair'/);
+  assert.match(source, /requestURL\.pathname === '\/pair\/start'/);
+  assert.match(source, /requestURL\.pathname === '\/pair\/callback'/);
   assert.match(source, /req\.method === 'POST' && req\.url === '\/signup\/api'/);
   assert.match(source, /if \(!rateAllowed\(ip\)\) return send\(res, 429, \{ ok: false, error: 'Too many attempts\. Try again later\.' \}\);/);
   assert.match(source, /cache-control/);
@@ -84,7 +87,7 @@ test('public auth routing exposes Mecord pages and only machine-facing Authelia 
   const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
   assert.match(caddy, /path \/ \/consent\/openid\/decision/);
   assert.match(caddy, /query flow=openid_connect/);
-  assert.match(caddy, /@mecord_ui path \/signup \/signup\/\* \/recover/);
+  assert.match(caddy, /@mecord_ui path \/signup \/signup\/\* \/recover \/pair \/pair\/\*/);
   assert.match(caddy, /@authelia_backend path \/api\/\* \/\.well-known\/\* \/jwks\.json/);
   assert.ok(caddy.includes('redir * /recover 303'));
   assert.match(caddy, /reverse_proxy 172\.16\.3\.31:8090/);

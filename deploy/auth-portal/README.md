@@ -1,10 +1,17 @@
 # Mecord Connect account portal
 
-This service provides the browser account surface used in production at `/signup`
-and at the OpenID Connect login entry. The OAuth entry presents Sign in and
-Create account together, then sends password authentication directly from the
+This service provides the browser account surface used in production at `/signup`,
+`/pair`, and at the OpenID Connect login entry. The OAuth entry presents Sign in
+and Create account together, then sends password authentication directly from the
 browser to Authelia's `/api/firstfactor` endpoint while preserving the original
 OIDC flow parameters. The service itself never receives sign-in passwords.
+
+Device enrollment is self-service through `/pair`: the user enters the one-time
+code printed by `mecord-connect remote`, the portal starts a short-lived PKCE
+flow with the dedicated `mecord-device-pairing-v1` client, exchanges the code
+server-side, and calls the public edge's narrow bearer-authenticated
+`POST /pair/api/claim` endpoint. The browser never receives the relay control
+token, raw OAuth access token, internal account ID, or OIDC subject.
 
 It is intentionally separate from Authelia and writes only newly registered
 accounts to Authelia's file user database through a shared writable users
@@ -19,8 +26,11 @@ directory.
 - `PORTAL_USERS_FILE`: shared Authelia user database path.
 - `PORTAL_DEFAULT_GROUP`: normal signup group; production uses
   `operator-users`.
-- Reverse proxy `/signup`, `/signup/*`, `/recover`, and the root OAuth entry
-  (`/?flow=openid_connect&flow_id=...`) to this service.
+- Reverse proxy `/signup`, `/signup/*`, `/recover`, `/pair`, `/pair/*`, and the
+  active root/consent OAuth entry (`/?flow=openid_connect&flow_id=...`) to this service.
+- Configure the dedicated public PKCE client `mecord-device-pairing-v1` with only
+  `https://auth.splcart.in/pair/callback` as its redirect URI, `authorization_code`
+  grant, `openid operator:read operator:write` scopes, and the MCP resource audience.
 - Expose Authelia publicly only for machine-facing endpoints: `/api/*`,
   `/.well-known/*`, and `/jwks.json`.
 - Do not expose Authelia's browser UI routes such as `/settings`, `/2fa/*`,

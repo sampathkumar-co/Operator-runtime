@@ -22,3 +22,26 @@ clients:
     consent_mode: 'implicit'
     require_pkce: true
     pkce_challenge_method: 'S256'
+
+  - client_id: 'mecord-device-pairing-v1'
+    client_name: 'Mecord Device Pairing'
+    public: true
+    authorization_policy: 'chatgpt_reviewer_policy'
+    consent_mode: 'implicit'
+    require_pkce: true
+    pkce_challenge_method: 'S256'
+    redirect_uris:
+      - 'https://auth.splcart.in/pair/callback'
+    scopes:
+      - 'openid'
+      - 'operator:read'
+      - 'operator:write'
+    audience:
+      - 'https://operator.splcart.in/mcp'
+    requested_audience_mode: 'explicit'
+    grant_types:
+      - 'authorization_code'
+    response_types:
+      - 'code'
+    token_endpoint_auth_method: 'none'
+    access_token_signed_response_alg: 'RS256'
