@@ -61,26 +61,30 @@ test('public auth surface exposes signup plus the OpenID Connect entry only', ()
   assert.match(source, /x-frame-options/);
 });
 
-test('OAuth login page preserves Authelia flow fields and has native second-factor fallback', () => {
+test('OAuth login page preserves Authelia flow fields and resumes stored consent if the first-factor response omits a redirect', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /fetch\('\/api\/firstfactor'/);
   for (const field of ['rd', 'rm', 'flow_id', 'flow', 'subflow', 'user_code']) {
     assert.match(source, new RegExp("q\\.get\\('" + field.replace('_', '\\_') + "'\\)"));
   }
   assert.match(source, /keepMeLoggedIn:byId\('remember'\)\.checked/);
-  assert.match(source, /next\.searchParams\.set\('auth_native','1'\)/);
+  assert.match(source, /\/api\/oidc\/authorization\?consent_id=/);
+  assert.match(source, /encodeURIComponent\(flowID\)/);
+  assert.match(source, /location\.assign\('\/recover'\)/);
+  assert.doesNotMatch(source, /auth_native/);
   assert.match(source, /Account created\. Sign in to continue\./);
 });
 
-test('auth reverse-proxy source keeps OAuth entry, signup, and native Authelia routing separated', () => {
+test('public auth routing exposes Mecord pages and only machine-facing Authelia endpoints', () => {
   const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
   assert.match(caddy, /query flow=openid_connect/);
-  assert.match(caddy, /not query auth_native=1/);
-  assert.match(caddy, /@signup path \/signup \/signup\/\*/);
+  assert.match(caddy, /@mecord_ui path \/signup \/signup\/\* \/recover/);
+  assert.match(caddy, /@authelia_backend path \/api\/\* \/\.well-known\/\* \/jwks\.json/);
+  assert.ok(caddy.includes('redir * /recover 303'));
   assert.match(caddy, /reverse_proxy 172\.16\.3\.31:8090/);
   assert.match(caddy, /reverse_proxy 172\.16\.3\.30:9091/);
-  assert.ok(caddy.indexOf('@oauth_entry') < caddy.indexOf('@signup'));
-  assert.ok(caddy.indexOf('@signup') < caddy.lastIndexOf('handle {'));
+  assert.ok(caddy.indexOf('@oauth_entry') < caddy.indexOf('@authelia_backend'));
+  assert.ok(caddy.indexOf('@authelia_backend') < caddy.lastIndexOf('handle {'));
 });
 
 test('OAuth entry renders Mecord product UI rather than raw Authelia branding', () => {
@@ -92,14 +96,15 @@ test('OAuth entry renders Mecord product UI rather than raw Authelia branding', 
   assert.doesNotMatch(source, /Powered by Authelia/);
 });
 
-test('stale Mecord auth-native routes are intercepted by branded recovery', () => {
+test('all non-backend Authelia browser routes are removed from the public surface', () => {
   const source = text('deploy/auth-portal/server.mjs');
   const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
   assert.match(source, /requestURL\.pathname === '\/recover'/);
   assert.match(source, /This connection is no longer valid\. Return to ChatGPT and click Connect again\./);
-  assert.match(caddy, /path \/2fa\/\* \/settings \/settings\/\* \/consent \/consent\/\*/);
-  assert.match(caddy, /query auth_native=1/);
-  assert.match(caddy, /rewrite \* \/recover/);
+  assert.match(caddy, /@authelia_backend path \/api\/\* \/\.well-known\/\* \/jwks\.json/);
+  assert.match(caddy, /Any other browser\/page route is intentionally hidden/);
+  assert.ok(caddy.includes('redir * /recover 303'));
+  assert.doesNotMatch(caddy, /auth_native/);
 });
 
 test('Mecord groups stay one-factor while unrelated accounts retain the stronger fallback', () => {

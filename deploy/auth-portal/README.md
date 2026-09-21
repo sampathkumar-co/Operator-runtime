@@ -1,4 +1,4 @@
-# Operator account signup portal
+# Mecord Connect account portal
 
 This service provides the browser account surface used in production at `/signup`
 and at the OpenID Connect login entry. The OAuth entry presents Sign in and
@@ -12,17 +12,22 @@ directory.
 
 ## Required deployment contract
 
-- `PORTAL_INVITE_SHA256`: SHA-256 of the out-of-band registration code. Never
-  store the plaintext registration code on the server after handoff.
+- `PORTAL_INVITE_SHA256`: SHA-256 of the out-of-band registration code. Generate
+  a human-friendly random code with `node generate-registration-code.mjs <output-dir>`;
+  codes use the form `MCRD-XXXX-XXXX` and avoid ambiguous characters. Never keep
+  the plaintext registration code on the server after handoff.
 - `PORTAL_USERS_FILE`: shared Authelia user database path.
 - `PORTAL_DEFAULT_GROUP`: normal signup group; production uses
   `operator-users`.
-- Reverse proxy `/signup` and `/signup/*` to this service.
-- For the root path only, proxy requests with `flow=openid_connect` to this
-  service unless `auth_native=1` is present. The native bypass is required so
-  Authelia can continue second-factor or other native portal stages.
-- All API endpoints (including `/api/firstfactor`) and all other auth routes
-  remain owned by Authelia.
+- Reverse proxy `/signup`, `/signup/*`, `/recover`, and the root OAuth entry
+  (`/?flow=openid_connect&flow_id=...`) to this service.
+- Expose Authelia publicly only for machine-facing endpoints: `/api/*`,
+  `/.well-known/*`, and `/jwks.json`.
+- Do not expose Authelia's browser UI routes such as `/settings`, `/2fa/*`,
+  `/consent/*`, password-reset pages, or its generic portal root. Any browser
+  route outside the Mecord surface is rewritten to `/recover`.
+- `/api/firstfactor` and the OIDC endpoints remain owned by Authelia; the
+  Mecord browser calls those APIs directly without exposing the Authelia UI.
 - Authelia must mount the same user database read-only and enable its file
   watcher so atomic portal updates reload without restarts.
 

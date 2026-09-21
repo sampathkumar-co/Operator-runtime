@@ -224,9 +224,12 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
       msg.className='msg ok'; msg.textContent='Signed in. Continuing...';
       byId('loginPassword').value='';
       if(redirect){ location.assign(redirect); return; }
-      const next=new URL(location.href);
-      next.pathname='/'; next.searchParams.set('auth_native','1');
-      location.assign(next.pathname+'?'+next.searchParams.toString());
+      const flow=q.get('flow'),flowID=q.get('flow_id');
+      if(flow==='openid_connect'&&flowID){
+        const next='/api/oidc/authorization?consent_id='+encodeURIComponent(flowID);
+        location.assign(next); return;
+      }
+      location.assign('/recover');
     }catch(err){
       msg.className='msg bad'; msg.textContent=(err&&err.message)||'Sign in failed.';
       byId('loginPassword').value=''; btn.disabled=false; byId('loginPassword').focus();
