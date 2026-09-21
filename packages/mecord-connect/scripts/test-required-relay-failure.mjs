@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = path.join(packageRoot, 'runtime');
-const main = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'main.ts');
+const main = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'main.js');
 const native = path.join(runtimeRoot, 'native');
 
 await runCase('persisted emergency stop', async (stateDir) => {
@@ -63,7 +63,7 @@ function runAgent(stateDir, allowedRoot) {
       OPERATOR_WINDOWS_UIA_PATH: path.join(native, 'operator-windows-uia.exe'),
       OPERATOR_WINDOWS_PATH_LEASE_PATH: path.join(native, 'operator-windows-path-lease.exe')
     };
-    const child = spawn(process.execPath, ['--experimental-strip-types', main], {
+    const child = spawn(process.execPath, [main], {
       env, cwd: allowedRoot, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '';

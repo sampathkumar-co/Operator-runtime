@@ -5,13 +5,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PACKAGE_NAME = '@mecrod/operator';
+const PACKAGE_NAME = 'mecord-connect';
 const RELAY_URL = 'wss://operator.splcart.in/device';
 const RELAY_RESULT_URL = 'https://operator.splcart.in/v1/device-result';
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = path.join(packageRoot, 'runtime');
 const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json');
-const remoteEntrypoint = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'remote.ts');
+const remoteEntrypoint = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'remote.js');
 const helperPath = (name) => path.join(runtimeRoot, 'native', name);
 
 const DESKTOP_ENV_KEYS = [
@@ -27,23 +27,23 @@ const WINDOWS_NATIVE_ENV_KEYS = [
   'SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TMP', 'TEMP'
 ];
 const REQUIRED_RUNTIME_FILES = [
-  'app/apps/local-agent/src/remote.ts',
+  'app/apps/local-agent/src/remote.js',
   'native/operator-windows-dpapi.exe',
   'native/operator-windows-uia.exe',
   'native/operator-windows-path-lease.exe'
 ];
 
 function usage() {
-  return `Mecrod Operator
+  return `Mecord Connect
 
 Usage:
-  npx @mecrod/operator@latest remote [--root <folder>] [--no-browser]
-  npx @mecrod/operator@latest doctor
-  npx @mecrod/operator@latest --help
+  npx mecord-connect@latest remote [--root <folder>] [--no-browser]
+  npx mecord-connect@latest doctor
+  npx mecord-connect@latest --help
 
 remote starts the local policy/runtime agent and its secure relay connection only.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.
---no-browser disables automatic launch of Operator's managed-browser capability.`;
+--no-browser disables automatic launch of Mecord Connect's managed-browser capability.`;
 }
 
 export function parseArgs(argv) {
@@ -80,7 +80,7 @@ export function assertSupportedRuntime(
   version = process.versions.node
 ) {
   if (platform !== 'win32' || arch !== 'x64') {
-    throw new Error(`Operator remote currently requires Windows x64; received ${platform} ${arch}.`);
+    throw new Error(`Mecord Connect remote currently requires Windows x64; received ${platform} ${arch}.`);
   }
   const parts = String(version).split('.').map(Number);
   if (parts.length < 2 || parts.some((part) => !Number.isSafeInteger(part))) {
@@ -89,7 +89,7 @@ export function assertSupportedRuntime(
   const major = parts[0];
   const supported = (major === 22 && parts[1] >= 14) || major === 24 || major === 26;
   if (!supported) {
-    throw new Error(`Operator remote requires Node.js 22.14+, 24.x, or 26.x; received ${version}.`);
+    throw new Error(`Mecord Connect remote requires Node.js 22.14+, 24.x, or 26.x; received ${version}.`);
   }
 }
 
@@ -286,7 +286,7 @@ export async function doctor() {
   await selfTestHelper('operator-windows-dpapi.exe');
   await selfTestHelper('operator-windows-path-lease.exe');
   await healthCheckUia();
-  console.log('Operator doctor: PASS');
+  console.log('Mecord Connect doctor: PASS');
   console.log(`Package: ${PACKAGE_NAME}@${manifest.version}`);
   console.log(`Source: ${manifest.sourceCommit}`);
   console.log(`Runtime files: ${manifest.files.length}`);
@@ -313,18 +313,18 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   env.OPERATOR_WINDOWS_PATH_LEASE_PATH = helperPath('operator-windows-path-lease.exe');
   env.OPERATOR_REMOTE_PACKAGE = PACKAGE_NAME;
 
-  console.log('[operator] starting secure remote runtime');
-  console.log(`[operator] authorized root: ${authorizedRoot}`);
-  console.log('[operator] ChatGPT uses the hosted MCP edge; no local MCP server is started.');
-  console.log('[operator] if this device is not paired yet, claim the one-time code shown below from Operator in ChatGPT.');
+  console.log('[mecord-connect] starting secure remote runtime');
+  console.log(`[mecord-connect] authorized root: ${authorizedRoot}`);
+  console.log('[mecord-connect] ChatGPT uses the hosted MCP edge; no local MCP server is started.');
+  console.log('[mecord-connect] if this device is not paired yet, claim the one-time code shown below from Mecord Connect in ChatGPT.');
 
-  const code = await runChild(process.execPath, ['--experimental-strip-types', remoteEntrypoint], {
+  const code = await runChild(process.execPath, [remoteEntrypoint], {
     cwd: authorizedRoot,
     env,
     stdio: 'inherit',
     windowsHide: false
   });
-  if (code !== 0) throw new Error(`Operator remote runtime exited with code ${code}.`);
+  if (code !== 0) throw new Error(`Mecord Connect remote runtime exited with code ${code}.`);
 }
 
 export async function main(argv) {

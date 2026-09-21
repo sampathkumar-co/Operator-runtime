@@ -1,0 +1,64 @@
+MECORD CONNECT RUNTIME LICENSE AGREEMENT
+
+Copyright (c) 2026 Kinthala Samuel Sampath Kumar. All rights reserved.
+
+This Mecord Connect Runtime License Agreement ("Agreement") governs your use of the software distributed as the mecord-connect package, including its bundled runtime payload, launchers, native helpers, updates, and accompanying documentation (collectively, the "Runtime").
+
+Licensor
+Kinthala Samuel Sampath Kumar
+Akkayapalem, Visakhapatnam, Andhra Pradesh, India
+Support contact: support@splcart.in
+
+1. License Grant
+
+Subject to this Agreement, the Licensor grants you a limited, non-exclusive, revocable, non-transferable, non-sublicensable license to install and use the Runtime on computers and accounts that you own or are authorized to control, solely for legitimate use with Mecord Connect and its supported local-development workflows.
+
+2. Permitted Use
+
+You may:
+- install and run the Runtime on authorized Windows computers;
+- use it to connect an authorized computer to Mecord Connect;
+- use functionality exposed through the Runtime only within the authorization, safety, approval, and access-control boundaries provided by Mecord Connect and the local Runtime;
+- make a reasonable backup copy solely for your own permitted use where applicable law allows.
+
+3. Restrictions
+
+Unless applicable law expressly requires otherwise, you may not:
+- redistribute, sell, sublicense, rent, lease, host, mirror, or republish the Runtime or a modified copy;
+- remove or alter copyright, license, safety, provenance, or security notices;
+- reverse engineer, decompile, disassemble, or attempt to derive source code from compiled components except to the limited extent such restriction is prohibited by applicable law;
+- bypass, disable, tamper with, or circumvent pairing, authentication, local approvals, capability policy, authorized-root restrictions, credential protections, rate limits, security checks, or other safeguards;
+- use the Runtime to access computers, accounts, data, services, repositories, or networks without authorization;
+- use the Runtime to distribute malware, steal credentials, evade access controls, interfere with systems, or violate applicable law or third-party rights.
+
+4. Ownership
+
+The Runtime is licensed, not sold. The Licensor and applicable contributors retain all right, title, and interest in and to the Runtime and all associated intellectual-property rights, except for third-party components governed by their own licenses.
+
+5. Hosted Services and Third Parties
+
+The Runtime may connect to Mecord Connect hosted services and third-party services. Access to those services may be subject to separate terms, privacy notices, availability limits, provider rules, and charges. This Agreement does not grant rights in third-party software or services.
+
+6. Updates and Changes
+
+The Licensor may update, replace, suspend, or discontinue the Runtime or related hosted functionality. Updated versions may require acceptance of updated terms where permitted by law.
+
+7. Termination
+
+This Agreement terminates automatically if you materially breach it. Upon termination, you must stop using and delete copies of the Runtime, except where retention is required by law. Provisions that by their nature should survive termination, including ownership, restrictions, disclaimers, liability limits, and governing law, survive.
+
+8. Disclaimer
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE RUNTIME IS PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, OR UNINTERRUPTED OR ERROR-FREE OPERATION. NOTHING IN THIS AGREEMENT EXCLUDES WARRANTIES OR RIGHTS THAT CANNOT LEGALLY BE EXCLUDED.
+
+9. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR WILL NOT BE LIABLE FOR INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, PUNITIVE, OR CONSEQUENTIAL DAMAGES, OR FOR LOSS OF PROFITS, REVENUE, DATA, BUSINESS, OR GOODWILL ARISING FROM OR RELATED TO THE RUNTIME. NOTHING IN THIS AGREEMENT LIMITS LIABILITY THAT CANNOT LEGALLY BE LIMITED.
+
+10. Governing Law and Jurisdiction
+
+This Agreement is governed by the laws of India. Subject to mandatory consumer-protection and jurisdiction rules that cannot be waived, disputes relating to this Agreement are subject to the competent courts at Visakhapatnam, Andhra Pradesh, India.
+
+11. Contact
+
+Questions about this Agreement may be sent to support@splcart.in.
