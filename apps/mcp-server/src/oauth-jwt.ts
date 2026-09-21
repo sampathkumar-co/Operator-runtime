@@ -59,7 +59,7 @@ export class OAuthJwtVerifier implements OAuthTokenVerifier {
       if (!Number.isFinite(payload.exp)) throw invalidToken('Access token has no valid expiration.');
       const subject = boundedClaim(payload.sub, 1024, 'subject');
       const clientId = boundedClaim(payload.client_id ?? payload.azp, 512, 'client_id');
-      const scopes = parseScopes(payload.scope);
+      const scopes = parseTokenScopes(payload.scope, payload.scp);
       return {
         token: '',
         clientId,
@@ -103,6 +103,16 @@ function strictHttps(url: URL, label: string): URL {
     throw new Error(`${label} must be credential-free HTTPS without query or fragment.`);
   }
   return url;
+}
+
+function parseTokenScopes(scope: unknown, scp: unknown): string[] {
+  const oauthScopes = parseScopes(scope);
+  const jwtScopes = parseScopes(scp);
+  if (oauthScopes.length && jwtScopes.length
+    && (oauthScopes.length !== jwtScopes.length || oauthScopes.some((value) => !jwtScopes.includes(value)))) {
+    throw invalidToken('Access token scope claims do not match.');
+  }
+  return oauthScopes.length ? oauthScopes : jwtScopes;
 }
 
 function parseScopes(input: unknown): string[] {

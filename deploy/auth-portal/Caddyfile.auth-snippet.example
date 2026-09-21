@@ -2,7 +2,7 @@
 # Authelia stays as the OAuth/API engine, but its browser UI is not exposed.
 
 @oauth_entry {
-	path /
+	path / /consent/openid/decision
 	query flow=openid_connect
 }
 handle @oauth_entry {

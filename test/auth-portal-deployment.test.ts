@@ -53,7 +53,8 @@ test('auth signup portal serializes writes and uses atomic replacement with back
 
 test('public auth surface exposes signup plus the OpenID Connect entry only', () => {
   const source = text('deploy/auth-portal/server.mjs');
-  assert.match(source, /requestURL\.pathname === '\/' && requestURL\.searchParams\.get\('flow'\) === 'openid_connect'/);
+  assert.match(source, /requestURL\.pathname === '\/' \|\| requestURL\.pathname === '\/consent\/openid\/decision'/);
+  assert.match(source, /requestURL\.searchParams\.get\('flow'\) === 'openid_connect'/);
   assert.match(source, /requestURL\.pathname === '\/signup' \|\| requestURL\.pathname === '\/recover' \|\| oauthEntry/);
   assert.match(source, /req\.method === 'POST' && req\.url === '\/signup\/api'/);
   assert.match(source, /if \(!rateAllowed\(ip\)\) return send\(res, 429, \{ ok: false, error: 'Too many attempts\. Try again later\.' \}\);/);
@@ -61,15 +62,19 @@ test('public auth surface exposes signup plus the OpenID Connect entry only', ()
   assert.match(source, /x-frame-options/);
 });
 
-test('OAuth login page preserves Authelia flow fields and resumes stored consent if the first-factor response omits a redirect', () => {
+test('OAuth login page preserves flow fields and completes Authelia explicit consent for offline access', () => {
   const source = text('deploy/auth-portal/server.mjs');
   assert.match(source, /fetch\('\/api\/firstfactor'/);
   for (const field of ['rd', 'rm', 'flow_id', 'flow', 'subflow', 'user_code']) {
     assert.match(source, new RegExp("q\\.get\\('" + field.replace('_', '\\_') + "'\\)"));
   }
   assert.match(source, /keepMeLoggedIn:byId\('remember'\)\.checked/);
-  assert.match(source, /\/api\/oidc\/authorization\?consent_id=/);
-  assert.match(source, /encodeURIComponent\(flowID\)/);
+  assert.match(source, /fetch\('\/api\/oidc\/consent\?flow_id='/);
+  assert.match(source, /fetch\('\/api\/oidc\/consent',\{method:'POST'/);
+  assert.match(source, /consent:true,pre_configure:false/);
+  assert.match(source, /data\.redirect_uri/);
+  assert.match(source, /location\.assign\(data\.redirect_uri\)/);
+  assert.doesNotMatch(source, /\/api\/oidc\/authorization\?consent_id=/);
   assert.match(source, /location\.assign\('\/recover'\)/);
   assert.doesNotMatch(source, /auth_native/);
   assert.match(source, /Account created\. Sign in to continue\./);
@@ -77,6 +82,7 @@ test('OAuth login page preserves Authelia flow fields and resumes stored consent
 
 test('public auth routing exposes Mecord pages and only machine-facing Authelia endpoints', () => {
   const caddy = text('deploy/auth-portal/Caddyfile.auth-snippet.example');
+  assert.match(caddy, /path \/ \/consent\/openid\/decision/);
   assert.match(caddy, /query flow=openid_connect/);
   assert.match(caddy, /@mecord_ui path \/signup \/signup\/\* \/recover/);
   assert.match(caddy, /@authelia_backend path \/api\/\* \/\.well-known\/\* \/jwks\.json/);

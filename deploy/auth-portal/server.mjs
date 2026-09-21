@@ -142,6 +142,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 .primary:disabled{opacity:.65;cursor:wait}.secondary{background:transparent;border:0;color:#255edc;cursor:pointer;font-weight:700;padding:0}
 .row{display:flex;align-items:center;gap:8px;margin-top:12px;color:#64748b;font-size:13px}.row input{width:auto}
 .msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.4}.ok{color:#85dfa7}.bad{color:#ffaaaa}
+.consent-list{display:grid;gap:10px;margin:20px 0;padding:0;list-style:none}.consent-list li{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid #e2e8f0;border-radius:11px;background:#f8fafc;color:#334155;font-size:13px;line-height:1.45}.consent-list li:before{content:"✓";color:#2563eb;font-weight:850}.consent-target{margin-top:14px;padding:11px 12px;border-radius:10px;background:#eff6ff;color:#1e3a8a;font-size:12px;overflow-wrap:anywhere}
 .switch{text-align:center;margin-top:16px;color:#bbb;font-size:13px}
 .footer{grid-column:2;text-align:center;color:#94a3b8;font-size:11px;margin:-38px 0 20px}
 @media(max-width:820px){body{padding:0;background:#fff}.shell{min-height:100vh;display:block;border:0;border-radius:0}.brand{display:none}.card{padding:34px 22px;min-height:calc(100vh - 48px)}.footer{grid-column:auto;margin:20px}}</style>
@@ -177,6 +178,13 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 </form>
 <div class="switch">Already have an account? <button id="signinInstead" class="secondary" type="button">Sign in</button></div>
 </div>
+<div id="oauthConsentPane" class="pane">
+<h2>Connect to ChatGPT</h2><p class="help">Review the access requested for this Mecord Connect session.</p>
+<ul id="oauthConsentScopes" class="consent-list"></ul>
+<div id="oauthConsentTarget" class="consent-target"></div>
+<button id="oauthConsentButton" class="primary" type="button">Allow and continue</button>
+<div id="oauthConsentMsg" class="msg"></div>
+</div>
 </section>
 <div class="footer">Mecord Connect · Secure account access</div>
 </main>
@@ -184,11 +192,14 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 (function(){
   const byId=(id)=>document.getElementById(id);
   const signInTab=byId('signInTab'),signUpTab=byId('signUpTab');
-  const signInPane=byId('signInPane'),signUpPane=byId('signUpPane');
+  const signInPane=byId('signInPane'),signUpPane=byId('signUpPane'),oauthConsentPane=byId('oauthConsentPane');
+  let oauthConsent;
   function show(which){
     const login=which==='signin';
-    signInTab.classList.toggle('active',login); signUpTab.classList.toggle('active',!login);
-    signInPane.classList.toggle('active',login); signUpPane.classList.toggle('active',!login);
+    const signup=which==='signup',consent=which==='consent';
+    signInTab.classList.toggle('active',login); signUpTab.classList.toggle('active',signup);
+    signInPane.classList.toggle('active',login); signUpPane.classList.toggle('active',signup); oauthConsentPane.classList.toggle('active',consent);
+    document.querySelector('.tabs').style.display=consent?'none':'grid';
     setTimeout(()=>{ const el=byId(login?'loginUsername':'signupUsername'); if(el) el.focus(); },0);
   }
   signInTab.onclick=()=>show('signin'); signUpTab.onclick=()=>show('signup');
@@ -203,6 +214,54 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     byId('loginUsername').disabled=true;
     byId('loginPassword').disabled=true;
   }
+
+  const oauthQuery=new URLSearchParams(location.search);
+  const oauthFlow=oauthQuery.get('flow'),oauthFlowID=oauthQuery.get('flow_id');
+  const activeOAuth=location.pathname==='/consent/openid/decision'&&oauthFlow==='openid_connect'&&Boolean(oauthFlowID);
+  const responseData=(value)=>value&&value.data?value.data:value;
+  const scopeLabels={
+    openid:'Verify your Mecord Connect identity',
+    email:'Share the email address on your Mecord account',
+    offline_access:'Keep the connection available until you disconnect it',
+    'operator:read':'Inspect authorized projects and device status',
+    'operator:write':'Perform changes you explicitly request and approve',
+    profile:'Share your basic Mecord profile'
+  };
+  async function loadOAuthConsent(silent){
+    if(!activeOAuth)return false;
+    const r=await fetch('/api/oidc/consent?flow_id='+encodeURIComponent(oauthFlowID),{credentials:'same-origin'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.status==='KO'){
+      if(!silent){const msg=byId('loginMsg');msg.className='msg bad';msg.textContent='Signed in, but this connection could not continue. Return to ChatGPT and click Connect again.';byId('signInButton').disabled=false;}
+      return false;
+    }
+    const data=responseData(j);
+    if(!data||!data.client_id)return false;
+    oauthConsent=data;
+    const list=byId('oauthConsentScopes');list.textContent='';
+    for(const scope of (data.scopes||[])){
+      const item=document.createElement('li');item.textContent=scopeLabels[scope]||('Grant '+scope+' access');list.appendChild(item);
+    }
+    const targets=Array.isArray(data.resource)&&data.resource.length?data.resource:(data.audience||[]);
+    byId('oauthConsentTarget').textContent=targets.length?'Connection target: '+targets.join(', '):'Connection target: Mecord Connect';
+    show('consent');return true;
+  }
+  if(activeOAuth)loadOAuthConsent(true).catch(()=>{});
+
+  byId('oauthConsentButton').addEventListener('click',async()=>{
+    const btn=byId('oauthConsentButton'),msg=byId('oauthConsentMsg');
+    if(!oauthConsent||!oauthFlowID)return;
+    btn.disabled=true;msg.className='msg';msg.textContent='Authorizing...';
+    const body={flow_id:oauthFlowID,client_id:oauthConsent.client_id,consent:true,pre_configure:false,claims:Array.isArray(oauthConsent.claims)?oauthConsent.claims:[]};
+    const subflow=oauthQuery.get('subflow'),userCode=oauthQuery.get('user_code');
+    if(subflow)body.subflow=subflow;if(userCode)body.user_code=userCode;
+    try{
+      const r=await fetch('/api/oidc/consent',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      const j=await r.json().catch(()=>({}));const data=responseData(j);
+      if(!r.ok||j.status==='KO'||!data||!data.redirect_uri)throw new Error('Authorization could not be completed.');
+      msg.className='msg ok';msg.textContent='Authorized. Returning to ChatGPT...';location.assign(data.redirect_uri);
+    }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Authorization could not be completed.';btn.disabled=false;}
+  });
 
   byId('signInForm').addEventListener('submit',async(ev)=>{
     ev.preventDefault();
@@ -224,11 +283,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
       msg.className='msg ok'; msg.textContent='Signed in. Continuing...';
       byId('loginPassword').value='';
       if(redirect){ location.assign(redirect); return; }
-      const flow=q.get('flow'),flowID=q.get('flow_id');
-      if(flow==='openid_connect'&&flowID){
-        const next='/api/oidc/authorization?consent_id='+encodeURIComponent(flowID);
-        location.assign(next); return;
-      }
+      if(await loadOAuthConsent(false))return;
       location.assign('/recover');
     }catch(err){
       msg.className='msg bad'; msg.textContent=(err&&err.message)||'Sign in failed.';
@@ -260,7 +315,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 const server = createServer(async (req, res) => {
   try {
     const requestURL = new URL(req.url || '/', 'http://portal.internal');
-    const oauthEntry = requestURL.pathname === '/' && requestURL.searchParams.get('flow') === 'openid_connect';
+    const oauthEntry = (requestURL.pathname === '/' || requestURL.pathname === '/consent/openid/decision') && requestURL.searchParams.get('flow') === 'openid_connect';
     if (req.method === 'GET' && (requestURL.pathname === '/signup' || requestURL.pathname === '/recover' || oauthEntry)) {
       return send(res, 200, page, 'text/html; charset=utf-8');
     }
