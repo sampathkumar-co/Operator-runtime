@@ -78,3 +78,44 @@ test('equivalent project-relative path forms stay canonical and create-list-read
   assert.equal(escaped.ok, false);
   assert.equal(escaped.error?.code, 'PATH_OUTSIDE_SCOPE');
 });
+
+test('Windows absolute path aliases resolve to the same authorized directory and file', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows path alias regression.');
+    return;
+  }
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-absolute-alias-'));
+  const source = path.join(root, 'src');
+  const file = path.join(source, 'fresh.txt');
+  await fs.mkdir(source);
+  await fs.writeFile(file, 'absolute-fresh');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+
+  const directoryForms = [
+    source,
+    source.replace(/\\/g, '/'),
+    `${root}\\.\\src`,
+    `${root}\\\\src`,
+    `${source}\\`,
+    source.toLowerCase()
+  ];
+  for (const form of directoryForms) {
+    const listed = await provider.execute(action('file.list', { path: form }));
+    assert.equal(listed.ok, true, `${form}: ${listed.error?.code ?? 'ok'}`);
+    assert.equal((listed.output as any).entries.some((entry: any) => entry.name === 'fresh.txt'), true, form);
+  }
+
+  const fileForms = [
+    file,
+    file.replace(/\\/g, '/'),
+    `${root}\\src\\.\\fresh.txt`,
+    `${root}\\\\src\\fresh.txt`,
+    file.toLowerCase()
+  ];
+  for (const form of fileForms) {
+    const read = await provider.execute(action('file.read', { path: form }));
+    assert.equal(read.ok, true, `${form}: ${read.error?.code ?? 'ok'}`);
+    assert.equal((read.output as any).content, 'absolute-fresh');
+  }
+});
