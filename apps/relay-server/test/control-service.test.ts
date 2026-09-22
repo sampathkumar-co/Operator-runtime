@@ -336,6 +336,61 @@ test('read requests dispatch fresh work even when a stateless MCP client reuses 
   assert.notEqual(keyBySeq.get(2), keyBySeq.get(3));
 });
 
+test('precondition-guarded public file writes re-evaluate reused stateless invocation IDs', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `fresh-write-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get(_deviceId: string, seq: number) {
+      return {
+        deliveryId: `fresh-write-${seq}`,
+        result: {
+          ok: seq === 1,
+          capability: 'file.create',
+          provider: 'filesystem.native',
+          evidence: [],
+          ...(seq === 1 ? {} : { error: { code: 'TARGET_EXISTS', message: 'Target exists.', retryable: false } }),
+          durationMs: 1
+        },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: accounts as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await post(port, {
+      accountId: ACCOUNT_A,
+      publicBoundary: true,
+      action: { ...writeAction(), taskId: 'same-stateless-request-id' },
+      waitMs: 1000
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+});
+
 
 test('relay control preserves retryable routing failures for the public boundary', async (t) => {
   const service = new RelayControlService({

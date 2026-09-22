@@ -107,10 +107,14 @@ export class RelayControlService {
         // therefore turn later reads into permanent snapshots (and can replay
         // an old failure after the device has been upgraded). Reads are safe to
         // execute again, so give each control request a fresh relay receipt.
-        // Mutations retain the deterministic key so transport retries cannot
-        // duplicate a side effect.
-        const idempotencyKey = action.risk === 'read'
-          ? freshReadReceiptKey(accountId, action, publicBoundary)
+        // Public file.create is protected by exclusive-create semantics and
+        // file.replace by its required content-SHA precondition plus one-shot
+        // approval. They can also be safely re-evaluated: doing so makes a
+        // genuinely new identical create observe TARGET_EXISTS instead of an
+        // old success. Other mutations retain the deterministic receipt so a
+        // transport retry cannot duplicate an unguarded side effect.
+        const idempotencyKey = requiresFreshReceipt(action)
+          ? freshExecutionReceiptKey(accountId, action, publicBoundary)
           : actionIdempotencyKey(accountId, action, publicBoundary);
 
         const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
@@ -282,9 +286,17 @@ function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBo
   return digest.digest('hex');
 }
 
-function freshReadReceiptKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
+function requiresFreshReceipt(action: ActionRequest): boolean {
+  if (action.risk === 'read') return true;
+  if (action.capability === 'file.create') return true;
+  return action.capability === 'file.replace'
+    && typeof action.input.expectedSha256 === 'string'
+    && /^[0-9a-f]{64}$/i.test(action.input.expectedSha256);
+}
+
+function freshExecutionReceiptKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
   return crypto.createHash('sha256')
-    .update('operator-relay-read-receipt-v1:')
+    .update('operator-relay-fresh-execution-receipt-v1:')
     .update(accountId)
     .update(':')
     .update(actionHash(action))
