@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
+import { canRetryUncertainRelayDelivery, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
 
@@ -72,6 +72,67 @@ class ScriptedRelaySocket implements RelaySocketLike {
     for (const listener of this.#listeners.get(type) ?? []) listener(event);
   }
 }
+
+test('uncertain relay recovery retries only a validated read action when no stored result exists', () => {
+  const base = {
+    seq: 7,
+    id: crypto.randomUUID(),
+    kind: 'action',
+    payload: { action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  assert.equal(canRetryUncertainRelayDelivery(base), true);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, risk: 'write' } } }), false);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, provenance: { kind: 'observed' } } } }), false);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task.dispatch' }), false);
+});
+
+test('missing crash-window result replays a read through the normal bounded execution path', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-read-recovery-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Read Recovery PC');
+  const deliveryId = crypto.randomUUID();
+  await fs.writeFile(path.join(stateDir, 'relay-client.json'), JSON.stringify({
+    version: 1,
+    lastAckedServerSeq: 0,
+    processing: { seq: 1, id: deliveryId, startedAt: '2026-09-22T04:56:29.297Z' }
+  }, null, 2));
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, capability: 'git.diff', provider: 'git.native', output: { files: [] }, evidence: [], durationMs: 1 }));
+  });
+  const resultBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { publicBoundary: true, approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 }, action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+  assert.equal(localHits, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
 
 test('public relay blocks restricted local output and leaves no ACKed outbox payload', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-boundary-'));

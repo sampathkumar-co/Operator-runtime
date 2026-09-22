@@ -58,7 +58,7 @@ export class LocalAgentRelayRunner {
       supportedCapabilities: options.supportedCapabilities,
       getSupportedCapabilities: options.getSupportedCapabilities,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
-      onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id),
+      onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id, context.delivery),
       onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id),
       onAcknowledged: (delivery) => this.#discardStoredResult(delivery.seq, delivery.id)
     });
@@ -79,10 +79,10 @@ export class LocalAgentRelayRunner {
     await this.#submitResult(delivery.seq, delivery.id, safe);
   }
 
-  async #recoverStoredResult(seq: number, deliveryId: string): Promise<RelayRecoveryDecision> {
+  async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, seq);
-    if (!stored || stored.deliveryId !== deliveryId) return 'stop';
+    if (!stored || stored.deliveryId !== deliveryId) return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
     await this.#submitResult(seq, deliveryId, stored.result);
     return 'ack';
   }
@@ -140,6 +140,15 @@ export class LocalAgentRelayRunner {
 }
 
 export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
+
+export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean {
+  if (delivery.kind !== 'action') return false;
+  try {
+    return validateRemoteAction(delivery.payload.action).risk === 'read';
+  } catch {
+    return false;
+  }
+}
 
 function validateRemoteAction(input: unknown): ActionRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_ACTION_INVALID', 'Relay action payload must contain an action object.');
