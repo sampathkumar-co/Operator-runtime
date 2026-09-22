@@ -102,7 +102,16 @@ export class RelayControlService {
         const action = validAction(body.action);
         const publicBoundary = body.publicBoundary === true;
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
-        const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
+        // Stateless MCP clients commonly reuse the same JSON-RPC request ID for
+        // separate tool calls. A durable receipt keyed only by that ID would
+        // therefore turn later reads into permanent snapshots (and can replay
+        // an old failure after the device has been upgraded). Reads are safe to
+        // execute again, so give each control request a fresh relay receipt.
+        // Mutations retain the deterministic key so transport retries cannot
+        // duplicate a side effect.
+        const idempotencyKey = action.risk === 'read'
+          ? freshReadReceiptKey(accountId, action, publicBoundary)
+          : actionIdempotencyKey(accountId, action, publicBoundary);
 
         const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
         if (completed) {
@@ -271,6 +280,19 @@ function validSeq(input: unknown): number {
 function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
   const digest = crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0');
   return digest.digest('hex');
+}
+
+function freshReadReceiptKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
+  return crypto.createHash('sha256')
+    .update('operator-relay-read-receipt-v1:')
+    .update(accountId)
+    .update(':')
+    .update(actionHash(action))
+    .update(':')
+    .update(publicBoundary ? '1' : '0')
+    .update(':')
+    .update(crypto.randomBytes(32))
+    .digest('hex');
 }
 
 function boundedWait(input: unknown): number {

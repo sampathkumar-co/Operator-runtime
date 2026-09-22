@@ -276,7 +276,7 @@ test('new device registration rolls back when serialized account binding fails',
 });
 
 
-test('read retries recover the same invocation while a new MCP invocation dispatches fresh work', async (t) => {
+test('read requests dispatch fresh work even when a stateless MCP client reuses its invocation ID', async (t) => {
   const keyBySeq = new Map<number, string>();
   const completedByKey = new Map<string, any>();
   let dispatchCalls = 0;
@@ -323,7 +323,8 @@ test('read retries recover the same invocation while a new MCP invocation dispat
     });
     assert.equal(response.status, 200, await response.text());
   }
-  assert.equal(dispatchCalls, 1);
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
 
   const fresh = await post(port, {
     accountId: ACCOUNT_A,
@@ -331,8 +332,8 @@ test('read retries recover the same invocation while a new MCP invocation dispat
     waitMs: 1000
   });
   assert.equal(fresh.status, 200, await fresh.text());
-  assert.equal(dispatchCalls, 2);
-  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+  assert.equal(dispatchCalls, 3);
+  assert.notEqual(keyBySeq.get(2), keyBySeq.get(3));
 });
 
 
