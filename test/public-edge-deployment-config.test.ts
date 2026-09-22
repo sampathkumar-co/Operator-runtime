@@ -12,6 +12,8 @@ test('public-edge image uses patched pinned Node and a non-root read-only runtim
   const dockerfile = text('deploy/public-edge/Dockerfile');
   assert.match(dockerfile, /^FROM node:22\.23\.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5/m);
   assert.match(dockerfile, /^USER node$/m);
+  assert.match(dockerfile, /org\.opencontainers\.image\.revision="\$\{OPERATOR_SOURCE_COMMIT\}"/);
+  assert.match(dockerfile, /org\.opencontainers\.image\.created="\$\{OPERATOR_BUILD_TIMESTAMP\}"/);
   assert.match(dockerfile, /^HEALTHCHECK .*healthcheck\.mjs"\]$/m);
   assert.match(dockerfile, /^ENTRYPOINT \["node", "deploy\/public-edge\/supervisor\.mjs"\]$/m);
   assert.doesNotMatch(dockerfile, /^COPY PRIVACY\.md TERMS\.md SUPPORT\.md \.\/$/m);
@@ -33,6 +35,8 @@ test('public-edge compose publishes backends only on host loopback and never pub
   assert.ok(ports, 'compose ports block must be found');
   assert.doesNotMatch(ports, /8790/);
   assert.match(compose, /read_only: true/);
+  assert.match(compose, /OPERATOR_SOURCE_COMMIT: \$\{OPERATOR_SOURCE_COMMIT:-unknown\}/);
+  assert.match(compose, /OPERATOR_BUILD_TIMESTAMP: \$\{OPERATOR_BUILD_TIMESTAMP:-unknown\}/);
   assert.match(compose, /cap_drop:\r?\n\s+- ALL/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /OPERATOR_PUBLIC_NOTICES_DIR: \/run\/operator-public-notices/);
@@ -57,6 +61,7 @@ test('public-edge supervisor shares loopback relay control and waits for both se
   assert.ok(signalHandler > relayStart && signalHandler < mcpStart, 'signal handlers must be installed before MCP startup waits');
   assert.ok(waitForChildExit > mcpStart, 'supervisor must race the pre-registered child exit promises');
   assert.match(supervisor, /Promise\.race\(children\.map\(\(\{ exit \}\) => exit\)\)/);
+  assert.match(supervisor, /sourceCommit, buildTimestamp/);
 });
 
 test('loopback probe preserves the canonical Host header without permitting remote targets', async () => {

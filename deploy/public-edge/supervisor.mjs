@@ -8,6 +8,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
 const shuttingDown = { value: false };
 
+function provenance() {
+  const sourceCommit = /^[0-9a-f]{40}$/i.test(process.env.OPERATOR_SOURCE_COMMIT ?? '')
+    ? process.env.OPERATOR_SOURCE_COMMIT.toLowerCase()
+    : 'unknown';
+  const buildTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(process.env.OPERATOR_BUILD_TIMESTAMP ?? '')
+    ? process.env.OPERATOR_BUILD_TIMESTAMP
+    : 'unknown';
+  return { sourceCommit, buildTimestamp };
+}
+
 function start(name, cwd, args) {
   const child = spawn(process.execPath, args, {
     cwd: path.join(root, cwd),
@@ -75,7 +85,7 @@ try {
   const mcp = start('mcp', 'apps/mcp-server', ['--experimental-strip-types', 'src/server.ts']);
   children.push(mcp);
   await waitForHealth('http://127.0.0.1:47200/health', { headers: { host: publicHostHeader() } });
-  process.stdout.write(JSON.stringify({ service: 'operator-public-edge', status: 'ready' }) + '\n');
+  process.stdout.write(JSON.stringify({ service: 'operator-public-edge', status: 'ready', ...provenance() }) + '\n');
 
   const firstExit = await Promise.race(children.map(({ exit }) => exit));
   if (!shuttingDown.value) {

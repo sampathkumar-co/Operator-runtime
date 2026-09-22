@@ -204,7 +204,12 @@ app.all('/mcp', async (request, reply) => {
   }
   return withMcpInvocation(request.body, invocationScope, () => nodeHandler(request.raw, reply.raw, request.body));
 });
-app.get('/health', async () => ({ ok: true, service: 'operator-mcp-server', version: '0.1.0' }));
+app.get('/health', async () => ({
+  ok: true,
+  service: 'operator-mcp-server',
+  version: '0.1.0',
+  ...runtimeProvenance(process.env)
+}));
 
 await app.listen({ host, port });
 if (publicEdge) console.error(`[operator] public MCP edge listening behind trusted TLS proxy for ${publicEdge.publicUrl.toString()}`);
@@ -214,6 +219,16 @@ function validatePublicHeaders(request: Request): Response | undefined {
   if (!publicEdge) return undefined;
   return hostHeaderValidationResponse(request, publicEdge.allowedHostnames)
     ?? originValidationResponse(request, publicEdge.allowedHostnames);
+}
+
+function runtimeProvenance(env: NodeJS.ProcessEnv): { sourceCommit: string; buildTimestamp: string } {
+  const sourceCommit = /^[0-9a-f]{40}$/i.test(env.OPERATOR_SOURCE_COMMIT ?? '')
+    ? env.OPERATOR_SOURCE_COMMIT!.toLowerCase()
+    : 'unknown';
+  const buildTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(env.OPERATOR_BUILD_TIMESTAMP ?? '')
+    ? env.OPERATOR_BUILD_TIMESTAMP!
+    : 'unknown';
+  return { sourceCommit, buildTimestamp };
 }
 
 async function sendSdkResponse(reply: FastifyReply, response: Response): Promise<FastifyReply> {
