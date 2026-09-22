@@ -73,7 +73,7 @@ class ScriptedRelaySocket implements RelaySocketLike {
   }
 }
 
-test('public relay blocks restricted local output before outbox persistence and result submission', async (t) => {
+test('public relay blocks restricted local output and leaves no ACKed outbox payload', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-boundary-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
   const secret = 'password=hunter2-public-boundary-test';
@@ -145,7 +145,7 @@ test('public relay blocks restricted local output before outbox persistence and 
   const outboxFile = path.join(stateDir, 'relay-outbox', 'relay-results.json');
   const outbox = await fs.readFile(outboxFile, 'utf8');
   assert.doesNotMatch(outbox, /hunter2-public-boundary-test/);
-  assert.match(outbox, /RESTRICTED_DATA_BLOCKED/);
+  assert.deepEqual(JSON.parse(outbox).streams, []);
   assert.equal(socket.sent.some((frame) => frame.includes(secret)), false);
 });
 
@@ -194,5 +194,5 @@ test('public relay blocks restricted action input before local execution', async
   assert.equal(JSON.parse(resultBodies[0]!).result?.error?.code, 'RESTRICTED_DATA_BLOCKED');
   const outbox = await fs.readFile(path.join(stateDir, 'relay-outbox', 'relay-results.json'), 'utf8');
   assert.doesNotMatch(outbox, /hunter2-public-input-test/);
-  assert.match(outbox, /RESTRICTED_DATA_BLOCKED/);
+  assert.deepEqual(JSON.parse(outbox).streams, []);
 });

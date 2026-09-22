@@ -18,6 +18,16 @@ function action() {
   };
 }
 
+function writeAction() {
+  return {
+    id: 'write-retry-test',
+    capability: 'file.create',
+    risk: 'write',
+    input: { path: 'safe-retry.txt', content: 'safe retry fixture' },
+    provenance: { kind: 'chatgpt' }
+  };
+}
+
 async function post(port: number, body: unknown) {
   return await fetch(`http://127.0.0.1:${port}/v1/execute`, {
     method: 'POST',
@@ -141,7 +151,7 @@ test('public relay control preserves trusted public-boundary marker in delivery 
   assert.equal(payload.action.capability, 'computer.inspect');
 });
 
-test('completed idempotent result is recovered before routing even when the device is offline', async (t) => {
+test('completed non-read result is recovered before routing even when the device is offline', async (t) => {
   const deliveryId = '44444444-4444-4444-8444-444444444444';
   let recoverCalls = 0;
   let dispatchCalls = 0;
@@ -162,7 +172,7 @@ test('completed idempotent result is recovered before routing even when the devi
   t.after(() => service.close());
   const response = await post(port, {
     accountId: ACCOUNT_A,
-    action: { ...action(), taskId: 'mcp-request-retry' },
+    action: { ...action(), risk: 'write', taskId: 'mcp-request-retry' },
     waitMs: 1000
   });
   assert.equal(response.status, 200);
@@ -263,4 +273,82 @@ test('new device registration rolls back when serialized account binding fails',
   assert.equal(response.status, 409);
   assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
   assert.equal(rollbacks, 1);
+});
+
+
+test('repeated read requests dispatch fresh work instead of replaying a completed snapshot', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  const completedByKey = new Map<string, any>();
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `fresh-read-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey(key: string) { return completedByKey.get(key) ?? null; },
+    async get(_deviceId: string, seq: number) {
+      const key = keyBySeq.get(seq)!;
+      const result = {
+        deliveryId: `fresh-read-${seq}`,
+        result: { ok: true, capability: 'computer.inspect', provider: `fresh-${seq}`, evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+      completedByKey.set(key, { deviceId: DEVICE_ID, result: { seq, ...result } });
+      return result;
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: accounts as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await post(port, {
+      accountId: ACCOUNT_A,
+      action: { ...action(), taskId: 'same-read-request-id' },
+      waitMs: 1000
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+});
+
+
+test('relay control preserves retryable routing failures for the public boundary', async (t) => {
+  const service = new RelayControlService({
+    hub: {
+      recoverIdempotent: async () => null,
+      dispatch: async () => {
+        throw new OperatorError('ROUTE_DEVICE_OFFLINE', 'private routing detail', { retryable: true });
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'route-offline-retryable' },
+    waitMs: 1000
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'ROUTE_DEVICE_OFFLINE');
+  assert.equal(body.error.retryable, true);
 });

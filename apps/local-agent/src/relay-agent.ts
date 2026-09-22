@@ -59,12 +59,14 @@ export class LocalAgentRelayRunner {
       getSupportedCapabilities: options.getSupportedCapabilities,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id),
-      onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id)
+      onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id),
+      onAcknowledged: (delivery) => this.#discardStoredResult(delivery.seq, delivery.id)
     });
   }
 
   run(): Promise<void> { return this.#client.run(); }
   stop(): void { this.#client.stop(); this.#sessionCredentials.stop(); }
+  reconnect(): void { this.#client.reconnect(); }
   state(): ReturnType<RelayClient['state']> { return this.#client.state(); }
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
@@ -83,6 +85,11 @@ export class LocalAgentRelayRunner {
     if (!stored || stored.deliveryId !== deliveryId) return 'stop';
     await this.#submitResult(seq, deliveryId, stored.result);
     return 'ack';
+  }
+
+  async #discardStoredResult(seq: number, deliveryId: string): Promise<void> {
+    const identity = await this.#identity.loadOrCreate();
+    await this.#outbox.removeExact(identity.deviceId, seq, deliveryId);
   }
 
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {

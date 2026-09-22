@@ -19,7 +19,7 @@ export class PathScope {
   }
 
   async resolveExisting(inputPath: string): Promise<string> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const real = await fs.realpath(absolute);
     const realRoots = await Promise.all(this.roots.map(async (root) => {
       try { return await fs.realpath(root); } catch { return root; }
@@ -31,7 +31,7 @@ export class PathScope {
   }
 
   async resolveForWrite(inputPath: string): Promise<string> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const parent = await fs.realpath(path.dirname(absolute));
     const realRoots = await Promise.all(this.roots.map(async (root) => {
       try { return await fs.realpath(root); } catch { return root; }
@@ -43,7 +43,7 @@ export class PathScope {
   }
 
   async withExisting<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const root = this.#lexicalRoot(absolute);
     return await withWindowsPathLease({
       root,
@@ -54,7 +54,7 @@ export class PathScope {
   }
 
   async withForWrite<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const root = this.#lexicalRoot(absolute);
     return await withWindowsPathLease({
       root,
@@ -62,6 +62,14 @@ export class PathScope {
       mode: 'parent',
       executable: this.#windowsPathLeaseExecutable
     }, async () => await operation(await this.resolveForWrite(absolute)));
+  }
+
+  #absolute(inputPath: string): string {
+    if (path.isAbsolute(inputPath)) return path.resolve(inputPath);
+    if (this.roots.length !== 1) {
+      throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative paths require exactly one authorized root.');
+    }
+    return path.resolve(this.roots[0]!, inputPath);
   }
 
   #lexicalRoot(absolute: string): string {

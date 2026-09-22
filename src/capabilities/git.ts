@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
-import { assertPublicSafePath } from '../core/public-restricted-data.ts';
+import { assertPublicSafePath, containsRestrictedData } from '../core/public-restricted-data.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
 import { ProcessProvider } from './process.ts';
@@ -94,11 +94,12 @@ export class GitProvider implements CapabilityProvider {
 
     const prefix = publicLiteral ? PUBLIC_GIT_PREFIX : SAFE_GIT_PREFIX;
     const args = action.capability === 'git.status'
-      ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v2', '--branch', '--ignore-submodules=all']
+      ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v1', '-z', '--branch', '--ignore-submodules=all']
       : action.capability === 'git.diff'
         ? [...prefix, 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths]
         : [...SAFE_GIT_PREFIX, 'rev-parse', '--show-toplevel'];
-    return await this.#run(action, cwd, args);
+    const result = await this.#run(action, cwd, args);
+    return action.capability === 'git.status' && result.ok ? structuredGitStatus(result) : result;
   }
 
   async #rejectContentFilters(action: ActionRequest, cwd: string): Promise<ActionResult | undefined> {
@@ -127,6 +128,37 @@ export class GitProvider implements CapabilityProvider {
     const result = await this.#process.execute({ ...action, capability: 'terminal.execute', input: { executable: 'git', args, cwd, timeoutMs: 30_000 } });
     return { ...result, capability: action.capability, provider: this.name };
   }
+}
+
+function structuredGitStatus(result: ActionResult): ActionResult {
+  const raw = result.output as { stdout?: unknown; truncated?: unknown } | undefined;
+  const records = String(raw?.stdout ?? '').split('\0').filter(Boolean);
+  let branch: string | null = null;
+  let detached = false;
+  if (records[0]?.startsWith('## ')) {
+    const parsed = safeStatusBranch(records.shift()!.slice(3));
+    branch = parsed.branch;
+    detached = parsed.detached;
+  }
+  const entries: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.length < 4 || record[2] !== ' ') { entries.push({ kind: 'unknown', restricted: true }); continue; }
+    const status = record.slice(0, 2);
+    const pathValue = safeStatusPath(record.slice(3));
+    const entry: Record<string, unknown> = {
+      indexStatus: status[0],
+      worktreeStatus: status[1],
+      kind: status === '??' ? 'untracked' : status.includes('R') ? 'renamed' : status.includes('C') ? 'copied' : status.includes('U') ? 'unmerged' : 'tracked'
+    };
+    if (pathValue) entry.path = pathValue; else entry.restricted = true;
+    if ((status.includes('R') || status.includes('C')) && index + 1 < records.length) {
+      const original = safeStatusPath(records[++index]!);
+      if (original) entry.originalPath = original; else entry.originalRestricted = true;
+    }
+    entries.push(entry);
+  }
+  return { ...result, output: { branch, detached, clean: entries.length === 0, entries, truncated: raw?.truncated === true } };
 }
 
 async function validatePublicLiteralPaths(
@@ -192,4 +224,29 @@ function gitFailure(action: ActionRequest, code: string, message: string): Actio
     error: { code, message, retryable: false },
     durationMs: 0
   };
+}
+
+
+function safeStatusBranch(raw: string): { branch: string | null; detached: boolean } {
+  let value = raw.trim();
+  if (value === 'HEAD (no branch)' || value.startsWith('HEAD detached ')) {
+    return { branch: null, detached: true };
+  }
+  value = value.replace(/^No commits yet on /, '').replace(/^Initial commit on /, '');
+  const tracking = value.indexOf('...');
+  if (tracking >= 0) value = value.slice(0, tracking);
+  const bracket = value.indexOf(' [');
+  if (bracket >= 0) value = value.slice(0, bracket);
+  const valid = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/.test(value) && !containsRestrictedData(value);
+  return { branch: valid ? value : '[hidden]', detached: false };
+}
+
+
+function safeStatusPath(raw: string): string | undefined {
+  const normalized = normalizeGitPath(raw);
+  const segments = normalized.split('/');
+  if (!normalized || normalized.length > 4096) return undefined;
+  if (path.isAbsolute(normalized) || segments.includes('.') || segments.includes('..')) return undefined;
+  try { assertPublicSafePath(normalized); } catch { return undefined; }
+  return containsRestrictedData(normalized) ? undefined : normalized;
 }

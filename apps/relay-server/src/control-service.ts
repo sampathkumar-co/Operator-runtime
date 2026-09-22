@@ -163,7 +163,7 @@ export class RelayControlService {
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('RELAY_CONTROL_FAILED', error instanceof Error ? error.message : String(error));
         const status = op.code === 'REQUEST_TOO_LARGE' ? 413 : op.code === 'UNAUTHORIZED' ? 401 : 409;
-        send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message));
+        send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message, undefined, undefined, op.retryable));
       }
     });
     applyBoundedHttpServerPolicy(server);
@@ -194,7 +194,7 @@ export class RelayControlService {
   }
 }
 
-function relayFailure(capability: string, startedAt: number, code: string, message: string, deviceId?: string, seq?: number): ActionResult {
+function relayFailure(capability: string, startedAt: number, code: string, message: string, deviceId?: string, seq?: number, retryable = false): ActionResult {
   return {
     ok: false,
     capability,
@@ -206,7 +206,7 @@ function relayFailure(capability: string, startedAt: number, code: string, messa
       data: { code, ...(deviceId ? { deviceId } : {}), ...(seq ? { deliverySeq: seq } : {}) },
       timestamp: new Date().toISOString()
     }],
-    error: { code, message, retryable: false },
+    error: { code, message, retryable },
     durationMs: Math.round(performance.now() - startedAt)
   };
 }
@@ -269,7 +269,9 @@ function validSeq(input: unknown): number {
 }
 
 function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
-  return crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0').digest('hex');
+  const digest = crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0');
+  if (action.risk === 'read') digest.update(':fresh-read:').update(crypto.randomBytes(16));
+  return digest.digest('hex');
 }
 
 function boundedWait(input: unknown): number {

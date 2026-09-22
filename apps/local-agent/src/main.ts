@@ -131,7 +131,8 @@ function startRelay(): void {
     rotateUrl: deriveRelaySessionRotateUrl(relayUrl, relayResultUrl, relayAllowInsecureLoopback),
     protector: windowsBootstrapProtector(),
     allowLoopbackInsecure: relayAllowInsecureLoopback,
-    enrollment
+    enrollment,
+    onBackgroundRefreshFailure: () => relayRunner?.reconnect()
   });
   relaySessionCredentials = sessionCredentials;
   relayRunner = new LocalAgentRelayRunner({

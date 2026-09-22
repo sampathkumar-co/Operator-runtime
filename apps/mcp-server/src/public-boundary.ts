@@ -32,6 +32,13 @@ const PUBLIC_ERROR_MESSAGES = new Map<string, string>([
   ['NOT_A_FILE', 'The requested target is not a regular file.'],
   ['NOT_A_DIRECTORY', 'The requested target is not a directory.'],
   ['WINDOWS_PATH_LEASE_DENIED', 'Windows path authority validation refused the request.'],
+  ['ROUTE_DEVICE_OFFLINE', 'The paired device is currently offline or stale.'],
+  ['ROUTE_NO_DEVICE', 'No active online device is currently available for this action.'],
+  ['ROUTE_CAPABILITY_MISMATCH', 'The paired device does not currently advertise the capability required for this action.'],
+  ['RELAY_AUTHORITY_CHANGED', 'The device connection changed while this action was being routed.'],
+  ['RELAY_RESULT_PENDING', 'The routed action has not produced a durable result yet.'],
+  ['RELAY_EXECUTION_EXPIRED_UNCERTAIN', 'A prior invocation expired before a durable result was recorded.'],
+  ['RELAY_RESULT_AUTHORITY_REVOKED', 'A stored relay result no longer belongs to the active device authority.'],
   ['PUBLIC_BOUNDARY_REJECTED', 'The request was rejected by the public safety boundary.']
 ]);
 

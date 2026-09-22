@@ -309,3 +309,29 @@ test('public file list filters sensitive entry names instead of failing the whol
   assert.equal(json.includes('credentials.json'), false);
   assert.equal(json.includes('Alice'), false);
 });
+
+
+test('public relay liveness errors keep only safe code, message, and retryability', async () => {
+  const agent = { execute: async () => ({
+    ok: false,
+    capability: 'file.create',
+    provider: 'relay.control',
+    evidence: [],
+    durationMs: 1,
+    error: {
+      code: 'ROUTE_DEVICE_OFFLINE',
+      message: 'deviceId=private-device-id internal route details',
+      retryable: true
+    }
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.create', 'write', {
+    path: 'C:\\repo\\safe.txt',
+    content: 'safe'
+  });
+  const structured = response.structuredContent as Record<string, any>;
+  assert.equal(response.isError, true);
+  assert.equal(structured.error.code, 'ROUTE_DEVICE_OFFLINE');
+  assert.equal(structured.error.message, 'The paired device is currently offline or stale.');
+  assert.equal(structured.error.retryable, true);
+  assert.equal(JSON.stringify(response).includes('private-device-id'), false);
+});

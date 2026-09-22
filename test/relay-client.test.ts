@@ -55,6 +55,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   await identity.loadOrCreate('Relay Test PC');
   const sockets: FakeSocket[] = [];
   const delivered: any[] = [];
+  const acknowledged: any[] = [];
   let client!: RelayClient;
 
   const factory = () => {
@@ -94,6 +95,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     getSessionToken: async () => 'ephemeral-session-token',
     supportedCapabilities: ['git.status', 'file.read'],
     onDelivery: async (delivery) => { delivered.push(delivery); },
+    onAcknowledged: async (delivery) => { acknowledged.push({ delivery, state: await client.state() }); },
     sleep: async () => {}
   });
 
@@ -102,6 +104,9 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   assert.equal(delivered[0].id, 'delivery-1');
   assert.equal((await client.state()).lastAckedServerSeq, 1);
   assert.equal((await client.state()).processing, undefined);
+  assert.equal(acknowledged.length, 1);
+  assert.deepEqual(acknowledged[0].delivery, { seq: 1, id: 'delivery-1' });
+  assert.equal(acknowledged[0].state.lastAckedServerSeq, 1);
   assert.equal(sockets.length, 2);
   assert.equal(sockets[0].sent.some((frame) => frame.type === 'ack' && frame.seq === 1), true);
 });
@@ -138,7 +143,7 @@ test('relay recomputes signed capabilities before every reconnect hello', async 
         capabilities: expected
       });
       setTimeout(() => {
-        if (connectionNumber === 1) socket.close(1012, 'simulate network reconnect');
+        if (connectionNumber === 1) client.reconnect();
         else { client.stop(); socket.close(); }
       }, 0);
     };

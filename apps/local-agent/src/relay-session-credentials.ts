@@ -9,6 +9,7 @@ const MAX_STATE_BYTES = 128 * 1024;
 const DEFAULT_REFRESH_SKEW_MS = 60_000;
 const RETRY_REFRESH_MS = 10_000;
 const MIN_REMAINING_MS = 5_000;
+const MAX_SESSION_LIFETIME_MS = 30 * 60_000;
 
 const LEGACY_TOKEN_OPTIONS = {
   maxBytes: MAX_TOKEN_BYTES,
@@ -46,6 +47,7 @@ export interface RelaySessionCredentialManagerOptions {
   fetchImpl?: typeof fetch;
   clock?: () => Date;
   enrollment?: RelayEnrollmentProvider;
+  onBackgroundRefreshFailure?: () => void;
 }
 
 type TokenMetadata = {
@@ -68,6 +70,7 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
   #fetch: typeof fetch;
   #clock: () => Date;
   #enrollment?: RelayEnrollmentProvider;
+  #onBackgroundRefreshFailure?: () => void;
   #timer: NodeJS.Timeout | null = null;
   #queue: Promise<void> = Promise.resolve();
   #stopped = false;
@@ -88,6 +91,7 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
     this.#fetch = options.fetchImpl ?? fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#enrollment = options.enrollment;
+    this.#onBackgroundRefreshFailure = options.onBackgroundRefreshFailure;
   }
 
   async forConnection(): Promise<string> { return await this.#freshToken(); }
@@ -273,7 +277,10 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
 
   async #refreshFromTimer(): Promise<void> {
     try { await this.#freshToken(); }
-    catch { /* a foreground reconnect/request will surface a terminal refresh failure */ }
+    catch {
+      if (this.#stopped) return;
+      try { this.#onBackgroundRefreshFailure?.(); } catch { /* liveness callback is best-effort */ }
+    }
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -359,10 +366,14 @@ function parseTokenMetadata(tokenInput: string): TokenMetadata {
   const expiresAtMs = Date.parse(expiresAt);
   const issuedAt = validIso(String(raw.issuedAt ?? ''), 'token issue time');
   const issuedAtMs = Date.parse(issuedAt);
-  if (expiresAtMs <= issuedAtMs || expiresAtMs - issuedAtMs > 15 * 60_000) {
+  assertRelaySessionLifetime(issuedAtMs, expiresAtMs);
+  return { jti, expiresAt, expiresAtMs };
+}
+
+export function assertRelaySessionLifetime(issuedAtMs: number, expiresAtMs: number): void {
+  if (!Number.isFinite(issuedAtMs) || !Number.isFinite(expiresAtMs) || expiresAtMs <= issuedAtMs || expiresAtMs - issuedAtMs > MAX_SESSION_LIFETIME_MS) {
     throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session credential lifetime is invalid.', { retryable: true });
   }
-  return { jti, expiresAt, expiresAtMs };
 }
 
 function validIso(value: string, label: string): string {

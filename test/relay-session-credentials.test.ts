@@ -7,6 +7,7 @@ import test from 'node:test';
 import type { DeviceSecretProtector } from '../src/core/device-identity.ts';
 import {
   RelaySessionCredentialManager,
+  assertRelaySessionLifetime,
   deriveRelaySessionRotateUrl,
   type RelayEnrollmentProvider
 } from '../apps/local-agent/src/relay-session-credentials.ts';
@@ -44,7 +45,7 @@ function sessionToken(issuedAtMs: number, ttlMs: number, jti = crypto.randomUUID
   return `${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${'s'.repeat(64)}`;
 }
 
-function manager(stateDir: string, legacy: string, now: () => Date, fetchImpl?: typeof fetch, enrollment?: RelayEnrollmentProvider) {
+function manager(stateDir: string, legacy: string, now: () => Date, fetchImpl?: typeof fetch, enrollment?: RelayEnrollmentProvider, onBackgroundRefreshFailure?: () => void) {
   return new RelaySessionCredentialManager({
     stateDir,
     legacyTokenFile: legacy,
@@ -54,7 +55,8 @@ function manager(stateDir: string, legacy: string, now: () => Date, fetchImpl?: 
     clock: now,
     refreshSkewMs: 60_000,
     fetchImpl,
-    enrollment
+    enrollment,
+    onBackgroundRefreshFailure
   });
 }
 
@@ -194,5 +196,44 @@ test('rotation derives from validated result authority and rejects cross-origin 
   assert.throws(
     () => deriveRelaySessionRotateUrl('wss://relay.operator.example/device', 'https://evil.example/v1/device-result'),
     /relay-authorized HTTPS origin/
+  );
+});
+
+
+test('terminal background refresh failure signals relay reconnect instead of being silently swallowed', async (t) => {
+  const state = await tempDir(t, 'operator-relay-cred-background-failure-');
+  const legacy = path.join(state, 'relay-session.token');
+  const nowMs = Date.parse('2026-09-14T12:00:00.000Z');
+  const token = sessionToken(nowMs, 45_000);
+  await fs.writeFile(legacy, token, { mode: 0o600 });
+
+  const fetchImpl = (async () => new Response(JSON.stringify({ error: { code: 'REFRESH_REJECTED' } }), {
+    status: 400,
+    headers: { 'content-type': 'application/json' }
+  })) as typeof fetch;
+
+  let signal!: () => void;
+  const signaled = new Promise<void>((resolve) => { signal = resolve; });
+  const credentials = manager(state, legacy, () => new Date(nowMs), fetchImpl, undefined, signal);
+  t.after(() => credentials.stop());
+
+  assert.equal(await credentials.forRequest(), token);
+  await Promise.race([
+    signaled,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('background refresh failure was not signaled')), 2_500))
+  ]);
+});
+
+
+test('relay session lifetime boundary accepts 30 minutes and rejects invalid ranges', () => {
+  const issuedAt = Date.parse('2026-09-16T12:00:00.000Z');
+  assert.doesNotThrow(() => assertRelaySessionLifetime(issuedAt, issuedAt + 30 * 60_000));
+  assert.throws(
+    () => assertRelaySessionLifetime(issuedAt, issuedAt + 30 * 60_000 + 1),
+    (error: any) => error?.code === 'RELAY_SESSION_TOKEN_INVALID'
+  );
+  assert.throws(
+    () => assertRelaySessionLifetime(issuedAt, issuedAt),
+    (error: any) => error?.code === 'RELAY_SESSION_TOKEN_INVALID'
   );
 });
