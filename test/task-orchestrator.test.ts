@@ -358,6 +358,106 @@ test('browser task re-discovers a disappeared semantic target before retrying na
   assert.ok(completed.evidence.some((item) => item.kind === 'strategy_fallback' && /re-discovery/.test(item.message)));
 });
 
+class SemanticAppProvider implements CapabilityProvider {
+  readonly name = 'test.windows.uia';
+  value = 'before';
+  operateCalls = 0;
+  ambiguous = false;
+  supports(action: ActionRequest): boolean { return ['app.inspect', 'app.operate'].includes(action.capability); }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'app.operate') {
+      this.operateCalls += 1;
+      assert.equal(action.input.operation, 'set_value');
+      assert.deepEqual(action.input.selector, { automationId: 'editor-value', controlType: 'Edit' });
+      this.value = String(action.input.value);
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: { operation: 'set_value', postcondition: { verified: true, actual_value: this.value } },
+        evidence: [], durationMs: 0
+      };
+    }
+    if (this.ambiguous) return {
+      ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 0,
+      error: { code: 'UIA_AMBIGUOUS_SELECTOR', message: 'Selector matched more than one control.', retryable: false }
+    };
+    return {
+      ok: true, capability: action.capability, provider: this.name,
+      output: { elements: [{
+        name: 'Editor value', automation_id: 'editor-value', class_name: 'TextBox', control_type: 'Edit', process_id: 4242,
+        patterns: { invoke: false, value: true, selection_item: false, expand_collapse: false, scroll: false, legacy_iaccessible: false },
+        value: this.value
+      }] },
+      evidence: [], durationMs: 0
+    };
+  }
+}
+
+test('app task inspects a unique UIA target, blocks for approval, operates once, and re-inspects the postcondition', async (t) => {
+  const state = await tempDir(t, 'operator-task-app-state-');
+  const provider = new SemanticAppProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Set a semantic application value and verify it.', authorizedScope: ['app:editor-value'],
+    successConditions: ['target is unique', 'approved mutation runs once', 're-inspection confirms exact value'],
+    goal: { kind: 'app-operation', operation: 'set_value', selector: { automationId: 'editor-value', controlType: 'Edit' }, value: 'after' }
+  });
+
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(provider.operateCalls, 0);
+  assert.deepEqual(blocked.execution?.records.map((record) => record.capability), ['app.inspect', 'app.operate']);
+  const actionId = blocked.execution!.records[1]!.actionId;
+
+  const completed = await orchestrator.resume(task.id, [actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.operateCalls, 1);
+  assert.equal(provider.value, 'after');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['app.inspect', 'app.operate', 'app.inspect']);
+  assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'uia'));
+  assert.equal(completed.execution?.records[1]?.actionId, actionId);
+});
+
+test('app task fails closed on an ambiguous semantic selector without operating any control', async (t) => {
+  const state = await tempDir(t, 'operator-task-app-ambiguous-');
+  const provider = new SemanticAppProvider();
+  provider.ambiguous = true;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [], allowExternalWrites: true }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Never choose an ambiguous control.', authorizedScope: ['app:editor-value'], successConditions: ['fail closed'],
+    goal: { kind: 'app-operation', operation: 'set_value', selector: { name: 'Editor value' }, value: 'unsafe' }
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'UIA_AMBIGUOUS_SELECTOR');
+  assert.equal(provider.operateCalls, 0);
+  assert.deepEqual(failed.execution?.records.map((record) => record.capability), ['app.inspect']);
+});
+
+test('invoke app goals require an explicit semantic verification target', async (t) => {
+  const state = await tempDir(t, 'operator-task-app-invoke-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [] }
+  });
+  await assert.rejects(
+    () => orchestrator.submit({
+      objective: 'Invoke a control.', authorizedScope: ['app:save'], successConditions: ['verify side effect'],
+      goal: { kind: 'app-operation', operation: 'invoke', selector: { automationId: 'save' } }
+    }),
+    (error: any) => error?.code === 'TASK_GOAL_INVALID'
+  );
+});
+
 class OneStepPlanner implements TaskPlanner {
   readonly id = 'test.one-step';
   supports(): boolean { return true; }

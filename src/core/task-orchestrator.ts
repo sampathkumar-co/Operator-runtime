@@ -9,10 +9,18 @@ import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 
+export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
+export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
+
 export type SemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
-  | { kind: 'browser-navigation'; url: string; targetId?: string };
+  | { kind: 'browser-navigation'; url: string; targetId?: string }
+  | {
+      kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
+      value?: string; horizontalAmount?: string; verticalAmount?: string;
+      verifySelector?: UiaTaskSelector; waitMs?: number;
+    };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
@@ -316,7 +324,7 @@ export class TaskOrchestrator {
 
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
-  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation'].includes(goal.kind); }
+  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
@@ -333,6 +341,22 @@ export class SemanticTaskPlanner implements TaskPlanner {
       if (phase === 'commands') return { type: 'step', key: 'inspect-commands', title: 'Discover trusted project commands', capability: 'project.command.inspect', input: { path: goal.root } };
       if (phase === 'run') return { type: 'step', key: 'run-command', title: 'Execute trusted project command', capability: 'project.command.run', input: { path: goal.root, commandId: state.commandId, expectedRisk: state.commandRisk } };
       return { type: 'complete', message: 'Trusted project command completed with its registered postcondition validation.' };
+    }
+    if (goal.kind === 'app-operation') {
+      const selector = phase === 'verify' ? (goal.verifySelector ?? goal.selector) : goal.selector;
+      const inspectInput = { selector, maxNodes: 1, maxDepth: 0, waitMs: goal.waitMs ?? 0 };
+      if (phase === 'start') return { type: 'step', key: 'inspect-app-target', title: 'Inspect unique semantic app target', capability: 'app.inspect', input: inspectInput };
+      if (phase === 'operate') return {
+        type: 'step', key: 'operate-app-target', title: 'Operate verified semantic app target', capability: 'app.operate',
+        input: {
+          operation: goal.operation, selector: goal.selector, waitMs: goal.waitMs ?? 0,
+          ...(goal.value !== undefined ? { value: goal.value } : {}),
+          ...(goal.horizontalAmount !== undefined ? { horizontalAmount: goal.horizontalAmount } : {}),
+          ...(goal.verticalAmount !== undefined ? { verticalAmount: goal.verticalAmount } : {})
+        }
+      };
+      if (phase === 'verify') return { type: 'step', key: 'verify-app-target', title: 'Re-inspect app postcondition', capability: 'app.inspect', input: inspectInput };
+      return { type: 'complete', message: 'Application operation satisfied semantic targeting and deterministic postcondition verification.' };
     }
     if (phase === 'start') return { type: 'step', key: 'inspect-browser', title: 'Inspect semantic browser state', capability: 'browser.inspect', input: {} };
     if (phase === 'navigate') return { type: 'step', key: 'navigate-browser', title: 'Navigate the selected browser target', capability: 'browser.navigate', input: { targetId: state.targetId, url: goal.url }, target: goal.url };
@@ -367,6 +391,22 @@ export class SemanticTaskPlanner implements TaskPlanner {
         state.commandRisk = selected.risk;
         state.phase = 'run';
       } else if (step.key === 'run-command') state.phase = 'complete';
+      return;
+    }
+    if (goal.kind === 'app-operation') {
+      if (step.key === 'inspect-app-target') {
+        const element = uniqueInspectedUiaElement(result.output);
+        requireUiaOperationSupport(goal.operation, element);
+        state.targetIdentity = uiaElementIdentity(element);
+        state.phase = 'operate';
+      } else if (step.key === 'operate-app-target') {
+        verifyUiaOperationResult(goal, result.output);
+        state.phase = 'verify';
+      } else if (step.key === 'verify-app-target') {
+        const element = uniqueInspectedUiaElement(result.output);
+        verifyUiaReinspection(goal, element, state.targetIdentity);
+        state.phase = 'complete';
+      }
       return;
     }
     if (step.key === 'inspect-browser') {
@@ -404,6 +444,12 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.evidence.push(evidence('strategy_fallback', 'info', 'Browser target disappeared; switched to semantic target re-discovery.'));
       return true;
     }
+    if (step.key === 'operate-app-target' && ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT'].includes(result.error?.code ?? '')) {
+      task.execution!.plannerState.phase = 'start';
+      delete task.execution!.plannerState.targetIdentity;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'UIA target disappeared or timed out; switched to bounded semantic target re-discovery.'));
+      return true;
+    }
     return false;
   }
 }
@@ -432,8 +478,111 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (url.username || url.password) throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal URL must not contain credentials.');
     goal.url = url.toString();
     if (goal.targetId !== undefined) goal.targetId = boundedText(goal.targetId, 256, 'browser targetId');
+  } else if (goal.kind === 'app-operation') {
+    goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
+    if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');
+    if (!UIA_TASK_OPERATIONS.includes(goal.operation)) throw new OperatorError('TASK_GOAL_INVALID', 'App operation is not in the closed semantic operation set.');
+    if (goal.operation === 'invoke' && goal.verifySelector === undefined) throw new OperatorError('TASK_GOAL_INVALID', 'Invoke tasks require a semantic verifySelector so their external effect can be re-observed.');
+    if (goal.operation === 'set_value') goal.value = boundedText(goal.value, 64 * 1024, 'app value');
+    else if (goal.value !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${goal.operation} does not accept a value.`);
+    if (goal.operation === 'scroll') {
+      if (goal.horizontalAmount === undefined && goal.verticalAmount === undefined) throw new OperatorError('TASK_GOAL_INVALID', 'Scroll requires a bounded horizontalAmount or verticalAmount.');
+      if (goal.horizontalAmount !== undefined) goal.horizontalAmount = validUiaScrollAmount(goal.horizontalAmount, 'horizontalAmount');
+      if (goal.verticalAmount !== undefined) goal.verticalAmount = validUiaScrollAmount(goal.verticalAmount, 'verticalAmount');
+    } else if (goal.horizontalAmount !== undefined || goal.verticalAmount !== undefined) {
+      throw new OperatorError('TASK_GOAL_INVALID', `${goal.operation} does not accept scroll amounts.`);
+    }
+    goal.waitMs = boundedInteger(goal.waitMs, 0, 10_000, 0);
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
+}
+
+const UIA_TASK_OPERATIONS: readonly UiaTaskOperation[] = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'];
+const UIA_SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
+
+function normalizeUiaTaskSelector(input: unknown, label: string): UiaTaskSelector {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const allowed = new Set(['name', 'automationId', 'className', 'controlType', 'processId']);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label} contains an unsupported selector field.`);
+  const selector: UiaTaskSelector = {};
+  for (const key of ['name', 'automationId', 'className', 'controlType'] as const) {
+    if (raw[key] !== undefined) selector[key] = boundedText(raw[key], 512, `${label}.${key}`);
+  }
+  if (raw.processId !== undefined) {
+    const pid = Number(raw.processId);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffff_ffff) throw new OperatorError('TASK_GOAL_INVALID', `${label}.processId is invalid.`);
+    selector.processId = pid;
+  }
+  if (Object.keys(selector).length === 0) throw new OperatorError('TASK_GOAL_INVALID', `${label} must identify a semantic UIA target.`);
+  return selector;
+}
+
+function validUiaScrollAmount(input: unknown, label: string): string {
+  if (typeof input !== 'string' || !(UIA_SCROLL_AMOUNTS as readonly string[]).includes(input)) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} must be one of ${UIA_SCROLL_AMOUNTS.join(', ')}.`);
+  }
+  return input;
+}
+
+function uniqueInspectedUiaElement(output: unknown): Record<string, unknown> {
+  const elements = Array.isArray(asRecord(output).elements) ? asRecord(output).elements as unknown[] : [];
+  if (elements.length !== 1 || !elements[0] || typeof elements[0] !== 'object' || Array.isArray(elements[0])) {
+    throw new OperatorError('TASK_UIA_TARGET_NOT_UNIQUE', 'UIA inspection did not return exactly one semantic target.');
+  }
+  return elements[0] as Record<string, unknown>;
+}
+
+function requireUiaOperationSupport(operation: UiaTaskOperation, element: Record<string, unknown>): void {
+  const patterns = asRecord(element.patterns);
+  const supported = operation === 'invoke' ? patterns.invoke === true || patterns.legacy_iaccessible === true
+    : operation === 'set_value' ? patterns.value === true || patterns.legacy_iaccessible === true
+    : operation === 'select' ? patterns.selection_item === true
+    : operation === 'expand' || operation === 'collapse' ? patterns.expand_collapse === true
+    : operation === 'scroll' ? patterns.scroll === true
+    : true;
+  if (!supported) throw new OperatorError('TASK_UIA_PATTERN_UNAVAILABLE', `Semantic target does not support ${operation}.`);
+}
+
+function uiaElementIdentity(element: Record<string, unknown>): Record<string, unknown> {
+  return {
+    automationId: String(element.automation_id ?? ''), className: String(element.class_name ?? ''),
+    controlType: String(element.control_type ?? ''), processId: Number(element.process_id ?? 0)
+  };
+}
+
+function verifyUiaOperationResult(goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>, outputValue: unknown): void {
+  const output = asRecord(outputValue);
+  if (output.operation !== goal.operation) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA operation result did not identify the requested operation.');
+  const postcondition = asRecord(output.postcondition);
+  if (goal.operation === 'invoke') {
+    if (postcondition.element_reachable !== true) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA invoke did not prove the semantic target was reached.');
+    return;
+  }
+  if (postcondition.verified !== true) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA operation did not return a verified semantic postcondition.');
+  if (goal.operation === 'set_value' && postcondition.actual_value !== goal.value) {
+    throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA set_value did not verify the requested exact value.');
+  }
+}
+
+function verifyUiaReinspection(
+  goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>,
+  element: Record<string, unknown>,
+  priorIdentity: unknown
+): void {
+  if (goal.verifySelector === undefined) {
+    const before = asRecord(priorIdentity);
+    const after = uiaElementIdentity(element);
+    for (const key of ['automationId', 'className', 'controlType', 'processId']) {
+      if (before[key] !== undefined && before[key] !== '' && before[key] !== 0 && before[key] !== after[key]) {
+        throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection resolved to a different semantic target.');
+      }
+    }
+  }
+  if (goal.operation === 'set_value' && element.value !== goal.value) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm the requested value.');
+  if (goal.operation === 'select' && element.selected !== true) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm selection.');
+  if (goal.operation === 'expand' && element.expand_collapse_state !== 'Expanded') throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm expansion.');
+  if (goal.operation === 'collapse' && element.expand_collapse_state !== 'Collapsed') throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm collapse.');
 }
 
 function deterministicActionId(taskId: string, stepKey: string, attempt: number, inputHash: string): string {
