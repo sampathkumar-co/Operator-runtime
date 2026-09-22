@@ -277,3 +277,66 @@ test('TaskStore durable writes leave no stale temporary files', async (t) => {
   assert.deepEqual(entries, [`${value.id}.json`]);
   assert.equal(entries.some((name) => name.endsWith('.tmp')), false);
 });
+
+test('TaskStore execution lease excludes a second process-local owner and releases cleanly', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-exclusive-');
+  const value = task();
+  const firstStore = new TaskStore(state);
+  const secondStore = new TaskStore(state);
+  const lease = await firstStore.acquireExecutionLease(value.id);
+
+  await assert.rejects(
+    () => secondStore.acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_ALREADY_RUNNING'
+  );
+  await lease.assertOwned();
+  await lease.release();
+  const replacement = await secondStore.acquireExecutionLease(value.id);
+  await replacement.release();
+});
+
+test('TaskStore reclaims an execution lease left by a crashed child process', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-crash-');
+  const value = task();
+  const script = [
+    "import { TaskStore } from './src/core/task-store.ts'",
+    'const store = new TaskStore(process.argv[1])',
+    'await store.acquireExecutionLease(process.argv[2])'
+  ].join(';');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, state, value.id], { cwd: process.cwd() }, (error) => error ? reject(error) : resolve());
+  });
+
+  const recovered = await new TaskStore(state).acquireExecutionLease(value.id);
+  await recovered.assertOwned();
+  await recovered.release();
+});
+
+test('TaskStore refuses a symlinked execution-lease directory', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-link-state-');
+  const outside = await tempDir(t, 'operator-task-lease-link-outside-');
+  const value = task();
+  if (!(await makeSymlinkOrSkip(t, outside, path.join(state, 'task-leases'), 'junction'))) return;
+
+  await assert.rejects(
+    () => new TaskStore(state).acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /real directory/.test(error.message)
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test('TaskStore fails closed on malformed execution-lease ownership', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-corrupt-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  await fs.writeFile(path.join(leases, `${value.id}.json`), JSON.stringify({
+    version: 1, taskId: value.id, ownerId: 'forged', pid: process.pid, acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  await assert.rejects(
+    () => new TaskStore(state).acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /ownerId/.test(error.message)
+  );
+});

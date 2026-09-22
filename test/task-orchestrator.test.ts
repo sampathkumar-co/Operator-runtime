@@ -294,3 +294,29 @@ test('an in-flight pause survives action completion and can be resumed durably',
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
   assert.equal((await orchestrator.resume(task.id)).state, 'VERIFIED');
 });
+
+test('a durable execution lease prevents a second orchestrator from duplicating an in-flight action', async (t) => {
+  const root = await tempDir(t, 'operator-task-exclusive-');
+  const state = await tempDir(t, 'operator-task-exclusive-state-');
+  const provider = new DelayedProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const first = new TaskOrchestrator({
+    runtime, store: new TaskStore(state), permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const second = new TaskOrchestrator({
+    runtime, store: new TaskStore(state), permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await first.submit({
+    objective: 'Execute exactly once.', authorizedScope: [root], successConditions: ['one execution'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+  const running = first.run(task.id);
+  await provider.startedPromise;
+  await assert.rejects(
+    () => second.run(task.id),
+    (error: any) => error?.code === 'TASK_ALREADY_RUNNING'
+  );
+  provider.release();
+  assert.equal((await running).state, 'VERIFIED');
+  assert.equal((await new TaskStore(state).get(task.id)).execution?.records.length, 1);
+});

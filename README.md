@@ -13,7 +13,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - instruction-provenance boundary for prompt-injection defense
 - evidence-rich structured action results
 - persistent Task Capsules and dependency gates
-- durable semantic task executor with bounded planning, retries, loop detection, pause/resume/cancel, crash recovery and evidence-backed postconditions
+- durable semantic task executor with cross-process ownership, bounded planning, retries, loop detection, pause/resume/cancel, crash recovery and evidence-backed postconditions
 - rooted filesystem provider with realpath/symlink escape defense
 - atomic file writes with expected-SHA protection
 - argv-only process execution with no command shell and executable allowlists

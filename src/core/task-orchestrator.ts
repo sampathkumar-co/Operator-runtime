@@ -108,12 +108,18 @@ export class TaskOrchestrator {
   async run(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) return await active;
-    const promise = this.#run(taskId, approvedActionIds).finally(() => this.#active.delete(taskId));
+    const promise = this.#runWithLease(taskId, approvedActionIds).finally(() => this.#active.delete(taskId));
     this.#active.set(taskId, promise);
     return await promise;
   }
 
-  async #run(taskId: string, approvedActionIds: string[]): Promise<TaskCapsule> {
+  async #runWithLease(taskId: string, approvedActionIds: string[]): Promise<TaskCapsule> {
+    const lease = await this.#store.acquireExecutionLease(taskId);
+    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned); }
+    finally { await lease.release(); }
+  }
+
+  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
@@ -127,36 +133,39 @@ export class TaskOrchestrator {
       execution.deadlineAt = new Date(Date.now() + execution.timeoutMs).toISOString();
     }
     task.state = 'RUNNING';
+    await assertLease();
     await this.#store.put(task);
 
     while (true) {
       task = await this.#store.get(task.id);
+      await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
       const current = task.execution!;
-      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded deadline.');
+      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded deadline.', assertLease);
       this.#markInterrupted(current);
       const context = { task, goal };
       let decision: PlannerDecision;
       try { decision = planner.next(context); }
-      catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error)); }
+      catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       if (decision.type === 'complete') {
         task.evidence.push(evidence('task_completion', 'pass', decision.message));
         finalizeTask(task);
+        await assertLease();
         await this.#store.put(task);
         return task;
       }
-      if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.');
+      if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
 
       const inputHash = sha256(canonicalJson(decision.input));
       if (detectPlannerLoop(current.records, decision.key, inputHash)) {
-        return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`);
+        return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, assertLease);
       }
       const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
       const priorAttempts = current.records.filter((record) => record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED').length;
-      if (priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`);
+      if (priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
-      catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error)); }
+      catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
       const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
@@ -169,6 +178,7 @@ export class TaskOrchestrator {
       if (!blockedReplay) current.records.push(record);
       else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
       current.stepCount += 1;
+      await assertLease();
       await this.#store.put(task);
 
       const action: ActionRequest = {
@@ -189,13 +199,14 @@ export class TaskOrchestrator {
         };
       }
       const latest = await this.#store.get(task.id);
+      await assertLease();
       const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED' ? latest.state : undefined;
       task = latest;
       const latestExecution = task.execution!;
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
-      if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.');
+      if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
       const latestNode = task.nodes.find((candidate) => candidate.title === decision.title);
-      if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.');
+      if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
@@ -215,11 +226,12 @@ export class TaskOrchestrator {
           latestRecord.state = 'FAILED';
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
-          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error));
+          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
         if (controlState) task.state = controlState;
+        await assertLease();
         await this.#store.put(task);
         if (controlState) return task;
         continue;
@@ -230,6 +242,7 @@ export class TaskOrchestrator {
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
+        await assertLease();
         await this.#store.put(task);
         return task;
       }
@@ -237,6 +250,7 @@ export class TaskOrchestrator {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
         if (controlState) task.state = controlState;
+        await assertLease();
         await this.#store.put(task);
         if (controlState) return task;
         continue;
@@ -245,11 +259,12 @@ export class TaskOrchestrator {
       setNodeState(task, latestNode.id, 'FAILED');
       if (controlState) {
         task.state = controlState;
+        await assertLease();
         await this.#store.put(task);
         return task;
       }
-      if (result.error?.retryable === true && risk === 'read') { await this.#store.put(task); continue; }
-      return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.');
+      if (result.error?.retryable === true && risk === 'read') { await assertLease(); await this.#store.put(task); continue; }
+      return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
   }
 
@@ -287,11 +302,12 @@ export class TaskOrchestrator {
     }
   }
 
-  async #fail(task: TaskCapsule, code: string, message: string): Promise<TaskCapsule> {
+  async #fail(task: TaskCapsule, code: string, message: string, assertLease?: () => Promise<void>): Promise<TaskCapsule> {
     task.state = 'FAILED';
     task.failures.push({ at: new Date().toISOString(), code, message });
     task.evidence.push(evidence('task_failure', 'fail', message, { code }));
     task.updatedAt = new Date().toISOString();
+    await assertLease?.();
     await this.#store.put(task);
     return task;
   }

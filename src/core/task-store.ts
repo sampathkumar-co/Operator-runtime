@@ -1,9 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
 import type { Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
-import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_TASK_BYTES = 8 * 1024 * 1024;
 const MAX_LIST = 500;
@@ -19,12 +20,35 @@ const TASK_OPTIONS = {
 } as const;
 const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
 const MAX_ACTION_RECORDS = 5000;
+const LEASE_OPTIONS = {
+  maxBytes: 16 * 1024,
+  errorCode: 'TASK_LEASE_CORRUPT',
+  invalidMessage: 'Stored task execution lease is invalid.'
+} as const;
+
+type TaskLeaseRecord = {
+  version: 1;
+  taskId: string;
+  ownerId: string;
+  pid: number;
+  acquiredAt: string;
+};
+
+export interface TaskExecutionLease {
+  readonly taskId: string;
+  readonly ownerId: string;
+  assertOwned(): Promise<void>;
+  release(): Promise<void>;
+}
 
 export class TaskStore {
   #dir: string;
+  #leaseDir: string;
 
   constructor(stateDir: string) {
-    this.#dir = path.join(path.resolve(stateDir), 'tasks');
+    const root = path.resolve(stateDir);
+    this.#dir = path.join(root, 'tasks');
+    this.#leaseDir = path.join(root, 'task-leases');
   }
 
   async init(): Promise<void> {
@@ -84,9 +108,121 @@ export class TaskStore {
     await fs.rm(this.#file(taskId), { force: true });
   }
 
+  async acquireExecutionLease(taskIdInput: string): Promise<TaskExecutionLease> {
+    const taskId = validTaskId(taskIdInput);
+    await this.#initLeaseDir();
+    const leasePath = path.join(this.#leaseDir, `${taskId}.json`);
+    const record: TaskLeaseRecord = {
+      version: 1,
+      taskId,
+      ownerId: crypto.randomUUID(),
+      pid: process.pid,
+      acquiredAt: new Date().toISOString()
+    };
+    const serialized = Buffer.from(JSON.stringify(record), 'utf8');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await createDurableStateBytes(leasePath, serialized, LEASE_OPTIONS);
+        return taskExecutionLease(leasePath, record);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      let existing: TaskLeaseRecord;
+      try { existing = await readTaskLease(leasePath, taskId); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      if (processIsAlive(existing.pid)) {
+        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned by an active executor.`, {
+          details: { acquiredAt: existing.acquiredAt }
+        });
+      }
+      const stale = `${leasePath}.${crypto.randomUUID()}.stale`;
+      try {
+        await fs.rename(leasePath, stale);
+        await fs.rm(stale, { force: true });
+      } catch (error) {
+        if (!['ENOENT', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
+    }
+    throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} execution ownership changed concurrently.`);
+  }
+
   #file(taskId: string): string {
     return path.join(this.#dir, `${validTaskId(taskId)}.json`);
   }
+
+  async #initLeaseDir(): Promise<void> {
+    await fs.mkdir(this.#leaseDir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(this.#leaseDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new OperatorError('TASK_LEASE_CORRUPT', 'Task lease directory must be a real directory, not a link or special file.');
+    }
+  }
+}
+
+function taskExecutionLease(leasePath: string, expected: TaskLeaseRecord): TaskExecutionLease {
+  let released = false;
+  const assertOwned = async (): Promise<void> => {
+    if (released) throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease has already been released.');
+    const current = await readTaskLease(leasePath, expected.taskId).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease no longer exists.');
+      throw error;
+    });
+    if (current.ownerId !== expected.ownerId || current.pid !== expected.pid) {
+      throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease ownership changed.');
+    }
+  };
+  return {
+    taskId: expected.taskId,
+    ownerId: expected.ownerId,
+    assertOwned,
+    async release(): Promise<void> {
+      if (released) return;
+      await assertOwned();
+      await fs.rm(leasePath);
+      await syncLeaseDirectory(path.dirname(leasePath));
+      released = true;
+    }
+  };
+}
+
+async function readTaskLease(file: string, expectedTaskId: string): Promise<TaskLeaseRecord> {
+  let raw: unknown;
+  try { raw = JSON.parse(await readDurableStateText(file, LEASE_OPTIONS)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    if (error instanceof OperatorError) throw error;
+    throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease is not valid JSON.');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease must be an object.');
+  const value = raw as Record<string, unknown>;
+  if (value.version !== 1 || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
+  const ownerId = validLeaseId(value.ownerId, 'ownerId');
+  const pid = Number(value.pid);
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease PID is invalid.');
+  return { version: 1, taskId: expectedTaskId, ownerId, pid, acquiredAt: validIso(value.acquiredAt, 'lease acquiredAt') };
+}
+
+function validLeaseId(input: unknown, label: string): string {
+  try { return validTaskId(String(input ?? '')); }
+  catch { throw new OperatorError('TASK_LEASE_CORRUPT', `Stored task execution lease ${label} is invalid.`); }
+}
+
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+async function syncLeaseDirectory(directory: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const handle = await fs.open(directory, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 function parseStoredTask(text: string, expectedTaskId: string): TaskCapsule {

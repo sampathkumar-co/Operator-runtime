@@ -23,7 +23,7 @@ export class LocalPrivacyDataStore {
   async inventory(): Promise<PrivacyCategoryStatus[]> {
     return [
       await this.#status('activity', ['audit.ndjson', 'audit-head.json'], true),
-      await this.#status('tasks', ['tasks'], true),
+      await this.#status('tasks', ['tasks', 'task-leases'], true),
       await this.#status('session-state', ['relay-client.json', 'device-sessions.json', 'relay-session.token'], true),
       await this.#status('device-identity', ['device-identity.json'], false),
       await this.#status('pairing-state', ['device-registry.json', 'device-routing.json'], false)
@@ -36,7 +36,7 @@ export class LocalPrivacyDataStore {
     const targets = category === 'activity'
       ? ['audit.ndjson', 'audit-head.json']
       : category === 'tasks'
-        ? ['tasks']
+        ? ['tasks', 'task-leases']
         : ['relay-client.json', 'device-sessions.json', 'relay-session.token'];
 
     for (const relative of targets) {

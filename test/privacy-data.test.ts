@@ -25,13 +25,15 @@ test('privacy inventory is bounded and purge requires recovery auth while protec
   const audit = new AuditLog(state);
   await audit.append({ capability: 'file.read', result: 'success', risk: 'read', details: { actionId: 'privacy-test' } });
   const tasks = new TaskStore(state);
-  await tasks.put(createTask({
+  const task = createTask({
     userObjective: 'privacy test',
     interpretedObjective: 'privacy test',
     authorizedScope: [root],
     prohibitedScope: [],
     successConditions: ['done']
-  }));
+  });
+  await tasks.put(task);
+  await tasks.acquireExecutionLease(task.id);
   await fs.writeFile(path.join(state, 'relay-client.json'), '{"version":1}', { mode: 0o600 });
   await fs.writeFile(path.join(state, 'device-sessions.json'), '{"version":1}', { mode: 0o600 });
   await fs.writeFile(path.join(state, 'relay-session.token'), 'header.payload', { mode: 0o600 });
@@ -86,6 +88,7 @@ test('privacy inventory is bounded and purge requires recovery auth while protec
 
   await assert.rejects(fs.access(path.join(state, 'audit.ndjson')));
   await assert.rejects(fs.access(path.join(state, 'tasks')));
+  await assert.rejects(fs.access(path.join(state, 'task-leases')));
   await assert.rejects(fs.access(path.join(state, 'relay-client.json')));
   await assert.rejects(fs.access(path.join(state, 'device-sessions.json')));
   await assert.rejects(fs.access(path.join(state, 'relay-session.token')));
