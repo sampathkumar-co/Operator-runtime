@@ -1,5 +1,5 @@
 export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
-export type TaskState = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
+export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type ProvenanceKind =
   | 'user'

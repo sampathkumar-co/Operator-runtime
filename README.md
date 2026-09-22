@@ -13,6 +13,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - instruction-provenance boundary for prompt-injection defense
 - evidence-rich structured action results
 - persistent Task Capsules and dependency gates
+- durable semantic task executor with bounded planning, retries, loop detection, pause/resume/cancel, crash recovery and evidence-backed postconditions
 - rooted filesystem provider with realpath/symlink escape defense
 - atomic file writes with expected-SHA protection
 - argv-only process execution with no command shell and executable allowlists
@@ -124,6 +125,8 @@ npm run dev:agent
 ```
 
 The local agent is **loopback-only**: startup rejects wildcard, LAN, DNS-name, and other non-literal-loopback bind hosts. Remote ingress must go through the approved relay/Secure MCP Tunnel boundary; the agent is intentionally **not** a public shell endpoint.
+
+The authenticated local boundary also exposes durable task execution: `POST /v1/tasks` submits a controlled-file-change or trusted-project-command goal, while `POST /v1/tasks/:id/run`, `/pause`, `/resume`, and `/cancel` control it. `GET /v1/tasks/:id` returns the persisted Task Capsule, including action attempts and evidence. Destructive task resume requires the separate recovery authority and the exact deterministic blocked action ID.
 
 ## MCP development adapter
 

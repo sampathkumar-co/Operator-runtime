@@ -16,6 +16,8 @@ import { LocalDeviceResetCoordinator } from './device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
+import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { evidence } from '../../../src/core/evidence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -185,6 +187,41 @@ async function resetLocalDevice() {
   return await coordinator.reset();
 }
 
+const permissions = {
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+  allowedRoots,
+  allowExternalWrites: false,
+  allowSystemChanges: false,
+  allowDestructive: false
+};
+const taskOrchestrator = new TaskOrchestrator({
+  runtime,
+  store: tasks,
+  permissions,
+  executeAction: async (action, actionPermissions) => {
+    if ((await emergencyStop.status()).engaged) {
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'policy',
+        evidence: [evidence('emergency_stop', 'fail', 'Operator execution is disabled by the local emergency stop.')],
+        error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.', retryable: false },
+        durationMs: 0
+      };
+    }
+    const result = await runtime.execute(action, actionPermissions);
+    await audit.append({
+      taskId: action.taskId,
+      capability: action.capability,
+      target: action.target,
+      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
+      risk: action.risk,
+      details: { actionId: action.id, provider: result.provider, durationMs: result.durationMs, errorCode: result.error?.code }
+    });
+    return result;
+  }
+});
+
 const agent = createLocalAgentServer({
   runtime,
   token,
@@ -193,6 +230,7 @@ const agent = createLocalAgentServer({
   approvals,
   audit,
   tasks,
+  taskOrchestrator,
   deviceIdentity,
   deviceRegistry,
   privacy,
@@ -219,13 +257,7 @@ const agent = createLocalAgentServer({
     projectExecutableAllowlistCount: allowedExecutables.length,
     terminalExecutableAllowlistCount: terminalAllowedExecutables.length
   },
-  permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
-    allowedRoots,
-    allowExternalWrites: false,
-    allowSystemChanges: false,
-    allowDestructive: false
-  }
+  permissions
 });
 
 const host = process.env.OPERATOR_AGENT_HOST ?? '127.0.0.1';

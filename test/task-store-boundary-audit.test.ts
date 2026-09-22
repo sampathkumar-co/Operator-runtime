@@ -153,6 +153,35 @@ test('TaskStore rejects malformed persisted timestamps', async (t) => {
   await expectCorrupt(() => new TaskStore(state).get(value.id), /ISO timestamp/);
 });
 
+test('TaskStore rejects malformed durable execution records and impossible timing', async (t) => {
+  const state = await tempDir(t, 'operator-task-bad-execution-');
+  const value = task();
+  const now = value.createdAt;
+  const execution = {
+    schemaVersion: 1,
+    plannerId: 'test.planner',
+    goalKind: 'test-goal',
+    plannerState: { phase: 'start' },
+    maxSteps: 10,
+    maxAttemptsPerStep: 2,
+    timeoutMs: 1000,
+    stepCount: 1,
+    startedAt: now,
+    deadlineAt: new Date(Date.parse(now) + 1000).toISOString(),
+    records: [{
+      stepKey: 'one', actionId: 'action-one', capability: 'file.read', risk: 'owner',
+      inputHash: 'a'.repeat(64), attempt: 1, state: 'STARTED', startedAt: now, evidence: []
+    }]
+  };
+  await writePersisted(state, value.id, { ...value, execution });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /risk is invalid/);
+
+  execution.records[0]!.risk = 'read';
+  (execution.records[0] as any).finishedAt = now;
+  await writePersisted(state, value.id, { ...value, execution });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /cannot finish while STARTED/);
+});
+
 test('TaskStore rejects oversized persisted collections and strings', async (t) => {
   const state = await tempDir(t, 'operator-task-bounds-');
   const collectionTask = task();

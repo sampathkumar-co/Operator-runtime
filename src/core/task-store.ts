@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { TaskCapsule, TaskNode } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
 import type { Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -17,7 +17,8 @@ const TASK_OPTIONS = {
   errorCode: 'TASK_STATE_CORRUPT',
   invalidMessage: 'Stored task capsule is invalid.'
 } as const;
-const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
+const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
+const MAX_ACTION_RECORDS = 5000;
 
 export class TaskStore {
   #dir: string;
@@ -133,6 +134,7 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
   const nodes = validateNodes(raw.nodes);
   const evidence = validateEvidenceArray(raw.evidence, MAX_EVIDENCE, 'task evidence');
   const failures = validateFailures(raw.failures);
+  const execution = raw.execution === undefined ? undefined : validateExecution(raw.execution);
   const createdAt = validIso(raw.createdAt, 'createdAt');
   const updatedAt = validIso(raw.updatedAt, 'updatedAt');
   if (Date.parse(updatedAt) < Date.parse(createdAt)) throw corrupt('Task updatedAt cannot precede createdAt.');
@@ -147,8 +149,78 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
     nodes,
     evidence,
     failures,
+    ...(execution ? { execution } : {}),
     createdAt,
     updatedAt
+  };
+}
+
+function validateExecution(input: unknown): TaskExecution {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('execution must be an object.');
+  const raw = input as Record<string, unknown>;
+  if (raw.schemaVersion !== 1) throw corrupt('execution schemaVersion is invalid.');
+  const plannerId = boundedText(raw.plannerId, 256, 'execution plannerId');
+  const goalKind = boundedText(raw.goalKind, 256, 'execution goalKind');
+  const plannerState = jsonObject(raw.plannerState, 'execution plannerState');
+  const maxSteps = boundedInteger(raw.maxSteps, 1, 1000, 'execution maxSteps');
+  const maxAttemptsPerStep = boundedInteger(raw.maxAttemptsPerStep, 1, 20, 'execution maxAttemptsPerStep');
+  const timeoutMs = boundedInteger(raw.timeoutMs, 100, 24 * 60 * 60 * 1000, 'execution timeoutMs');
+  const stepCount = boundedInteger(raw.stepCount, 0, maxSteps, 'execution stepCount');
+  const startedAt = raw.startedAt === undefined ? undefined : validIso(raw.startedAt, 'execution startedAt');
+  const deadlineAt = raw.deadlineAt === undefined ? undefined : validIso(raw.deadlineAt, 'execution deadlineAt');
+  if ((startedAt === undefined) !== (deadlineAt === undefined)) throw corrupt('execution timing fields must appear together.');
+  if (startedAt && deadlineAt && Date.parse(deadlineAt) <= Date.parse(startedAt)) throw corrupt('execution deadline must follow start.');
+  if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
+  const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
+  return { schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount, ...(startedAt ? { startedAt, deadlineAt } : {}), records };
+}
+
+function validateActionRecord(input: unknown, index: number): TaskActionRecord {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt(`Action record ${index} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const state = String(raw.state ?? '');
+  if (!['STARTED', 'SUCCEEDED', 'FAILED', 'BLOCKED', 'INTERRUPTED'].includes(state)) throw corrupt(`Action record ${index} state is invalid.`);
+  const inputHash = boundedText(raw.inputHash, 64, `action record ${index} inputHash`);
+  if (!/^[0-9a-f]{64}$/.test(inputHash)) throw corrupt(`Action record ${index} inputHash is invalid.`);
+  const risk = String(raw.risk ?? '');
+  if (!['read', 'write', 'external', 'system', 'destructive'].includes(risk)) throw corrupt(`Action record ${index} risk is invalid.`);
+  const startedAt = validIso(raw.startedAt, `action record ${index} startedAt`);
+  const finishedAt = raw.finishedAt === undefined ? undefined : validIso(raw.finishedAt, `action record ${index} finishedAt`);
+  if (state === 'STARTED' && finishedAt !== undefined) throw corrupt(`Action record ${index} cannot finish while STARTED.`);
+  if (state !== 'STARTED' && finishedAt === undefined) throw corrupt(`Action record ${index} must include finishedAt.`);
+  if (finishedAt && Date.parse(finishedAt) < Date.parse(startedAt)) throw corrupt(`Action record ${index} finishedAt cannot precede startedAt.`);
+  return {
+    stepKey: boundedText(raw.stepKey, 256, `action record ${index} stepKey`),
+    actionId: boundedText(raw.actionId, 256, `action record ${index} actionId`),
+    capability: boundedText(raw.capability, 256, `action record ${index} capability`),
+    risk: risk as TaskActionRecord['risk'],
+    inputHash,
+    attempt: boundedInteger(raw.attempt, 1, 20, `action record ${index} attempt`),
+    state: state as TaskActionRecord['state'],
+    startedAt,
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(raw.errorCode === undefined ? {} : { errorCode: boundedText(raw.errorCode, 256, `action record ${index} errorCode`) }),
+    ...(raw.observation === undefined ? {} : { observation: validateObservation(raw.observation, index) }),
+    evidence: validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `action record ${index} evidence`)
+  };
+}
+
+function validateObservation(input: unknown, index: number): TaskObservationSummary {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt(`Action record ${index} observation must be an object.`);
+  const raw = input as Record<string, unknown>;
+  if (raw.schemaVersion !== 1) throw corrupt(`Action record ${index} observation schemaVersion is invalid.`);
+  const channel = String(raw.channel ?? '');
+  if (channel !== 'semantic' && channel !== 'visual') throw corrupt(`Action record ${index} observation channel is invalid.`);
+  const domain = String(raw.domain ?? '');
+  if (!['project', 'filesystem', 'git', 'browser', 'uia', 'process', 'system', 'application', 'visual', 'unknown'].includes(domain)) {
+    throw corrupt(`Action record ${index} observation domain is invalid.`);
+  }
+  return {
+    schemaVersion: 1,
+    channel,
+    domain: domain as TaskObservationSummary['domain'],
+    provider: boundedText(raw.provider, 256, `action record ${index} observation provider`),
+    observedAt: validIso(raw.observedAt, `action record ${index} observation observedAt`)
   };
 }
 
@@ -246,6 +318,12 @@ function validateIdArray(input: unknown, maxItems: number, label: string): strin
 function boundedText(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw corrupt(`${label} is invalid.`);
   return input;
+}
+
+function boundedInteger(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw corrupt(`${label} is invalid.`);
+  return value;
 }
 
 function validIso(input: unknown, label: string): string {
