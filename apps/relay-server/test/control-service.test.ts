@@ -276,7 +276,7 @@ test('new device registration rolls back when serialized account binding fails',
 });
 
 
-test('repeated read requests dispatch fresh work instead of replaying a completed snapshot', async (t) => {
+test('read retries recover the same invocation while a new MCP invocation dispatches fresh work', async (t) => {
   const keyBySeq = new Map<number, string>();
   const completedByKey = new Map<string, any>();
   let dispatchCalls = 0;
@@ -323,6 +323,14 @@ test('repeated read requests dispatch fresh work instead of replaying a complete
     });
     assert.equal(response.status, 200, await response.text());
   }
+  assert.equal(dispatchCalls, 1);
+
+  const fresh = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'new-read-request-id' },
+    waitMs: 1000
+  });
+  assert.equal(fresh.status, 200, await fresh.text());
   assert.equal(dispatchCalls, 2);
   assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
 });

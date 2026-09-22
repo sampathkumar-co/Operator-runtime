@@ -270,7 +270,6 @@ function validSeq(input: unknown): number {
 
 function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
   const digest = crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0');
-  if (action.risk === 'read') digest.update(':fresh-read:').update(crypto.randomBytes(16));
   return digest.digest('hex');
 }
 
