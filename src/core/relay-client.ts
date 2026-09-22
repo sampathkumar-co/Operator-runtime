@@ -126,6 +126,7 @@ export class RelayClient {
   #attempt = 0;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #lastPongAt = 0;
+  #interruptConnection: (() => void) | null = null;
 
   constructor(options: RelayClientOptions) {
     this.#stateFile = path.join(path.resolve(options.stateDir), 'relay-client.json');
@@ -175,6 +176,11 @@ export class RelayClient {
 
   reconnect(): void {
     if (this.#stopped) return;
+    const interrupt = this.#interruptConnection;
+    if (interrupt) {
+      interrupt();
+      return;
+    }
     try { this.#socket?.close(1012, 'session refresh recovery'); } catch { /* reconnect loop handles the next attempt */ }
   }
 
@@ -217,11 +223,13 @@ export class RelayClient {
       let welcomed = false;
       let settled = false;
       let messageQueue: Promise<void> = Promise.resolve();
+      let interrupt: (() => void) | null = null;
 
       const cleanup = () => {
         socket.removeEventListener?.('message', onMessage);
         socket.removeEventListener?.('error', onError);
         socket.removeEventListener?.('close', onClose);
+        if (this.#interruptConnection === interrupt) this.#interruptConnection = null;
       };
       const succeed = () => {
         if (settled) return;
@@ -242,6 +250,8 @@ export class RelayClient {
         if (this.#stopped) succeed();
         else fail(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
       };
+      interrupt = () => fail(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested.', { retryable: true }));
+      this.#interruptConnection = interrupt;
       const processMessage = async (event: any) => {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
