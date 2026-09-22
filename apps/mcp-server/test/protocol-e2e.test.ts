@@ -187,6 +187,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       OPERATOR_AGENT_HOST: '127.0.0.1',
       OPERATOR_AGENT_PORT: String(agentPort),
       OPERATOR_AGENT_TOKEN: TOKEN,
+      OPERATOR_STATE_DIR: path.join(authorityRoot, 'state'),
       OPERATOR_ALLOWED_ROOTS: testRoot,
       OPERATOR_ALLOWED_EXECUTABLES: 'node',
       OPERATOR_PROJECT_COMMAND_REGISTRY: commandRegistryPath,
