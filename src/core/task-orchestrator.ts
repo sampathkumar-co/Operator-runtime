@@ -11,7 +11,8 @@ import { OperatorError } from './errors.ts';
 
 export type SemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
-  | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' };
+  | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
+  | { kind: 'browser-navigation'; url: string; targetId?: string };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
@@ -315,7 +316,7 @@ export class TaskOrchestrator {
 
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
-  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command'].includes(goal.kind); }
+  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
@@ -327,10 +328,16 @@ export class SemanticTaskPlanner implements TaskPlanner {
       if (phase === 'git') return { type: 'step', key: 'inspect-git', title: 'Verify Git observes the file', capability: 'git.status', input: { cwd: goal.root } };
       return { type: 'complete', message: 'Controlled file task satisfied exact-content and Git-state postconditions.' };
     }
-    if (phase === 'start') return { type: 'step', key: 'inspect-project', title: 'Inspect project semantics', capability: 'project.inspect', input: { path: goal.root } };
-    if (phase === 'commands') return { type: 'step', key: 'inspect-commands', title: 'Discover trusted project commands', capability: 'project.command.inspect', input: { path: goal.root } };
-    if (phase === 'run') return { type: 'step', key: 'run-command', title: 'Execute trusted project command', capability: 'project.command.run', input: { path: goal.root, commandId: state.commandId, expectedRisk: state.commandRisk } };
-    return { type: 'complete', message: 'Trusted project command completed with its registered postcondition validation.' };
+    if (goal.kind === 'trusted-project-command') {
+      if (phase === 'start') return { type: 'step', key: 'inspect-project', title: 'Inspect project semantics', capability: 'project.inspect', input: { path: goal.root } };
+      if (phase === 'commands') return { type: 'step', key: 'inspect-commands', title: 'Discover trusted project commands', capability: 'project.command.inspect', input: { path: goal.root } };
+      if (phase === 'run') return { type: 'step', key: 'run-command', title: 'Execute trusted project command', capability: 'project.command.run', input: { path: goal.root, commandId: state.commandId, expectedRisk: state.commandRisk } };
+      return { type: 'complete', message: 'Trusted project command completed with its registered postcondition validation.' };
+    }
+    if (phase === 'start') return { type: 'step', key: 'inspect-browser', title: 'Inspect semantic browser state', capability: 'browser.inspect', input: {} };
+    if (phase === 'navigate') return { type: 'step', key: 'navigate-browser', title: 'Navigate the selected browser target', capability: 'browser.navigate', input: { targetId: state.targetId, url: goal.url }, target: goal.url };
+    if (phase === 'verify') return { type: 'step', key: 'verify-browser', title: 'Verify semantic browser destination', capability: 'browser.inspect', input: { targetId: state.targetId }, target: goal.url };
+    return { type: 'complete', message: 'Browser navigation satisfied semantic destination postconditions.' };
   }
 
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
@@ -350,21 +357,51 @@ export class SemanticTaskPlanner implements TaskPlanner {
       }
       return;
     }
-    if (step.key === 'inspect-project') state.phase = 'commands';
-    else if (step.key === 'inspect-commands') {
-      const commands = Array.isArray(asRecord(result.output).commands) ? asRecord(result.output).commands as Array<Record<string, unknown>> : [];
-      const selected = commands.find((command) => command.kind === goal.commandKind);
-      if (!selected || typeof selected.id !== 'string' || typeof selected.risk !== 'string') throw new OperatorError('TASK_TRUSTED_COMMAND_NOT_FOUND', `No trusted ${goal.commandKind} command is configured.`);
-      state.commandId = selected.id;
-      state.commandRisk = selected.risk;
-      state.phase = 'run';
-    } else if (step.key === 'run-command') state.phase = 'complete';
+    if (goal.kind === 'trusted-project-command') {
+      if (step.key === 'inspect-project') state.phase = 'commands';
+      else if (step.key === 'inspect-commands') {
+        const commands = Array.isArray(asRecord(result.output).commands) ? asRecord(result.output).commands as Array<Record<string, unknown>> : [];
+        const selected = commands.find((command) => command.kind === goal.commandKind);
+        if (!selected || typeof selected.id !== 'string' || typeof selected.risk !== 'string') throw new OperatorError('TASK_TRUSTED_COMMAND_NOT_FOUND', `No trusted ${goal.commandKind} command is configured.`);
+        state.commandId = selected.id;
+        state.commandRisk = selected.risk;
+        state.phase = 'run';
+      } else if (step.key === 'run-command') state.phase = 'complete';
+      return;
+    }
+    if (step.key === 'inspect-browser') {
+      const tabs = Array.isArray(asRecord(result.output).tabs) ? asRecord(result.output).tabs as Array<Record<string, unknown>> : [];
+      const selected = goal.targetId
+        ? tabs.find((tab) => tab.id === goal.targetId)
+        : tabs.find((tab) => tab.type === 'page');
+      if (!selected || typeof selected.id !== 'string') throw new OperatorError('TASK_BROWSER_TARGET_NOT_FOUND', 'No matching semantic browser page target is available.');
+      state.targetId = selected.id;
+      state.phase = 'navigate';
+    } else if (step.key === 'navigate-browser') {
+      const output = asRecord(result.output);
+      if (typeof output.targetId !== 'string' || output.targetId !== state.targetId || !sameBrowserDestination(String(output.url ?? ''), goal.url)) {
+        throw new OperatorError('TASK_BROWSER_POSTCONDITION_FAILED', 'Browser navigation result did not match the selected target and destination.');
+      }
+      state.phase = 'verify';
+    } else if (step.key === 'verify-browser') {
+      const target = asRecord(asRecord(result.output).target);
+      if (target.id !== state.targetId || !sameBrowserDestination(String(target.url ?? ''), goal.url)) {
+        throw new OperatorError('TASK_BROWSER_POSTCONDITION_FAILED', 'Semantic browser re-observation did not confirm the requested destination.');
+      }
+      state.phase = 'complete';
+    }
   }
 
   fallback({ task }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): boolean {
     if (step.key === 'create-file' && result.error?.code === 'TARGET_EXISTS') {
       task.execution!.plannerState.phase = 'read';
       task.evidence.push(evidence('strategy_fallback', 'info', 'Target already existed; switched to exact-content verification.'));
+      return true;
+    }
+    if (step.key === 'navigate-browser' && result.error?.code === 'BROWSER_TARGET_NOT_FOUND') {
+      task.execution!.plannerState.phase = 'start';
+      delete task.execution!.plannerState.targetId;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'Browser target disappeared; switched to semantic target re-discovery.'));
       return true;
     }
     return false;
@@ -383,11 +420,19 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (relative.startsWith('..') || path.isAbsolute(relative)) throw new OperatorError('TASK_GOAL_INVALID', 'Controlled file path must remain inside its goal root.');
     goal.root = root;
     goal.path = target;
-  } else {
+  } else if (goal.kind === 'trusted-project-command') {
     boundedText(goal.root, 4096, 'goal root');
     if (!['build', 'test', 'lint'].includes(goal.commandKind)) throw new OperatorError('TASK_GOAL_INVALID', 'Trusted command kind is invalid.');
     goal.root = path.resolve(goal.root);
-  }
+  } else if (goal.kind === 'browser-navigation') {
+    const rawUrl = boundedText(goal.url, 16_384, 'goal URL');
+    let url: URL;
+    try { url = new URL(rawUrl); } catch { throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal requires a valid absolute URL.'); }
+    if (!['http:', 'https:'].includes(url.protocol)) throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal permits only HTTP(S) destinations.');
+    if (url.username || url.password) throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal URL must not contain credentials.');
+    goal.url = url.toString();
+    if (goal.targetId !== undefined) goal.targetId = boundedText(goal.targetId, 256, 'browser targetId');
+  } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
 }
 
@@ -432,6 +477,17 @@ function detectPlannerLoop(records: TaskActionRecord[], stepKey: string, inputHa
     if (tail.join('\0') === prior.join('\0') && tail.join('\0') === earlier.join('\0')) return true;
   }
   return false;
+}
+function sameBrowserDestination(actualRaw: string, expectedRaw: string): boolean {
+  try {
+    const actual = new URL(actualRaw);
+    const expected = new URL(expectedRaw);
+    actual.hash = '';
+    expected.hash = '';
+    return actual.origin === expected.origin
+      && actual.search === expected.search
+      && (actual.pathname === expected.pathname || actual.pathname.replace(/\/$/, '') === expected.pathname.replace(/\/$/, ''));
+  } catch { return false; }
 }
 function asRecord(value: unknown): Record<string, unknown> { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function boundedInteger(value: unknown, min: number, max: number, fallback: number): number { const parsed = value === undefined ? fallback : Number(value); if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw new OperatorError('TASK_BUDGET_INVALID', 'Task budget is invalid.'); return parsed; }

@@ -161,7 +161,8 @@ export function createLocalAgentServer(options: {
       try {
         const body = await readJson(req) as Record<string, unknown>;
         const goal = body.goal as SemanticTaskGoal;
-        if (!goal || typeof goal !== 'object' || typeof goal.root !== 'string' || !withinAuthorizedRoots(goal.root, options.permissions.allowedRoots)) {
+        const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
+        if (!authorizedScope) {
           send(res, 403, { ok: false, error: { code: 'TASK_SCOPE_DENIED', message: 'Task goal root is outside the authorized roots.' } });
           return;
         }
@@ -171,7 +172,7 @@ export function createLocalAgentServer(options: {
         }
         const submitted = await options.taskOrchestrator.submit({
           objective: body.objective,
-          authorizedScope: [path.resolve(goal.root)],
+          authorizedScope,
           prohibitedScope: Array.isArray(body.prohibitedScope) ? body.prohibitedScope : [],
           successConditions: body.successConditions,
           goal,
@@ -548,4 +549,16 @@ function withinAuthorizedRoots(input: string, roots: string[]): boolean {
     const relative = path.relative(path.resolve(root), candidate);
     return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
   });
+}
+
+function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] | null {
+  if (!goal || typeof goal !== 'object') return null;
+  if (goal.kind === 'browser-navigation') {
+    try {
+      const url = new URL(String(goal.url ?? ''));
+      return [`browser:${url.origin}`];
+    } catch { return ['browser:invalid']; }
+  }
+  if (typeof goal.root !== 'string' || !withinAuthorizedRoots(goal.root, roots)) return null;
+  return [path.resolve(goal.root)];
 }

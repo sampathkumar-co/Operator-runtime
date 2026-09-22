@@ -262,6 +262,102 @@ class DelayedProvider implements CapabilityProvider {
   }
 }
 
+class SemanticBrowserProvider implements CapabilityProvider {
+  readonly name = 'test.browser.semantic';
+  #url = 'https://example.test/start';
+  supports(action: ActionRequest): boolean { return ['browser.inspect', 'browser.navigate'].includes(action.capability); }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'browser.navigate') {
+      assert.equal(action.input.targetId, 'tab-1');
+      this.#url = String(action.input.url);
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: { targetId: 'tab-1', url: this.#url, title: 'Destination' }, evidence: [], durationMs: 0
+      };
+    }
+    return {
+      ok: true, capability: action.capability, provider: this.name,
+      output: action.input.targetId
+        ? { target: { id: 'tab-1', type: 'page', title: 'Destination', url: this.#url }, page: { semantic: { headings: ['Destination'] } } }
+        : { tabs: [{ id: 'tab-1', type: 'page', title: 'Start', url: this.#url }] },
+      evidence: [], durationMs: 0
+    };
+  }
+}
+
+test('task executor navigates and re-observes a semantic browser target before completion', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-state-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new SemanticBrowserProvider()),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Navigate a semantic browser page and verify the destination.',
+    authorizedScope: ['browser:https://example.test'],
+    successConditions: ['selected page reaches requested destination', 'semantic re-observation confirms it'],
+    goal: { kind: 'browser-navigation', url: 'https://example.test/destination?mode=verified#section' }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), [
+    'browser.inspect', 'browser.navigate', 'browser.inspect'
+  ]);
+  assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'browser'));
+  assert.equal(completed.execution?.plannerState.targetId, 'tab-1');
+});
+
+class RediscoveringBrowserProvider implements CapabilityProvider {
+  readonly name = 'test.browser.rediscovery';
+  #targetId = 'tab-old';
+  #url = 'https://example.test/start';
+  #failedOnce = false;
+  supports(action: ActionRequest): boolean { return ['browser.inspect', 'browser.navigate'].includes(action.capability); }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'browser.navigate' && !this.#failedOnce) {
+      this.#failedOnce = true;
+      this.#targetId = 'tab-new';
+      return {
+        ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 0,
+        error: { code: 'BROWSER_TARGET_NOT_FOUND', message: 'Target closed.', retryable: true }
+      };
+    }
+    if (action.capability === 'browser.navigate') {
+      assert.equal(action.input.targetId, 'tab-new');
+      this.#url = String(action.input.url);
+      return { ok: true, capability: action.capability, provider: this.name, output: { targetId: this.#targetId, url: this.#url }, evidence: [], durationMs: 0 };
+    }
+    const output = action.input.targetId
+      ? { target: { id: this.#targetId, type: 'page', url: this.#url } }
+      : { tabs: [{ id: this.#targetId, type: 'page', url: this.#url }] };
+    return { ok: true, capability: action.capability, provider: this.name, output, evidence: [], durationMs: 0 };
+  }
+}
+
+test('browser task re-discovers a disappeared semantic target before retrying navigation', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-fallback-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new RediscoveringBrowserProvider()), store: new TaskStore(state),
+    permissions: { allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [] }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Recover from a closed browser tab.', authorizedScope: ['browser:https://example.test'],
+    successConditions: ['new page target reaches destination'],
+    goal: { kind: 'browser-navigation', url: 'https://example.test/recovered' }
+  });
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(completed.execution?.plannerState.targetId, 'tab-new');
+  assert.equal(completed.execution?.records.find((record) => record.errorCode === 'BROWSER_TARGET_NOT_FOUND')?.state, 'FAILED');
+  assert.ok(completed.evidence.some((item) => item.kind === 'strategy_fallback' && /re-discovery/.test(item.message)));
+});
+
 class OneStepPlanner implements TaskPlanner {
   readonly id = 'test.one-step';
   supports(): boolean { return true; }

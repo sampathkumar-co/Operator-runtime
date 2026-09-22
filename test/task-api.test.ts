@@ -7,12 +7,36 @@ import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
 import { TaskStore } from '../src/core/task-store.ts';
+import { OperatorRuntime } from '../src/core/runtime.ts';
+import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
 import { supportedGitAvailable } from './git-test-support.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   return dir;
+}
+
+const BROWSER_SCORE: CapabilityScore = {
+  reliability: 1, latency: 1, determinism: 1, security: 1,
+  reversibility: 1, informationQuality: 1, interactionCost: 0
+};
+
+class ApiBrowserProvider implements CapabilityProvider {
+  readonly name = 'test.browser.api';
+  #url = 'https://example.test/start';
+  supports(action: ActionRequest): boolean { return ['browser.inspect', 'browser.navigate'].includes(action.capability); }
+  score(): CapabilityScore { return BROWSER_SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'browser.navigate') {
+      this.#url = String(action.input.url);
+      return { ok: true, capability: action.capability, provider: this.name, output: { targetId: 'tab-api', url: this.#url }, evidence: [], durationMs: 0 };
+    }
+    const output = action.input.targetId
+      ? { target: { id: 'tab-api', type: 'page', url: this.#url } }
+      : { tabs: [{ id: 'tab-api', type: 'page', url: this.#url }] };
+    return { ok: true, capability: action.capability, provider: this.name, output, evidence: [], durationMs: 0 };
+  }
 }
 
 test('authenticated task API submits, executes, and reads a durable multi-action goal', async (t) => {
@@ -133,4 +157,33 @@ test('task API requires separate recovery authority for the exact blocked action
   const completed = await approved.json() as any;
   assert.equal(completed.task.state, 'VERIFIED');
   assert.equal(await fs.readFile(marker, 'utf8'), 'approved');
+});
+
+test('task API accepts a browser-scoped semantic goal without a filesystem root', async (t) => {
+  const state = await tempDir(t, 'operator-task-api-browser-state-');
+  const runtime = new OperatorRuntime().register(new ApiBrowserProvider());
+  const tasks = new TaskStore(state);
+  const permissions = {
+    allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+    allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'b'.repeat(64);
+  const agent = createLocalAgentServer({ runtime, token, permissions, tasks, taskOrchestrator });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const response = await fetch(`http://127.0.0.1:${bound.port}/v1/tasks`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      objective: 'Navigate and verify a semantic browser page.', run: true,
+      successConditions: ['destination re-observed'],
+      goal: { kind: 'browser-navigation', url: 'https://example.test/api-destination' }
+    })
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json() as any;
+  assert.equal(payload.task.state, 'VERIFIED');
+  assert.deepEqual(payload.task.authorizedScope, ['browser:https://example.test']);
+  assert.deepEqual(payload.task.execution.records.map((record: any) => record.observation.domain), ['browser', 'browser', 'browser']);
 });

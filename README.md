@@ -126,7 +126,7 @@ npm run dev:agent
 
 The local agent is **loopback-only**: startup rejects wildcard, LAN, DNS-name, and other non-literal-loopback bind hosts. Remote ingress must go through the approved relay/Secure MCP Tunnel boundary; the agent is intentionally **not** a public shell endpoint.
 
-The authenticated local boundary also exposes durable task execution: `POST /v1/tasks` submits a controlled-file-change or trusted-project-command goal, while `POST /v1/tasks/:id/run`, `/pause`, `/resume`, and `/cancel` control it. `GET /v1/tasks/:id` returns the persisted Task Capsule, including action attempts and evidence. Destructive task resume requires the separate recovery authority and the exact deterministic blocked action ID.
+The authenticated local boundary also exposes durable task execution: `POST /v1/tasks` submits a controlled-file-change, trusted-project-command, or semantic browser-navigation goal, while `POST /v1/tasks/:id/run`, `/pause`, `/resume`, and `/cancel` control it. `GET /v1/tasks/:id` returns the persisted Task Capsule, including action attempts and evidence. Destructive task resume requires the separate recovery authority and the exact deterministic blocked action ID.
 
 ## MCP development adapter
 
