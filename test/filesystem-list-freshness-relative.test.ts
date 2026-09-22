@@ -44,3 +44,37 @@ test('relative create is immediately visible through normalized parent listings'
   assert.equal(escaped.ok, false);
   assert.equal(escaped.error?.code, 'PATH_OUTSIDE_SCOPE');
 });
+
+test('equivalent project-relative path forms stay canonical and create-list-read is immediately fresh', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-canonical-'));
+  await fs.mkdir(path.join(root, 'src'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+
+  const created = await provider.execute(action('file.create', { path: 'src/fresh.txt', content: 'fresh-now' }));
+  assert.equal(created.ok, true, created.error?.message);
+
+  const directoryForms = process.platform === 'win32'
+    ? ['src', './src', '.\\src']
+    : ['src', './src'];
+  for (const form of directoryForms) {
+    const listed = await provider.execute(action('file.list', { path: form }));
+    assert.equal(listed.ok, true, `${form}: ${listed.error?.code ?? 'ok'}`);
+    assert.equal((listed.output as any).entries.some((entry: any) => entry.name === 'fresh.txt'), true, form);
+  }
+
+  const expectedFile = await fs.realpath(path.join(root, 'src', 'fresh.txt'));
+  const fileForms = process.platform === 'win32'
+    ? ['src/fresh.txt', './src/fresh.txt', '.\\src\\fresh.txt']
+    : ['src/fresh.txt', './src/fresh.txt'];
+  for (const form of fileForms) {
+    const read = await provider.execute(action('file.read', { path: form }));
+    assert.equal(read.ok, true, `${form}: ${read.error?.code ?? 'ok'}`);
+    assert.equal((read.output as any).path, expectedFile);
+    assert.equal((read.output as any).content, 'fresh-now');
+  }
+
+  const escaped = await provider.execute(action('file.read', { path: '..\\outside.txt' }));
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.error?.code, 'PATH_OUTSIDE_SCOPE');
+});

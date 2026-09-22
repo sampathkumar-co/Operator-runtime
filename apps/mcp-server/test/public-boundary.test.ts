@@ -335,3 +335,31 @@ test('public relay liveness errors keep only safe code, message, and retryabilit
   assert.equal(structured.error.retryable, true);
   assert.equal(JSON.stringify(response).includes('private-device-id'), false);
 });
+
+test('public boundary preserves safe operational error codes without leaking internal messages', async () => {
+  const cases = [
+    ['WINDOWS_PATH_LEASE_HELPER_REQUIRED', 'The Windows path authority helper is unavailable.'],
+    ['WINDOWS_PATH_LEASE_TIMEOUT', 'Windows path authority validation timed out.'],
+    ['CAPABILITY_UNAVAILABLE', 'The requested capability is not currently available on the paired device.'],
+    ['RELAY_DELIVERY_CAPABILITY_RETIRED', 'The routed action was retired because the active device no longer advertised the required capability.']
+  ] as const;
+
+  for (const [code, message] of cases) {
+    const agent = { execute: async () => ({
+      ok: false,
+      capability: 'file.read',
+      provider: 'internal-provider',
+      evidence: [],
+      durationMs: 1,
+      error: { code, message: 'private deviceId=secret-device C:\\Users\\Alice\\private.txt', retryable: true }
+    }) } as unknown as LocalAgentClient;
+    const response = await invokePublicWithAgent(agent, 'file.read', 'read', { path: 'C:\\repo\\safe.txt' });
+    const structured = response.structuredContent as Record<string, any>;
+    assert.equal(structured.error.code, code);
+    assert.equal(structured.error.message, message);
+    assert.equal(structured.error.retryable, true);
+    const json = JSON.stringify(response);
+    assert.equal(json.includes('secret-device'), false);
+    assert.equal(json.includes('Alice'), false);
+  }
+});

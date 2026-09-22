@@ -9,8 +9,14 @@ function capabilityAllowed(capability: string, allowed: string[]): boolean {
 }
 
 function pathWithin(child: string, root: string): boolean {
-  const rel = path.relative(path.resolve(root), path.resolve(child));
+  const rel = path.relative(path.resolve(root), child);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function policyPath(inputPath: string, roots: string[]): string | undefined {
+  if (path.isAbsolute(inputPath)) return path.resolve(inputPath);
+  if (roots.length !== 1) return undefined;
+  return path.resolve(roots[0]!, inputPath);
 }
 
 export class PolicyEngine {
@@ -28,7 +34,8 @@ export class PolicyEngine {
         : undefined;
 
     if (targetPath && permissions.allowedRoots.length > 0) {
-      if (!permissions.allowedRoots.some((root) => pathWithin(targetPath, root))) {
+      const candidate = policyPath(targetPath, permissions.allowedRoots);
+      if (!candidate || !permissions.allowedRoots.some((root) => pathWithin(candidate, root))) {
         throw new PolicyError('PATH_OUTSIDE_SCOPE', 'Requested path is outside the authorized roots.', { targetPath });
       }
     }
