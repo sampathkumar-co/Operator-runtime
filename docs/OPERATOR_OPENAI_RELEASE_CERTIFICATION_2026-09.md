@@ -2,31 +2,32 @@
 
 ## Certification status
 
-**NOT YET CONFIRMED FOR RELEASE.**
+**MECORD CONNECT v1 IS LIVE; OPENAI SUBMISSION/APPROVAL IS NOT YET COMPLETE.**
 
-Engineering work is substantially complete, but five external/account actions remain and are intentionally excluded from autonomous execution.
+The production edge and npm runtime are released. Remaining work is limited to OpenAI/reviewer/device evidence and final submission actions that are intentionally not inferred from source-only tests.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
-## Frozen production baseline
+## Current production baseline
 
-Production remains intentionally frozen on OCC-3M:
+Production is live on Mecord Connect v1:
 
-- source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
-- edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
+- source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
-- public surface: exactly 10 MCP tools, including the legacy public `device.claim` enrollment tool
+- public surface: exactly 9 MCP tools
+- legacy public `device.claim`: absent
+- fresh ChatGPT OAuth connection: completed and tool definitions refreshed
 
-OCC-3M production is healthy and remains the rollback/safety baseline until the final successor is allowed to deploy.
+OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18` is retained only as the rollback baseline.
 
-## Current Mecord Connect successor
+## Current Mecord Connect release
 
 Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the merge of exact-head green PR #28.
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The release candidate is the exact current `main` head resolved live at the release checkpoint. Any descendant must establish fresh exact-head evidence before deployment/submission.
+The deployed v1 source is exact commit `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. The release run reported 19/19 CI checks green and 437 passed / 17 expected skips / 0 failures before/through deployment verification.
 
 This candidate includes:
 
@@ -96,7 +97,7 @@ Release guards fail closed if the package name, proprietary license, dual-use de
 
 GitHub NPM Runtime certification builds the native helpers, builds the exact-source runtime payload, packs the tarball, verifies required policy/runtime files, installs the tarball, runs the direct runtime doctor, and runs the installed `mecord-connect.cmd` doctor.
 
-The package is not yet public. npm account setup is resolved: `npm whoami` = **mecrod** and 2FA mode = **auth-and-writes**; because the package is unscoped, no npm organization/scope is required. Publication now waits only for explicit irreversible authorization plus post-publish verification.
+The package is public as **`mecord-connect@1.0.0`** under the **`latest`** tag, published by npm user **mecrod** from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan; 0 vulnerabilities were reported.
 
 ## Public MCP surface
 
@@ -145,9 +146,9 @@ Production OAuth uses a predefined public client with:
   - `https://chatgpt.com/connector_platform_oauth_redirect`
   - existing callback-ID redirect
 
-Provider preflight and redirect acceptance are proven.
+Provider preflight and redirect acceptance are proven. A real ChatGPT-hosted OAuth sign-in/reconnect also completed and refreshed the live nine-tool definition.
 
-Real OpenAI-hosted authorization/code-exchange, issued-token audience/scope proof, revocation/reconnect and ChatGPT E2E remain external.
+Issued-token audience/scope capture, explicit revoke/disconnect failure + reconnect recovery, and device-backed read/write E2E remain external. The first live `computer.inspect` reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline.
 
 ## Production isolation/security baseline
 
