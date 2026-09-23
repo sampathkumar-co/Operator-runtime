@@ -44,6 +44,8 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseApprovalConsoleCommand('approvals'), { kind: 'list' });
   assert.deepEqual(parseApprovalConsoleCommand('approve'), { kind: 'decision', decision: 'approve', selector: undefined });
   assert.deepEqual(parseApprovalConsoleCommand('deny abc123'), { kind: 'decision', decision: 'deny', selector: 'abc123' });
+  assert.deepEqual(parseApprovalConsoleCommand('session'), { kind: 'decision', decision: 'session', selector: undefined });
+  assert.deepEqual(parseApprovalConsoleCommand('allow-session abc123'), { kind: 'decision', decision: 'session', selector: 'abc123' });
   assert.deepEqual(parseApprovalConsoleCommand('approve one two'), { kind: 'invalid' });
   assert.deepEqual(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 49152 }), { baseUrl: 'http://127.0.0.1:49152' });
   assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '0.0.0.0', port: 49152 }), null);
