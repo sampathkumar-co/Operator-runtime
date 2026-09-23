@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { isDeveloperAccount } from '../../../src/core/developer-relay-surface.ts';
 import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
@@ -95,12 +96,17 @@ export class RelayControlService {
           projectKey?: unknown;
           action?: unknown;
           publicBoundary?: unknown;
+          developerBoundary?: unknown;
           waitMs?: unknown;
         };
         const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
         const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
         if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
         const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+        const developerBoundary = body.developerBoundary === true;
+        if (developerBoundary && !isDeveloperAccount(accountId)) {
+          throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This relay request requires an explicitly entitled Mecord developer account.');
+        }
         const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
         const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
         const action = validAction(body.action);
@@ -195,12 +201,16 @@ export class RelayControlService {
 
   async #handleTaskRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const body = await readJson(request) as {
-      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; waitMs?: unknown;
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; developerBoundary?: unknown; waitMs?: unknown;
     };
     const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
     const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
     if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
     const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    const developerBoundary = body.developerBoundary === true;
+    if (developerBoundary && !isDeveloperAccount(accountId)) {
+      throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This task request requires an explicitly entitled Mecord developer account.');
+    }
     const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
     const requestedProjectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
