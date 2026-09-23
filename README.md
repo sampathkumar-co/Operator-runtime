@@ -36,7 +36,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
 - full/private MCP runtime with **22 semantic tools**
-- curated public Mecord Connect MCP surface with **10 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
+- curated public Mecord Connect MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
 - official MCP client and MCP Inspector end-to-end certification
