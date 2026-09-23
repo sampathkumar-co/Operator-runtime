@@ -495,6 +495,7 @@ export function createLocalAgentServer(options: {
           send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve, session, or deny.' } });
           return;
         }
+        notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
         send(res, 200, {
           ok: true,
           approval: {
