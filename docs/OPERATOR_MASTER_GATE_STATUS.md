@@ -45,7 +45,7 @@ Current canonical count: **27 PASS / 10 BLOCKED / 0 NOT APPLICABLE**.
 | G31 Positive Reviewer Cases | PASS | All submitted five positive cases pass through the certified public boundary on the deterministic fixture; positive #5 is bounded `git.diff`. |
 | G32 Negative Reviewer Cases | PASS | All submitted three negative cases pass, with additional `APPROVAL_REQUIRED` and duplicate-create safety assertions. |
 | G33 Real ChatGPT E2E | BLOCKED | Requires the actual OpenAI draft/connection, completed OAuth login, relay/device execution, read/write results, revocation and reconnect. |
-| G34 OpenAI Metadata Match | BLOCKED | OpenAI Scan Tools has not yet imported/reconciled the exact production 10-tool surface. |
+| G34 OpenAI Metadata Match | BLOCKED | OpenAI Scan Tools has not yet imported/reconciled the exact production 9-tool surface. |
 | G35 Submission Readiness | BLOCKED | Owner decisions are applied in source, but final live Mecord Connect deployment, npm publication/clean-machine proof, exact publisher verification, reviewer login/pairing, domain challenge if issued, Scan Tools, authenticated E2E and the required reviewer-accessible demo recording remain incomplete. |
 | G36 Hostile Release Simulation | BLOCKED | A non-mutating OCC-3M pre-submission probe is recorded in `OPERATOR_HOSTILE_PRESUBMISSION_20260918.md` and is green for public pages, OAuth metadata/challenge fail-closed behavior, unauthenticated MCP, malicious Origin, forged Host and oversized JSON. Final G36 still requires the frozen final successor plus the real ChatGPT/reviewer/public-package path; release-blocking fixes would trigger affected recertification. |
 
