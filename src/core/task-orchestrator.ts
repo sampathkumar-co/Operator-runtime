@@ -86,6 +86,7 @@ export class TaskOrchestrator {
   #active = new Map<string, Promise<TaskCapsule>>();
   #controllers = new Map<string, AbortController>();
   #controlRequests = new Map<string, 'PAUSED' | 'CANCELLED'>();
+  #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
 
   constructor(options: {
@@ -374,17 +375,19 @@ export class TaskOrchestrator {
     const previous = this.#controlRequests.get(taskId);
     this.#controlRequests.set(taskId, state);
     try {
-      const task = await this.#store.get(taskId);
-      if (task.state === state) {
+      return await this.#withStateWriteLock(taskId, async () => {
+        const task = await this.#store.get(taskId);
+        if (task.state === state) {
+          if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
+          return task;
+        }
+        if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
+        task.state = state;
+        task.updatedAt = new Date().toISOString();
+        await this.#store.put(task);
         if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
         return task;
-      }
-      if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
-      task.state = state;
-      task.updatedAt = new Date().toISOString();
-      await this.#store.put(task);
-      if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
-      return task;
+      });
     } catch (error) {
       if (previous) this.#controlRequests.set(taskId, previous);
       else this.#controlRequests.delete(taskId);
@@ -392,25 +395,35 @@ export class TaskOrchestrator {
     }
   }
 
+  #applyControlRequest(task: TaskCapsule): void {
+    const requested = this.#controlRequests.get(task.id);
+    if (requested === 'CANCELLED') task.state = 'CANCELLED';
+    else if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) task.state = 'PAUSED';
+  }
+
   async #persistRunState(task: TaskCapsule, assertLease: () => Promise<void>): Promise<void> {
-    const applyControl = (): void => {
-      const requested = this.#controlRequests.get(task.id);
-      if (requested === 'CANCELLED') task.state = 'CANCELLED';
-      else if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) task.state = 'PAUSED';
-    };
-
-    applyControl();
-    await assertLease();
-    await this.#store.put(task);
-
-    // A control request can arrive after the first check but before the write.
-    // Re-check after the write and repair the durable state if that race occurred.
-    const beforeRepair = task.state;
-    applyControl();
-    if (task.state !== beforeRepair) {
-      task.updatedAt = new Date().toISOString();
+    await this.#withStateWriteLock(task.id, async () => {
+      this.#applyControlRequest(task);
       await assertLease();
       await this.#store.put(task);
+    });
+    // Control intent is published before its serialized durable write. Re-apply
+    // synchronously so the runner cannot dispatch work while that write waits.
+    this.#applyControlRequest(task);
+  }
+
+  async #withStateWriteLock<T>(taskId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.#stateWriteTails.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.#stateWriteTails.set(taskId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.#stateWriteTails.get(taskId) === tail) this.#stateWriteTails.delete(taskId);
     }
   }
 
