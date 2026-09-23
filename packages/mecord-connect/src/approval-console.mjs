@@ -1,4 +1,9 @@
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const approvalWindowPath = fileURLToPath(new URL('./approval-window.ps1', import.meta.url));
 
 export function parseApprovalConsoleCommand(input) {
   const parts = String(input ?? '').trim().split(/\s+/).filter(Boolean);
@@ -75,6 +80,60 @@ async function localAgentJson(baseUrl, agentToken, { pathName, method = 'GET', r
   return payload;
 }
 
+async function showNativeApprovalCard(record) {
+  if (process.platform !== 'win32' || process.env.MECORD_DISABLE_APPROVAL_UI === '1') return null;
+  const systemRoot = String(process.env.SystemRoot ?? '').trim();
+  if (!/^[A-Za-z]:\\/.test(systemRoot)) return null;
+  const powershell = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    const child = spawn(powershell, [
+      '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', approvalWindowPath
+    ], {
+      shell: false,
+      windowsHide: false,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const finish = (decision = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(decision);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* noop */ }
+      finish(null);
+    }, 10 * 60_000);
+    timer.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 64) {
+        try { child.kill(); } catch { /* noop */ }
+        finish(null);
+      }
+    });
+    child.once('error', () => finish(null));
+    child.once('close', () => {
+      const decision = stdout.trim().toLowerCase();
+      finish(['approve', 'session', 'deny'].includes(decision) ? decision : null);
+    });
+    try {
+      child.stdin.end(JSON.stringify({
+        capability: String(record.capability ?? ''),
+        risk: String(record.risk ?? ''),
+        target: displayTarget(record.target),
+        actionId: String(record.actionId ?? '')
+      }));
+    } catch {
+      try { child.kill(); } catch { /* noop */ }
+      finish(null);
+    }
+  });
+}
+
 export function startLocalApprovalConsole({
   baseUrl,
   agentToken,
@@ -87,6 +146,44 @@ export function startLocalApprovalConsole({
   let busy = false;
   const announced = new Set();
   const interactive = Boolean(input?.isTTY);
+  let nativePromptActive = false;
+
+  const submitDecision = async (record, decision) => {
+    const payload = await localAgentJson(baseUrl, agentToken, {
+      pathName: `/v1/approvals/${encodeURIComponent(record.actionId)}`,
+      method: 'POST',
+      recoveryToken,
+      body: {
+        decision,
+        approvalRequestId: record.approvalRequestId
+      }
+    });
+    const status = payload?.approval?.status ?? decision;
+    output.write(`[mecord-connect] ${status}: ${record.capability} ${displayTarget(record.target)}\n`);
+    if (decision === 'approve') {
+      output.write('[mecord-connect] approved once for this exact action.\n');
+    } else if (decision === 'session') {
+      const expiresAt = payload?.session?.expiresAt;
+      const idleExpiresAt = payload?.session?.idleExpiresAt;
+      output.write(`[mecord-connect] session access enabled${expiresAt ? ` until ${expiresAt}` : ''}${idleExpiresAt ? ` (idle expiry ${idleExpiresAt})` : ''}.\n`);
+    }
+    announced.delete(record.approvalRequestId);
+    return payload;
+  };
+
+  const maybePromptNative = async (record) => {
+    if (nativePromptActive) return;
+    nativePromptActive = true;
+    try {
+      const decision = await showNativeApprovalCard(record);
+      if (!decision) return;
+      await submitDecision(record, decision);
+    } catch (error) {
+      output.write(`[mecord-connect] native approval UI failed: ${error instanceof Error ? error.message : 'unknown error'}; terminal fallback remains available.\n`);
+    } finally {
+      nativePromptActive = false;
+    }
+  };
 
   const refresh = async (announce = false) => {
     if (stopped || busy) return pending;
@@ -102,8 +199,9 @@ export function startLocalApprovalConsole({
           announced.add(record.approvalRequestId);
           output.write(`\n[mecord-connect] approval required: ${record.capability} (${record.risk}) ${displayTarget(record.target)}\n`);
           output.write(pending.length === 1
-            ? '[mecord-connect] choose "approve" once, "session" for this runtime session, or "deny".\n'
-            : `[mecord-connect] choose "approve ${String(record.actionId).slice(0, 12)}", "session ${String(record.actionId).slice(0, 12)}", or "deny ${String(record.actionId).slice(0, 12)}".\n`);
+            ? '[mecord-connect] review the local Mecord approval window, or use "approve", "session", or "deny" here.\n'
+            : `[mecord-connect] review the local Mecord approval window, or use the ${String(record.actionId).slice(0, 12)} id prefix here.\n`);
+          void maybePromptNative(record);
         }
       }
       return pending;
@@ -162,26 +260,7 @@ export function startLocalApprovalConsole({
           return;
         }
         try {
-          const payload = await localAgentJson(baseUrl, agentToken, {
-            pathName: `/v1/approvals/${encodeURIComponent(record.actionId)}`,
-            method: 'POST',
-            recoveryToken,
-            body: {
-              decision: command.decision,
-              approvalRequestId: record.approvalRequestId
-            }
-          });
-          const status = payload?.approval?.status ?? command.decision;
-          output.write(`[mecord-connect] ${status}: ${record.capability} ${displayTarget(record.target)}\n`);
-          if (command.decision === 'approve') {
-            output.write('[mecord-connect] approved once for this exact action. Retry the same ChatGPT request within 10 minutes.\n');
-          } else if (command.decision === 'session') {
-            const expiresAt = payload?.session?.expiresAt;
-            const idleExpiresAt = payload?.session?.idleExpiresAt;
-            output.write(`[mecord-connect] session access enabled for this account/device/root${expiresAt ? ` until ${expiresAt}` : ''}${idleExpiresAt ? ` (idle expiry ${idleExpiresAt})` : ''}.\n`);
-            output.write('[mecord-connect] external, system, and destructive actions inside the current authorized scope will not re-prompt during this session.\n');
-          }
-          announced.delete(record.approvalRequestId);
+          await submitDecision(record, command.decision);
           await refresh(false);
         } catch (error) {
           output.write(`[mecord-connect] approval update failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);
