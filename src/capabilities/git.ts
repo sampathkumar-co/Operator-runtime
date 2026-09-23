@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { assertPublicSafePath, containsRestrictedData } from '../core/public-restricted-data.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
@@ -52,7 +52,7 @@ export class GitProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     try { resolveSupportedGitExecutable(process.env); } catch (error) {
       const op = error instanceof OperatorError
         ? error
@@ -64,7 +64,7 @@ export class GitProvider implements CapabilityProvider {
     const publicLiteral = action.capability === 'git.diff' && action.input.publicLiteralFiles === true;
 
     if (action.capability !== 'git.rev-parse') {
-      const filterFailure = await this.#rejectContentFilters(action, cwd);
+      const filterFailure = await this.#rejectContentFilters(action, cwd, context);
       if (filterFailure) return filterFailure;
     }
 
@@ -74,7 +74,7 @@ export class GitProvider implements CapabilityProvider {
 
       const tracked = await this.#run(action, cwd, [
         ...PUBLIC_GIT_PREFIX, 'ls-files', '-z', '--', ...paths
-      ]);
+      ], context);
       if (!tracked.ok) return tracked;
       const trackedNames = splitGitNul((tracked.output as Record<string, unknown> | undefined)?.stdout);
       const requested = new Set(paths.map(normalizeGitPath));
@@ -84,7 +84,7 @@ export class GitProvider implements CapabilityProvider {
 
       const names = await this.#run(action, cwd, [
         ...PUBLIC_GIT_PREFIX, 'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths
-      ]);
+      ], context);
       if (!names.ok) return names;
       const changed = splitGitNul((names.output as Record<string, unknown> | undefined)?.stdout);
       if (changed.some((name) => !requested.has(name))) {
@@ -98,11 +98,11 @@ export class GitProvider implements CapabilityProvider {
       : action.capability === 'git.diff'
         ? [...prefix, 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths]
         : [...SAFE_GIT_PREFIX, 'rev-parse', '--show-toplevel'];
-    const result = await this.#run(action, cwd, args);
+    const result = await this.#run(action, cwd, args, context);
     return action.capability === 'git.status' && result.ok ? structuredGitStatus(result) : result;
   }
 
-  async #rejectContentFilters(action: ActionRequest, cwd: string): Promise<ActionResult | undefined> {
+  async #rejectContentFilters(action: ActionRequest, cwd: string, context: CapabilityExecutionContext): Promise<ActionResult | undefined> {
     const inspected = await this.#process.execute({
       ...action,
       capability: 'terminal.execute',
@@ -112,7 +112,7 @@ export class GitProvider implements CapabilityProvider {
         cwd,
         timeoutMs: 30_000
       }
-    });
+    }, context);
     const output = inspected.output as { exitCode?: number | null; stdout?: string; stderr?: string } | undefined;
     if (!inspected.ok && output?.exitCode !== 1) {
       return gitFailure(action, 'GIT_CONFIG_INSPECTION_FAILED', String(output?.stderr ?? inspected.error?.message ?? 'Unable to inspect Git content-filter configuration.').trim());
@@ -124,8 +124,8 @@ export class GitProvider implements CapabilityProvider {
     return undefined;
   }
 
-  async #run(action: ActionRequest, cwd: string, args: string[]): Promise<ActionResult> {
-    const result = await this.#process.execute({ ...action, capability: 'terminal.execute', input: { executable: 'git', args, cwd, timeoutMs: 30_000 } });
+  async #run(action: ActionRequest, cwd: string, args: string[], context: CapabilityExecutionContext): Promise<ActionResult> {
+    const result = await this.#process.execute({ ...action, capability: 'terminal.execute', input: { executable: 'git', args, cwd, timeoutMs: 30_000 } }, context);
     return { ...result, capability: action.capability, provider: this.name };
   }
 }
