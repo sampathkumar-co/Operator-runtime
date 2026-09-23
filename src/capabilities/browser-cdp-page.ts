@@ -66,19 +66,21 @@ export async function pageIdentity(session: CdpConnection): Promise<{ url: strin
   };
 }
 
-export async function waitForReadyState(session: CdpConnection, timeoutMs: number): Promise<void> {
+export async function waitForReadyState(session: CdpConnection, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    throwIfAborted(signal);
     const state = await pageIdentity(session);
+    throwIfAborted(signal);
     if (state.readyState === 'interactive' || state.readyState === 'complete') return;
-    await delay(75);
+    await delay(75, signal);
   }
   throw new OperatorError('BROWSER_READY_TIMEOUT', 'Timed out waiting for the page to become ready.', { retryable: true });
 }
 
-export async function settleAfterInteraction(session: CdpConnection): Promise<void> {
-  await delay(50);
-  try { await waitForReadyState(session, 2_000); } catch (error) {
+export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal): Promise<void> {
+  await delay(50, signal);
+  try { await waitForReadyState(session, 2_000, signal); } catch (error) {
     if (!(error instanceof OperatorError) || error.code !== 'BROWSER_READY_TIMEOUT') throw error;
   }
 }
@@ -172,7 +174,28 @@ export function failure(action: ActionRequest, provider: string, started: number
   };
 }
 
-function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    throwIfAborted(signal);
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function abortError(): OperatorError {
+  return new OperatorError('EXECUTION_ABORTED', 'Browser execution was cancelled.', { retryable: false });
+}
 
 export function semanticSnapshotFunction() {
   const trim = (value: unknown, max = 180) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
