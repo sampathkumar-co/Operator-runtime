@@ -52,12 +52,12 @@ export class CapabilityRouter {
     return false;
   }
 
-  async rank(action: ActionRequest): Promise<Array<{ provider: CapabilityProvider; score: number; baseScore: number; learnedAdjustment: number }>> {
+  async rank(action: ActionRequest, learningContext = 'global'): Promise<Array<{ provider: CapabilityProvider; score: number; baseScore: number; learnedAdjustment: number }>> {
     const candidates: Array<{ provider: CapabilityProvider; score: number; baseScore: number; learnedAdjustment: number }> = [];
     for (const provider of this.#providers) {
       if (await provider.supports(action)) {
         const baseScore = weightedScore(await provider.score(action));
-        const learnedAdjustment = this.#learning ? await this.#learning.adjustment(action.capability, provider.name) : 0;
+        const learnedAdjustment = this.#learning ? await this.#learning.adjustment(action.capability, provider.name, learningContext) : 0;
         candidates.push({ provider, baseScore, learnedAdjustment, score: normalize(baseScore + learnedAdjustment) });
       }
     }
@@ -65,10 +65,10 @@ export class CapabilityRouter {
     return candidates;
   }
 
-  async recordOutcome(capability: string, providerName: string, outcome: 'verified' | 'failed'): Promise<boolean> {
+  async recordOutcome(capability: string, providerName: string, outcome: 'verified' | 'failed', metadata: { context?: string; durationMs?: number } = {}): Promise<boolean> {
     if (!this.#learning) return false;
     if (!this.#providers.some((provider) => provider.name === providerName)) return false;
-    await this.#learning.record(capability, providerName, outcome);
+    await this.#learning.record(capability, providerName, outcome, metadata);
     return true;
   }
 
@@ -81,8 +81,8 @@ export class CapabilityRouter {
     return [...risks][0]!;
   }
 
-  async select(action: ActionRequest): Promise<CapabilityProvider> {
-    const ranked = await this.rank(action);
+  async select(action: ActionRequest, learningContext = 'global'): Promise<CapabilityProvider> {
+    const ranked = await this.rank(action, learningContext);
     if (!ranked[0]) {
       throw new OperatorError('CAPABILITY_UNAVAILABLE', `No provider can execute ${action.capability}.`);
     }

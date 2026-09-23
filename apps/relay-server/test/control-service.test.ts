@@ -449,13 +449,19 @@ test('durable task submission persists device affinity and later control uses th
   const submit = await fetch(`http://127.0.0.1:${port}/v1/task`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'submit', request: {
-      requestId: taskId, objective: 'inspect browser', successConditions: ['submitted'],
-      goal: { kind: 'browser-navigation', url: 'https://example.com' }, run: false
+      requestId: taskId, objective: 'run bounded workflow', successConditions: ['submitted'],
+      goal: {
+        kind: 'semantic-workflow',
+        steps: [
+          { kind: 'browser-navigation', url: 'https://example.com' },
+          { kind: 'postgres-select', root: '/tmp/project', profileId: 'local', table: 'items' }
+        ]
+      }, run: false
     } }, waitMs: 1000 })
   });
   assert.equal(submit.status, 200, await submit.text());
   assert.deepEqual(bound, { key: `task:${taskId}`, deviceId: DEVICE_ID });
-  assert.deepEqual(dispatches[0].requiredCapabilities, ['browser.inspect', 'browser.navigate']);
+  assert.deepEqual(dispatches[0].requiredCapabilities, ['browser.inspect', 'browser.navigate', 'postgres.inspect', 'postgres.select']);
   const inspect = await fetch(`http://127.0.0.1:${port}/v1/task`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'inspect', taskId }, waitMs: 1000 })

@@ -16,17 +16,17 @@ Production remains intentionally frozen on OCC-3M:
 - edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
-- public surface: exactly 10 MCP tools
+- public surface: exactly 10 MCP tools, including the legacy public `device.claim` enrollment tool
 
 OCC-3M production is healthy and remains the rollback/safety baseline until the final successor is allowed to deploy.
 
 ## Current Mecord Connect successor
 
-Draft PR #27 / branch `release/occ3r-integrated-successor`.
+Certified source baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`.
 
-Current source head:
+Active hardening successor: PR #28 / branch `hardening/post-merge-completion`.
 
-`11abc578488f5deb4df83299554b6a4eae3bbe2e`
+The exact PR head is intentionally not hard-coded in this static certification packet; GitHub's current PR head is authoritative immediately before merge/submission.
 
 This candidate includes:
 
@@ -35,7 +35,7 @@ This candidate includes:
 - plugin manifest `mecord-connect` / **Mecord Connect**;
 - OAuth protected-resource `resource_name: Mecord Connect`;
 - public MCP initialize `name: mecord-connect` / `title: Mecord Connect`;
-- exactly 10 public MCP tools;
+- exactly 9 public MCP tools;
 - source-controlled Privacy/Terms/Support notices;
 - individual publisher identity **Kinthala Samuel Sampath Kumar**;
 - public locality **Akkayapalem, Visakhapatnam, Andhra Pradesh, India**;
@@ -50,20 +50,13 @@ This candidate includes:
 - Windows-native DPAPI/UIA/path-authority boundary;
 - Git fixture cleanup retry hardening for transient recursive-removal races.
 
-Exact-head workflow set for this current candidate:
+Certified `main` exact-head result:
+- CI #806: **PASS**
+- Platform Matrix #576: **PASS**
+- NPM Runtime #206: **PASS**
+- Windows Signing Smoke #577: **PASS**
 
-- CI **#757**
-- Platform Matrix **#527**
-- NPM Remote Runtime **#167**
-- Windows Signing Smoke **#528**
-
-Exact-head result:
-- CI #765: **PASS**
-- Platform Matrix #535: **PASS**
-- NPM Runtime #174: **PASS**
-- Windows Signing Smoke #536: **PASS**
-
-CI #765 specifically confirms the previously flaky structured Git-write test now passes; Core runtime completed 368 tests with 0 failures on the Linux CI job.
+For active PR #28, exact-head run IDs and conclusions are dynamic external evidence. All four workflow families must be terminal success on the then-current PR head before merge; superseded run numbers must not be reused as certification.
 
 ## Owner decisions already resolved in source
 
@@ -107,18 +100,17 @@ The package is not yet public. npm account setup is resolved: `npm whoami` = **m
 
 ## Public MCP surface
 
-Exactly 10 tools:
+Exactly 9 tools:
 
-1. `device.claim`
-2. `computer.inspect`
-3. `project.inspect`
-4. `project.commands`
-5. `file.list`
-6. `file.read`
-7. `file.create`
-8. `file.replace`
-9. `git.status`
-10. `git.diff`
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
 Generic terminal, unrestricted browser automation, raw Windows UI Automation and arbitrary PostgreSQL access are deliberately not exposed by the public plugin.
 
@@ -183,7 +175,7 @@ Earlier PRs remain useful provenance but are no longer the current candidate:
 - PR #24 made public legal notices reproducible from source;
 - earlier PR #27 heads introduced the Mecord Connect rebrand and exact public MCP identity.
 
-Their decisions and functionality are integrated into the current PR #27 successor. They must not be treated as alternate release candidates.
+Their decisions and functionality are integrated into current `main` and carried forward by PR #28. They must not be treated as alternate release candidates.
 
 ## MSIX / Microsoft Store
 
@@ -205,7 +197,7 @@ Owner enters the provisioned reviewer credential, proves no secondary verificati
 Use only the exact OpenAI-issued challenge token.
 
 ### 4. Real OpenAI/ChatGPT OAuth + Scan Tools + E2E + demo
-Prove issued-token resource/scopes, exact 10-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
+Prove issued-token resource/scopes, exact 9-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
 
 ### 5. Explicit irreversible publication / deployment / submission authorization
 Authorize publication of the exact certified `mecord-connect` tarball with 2FA, final transactional deployment, then OpenAI Submit for Review only after the real review proof is green.

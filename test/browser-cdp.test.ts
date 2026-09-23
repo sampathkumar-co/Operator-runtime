@@ -3,6 +3,22 @@ import http from 'node:http';
 import test from 'node:test';
 import { BrowserCdpInspectProvider } from '../src/capabilities/browser-cdp.ts';
 
+test('aborted browser execution fails before contacting CDP', async () => {
+  const provider = new BrowserCdpInspectProvider('http://127.0.0.1:65534');
+  const controller = new AbortController();
+  controller.abort();
+  const result = await provider.execute({
+    id: 'browser-abort',
+    capability: 'browser.inspect',
+    risk: 'read',
+    input: {},
+    provenance: { kind: 'chatgpt' }
+  }, { signal: controller.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+  provider.close();
+});
+
 test('browser inspect returns compact semantic tab state from CDP discovery endpoint', async (t) => {
   const server = http.createServer((req, res) => {
     if (req.url === '/json/list') {

@@ -22,8 +22,9 @@ test('public-edge image uses patched pinned Node and a non-root read-only runtim
 
 test('public-edge CI smoke verifies current Mecord Connect branding', () => {
   const workflow = text('.github/workflows/ci.yml');
+  assert.match(workflow, /http:\/\/127\.0\.0\.1:47200\/health \| grep -q 'mecord-connect'/);
   assert.match(workflow, /http:\/\/127\.0\.0\.1:47200\/ \| grep -q 'Mecord Connect'/);
-  assert.doesNotMatch(workflow, /grep -q 'SPLCART Operator'/);
+  assert.doesNotMatch(workflow, /grep -q 'operator-mcp-server'|grep -q 'SPLCART Operator'/);
 });
 
 test('public-edge compose publishes backends only on host loopback and never publishes relay control', () => {

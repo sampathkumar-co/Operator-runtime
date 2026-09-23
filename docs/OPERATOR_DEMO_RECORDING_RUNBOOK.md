@@ -22,7 +22,7 @@ All must be true before recording:
 7. the canonical reviewer fixture is reset to baseline;
 8. the actual OpenAI draft connects through production OAuth;
 9. real read/write/revocation/reconnect proof has passed;
-10. Scan Tools has imported the expected ten-tool snapshot.
+10. Scan Tools has imported the expected nine-tool snapshot.
 
 ## Recording environment
 

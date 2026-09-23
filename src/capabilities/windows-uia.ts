@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
@@ -32,6 +32,7 @@ type Pending = {
   resolve: (response: SidecarResponse) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  cleanup?: () => void;
 };
 
 export type WindowsUiaOptions = {
@@ -53,8 +54,10 @@ class WindowsUiaSidecarClient {
     this.#timeoutMs = Math.min(Math.max(timeoutMs, 1_000), 120_000);
   }
 
-  async call(method: string, params: unknown): Promise<unknown> {
+  async call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Windows UIA execution was cancelled.', { retryable: false });
     await this.#ensureStarted();
+    if (signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Windows UIA execution was cancelled.', { retryable: false });
     const child = this.#process;
     if (!child || child.exitCode !== null || child.stdin.destroyed) {
       throw new OperatorError('UIA_SIDECAR_UNAVAILABLE', 'Windows UIA sidecar is not running.', { retryable: true });
@@ -67,15 +70,31 @@ class WindowsUiaSidecarClient {
     }
 
     const response = await new Promise<SidecarResponse>((resolve, reject) => {
+      let cleanupAbort = () => {};
       const timer = setTimeout(() => {
         this.#pending.delete(id);
+        cleanupAbort();
         reject(new OperatorError('UIA_SIDECAR_TIMEOUT', `${method} timed out.`, { retryable: true }));
       }, this.#timeoutMs);
-      this.#pending.set(id, { resolve, reject, timer });
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.#pending.delete(id);
+        cleanupAbort();
+        reject(new OperatorError('EXECUTION_ABORTED', 'Windows UIA execution was cancelled.', { retryable: false }));
+        this.close();
+      };
+      cleanupAbort = () => signal?.removeEventListener('abort', onAbort);
+      this.#pending.set(id, { resolve, reject, timer, cleanup: cleanupAbort });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
       child.stdin.write(`${payload}\n`, (error) => {
         if (!error) return;
         clearTimeout(timer);
         this.#pending.delete(id);
+        cleanupAbort();
         reject(new OperatorError('UIA_SIDECAR_WRITE_FAILED', error.message, { retryable: true }));
       });
     });
@@ -97,6 +116,7 @@ class WindowsUiaSidecarClient {
     const error = new OperatorError('UIA_SIDECAR_CLOSED', 'Windows UIA sidecar closed.', { retryable: true });
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       pending.reject(error);
     }
     this.#pending.clear();
@@ -141,6 +161,7 @@ class WindowsUiaSidecarClient {
       const pending = this.#pending.get(response.id);
       if (!pending) return;
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       this.#pending.delete(response.id);
       pending.resolve(response);
     });
@@ -155,6 +176,7 @@ class WindowsUiaSidecarClient {
       );
       for (const pending of this.#pending.values()) {
         clearTimeout(pending.timer);
+        pending.cleanup?.();
         pending.reject(error);
       }
       this.#pending.clear();
@@ -200,12 +222,12 @@ export class WindowsUiaProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       const output = action.capability === 'app.inspect'
-        ? await this.#client.call('inspect', normalizeInspectInput(action.input))
-        : await this.#client.call('operate', normalizeOperateInput(action.input));
+        ? await this.#client.call('inspect', normalizeInspectInput(action.input), context.signal)
+        : await this.#client.call('operate', normalizeOperateInput(action.input), context.signal);
       const postcondition = action.capability === 'app.operate'
         ? evidence('postcondition', 'pass', 'Windows UIA/Win32 operation returned verified semantic postcondition evidence.', { operation: action.input.operation, waitMs: normalizeWaitMs(action.input.waitMs) })
         : evidence('data_minimization', 'pass', 'Windows UIA returned a bounded semantic control tree, optional scoped events, and opt-in top-level window metadata instead of screenshots or process internals.', {

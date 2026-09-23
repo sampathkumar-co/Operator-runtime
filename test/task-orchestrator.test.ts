@@ -18,7 +18,7 @@ import {
   type TaskPlanner,
   type TaskPlannerContext
 } from '../src/core/task-orchestrator.ts';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, PermissionProfile } from '../src/core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, PermissionProfile } from '../src/core/types.ts';
 import { supportedGitAvailable } from './git-test-support.ts';
 
 const SCORE: CapabilityScore = {
@@ -284,8 +284,56 @@ test('task executor detects a no-progress planner loop before exhausting the glo
   assert.equal(failed.execution?.stepCount, 2);
 });
 
+class StaleRunnerWriteStore extends TaskStore {
+  #blockedOnce = false;
+  blocked!: () => void;
+  release!: () => void;
+  readonly blockedPromise: Promise<void>;
+  readonly releasePromise: Promise<void>;
+
+  constructor(stateDir: string) {
+    super(stateDir);
+    this.blockedPromise = new Promise((resolve) => { this.blocked = resolve; });
+    this.releasePromise = new Promise((resolve) => { this.release = resolve; });
+  }
+
+  override async put(task: Parameters<TaskStore['put']>[0]): Promise<void> {
+    const hasStartedRecord = task.execution?.records.some((record) => record.state === 'STARTED') === true;
+    if (!this.#blockedOnce && task.state === 'RUNNING' && hasStartedRecord) {
+      this.#blockedOnce = true;
+      this.blocked();
+      await this.releasePromise;
+    }
+    await super.put(task);
+  }
+}
+
+class BlockingResumeStore extends TaskStore {
+  #blockedOnce = false;
+  blocked!: () => void;
+  release!: () => void;
+  readonly blockedPromise: Promise<void>;
+  readonly releasePromise: Promise<void>;
+
+  constructor(stateDir: string) {
+    super(stateDir);
+    this.blockedPromise = new Promise((resolve) => { this.blocked = resolve; });
+    this.releasePromise = new Promise((resolve) => { this.release = resolve; });
+  }
+
+  override async put(task: Parameters<TaskStore['put']>[0]): Promise<void> {
+    if (!this.#blockedOnce && task.state === 'PENDING' && task.execution?.startedAt !== undefined) {
+      this.#blockedOnce = true;
+      this.blocked();
+      await this.releasePromise;
+    }
+    await super.put(task);
+  }
+}
+
 class DelayedProvider implements CapabilityProvider {
   readonly name = 'test.delayed';
+  calls = 0;
   started!: () => void;
   release!: () => void;
   readonly startedPromise: Promise<void>;
@@ -296,9 +344,24 @@ class DelayedProvider implements CapabilityProvider {
   }
   supports(action: ActionRequest): boolean { return action.capability === 'file.read'; }
   score(): CapabilityScore { return SCORE; }
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
+    this.calls += 1;
     this.started();
-    await this.releasePromise;
+    await new Promise<void>((resolve, reject) => {
+      if (context.signal?.aborted) {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+        return;
+      }
+      const onAbort = () => {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+      };
+      context.signal?.addEventListener('abort', onAbort, { once: true });
+      this.releasePromise.then(resolve, reject).finally(() => context.signal?.removeEventListener('abort', onAbort));
+    });
     return { ok: true, capability: action.capability, provider: this.name, output: { content: 'ok' }, evidence: [], durationMs: 0 };
   }
 }
@@ -351,6 +414,42 @@ test('task executor navigates and re-observes a semantic browser target before c
   ]);
   assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'browser'));
   assert.equal(completed.execution?.plannerState.targetId, 'tab-1');
+});
+
+test('semantic workflow composes multiple verified browser goals durably', async (t) => {
+  const state = await tempDir(t, 'operator-task-workflow-state-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new SemanticBrowserProvider()),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Navigate two destinations in order and verify each.',
+    authorizedScope: ['browser:https://example.test'],
+    successConditions: ['first destination verified', 'second destination verified'],
+    maxSteps: 10,
+    goal: {
+      kind: 'semantic-workflow',
+      steps: [
+        { kind: 'browser-navigation', url: 'https://example.test/first' },
+        { kind: 'browser-navigation', url: 'https://example.test/second' }
+      ]
+    }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), [
+    'browser.inspect', 'browser.navigate', 'browser.inspect',
+    'browser.inspect', 'browser.navigate', 'browser.inspect'
+  ]);
+  assert.ok(completed.execution?.records.slice(0, 3).every((record) => record.stepKey.startsWith('workflow:0:')));
+  assert.ok(completed.execution?.records.slice(3).every((record) => record.stepKey.startsWith('workflow:1:')));
+  assert.equal(completed.evidence.filter((item) => item.kind === 'workflow_step').length, 2);
+  assert.equal(completed.execution?.plannerState.workflowIndex, 2);
 });
 
 class RediscoveringBrowserProvider implements CapabilityProvider {
@@ -759,6 +858,126 @@ test('an in-flight pause survives action completion and can be resumed durably',
   assert.equal(paused.state, 'PAUSED');
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
   assert.equal((await orchestrator.resume(task.id)).state, 'VERIFIED');
+});
+
+test('pause during a stale pre-dispatch runner write prevents provider execution and resumes cleanly', async (t) => {
+  const root = await tempDir(t, 'operator-task-pause-race-');
+  const state = await tempDir(t, 'operator-task-pause-race-state-');
+  const store = new StaleRunnerWriteStore(state);
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Pause before dispatch and resume exactly once.',
+    authorizedScope: [root],
+    successConditions: ['provider does not run while paused', 'resume runs once'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const running = orchestrator.run(task.id);
+  await store.blockedPromise;
+  const pausing = orchestrator.pause(task.id);
+  store.release();
+  assert.equal((await pausing).state, 'PAUSED');
+
+  const paused = await running;
+  assert.equal(paused.state, 'PAUSED');
+  assert.equal(provider.calls, 0);
+  assert.equal(paused.execution?.stepCount, 0);
+  assert.equal(paused.execution?.records.length, 0);
+
+  const resumed = orchestrator.resume(task.id);
+  await provider.startedPromise;
+  assert.equal(provider.calls, 1);
+  provider.release();
+  assert.equal((await resumed).state, 'VERIFIED');
+});
+
+test('concurrent cancel cannot be overwritten by resume', async (t) => {
+  const root = await tempDir(t, 'operator-task-resume-cancel-race-');
+  const state = await tempDir(t, 'operator-task-resume-cancel-race-state-');
+  const store = new BlockingResumeStore(state);
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel must win over a concurrent resume.',
+    authorizedScope: [root],
+    successConditions: ['no provider dispatch after cancellation'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const initialRun = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  provider.release();
+  assert.equal((await initialRun).state, 'PAUSED');
+
+  const resumed = orchestrator.resume(task.id);
+  await store.blockedPromise;
+  const cancelling = orchestrator.cancel(task.id);
+  store.release();
+
+  assert.equal((await cancelling).state, 'CANCELLED');
+  assert.equal((await resumed).state, 'CANCELLED');
+  assert.equal(provider.calls, 1);
+  assert.equal((await store.get(task.id)).state, 'CANCELLED');
+});
+
+test('cancel survives a stale runner write that started before the control request', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-race-');
+  const state = await tempDir(t, 'operator-task-cancel-race-state-');
+  const store = new StaleRunnerWriteStore(state);
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Preserve cancellation through a stale runner write.',
+    authorizedScope: [root],
+    successConditions: ['cancel remains durable'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const running = orchestrator.run(task.id);
+  await store.blockedPromise;
+  const cancelling = orchestrator.cancel(task.id);
+  store.release();
+  assert.equal((await cancelling).state, 'CANCELLED');
+
+  const cancelled = await running;
+  const persisted = await store.get(task.id);
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(persisted.state, 'CANCELLED');
+  assert.equal(persisted.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(persisted.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
+});
+
+test('cancelling an in-flight task aborts provider execution and persists an interrupted record', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-');
+  const state = await tempDir(t, 'operator-task-cancel-state-');
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel immediately.', authorizedScope: [root], successConditions: ['provider stops'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.equal((await orchestrator.cancel(task.id)).state, 'CANCELLED');
+  const cancelled = await running;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
+  assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
 });
 
 test('a durable execution lease prevents a second orchestrator from duplicating an in-flight action', async (t) => {

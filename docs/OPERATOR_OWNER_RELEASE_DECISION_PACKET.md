@@ -27,13 +27,13 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Current integrated PR #27 head: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
+Certified source baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`.
 
-Exact-head certification: **CI #765 PASS / Platform Matrix #535 PASS / NPM Remote Runtime #174 PASS / Windows Signing Smoke #536 PASS**.
+Active hardening successor: PR #28 / `hardening/post-merge-completion`. Its exact head and four required workflow results are live GitHub evidence and must all be terminal success before merge/release.
 
 ## Applied source state
 
-Integrated PR #27 now applies these decisions in source:
+Current `main` plus the active PR #28 successor apply these decisions in source:
 
 - npm package renamed from @mecrod/operator to **mecord-connect**;
 - package folder renamed to packages/mecord-connect;
@@ -101,7 +101,7 @@ The remaining npm work belongs to the explicit irreversible release gate: build/
 - create/reconcile the Mecord Connect plugin draft;
 - use the current production MCP/OAuth endpoints;
 - complete a portal-issued domain challenge if one is issued;
-- run Scan Tools and verify the exact 10-tool public snapshot;
+- run Scan Tools and verify the exact 9-tool public snapshot;
 - execute real ChatGPT OAuth read/write/refusal/revoke/reconnect testing;
 - enter reviewer credentials without secondary verification;
 - record and host the required production demo;

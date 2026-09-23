@@ -100,3 +100,34 @@ test('review package has exact cases and complete public-tool annotation justifi
     assert.equal(PUBLIC_TOOL_NAMES.includes(forbidden), false);
   }
 });
+
+test('reviewer-facing evidence distinguishes frozen ten-tool production from the canonical nine-tool successor', async () => {
+  const finalSurfaceDocs = [
+    'docs/OPERATOR_DEMO_RECORDING_RUNBOOK.md',
+    'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
+    'docs/OPERATOR_OWNER_RELEASE_DECISION_PACKET.md',
+    'docs/SUBMISSION_PACKAGE.md'
+  ];
+  for (const relative of finalSurfaceDocs) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.equal(content.includes('`device.claim`'), false, `${relative} still advertises removed public device.claim as part of the final surface`);
+    assert.doesNotMatch(content, /\b(?:10[- ]tool|ten tools|ten-tool)\b/i, `${relative} still advertises the obsolete ten-tool final surface`);
+  }
+
+  const certification = await fs.readFile(path.join(root, 'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md'), 'utf8');
+  assert.match(certification, /Frozen production baseline[\s\S]*public surface: exactly 10 MCP tools[\s\S]*legacy public `device\.claim`/);
+  assert.match(certification, /Current Mecord Connect successor[\s\S]*exactly 9 public MCP tools/);
+
+  const releaseGate = await fs.readFile(path.join(root, 'docs/OPERATOR_RELEASE_GATE.md'), 'utf8');
+  assert.match(releaseGate, /Frozen OCC-3M production still exposes the bounded 10-tool surface including `device\.claim`[\s\S]*successor narrows this to the canonical 9-tool surface/);
+
+  const masterGate = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
+  assert.match(masterGate, /G3 MCP Truthfulness & Safety[\s\S]*exactly 9 allowlisted tools/);
+  assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*final deployed Mecord Connect 9-tool surface[\s\S]*older 10-tool baseline/);
+
+  const review = await json('docs/plugin-review-package.json');
+  assert.equal(review.sourceSuccessor.pullRequest, 28);
+  assert.equal(review.sourceSuccessor.branch, 'hardening/post-merge-completion');
+  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_PR_HEAD');
+  assert.equal(review.sourceSuccessor.status, 'REQUIRES_EXACT_HEAD_GREEN_BEFORE_MERGE');
+});

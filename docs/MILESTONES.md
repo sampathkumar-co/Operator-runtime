@@ -143,4 +143,22 @@ The dedicated performance gate uses intentionally wide anti-regression ceilings 
 
 Final platform revalidation runs the full root runtime/import suite with the same pinned Node release on Ubuntu, Windows and macOS. The matrix exposed and fixed macOS temporary-path aliasing in test fixtures and Windows Git line-ending nondeterminism in restore fixtures; no platform skips were added, and all three operating-system jobs are green with the same assertions. The Windows matrix additionally exercises the real DPAPI identity helper.
 
-Repository-owned M5 hardening is therefore largely complete. The remaining Microsoft Store gates are external: submit the exact Partner Center-identity MSIX, complete Store certification, configure the production domain/IdP, certify the supported private/live ChatGPT-to-MCP path, run a real paired-device ChatGPT workflow, and capture final screenshots/demo material. The optional direct/npx distribution lane has separate external gates: choose a trusted signer strategy compatible with its package identity, pin that signer in `operator-runtime-cli`, produce an RFC 3161 timestamped direct package, publish the signed assets to the intended HTTPS/GitHub Release location, and only then publish the npm bootstrap.
+Repository-owned M5 hardening is therefore complete for the Mecord Connect v1 source candidate. Microsoft Store/MSIX is outside the v1 release requirement and is tracked only as an optional distribution lane. Remaining v1 gates are external: production domain/IdP authorization proof, the supported private/live ChatGPT-to-MCP path, a real paired-device ChatGPT workflow, reviewer/demo evidence, explicit first npm publication, final transactional deployment, and OpenAI submission. The optional direct/sideload distribution lane separately requires a trusted signer strategy, RFC 3161 timestamping, published signed assets, and its own bootstrap verification before that lane is released.
+## M6 — bounded autonomous workflow substrate — REPOSITORY IMPLEMENTED, LIVE CHATGPT CERTIFICATION PENDING
+
+- [x] typed multi-goal semantic workflow composition
+- [x] durable child-goal progress and crash-safe resumption
+- [x] capability-union routing for heterogeneous remote workflows
+- [x] local-scope union enforcement for workflow children
+- [x] preemptive cancellation propagated into subprocess, Git, Docker, PostgreSQL, browser waits/discovery and Windows UIA execution
+- [x] context-specific provider reliability learning
+- [x] bounded latency-aware routing adjustment
+- [x] version-1 learning-state migration
+- [x] private MCP workflow schema and relay transport support
+- [ ] real fresh-chat Mecord Connect workflow certification on the final production deployment
+
+M6 deliberately does **not** introduce arbitrary model-generated shell commands or let learned routing alter permissions, risk classification, approvals or recovery authority. A `semantic-workflow` may contain only 1–20 already-supported typed semantic goals. Each child is independently normalized and executed through the existing capability router, canonical-risk resolver, local policy, approval gate and postcondition verifier. Nested workflow envelopes are rejected.
+
+Provider learning remains a routing hint rather than execution authority. State is bounded to capability/provider/semantic-context reliability counters and an aggregate latency EWMA; raw task text, URLs, paths, commands, credentials and result payloads are never persisted in the learning store. The learned adjustment remains capped so static security, determinism and policy boundaries remain authoritative.
+
+Cancellation is durable-first: the task is persisted as CANCELLED before the in-process abort signal is raised. Long-running subprocess-backed providers terminate their child process and Windows UIA closes the native sidecar request; browser waits and discovery calls observe the same abort signal. This closes the earlier gap where cancellation could be recorded only after an in-flight provider returned.

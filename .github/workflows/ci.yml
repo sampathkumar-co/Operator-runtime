@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   core-runtime:
     name: Core runtime tests
@@ -346,7 +350,7 @@ jobs:
           printf '%s\n' "$bindings" | grep -q '"8789/tcp"'
           ! printf '%s\n' "$bindings" | grep -q '8790'
           printf '%s\n' "$bindings" | grep -q '127.0.0.1'
-          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/health | grep -q 'operator-mcp-server'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/health | grep -q 'mecord-connect'
           curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/ | grep -q 'Mecord Connect'
           curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/privacy | grep -q 'CI Production Privacy'
           curl -fsS -H 'Host: edge.operator-runtime.dev' http://127.0.0.1:47200/terms | grep -q 'CI Production Terms'

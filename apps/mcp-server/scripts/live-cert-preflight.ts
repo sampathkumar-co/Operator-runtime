@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { TOOL_NAMES } from '../src/tool-surface.ts';
+import { PRODUCT_NAME, PRODUCT_TITLE } from '../../../src/core/product-identity.ts';
 
 type ToolLike = {
   name?: unknown;
@@ -66,7 +67,7 @@ export async function runLocalCertificationPreflight(rawUrl = process.env.OPERAT
   const healthResponse = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
   if (!healthResponse.ok) throw new Error(`MCP health check failed with HTTP ${healthResponse.status}.`);
   const health = await healthResponse.json() as Record<string, unknown>;
-  if (health.ok !== true || health.service !== 'operator-mcp-server') throw new Error('MCP health response did not identify a ready Operator MCP server.');
+  if (health.ok !== true || health.service !== PRODUCT_NAME) throw new Error(`MCP health response did not identify a ready ${PRODUCT_TITLE} MCP server.`);
 
   const client = new Client({ name: 'operator-live-cert-preflight', version: '0.1.0' }, { versionNegotiation: { mode: 'auto' } });
   const transport = new StreamableHTTPClientTransport(mcpUrl);

@@ -181,9 +181,15 @@ test('official MCP client and Inspector execute through relay control mode with 
     name: 'task.submit',
     arguments: {
       requestId: durableTaskId,
-      objective: 'Create a durable remote browser task without starting it.',
-      successConditions: ['task is durably accepted'],
-      goal: { kind: 'browser-navigation', url: 'https://example.com' },
+      objective: 'Create a durable remote semantic workflow without starting it.',
+      successConditions: ['workflow is durably accepted'],
+      goal: {
+        kind: 'semantic-workflow',
+        steps: [
+          { kind: 'browser-navigation', url: 'https://example.com/first' },
+          { kind: 'browser-navigation', url: 'https://example.com/second' }
+        ]
+      },
       run: false
     }
   });

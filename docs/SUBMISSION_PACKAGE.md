@@ -12,24 +12,23 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin and OAuth provider are live on frozen OCC-3M, while PR #27 head `11abc578488f5deb4df83299554b6a4eae3bbe2e` is the fully green Mecord Connect release successor (CI #765 / Platform #535 / NPM Runtime #174 / Signing #536 PASS). Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the five external/account categories: OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
+The production HTTPS origin and OAuth provider are live on frozen OCC-3M. Certified source baseline `main` is merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; the active engineering successor is PR #28 / `hardening/post-merge-completion`, whose exact head and four required workflow results must be read live from GitHub before merge/submission. Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the five external/account categories: OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
 
 ## What the public plugin does
 
 Mecord Connect lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
-Public v1 exposes only these ten tools:
+Public v1 exposes only these nine tools:
 
-1. `device.claim`
-2. `computer.inspect`
-3. `project.inspect`
-4. `project.commands`
-5. `file.list`
-6. `file.read`
-7. `file.create`
-8. `file.replace`
-9. `git.status`
-10. `git.diff`
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
 Generic terminal execution, browser automation, Windows UI Automation, arbitrary PostgreSQL row access and the legacy generic `file.write` tool are private-runtime capabilities and are **not** part of the public plugin.
 
@@ -128,8 +127,8 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
 - website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. The final descendant already contains the approved publisher/contact/jurisdiction source wording; before submission it must be deployed so all four live pages visibly match the Mecord Connect listing and the verified identity; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
-- Scan Tools imports exactly the intended ten-tool public surface and current annotations;
-- all ten annotation justifications match the scanned server values;
+- Scan Tools imports exactly the intended nine-tool public surface and current annotations;
+- all nine annotation justifications match the scanned server values;
 - the exact five positive and three negative cases are reproducible;
 - the reviewer demo fixture is reset to baseline before the review run and the local runtime is installed from the public npm package, not a source checkout;
 - country/region availability is limited to places where support/legal obligations are ready;

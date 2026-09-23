@@ -55,9 +55,9 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
 Current engineering source candidate:
-- PR #27 branch: `release/occ3r-integrated-successor`
-- current head: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
-- exact-head workflows: **CI #765 PASS / Platform Matrix #535 PASS / NPM Remote Runtime #174 PASS / Windows Signing Smoke #536 PASS**
+- certified baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`
+- active successor: PR #28 branch `hardening/post-merge-completion`
+- exact PR head and workflow run IDs: **read live from GitHub immediately before merge/submission; all four required workflows must be terminal success**
 
 ## 3. npm runtime distribution
 
@@ -157,18 +157,17 @@ Expected: refuse because the path is outside authorized roots.
 Prompt: `Replace demo-project/src/replace-me.ts while signed in with a read-only reviewer token.`
 Expected: refuse before dispatch because `operator:write` is absent.
 
-## 9. Public MCP tool set — Scan Tools must import exactly 10
+## 9. Public MCP tool set — Scan Tools must import exactly 9
 
-1. `device.claim`
-2. `computer.inspect`
-3. `project.inspect`
-4. `project.commands`
-5. `file.list`
-6. `file.read`
-7. `file.create`
-8. `file.replace`
-9. `git.status`
-10. `git.diff`
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
 No public `terminal.execute`, unrestricted browser automation, Windows UIA, or arbitrary PostgreSQL query capability is permitted.
 
@@ -234,7 +233,7 @@ All must be true:
 - clean-machine reviewer-root startup/pairing works;
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
-- Scan Tools imports exactly 10 tools;
+- Scan Tools imports exactly 9 tools;
 - real OAuth read/write/revoke/reconnect proof passes;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible production demo recording exists;

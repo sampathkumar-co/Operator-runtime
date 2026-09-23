@@ -9,7 +9,7 @@ This runbook contains only work that cannot be completed autonomously without th
 The npm account setup gate is now independently verified from the owner machine:
 
 - npm user: **mecrod**
-- authenticated `npm whoami`: **PASS**
+- npm account/2FA setup was previously verified: **PASS**; a fresh publication CLI login is still required immediately before irreversible publish
 - npm 2FA mode: **auth-and-writes**
 - release package: **mecord-connect**
 - npm organization/scope: **not required** for the unscoped package
@@ -25,7 +25,7 @@ Production remains intentionally frozen on OCC-3M:
 - production edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
-- public MCP surface: exactly 10 tools
+- public MCP surface: exactly 9 tools
 
 ## Owner decisions already resolved — do not ask again
 
@@ -154,7 +154,7 @@ Submit only after:
 - exact publisher identity is verified and matches live legal pages;
 - reviewer login/pairing passes;
 - domain challenge is complete if issued;
-- Scan Tools matches the 10-tool snapshot;
+- Scan Tools matches the 9-tool snapshot;
 - real OAuth read/write/refusal/revoke/reconnect proof passes;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible demo recording exists;

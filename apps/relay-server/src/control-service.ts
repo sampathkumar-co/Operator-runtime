@@ -334,7 +334,10 @@ function validTaskRelayRequest(input: unknown): ValidatedTaskRelayRequest {
   };
 }
 
-function taskRequiredCapabilities(goalInput: unknown): string[] {
+function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): string[] {
+  if (!goalInput || typeof goalInput !== 'object' || Array.isArray(goalInput)) {
+    throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal is invalid.');
+  }
   const goal = goalInput as Record<string, unknown>;
   switch (String(goal.kind ?? '')) {
     case 'controlled-file-change': return ['file.list', 'file.create', 'file.read', 'git.status'];
@@ -343,6 +346,12 @@ function taskRequiredCapabilities(goalInput: unknown): string[] {
     case 'app-operation': return ['app.inspect', 'app.operate'];
     case 'docker-lifecycle': return ['docker.inspect', 'docker.manage'];
     case 'postgres-select': return ['postgres.inspect', 'postgres.select'];
+    case 'semantic-workflow': {
+      if (!allowWorkflow || !Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) {
+        throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'semantic workflow must contain 1-20 non-nested typed goals.');
+      }
+      return [...new Set(goal.steps.flatMap((step) => taskRequiredCapabilities(step, false)))].sort();
+    }
     default: throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal kind is unsupported.');
   }
 }

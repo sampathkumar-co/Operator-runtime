@@ -22,6 +22,7 @@ import { invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
+import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -206,8 +207,9 @@ app.all('/mcp', async (request, reply) => {
 });
 app.get('/health', async () => ({
   ok: true,
-  service: 'operator-mcp-server',
-  version: '0.1.0',
+  service: PRODUCT_NAME,
+  title: PRODUCT_TITLE,
+  version: PRODUCT_VERSION,
   ...runtimeProvenance(process.env)
 }));
 
@@ -258,9 +260,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       : invokeWithAgent(agent, capability, risk, input, target);
 
   const server = new McpServer(
-    publicMode
-      ? { name: 'mecord-connect', title: 'Mecord Connect', version: '0.1.0' }
-      : { name: 'Operator', title: 'Operator', version: '0.1.0' },
+    { name: PRODUCT_NAME, title: PRODUCT_TITLE, version: PRODUCT_VERSION },
     { capabilities: { tools: {} }, instructions: publicMode
       ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'
       : 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
@@ -277,7 +277,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     className: z.string().min(1).max(512).optional(), controlType: z.string().min(1).max(128).optional(),
     processId: z.number().int().positive().optional()
   }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
-  const taskGoal = z.discriminatedUnion('kind', [
+  const atomicTaskGoal = z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('controlled-file-change'), root: z.string().min(1).max(4096), path: z.string().min(1).max(4096), content: z.string().max(256 * 1024) }),
     z.object({ kind: z.literal('trusted-project-command'), root: z.string().min(1).max(4096), commandKind: z.enum(['build', 'test', 'lint']) }),
     z.object({ kind: z.literal('browser-navigation'), url: z.string().min(1).max(8192), targetId: z.string().min(1).max(512).optional() }),
@@ -295,10 +295,14 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       verticalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(), verifySelector: taskSelector.optional(), waitMs: z.number().int().min(0).max(10_000).optional()
     })
   ]);
+  const taskGoal = z.union([
+    atomicTaskGoal,
+    z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) })
+  ]);
 
   server.registerTool('task.submit', {
     title: 'Submit durable semantic task',
-    description: 'Create one durable, UUID-addressed semantic task and optionally start it. The UUID makes submission retry-safe. All task actions still pass local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
+    description: 'Create one durable, UUID-addressed semantic task or bounded semantic workflow and optionally start it. The UUID makes submission retry-safe. Workflow children remain typed and every action still passes local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
     inputSchema: z.object({
       requestId: taskUuid, objective: z.string().min(1).max(16_384), successConditions: z.array(z.string().min(1).max(16_384)).min(1).max(1000),
       prohibitedScope: z.array(z.string().min(1).max(4096)).max(1000).optional(), goal: taskGoal,

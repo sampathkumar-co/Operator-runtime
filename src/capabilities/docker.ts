@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
@@ -59,13 +59,13 @@ export class DockerProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, executionContext: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       if (action.capability === 'docker.inspect') {
         const rootInput = String(action.input.path ?? '').trim();
         if (rootInput) {
-          const state = await this.#inspectProject(rootInput);
+          const state = await this.#inspectProject(rootInput, executionContext.signal);
           return success(action, started, {
             scope: 'project',
             root: state.root,
@@ -83,9 +83,9 @@ export class DockerProvider implements CapabilityProvider {
           ]);
         }
 
-        const context = await this.#localContext();
-        const serverVersion = await this.#serverVersion(context);
-        const containers = await this.#listDaemonContainers(context);
+        const context = await this.#localContext(executionContext.signal);
+        const serverVersion = await this.#serverVersion(context, executionContext.signal);
+        const containers = await this.#listDaemonContainers(context, executionContext.signal);
         return success(action, started, {
           scope: 'daemon',
           context: { ...context, local: true },
@@ -111,7 +111,7 @@ export class DockerProvider implements CapabilityProvider {
         throw new OperatorError('DOCKER_FINGERPRINT_REQUIRED', 'A fresh expectedCurrentFingerprint from docker.inspect is required.');
       }
 
-      const before = await this.#inspectProject(String(action.input.path ?? ''));
+      const before = await this.#inspectProject(String(action.input.path ?? ''), executionContext.signal);
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('DOCKER_STATE_CHANGED', 'Docker project state changed after the supplied precondition was captured.', {
           retryable: true,
@@ -128,9 +128,9 @@ export class DockerProvider implements CapabilityProvider {
       }
       const ids = [...new Set(selected.map((container) => container.id))].sort();
       const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);
-      await this.#run(before.context, [operation, ...ids], timeoutMs);
+      await this.#run(before.context, [operation, ...ids], timeoutMs, executionContext.signal);
 
-      const after = await this.#inspectProject(before.root);
+      const after = await this.#inspectProject(before.root, executionContext.signal);
       verifyLifecyclePostcondition(operation, services, after.containers);
       return success(action, started, {
         operation,
@@ -165,13 +165,13 @@ export class DockerProvider implements CapabilityProvider {
     }
   }
 
-  async #localContext(): Promise<DockerContext> {
-    const shown = await this.#runRaw(['context', 'show'], 15_000);
+  async #localContext(signal?: AbortSignal): Promise<DockerContext> {
+    const shown = await this.#runRaw(['context', 'show'], 15_000, signal);
     const name = shown.stdout.trim();
     if (!name || name.length > 256 || /[\r\n\0]/.test(name)) {
       throw new OperatorError('DOCKER_CONTEXT_INVALID', 'Docker returned an invalid active context name.');
     }
-    const inspected = await this.#runRaw(['context', 'inspect', name, '--format', '{{json .Endpoints.docker.Host}}'], 15_000);
+    const inspected = await this.#runRaw(['context', 'inspect', name, '--format', '{{json .Endpoints.docker.Host}}'], 15_000, signal);
     let host: string;
     try { host = JSON.parse(inspected.stdout.trim()) as string; } catch {
       throw new OperatorError('DOCKER_CONTEXT_INVALID', 'Docker context endpoint could not be parsed.');
@@ -184,16 +184,16 @@ export class DockerProvider implements CapabilityProvider {
     return { name, host };
   }
 
-  async #serverVersion(context: DockerContext): Promise<string> {
-    const result = await this.#run(context, ['version', '--format', '{{json .Server.Version}}'], 15_000);
+  async #serverVersion(context: DockerContext, signal?: AbortSignal): Promise<string> {
+    const result = await this.#run(context, ['version', '--format', '{{json .Server.Version}}'], 15_000, signal);
     try {
       const version = JSON.parse(result.stdout.trim());
       return typeof version === 'string' ? version.slice(0, 128) : '';
     } catch { return result.stdout.trim().slice(0, 128); }
   }
 
-  async #listDaemonContainers(context: DockerContext): Promise<{ items: Array<Record<string, unknown>>; truncated: boolean }> {
-    const result = await this.#run(context, ['ps', '--all', '--format', '{{json .}}'], 20_000);
+  async #listDaemonContainers(context: DockerContext, signal?: AbortSignal): Promise<{ items: Array<Record<string, unknown>>; truncated: boolean }> {
+    const result = await this.#run(context, ['ps', '--all', '--format', '{{json .}}'], 20_000, signal);
     const lines = result.stdout.split(/\r?\n/).filter(Boolean);
     const items: Array<Record<string, unknown>> = [];
     for (const line of lines.slice(0, MAX_CONTAINERS)) {
@@ -214,15 +214,15 @@ export class DockerProvider implements CapabilityProvider {
     return { items, truncated: lines.length > MAX_CONTAINERS || result.truncated };
   }
 
-  async #inspectProject(inputPath: string): Promise<ProjectState> {
+  async #inspectProject(inputPath: string, signal?: AbortSignal): Promise<ProjectState> {
     const root = await this.#scope.resolveExisting(inputPath);
-    const context = await this.#localContext();
-    const listed = await this.#run(context, ['ps', '--all', '--filter', 'label=com.docker.compose.project', '--format', '{{json .ID}}'], 20_000);
+    const context = await this.#localContext(signal);
+    const listed = await this.#run(context, ['ps', '--all', '--filter', 'label=com.docker.compose.project', '--format', '{{json .ID}}'], 20_000, signal);
     const ids = listed.stdout.split(/\r?\n/).filter(Boolean).slice(0, MAX_CONTAINERS).map((line) => {
       try { return String(JSON.parse(line)); } catch { throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container id output could not be parsed.'); }
     }).filter((id) => /^[0-9a-f]{12,64}$/i.test(id));
 
-    const containers = ids.length === 0 ? [] : await this.#inspectComposeContainers(context, ids);
+    const containers = ids.length === 0 ? [] : await this.#inspectComposeContainers(context, ids, signal);
     const matched = containers
       .filter((container) => sameLocalPath(container.workingDir, root))
       .sort((a, b) => `${a.service}\0${a.id}`.localeCompare(`${b.service}\0${b.id}`));
@@ -234,8 +234,8 @@ export class DockerProvider implements CapabilityProvider {
     };
   }
 
-  async #inspectComposeContainers(context: DockerContext, ids: string[]): Promise<ComposeContainer[]> {
-    const result = await this.#run(context, ['inspect', '--format', INSPECT_FORMAT, ...ids], 30_000);
+  async #inspectComposeContainers(context: DockerContext, ids: string[], signal?: AbortSignal): Promise<ComposeContainer[]> {
+    const result = await this.#run(context, ['inspect', '--format', INSPECT_FORMAT, ...ids], 30_000, signal);
     const containers: ComposeContainer[] = [];
     for (const line of result.stdout.split(/\r?\n/).filter(Boolean)) {
       const fields = line.split('\t');
@@ -258,12 +258,12 @@ export class DockerProvider implements CapabilityProvider {
     return containers;
   }
 
-  async #run(context: DockerContext, args: string[], timeoutMs: number): Promise<DockerOutput> {
-    return this.#runRaw(['--context', context.name, ...args], timeoutMs);
+  async #run(context: DockerContext, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerOutput> {
+    return this.#runRaw(['--context', context.name, ...args], timeoutMs, signal);
   }
 
-  async #runRaw(args: string[], timeoutMs: number): Promise<DockerOutput> {
-    return await runDocker(this.#dockerExecutable, [...this.#dockerArgsPrefix, ...args], timeoutMs);
+  async #runRaw(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerOutput> {
+    return await runDocker(this.#dockerExecutable, [...this.#dockerArgsPrefix, ...args], timeoutMs, signal);
   }
 }
 
@@ -361,8 +361,12 @@ function dockerEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-async function runDocker(executable: string, args: string[], timeoutMs: number): Promise<DockerOutput> {
+async function runDocker(executable: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerOutput> {
   return await new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new OperatorError('EXECUTION_ABORTED', 'Docker execution was cancelled.', { retryable: false }));
+      return;
+    }
     const environment = dockerEnvironment();
     const dockerExecutable = resolveTrustedExecutable(executable, environment);
     const child = spawn(dockerExecutable, args, {
@@ -376,6 +380,8 @@ async function runDocker(executable: string, args: string[], timeoutMs: number):
     let bytes = 0;
     let truncated = false;
     let timedOut = false;
+    let aborted = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
     const capture = (bucket: Buffer[]) => (chunk: Buffer) => {
       if (bytes >= MAX_OUTPUT_BYTES) { truncated = true; return; }
       const sliced = chunk.subarray(0, MAX_OUTPUT_BYTES - bytes);
@@ -386,14 +392,31 @@ async function runDocker(executable: string, args: string[], timeoutMs: number):
     child.stdout.on('data', capture(stdout));
     child.stderr.on('data', capture(stderr));
     child.once('error', reject);
+    const terminate = () => {
+      try { child.kill('SIGTERM'); } catch { /* child may already be gone */ }
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* child may already be gone */ }
+        }, 1000);
+        forceKillTimer.unref();
+      }
+    };
+    const onAbort = () => { aborted = true; terminate(); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+      terminate();
     }, timeoutMs);
     timer.unref();
     child.once('close', (code) => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener('abort', onAbort);
+      if (aborted) {
+        reject(new OperatorError('EXECUTION_ABORTED', 'Docker execution was cancelled.', { retryable: false }));
+        return;
+      }
       if (timedOut) {
         reject(new OperatorError('DOCKER_TIMEOUT', `Docker command exceeded ${timeoutMs}ms timeout.`, { retryable: true }));
         return;

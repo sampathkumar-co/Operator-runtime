@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -15,7 +15,7 @@ export type UiaTaskSelector = { name?: string; automationId?: string; className?
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 
-export type SemanticTaskGoal =
+export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
@@ -30,6 +30,10 @@ export type SemanticTaskGoal =
       value?: string; horizontalAmount?: string; verticalAmount?: string;
       verifySelector?: UiaTaskSelector; waitMs?: number;
     };
+
+export type SemanticTaskGoal =
+  | AtomicSemanticTaskGoal
+  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
@@ -80,21 +84,24 @@ export class TaskOrchestrator {
   #permissions: PermissionProfile;
   #planners: Map<string, TaskPlanner>;
   #active = new Map<string, Promise<TaskCapsule>>();
-  #executeAction: (action: ActionRequest, permissions: PermissionProfile) => Promise<ActionResult>;
+  #controllers = new Map<string, AbortController>();
+  #controlRequests = new Map<string, 'PAUSED' | 'CANCELLED'>();
+  #stateWriteTails = new Map<string, Promise<void>>();
+  #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
 
   constructor(options: {
     runtime: OperatorRuntime;
     store: TaskStore;
     permissions: PermissionProfile;
     planners?: TaskPlanner[];
-    executeAction?: (action: ActionRequest, permissions: PermissionProfile) => Promise<ActionResult>;
+    executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new SemanticTaskPlanner()];
+    const planners = options.planners ?? [new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
-    this.#executeAction = options.executeAction ?? ((action, permissions) => this.#runtime.execute(action, permissions));
+    this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -164,18 +171,24 @@ export class TaskOrchestrator {
   async run(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) return await active;
-    const promise = this.#runWithLease(taskId, approvedActionIds).finally(() => this.#active.delete(taskId));
+    const controller = new AbortController();
+    this.#controllers.set(taskId, controller);
+    const promise = this.#runWithLease(taskId, approvedActionIds, controller.signal).finally(() => {
+      this.#active.delete(taskId);
+      this.#controllers.delete(taskId);
+      this.#controlRequests.delete(taskId);
+    });
     this.#active.set(taskId, promise);
     return await promise;
   }
 
-  async #runWithLease(taskId: string, approvedActionIds: string[]): Promise<TaskCapsule> {
+  async #runWithLease(taskId: string, approvedActionIds: string[], signal: AbortSignal): Promise<TaskCapsule> {
     const lease = await this.#store.acquireExecutionLease(taskId);
-    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned); }
+    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned, signal); }
     finally { await lease.release(); }
   }
 
-  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>): Promise<TaskCapsule> {
+  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
@@ -189,8 +202,7 @@ export class TaskOrchestrator {
       execution.deadlineAt = new Date(Date.now() + execution.timeoutMs).toISOString();
     }
     task.state = 'RUNNING';
-    await assertLease();
-    await this.#store.put(task);
+    await this.#persistRunState(task, assertLease);
 
     while (true) {
       task = await this.#store.get(task.id);
@@ -206,8 +218,7 @@ export class TaskOrchestrator {
       if (decision.type === 'complete') {
         task.evidence.push(evidence('task_completion', 'pass', decision.message));
         finalizeTask(task);
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
       if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
@@ -234,8 +245,23 @@ export class TaskOrchestrator {
       if (!blockedReplay) current.records.push(record);
       else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
       current.stepCount += 1;
-      await assertLease();
-      await this.#store.put(task);
+      const preDispatchControl = await this.#persistRunState(task, assertLease);
+      if (preDispatchControl === 'PAUSED') {
+        current.records = current.records.filter((candidate) => candidate !== record);
+        current.stepCount = Math.max(0, current.stepCount - 1);
+        setNodeState(task, node.id, 'PENDING');
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
+      if (preDispatchControl === 'CANCELLED') {
+        record.state = 'INTERRUPTED';
+        record.finishedAt = new Date().toISOString();
+        record.errorCode = 'EXECUTION_ABORTED';
+        setNodeState(task, node.id, 'SKIPPED');
+        task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
 
       const action: ActionRequest = {
         id: actionId, taskId: task.id, capability: decision.capability, risk,
@@ -246,8 +272,9 @@ export class TaskOrchestrator {
         ...this.#permissions,
         approvedActionIds: [...new Set([...(this.#permissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
+      const learningContext = semanticLearningContext(goal, task);
       let result: ActionResult;
-      try { result = await this.#executeAction(action, permissions); }
+      try { result = await this.#executeAction(action, permissions, { signal, learningContext }); }
       catch (error) {
         result = {
           ok: false, capability: action.capability, provider: 'task-executor', evidence: [], durationMs: 0,
@@ -274,38 +301,43 @@ export class TaskOrchestrator {
         try {
           planner.accept({ task, goal }, decision, observation);
         } catch (error) {
-          await this.#recordLearning(task, result, 'failed');
+          await this.#recordLearning(task, result, 'failed', learningContext);
           latestRecord.state = 'FAILED';
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
           return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
-        await this.#recordLearning(task, result, 'verified');
+        await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
         if (controlState) task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         if (controlState) return task;
         continue;
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
-      await this.#recordLearning(task, result, 'failed');
+      if (controlState === 'CANCELLED' && latestRecord.errorCode === 'EXECUTION_ABORTED') {
+        latestRecord.state = 'INTERRUPTED';
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('task_cancel', 'info', 'In-flight task execution was aborted after cancellation.'));
+        task.state = 'CANCELLED';
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
+      await this.#recordLearning(task, result, 'failed', learningContext);
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
       if (planner.fallback?.({ task, goal }, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
         if (controlState) task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         if (controlState) return task;
         continue;
       }
@@ -313,33 +345,98 @@ export class TaskOrchestrator {
       setNodeState(task, latestNode.id, 'FAILED');
       if (controlState) {
         task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (result.error?.retryable === true && risk === 'read') { await assertLease(); await this.#store.put(task); continue; }
+      if (result.error?.retryable === true && risk === 'read') { await this.#persistRunState(task, assertLease); continue; }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
   }
 
   async pause(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'PAUSED'); }
-  async cancel(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'CANCELLED'); }
+  async cancel(taskId: string): Promise<TaskCapsule> {
+    const task = await this.#setControlState(taskId, 'CANCELLED');
+    this.#controllers.get(taskId)?.abort();
+    return task;
+  }
   async resume(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
-    const task = await this.#store.get(taskId);
-    if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
-    task.state = 'PENDING';
-    for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
-    await this.#store.put(task);
+    const active = this.#active.get(taskId);
+    if (active) await active;
+    await this.#withStateWriteLock(taskId, async () => {
+      const task = await this.#store.get(taskId);
+      if (this.#controlRequests.get(taskId) === 'CANCELLED') {
+        throw new OperatorError('TASK_TERMINAL', 'Task cancellation is already in progress.');
+      }
+      if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
+      if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
+      task.state = 'PENDING';
+      for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
+      await this.#store.put(task);
+    });
     return await this.run(taskId, approvedActionIds);
   }
 
   async #setControlState(taskId: string, state: 'PAUSED' | 'CANCELLED'): Promise<TaskCapsule> {
-    const task = await this.#store.get(taskId);
-    if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
-    task.state = state;
-    task.updatedAt = new Date().toISOString();
-    await this.#store.put(task);
-    return task;
+    const previous = this.#controlRequests.get(taskId);
+    this.#controlRequests.set(taskId, state);
+    try {
+      return await this.#withStateWriteLock(taskId, async () => {
+        const task = await this.#store.get(taskId);
+        if (task.state === state) {
+          if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
+          return task;
+        }
+        if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
+        task.state = state;
+        task.updatedAt = new Date().toISOString();
+        await this.#store.put(task);
+        if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
+        return task;
+      });
+    } catch (error) {
+      if (previous) this.#controlRequests.set(taskId, previous);
+      else this.#controlRequests.delete(taskId);
+      throw error;
+    }
+  }
+
+  #applyControlRequest(task: TaskCapsule): 'PAUSED' | 'CANCELLED' | undefined {
+    const requested = this.#controlRequests.get(task.id);
+    if (requested === 'CANCELLED') {
+      task.state = 'CANCELLED';
+      return 'CANCELLED';
+    }
+    if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) {
+      task.state = 'PAUSED';
+      return 'PAUSED';
+    }
+    return undefined;
+  }
+
+  async #persistRunState(task: TaskCapsule, assertLease: () => Promise<void>): Promise<'PAUSED' | 'CANCELLED' | undefined> {
+    await this.#withStateWriteLock(task.id, async () => {
+      this.#applyControlRequest(task);
+      await assertLease();
+      await this.#store.put(task);
+    });
+    // Control intent is published before its serialized durable write. Re-apply
+    // synchronously so the runner cannot dispatch work while that write waits.
+    return this.#applyControlRequest(task);
+  }
+
+  async #withStateWriteLock<T>(taskId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.#stateWriteTails.get(taskId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.#stateWriteTails.set(taskId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.#stateWriteTails.get(taskId) === tail) this.#stateWriteTails.delete(taskId);
+    }
   }
 
   async #canonicalRisk(capability: string, input: Record<string, unknown>): Promise<ActionRisk> {
@@ -348,9 +445,9 @@ export class TaskOrchestrator {
     return await this.#runtime.router.resolveRisk({ id: 'task-risk-probe', capability, risk: 'read', input, provenance: { kind: 'trusted_policy' } });
   }
 
-  async #recordLearning(task: TaskCapsule, result: ActionResult, outcome: 'verified' | 'failed'): Promise<void> {
+  async #recordLearning(task: TaskCapsule, result: ActionResult, outcome: 'verified' | 'failed', learningContext: string): Promise<void> {
     try {
-      const recorded = await this.#runtime.router.recordOutcome(result.capability, result.provider, outcome);
+      const recorded = await this.#runtime.router.recordOutcome(result.capability, result.provider, outcome, { context: learningContext, durationMs: result.durationMs });
       if (recorded) {
         task.evidence.push(evidence('adaptive_learning', 'info', 'Recorded a bounded provider outcome for future routing.', {
           capability: result.capability,
@@ -377,8 +474,8 @@ export class TaskOrchestrator {
     task.failures.push({ at: new Date().toISOString(), code, message });
     task.evidence.push(evidence('task_failure', 'fail', message, { code }));
     task.updatedAt = new Date().toISOString();
-    await assertLease?.();
-    await this.#store.put(task);
+    if (assertLease) await this.#persistRunState(task, assertLease);
+    else await this.#store.put(task);
     return task;
   }
 }
@@ -388,6 +485,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
@@ -463,6 +561,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   }
 
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
+    if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
@@ -602,11 +701,123 @@ export class SemanticTaskPlanner implements TaskPlanner {
   }
 }
 
+
+export class SemanticWorkflowPlanner implements TaskPlanner {
+  readonly id = 'operator.semantic-workflow.v1';
+  #atomic = new SemanticTaskPlanner();
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
+    const state = task.execution!.plannerState;
+    let index = workflowIndex(state, goal.steps.length);
+    while (index < goal.steps.length) {
+      const child = goal.steps[index]!;
+      const childState = workflowChildState(state);
+      const proxy = taskWithPlannerState(task, childState);
+      const decision = this.#atomic.next({ task: proxy, goal: child });
+      state.workflowChildState = proxy.execution!.plannerState;
+      if (decision.type === 'complete') {
+        task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
+        index += 1;
+        state.workflowIndex = index;
+        state.workflowChildState = { phase: 'start' };
+        continue;
+      }
+      return {
+        ...decision,
+        key: `workflow:${index}:${decision.key}`,
+        title: `[${index + 1}/${goal.steps.length}] ${decision.title}`
+      };
+    }
+    return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step);
+    this.#atomic.accept({ task: current.proxy, goal: current.child }, current.atomicStep, observation);
+    task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
+  }
+
+  fallback({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child }, current.atomicStep, observation) ?? false;
+    task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
+    return handled;
+  }
+
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>): {
+    child: AtomicSemanticTaskGoal;
+    proxy: TaskCapsule;
+    atomicStep: Extract<PlannerDecision, { type: 'step' }>;
+  } {
+    if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
+    const state = task.execution!.plannerState;
+    const index = workflowIndex(state, goal.steps.length);
+    const child = goal.steps[index];
+    if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
+    const proxy = taskWithPlannerState(task, workflowChildState(state));
+    const expected = this.#atomic.next({ task: proxy, goal: child });
+    if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
+      throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
+    }
+    return { child, proxy, atomicStep: expected };
+  }
+}
+
+function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): string {
+  if (goal.kind !== 'semantic-workflow') return goal.kind;
+  const state = task.execution?.plannerState;
+  if (!state) return 'semantic-workflow';
+  const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
+  return goal.steps[index]?.kind ?? 'semantic-workflow';
+}
+
+function workflowIndex(state: Record<string, unknown>, length: number): number {
+  const value = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
+  if (!Number.isSafeInteger(value) || value < 0 || value > length) {
+    throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow child index is invalid.');
+  }
+  return value;
+}
+
+function workflowChildState(state: Record<string, unknown>): Record<string, unknown> {
+  const value = state.workflowChildState;
+  if (value === undefined) return { phase: 'start' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow child planner state is invalid.');
+  }
+  return structuredClone(value as Record<string, unknown>);
+}
+
+function taskWithPlannerState(task: TaskCapsule, plannerState: Record<string, unknown>): TaskCapsule {
+  if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
+  return {
+    ...task,
+    execution: { ...task.execution, plannerState },
+    evidence: task.evidence,
+    nodes: task.nodes,
+    failures: task.failures
+  };
+}
+
 function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', 'Stored task goal is invalid.');
   const goal = structuredClone(input) as SemanticTaskGoal;
   if (goal.kind !== expectedKind) throw new OperatorError('TASK_GOAL_INVALID', 'Stored task goal kind does not match execution metadata.');
-  if (goal.kind === 'controlled-file-change') {
+  if (goal.kind === 'semantic-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Semantic workflow requires 1-20 typed child goals.');
+    }
+    goal.steps = goal.steps.map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Workflow step ${index} is invalid.`);
+      const kind = String((step as { kind?: unknown }).kind ?? '');
+      if (kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Nested semantic workflows are not permitted.');
+      return parseGoal(step, kind) as AtomicSemanticTaskGoal;
+    });
+  } else if (goal.kind === 'controlled-file-change') {
     boundedText(goal.root, 4096, 'goal root'); boundedText(goal.path, 4096, 'goal path'); boundedText(goal.content, 2 * 1024 * 1024, 'goal content');
     const root = path.resolve(goal.root);
     const target = path.resolve(root, goal.path);
