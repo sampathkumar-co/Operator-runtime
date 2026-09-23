@@ -107,54 +107,53 @@
     }
   },
   "externalGates": {
-    "productionMcpUrl": "PASS: https://operator.splcart.in/mcp is live on OCC-3M; unauthenticated requests fail closed with OAuth resource metadata.",
-    "website": "PASS: https://operator.splcart.in returns 200 with CSP, HSTS, nosniff, DENY framing, and no-referrer.",
-    "privacy": "SOURCE_RESOLVED_LIVE_PENDING_DEPLOYMENT: source Privacy notice identifies Kinthala Samuel Sampath Kumar and the approved locality/contact; production remains OCC-3M until final Mecord Connect deployment.",
-    "terms": "SOURCE_RESOLVED_LIVE_PENDING_DEPLOYMENT: source Terms identify Kinthala Samuel Sampath Kumar, India governing law and Visakhapatnam venue subject to mandatory protections; production remains OCC-3M until final deployment.",
-    "support": "SOURCE_RESOLVED_LIVE_PENDING_DEPLOYMENT: source Support names Kinthala Samuel Sampath Kumar and support@splcart.in; production remains OCC-3M until final deployment.",
+    "productionMcpUrl": "PASS_LIVE: https://operator.splcart.in/mcp is deployed from source 3b3b1bff35f8e78519f114b603f98e8acc56cd66; the refreshed ChatGPT connection exposes exactly the canonical 9 tools.",
+    "website": "PASS_LIVE: final Mecord Connect production pages are deployed and post-deploy health/routing/security verification passed.",
+    "privacy": "PASS_LIVE: final Mecord Connect Privacy notice is deployed from the current source-controlled notice set.",
+    "terms": "PASS_LIVE: final Mecord Connect Terms notice is deployed from the current source-controlled notice set.",
+    "support": "PASS_LIVE: final Mecord Connect Support notice is deployed from the current source-controlled notice set.",
     "oauthProviderPreflight": "PASS: predefined public client, S256, authorization/token endpoints, JWKS, scopes and exact callback accepted.",
-    "realAccessTokenAudience": "BLOCKED_HUMAN_AUTHORIZATION: complete one real user authorization and verify aud=https://operator.splcart.in/mcp.",
-    "realChatGptE2E": "BLOCKED_HUMAN_AUTHORIZATION: requires a connected ChatGPT draft/plugin and completed OAuth flow.",
+    "realAccessTokenAudience": "BLOCKED_EVIDENCE: a real ChatGPT OAuth sign-in/reconnect completed and reached production Mecord; capture sanitized issued-token audience/resource/scope evidence and explicit revoke/disconnect plus reconnect recovery.",
+    "realChatGptE2E": "PARTIAL_ROUTE_NO_DEVICE: a fresh ChatGPT conversation exposes exactly 9 tools with no device.claim and computer.inspect reached Mecord, but the paired local runtime was offline so device-backed read/write tests could not run.",
     "domainChallenge": "BLOCKED_OPENAI_PORTAL: OCC-3M is configuration-ready through OPENAI_APPS_CHALLENGE_TOKEN; keep 404 until the portal issues the exact token.",
     "reviewerCredentials": "PROVISIONED_UNVERIFIED: a dedicated production reviewer account and reviewer-only one-factor OIDC policy are provisioned; normal users retain the two-factor default and Authelia is healthy. The credential value is not in Git/chat. Owner-side password retrieval/login verification, canonical fixture-only pairing and real OpenAI reviewer execution are still required.",
     "publisherIdentity": "SOURCE_RESOLVED_BLOCKED_OPENAI_VERIFICATION: owner selected individual publisher Kinthala Samuel Sampath Kumar with Akkayapalem, Visakhapatnam, Andhra Pradesh, India and support@splcart.in. Source plugin/npm/license/disclosure/notices are aligned. OpenAI individual verification must confirm the exact legal-name spelling/order before submission.",
-    "hostedPluginRefresh": "BLOCKED_OPENAI_PORTAL_AND_DEPLOYMENT: deploy the certified Mecord Connect public edge first, then create or update the With MCP draft for https://operator.splcart.in/mcp in the OpenAI plugin submission portal, complete OAuth and domain verification, select Scan Tools, and verify exactly the canonical 9 tools with no device.claim before any review submission. Repository manifests and review packets do not update the hosted plugin by themselves.",
-    "toolScan": "BLOCKED_OPENAI_PORTAL: after the certified edge deployment and draft refresh, run Scan Tools against https://operator.splcart.in/mcp and reconcile names, schemas, security schemes, annotations, _meta and instructions against the canonical 9-tool source contract.",
+    "hostedPluginRefresh": "PASS_LIVE: the production With MCP connection was refreshed through real OAuth; a fresh ChatGPT conversation exposes exactly the canonical 9 tools and no device.claim.",
+    "toolScan": "BLOCKED_OPENAI_PORTAL: fresh-chat tool refresh matches the 9-tool source contract, but the formal submission-portal Scan Tools result still must be captured and reconciled.",
     "demoRecording": "BLOCKED_REAL_E2E: current OpenAI final submission validation requires a demo recording URL for remote-MCP plugins. Record only after the real ChatGPT OAuth/reviewer path is working from the public package; do not expose credentials, tokens, private keys, personal paths or real user data.",
-    "npmRuntimePublication": "BLOCKED_EXPLICIT_RELEASE_ACTION: unscoped mecord-connect@1.0.0 is not yet public. npm user mecord is authenticated and 2FA mode auth-and-writes is verified; no npm organization/scope is required. Remaining work is explicit publication authorization, exact-tarball publication, registry verification and clean-machine doctor/reviewer-root proof.",
-    "reviewerFixture": "LOCAL_SEMANTICS_PASS_AWAITING_IDENTITY_PAIRING: baseline ab658c353fc3e0ce79d71e2968f53eedbc247537; exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2. Additional local checks: file.replace -> APPROVAL_REQUIRED without local approval; duplicate file.create -> TARGET_EXISTS.",
-    "npmRuntimeLicense": "RESOLVED_SOURCE: owner selected PROPRIETARY. mecord-connect declares SEE LICENSE IN LICENSE, ships an owner-specific proprietary LICENSE and documents it in the package README. Final registry verification follows first publication.",
+    "npmRuntimePublication": "PASS_LIVE: mecord-connect@1.0.0 is public under latest from source 3b3b1bff35f8e78519f114b603f98e8acc56cd66. Clean registry install, installed doctor, remote --help, package/runtime file verification and vulnerability scan passed with 0 reported vulnerabilities.",
+    "reviewerFixture": "LOCAL_SEMANTICS_PASS_DEVICE_OFFLINE: baseline ab658c353fc3e0ce79d71e2968f53eedbc247537 and local 5 positive + 3 negative cases pass. The public package is live, but the latest real ChatGPT probe returned ROUTE_NO_DEVICE because the paired runtime was offline.",
+    "npmRuntimeLicense": "RESOLVED_LIVE: the public mecord-connect@1.0.0 registry package carries SEE LICENSE IN LICENSE and the proprietary LICENSE.",
     "evidenceBranchCi": "DYNAMIC_EXTERNAL_EVIDENCE: GitHub exact-head CI, Platform Matrix, NPM Remote Runtime and Windows Signing Smoke status for the active release-candidate branch is authoritative immediately before merge/submission. Do not copy stale run numbers into this static review package; every required run must be terminal success on the then-current exact head.",
-    "npmDualUseClassification": "RESOLVED_SOURCE: owner selected DUAL_USE. mecord-connect requires contentPolicy.class=dual-use, ships root DISCLOSURE and fails closed if the declaration is missing. npm account/2FA setup is resolved; final policy closure follows exact publication/registry verification.",
+    "npmDualUseClassification": "RESOLVED_LIVE: the public mecord-connect@1.0.0 registry package carries contentPolicy.class=dual-use and root DISCLOSURE.",
     "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into the merged PR #28 hardening baseline and retained by current main. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
     "occ3oPublicNoticeReproducibility": "PASS_ENGINEERING_DRAFT: PR #24 head 6edd3ee8eca2f5b8096424bac8750f0c945cec94 source-controls the exact live Privacy/Terms/Support notice bytes previously hidden by an ignore rule; CI #710, Platform Matrix #480 and Windows Signing Smoke #481 pass. A disposable merge preview with PR #22 is conflict-free, passes 24/24 focused tests and the full Windows-aware suite at 367 tests / 351 pass / 16 expected skips / 0 fail. FG-017 legal identity wording remains intentionally unresolved.",
     "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that were integrated into the merged PR #28 hardening baseline and retained through the PR #29 baseline d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
-    "publicBrandingDeployment": "BLOCKED_FINAL_DEPLOYMENT: production remains OCC-3M and still serves the pre-rebrand/pre-final pages. After the five external/account gates permit release sequencing, deploy the final Mecord Connect successor and verify /, /privacy, /terms and /support show Mecord Connect with the approved individual publisher identity."
+    "publicBrandingDeployment": "PASS_LIVE: final Mecord Connect production source 3b3b1bff35f8e78519f114b603f98e8acc56cd66 is deployed; final public pages and the canonical 9-tool surface are live."
   },
   "releaseCandidate": {
-    "name": "OCC-3M",
-    "sourceCommit": "405be7a03270c6c7ced78cd0d0d58314048a1af7",
-    "productionImage": "sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18",
-    "certifiedAtUtc": "2026-09-17T21:10:40Z"
+    "name": "Mecord Connect 1.0.0",
+    "sourceCommit": "3b3b1bff35f8e78519f114b603f98e8acc56cd66",
+    "productionMcp": "https://operator.splcart.in/mcp",
+    "npmPackage": "mecord-connect@1.0.0",
+    "status": "PRODUCTION_LIVE"
   },
   "sourceSuccessor": {
-    "name": "Mecord Connect current source candidate",
+    "name": "Mecord Connect current production source",
     "pullRequest": null,
     "branch": "main",
-    "sourceCommit": "DYNAMIC_CURRENT_MAIN_HEAD",
+    "sourceCommit": "3b3b1bff35f8e78519f114b603f98e8acc56cd66",
     "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",
     "workflowRuns": {
-      "ci": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release",
-      "platformMatrix": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS on Windows, Ubuntu and macOS; revalidate current main before release",
-      "npmRemoteRuntime": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release",
-      "windowsSigningSmoke": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release"
+      "ci": "production release session: 19/19 checks green",
+      "runtimeSuite": "437 pass / 17 expected skips / 0 failures",
+      "productionVerification": "health, OAuth metadata, routing, security boundaries, fresh-chat 9-tool refresh PASS"
     },
-    "status": "SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES",
+    "status": "PRODUCTION_DEPLOYED_NPM_PUBLISHED_AWAITING_FINAL_OPENAI_REVIEW_GATES",
     "workflowConclusions": {
       "ci": "success",
-      "platformMatrix": "success",
-      "npmRemoteRuntime": "success_on_engineering_baseline",
-      "windowsSigningSmoke": "success"
+      "runtimeSuite": "success",
+      "productionVerification": "success"
     }
   }
 }
