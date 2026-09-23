@@ -1,8 +1,8 @@
 # Operator OpenAI Release Gate — OCC-3M
 
 Frozen production source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
-Current release successor: PR #28 / `hardening/post-merge-completion` (exact head is live GitHub evidence)
-Current exact-main certification: merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; CI #806 / Platform Matrix #576 / NPM Runtime #206 / Signing #577 — all PASS. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
+Current release successor: merged hardening baseline `71b7c122a04b97637d17e4ae296437d64ad20620`, plus notice-only cleanup on current `main` `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`
+Hardening certification: PR #28 exact head passed CI #911 / Platform Matrix #681 / NPM Runtime #311 / Signing #682 before merge to `71b7c122a04b97637d17e4ae296437d64ad20620`. PR #29 then passed CI #914 / Platform Matrix #684 / Signing #685 before its notice-only merge to current `main` `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
 Evidence date: 2026-09-23
