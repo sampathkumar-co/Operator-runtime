@@ -284,6 +284,30 @@ test('task executor detects a no-progress planner loop before exhausting the glo
   assert.equal(failed.execution?.stepCount, 2);
 });
 
+class StaleRunnerWriteStore extends TaskStore {
+  #blockedOnce = false;
+  blocked!: () => void;
+  release!: () => void;
+  readonly blockedPromise: Promise<void>;
+  readonly releasePromise: Promise<void>;
+
+  constructor(stateDir: string) {
+    super(stateDir);
+    this.blockedPromise = new Promise((resolve) => { this.blocked = resolve; });
+    this.releasePromise = new Promise((resolve) => { this.release = resolve; });
+  }
+
+  override async put(task: Parameters<TaskStore['put']>[0]): Promise<void> {
+    const hasStartedRecord = task.execution?.records.some((record) => record.state === 'STARTED') === true;
+    if (!this.#blockedOnce && task.state === 'RUNNING' && hasStartedRecord) {
+      this.#blockedOnce = true;
+      this.blocked();
+      await this.releasePromise;
+    }
+    await super.put(task);
+  }
+}
+
 class DelayedProvider implements CapabilityProvider {
   readonly name = 'test.delayed';
   started!: () => void;
@@ -809,6 +833,35 @@ test('an in-flight pause survives action completion and can be resumed durably',
   assert.equal(paused.state, 'PAUSED');
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
   assert.equal((await orchestrator.resume(task.id)).state, 'VERIFIED');
+});
+
+test('cancel survives a stale runner write that started before the control request', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-race-');
+  const state = await tempDir(t, 'operator-task-cancel-race-state-');
+  const store = new StaleRunnerWriteStore(state);
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Preserve cancellation through a stale runner write.',
+    authorizedScope: [root],
+    successConditions: ['cancel remains durable'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const running = orchestrator.run(task.id);
+  await store.blockedPromise;
+  assert.equal((await orchestrator.cancel(task.id)).state, 'CANCELLED');
+  store.release();
+
+  const cancelled = await running;
+  const persisted = await store.get(task.id);
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(persisted.state, 'CANCELLED');
+  assert.equal(persisted.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(persisted.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
 });
 
 test('cancelling an in-flight task aborts provider execution and persists an interrupted record', async (t) => {
