@@ -148,7 +148,13 @@ export function createLocalAgentServer(options: {
     if (waiters.size === 0) approvalWaiters.delete(actionId);
   };
 
-  const waitForApprovalDecision = (actionId: string, approvalRequestId: string): Promise<InlineApprovalDecision | null> => {
+  const waitForApprovalDecision = (
+    actionId: string,
+    approvalRequestId: string,
+    maxWaitMs = INLINE_APPROVAL_WAIT_MS
+  ): Promise<InlineApprovalDecision | null> => {
+    const waitMs = Math.min(INLINE_APPROVAL_WAIT_MS, Math.max(0, Math.floor(maxWaitMs)));
+    if (waitMs <= 0) return Promise.resolve(null);
     return new Promise((resolve) => {
       const waiters = approvalWaiters.get(actionId) ?? new Set<InlineApprovalWaiter>();
       const waiter: InlineApprovalWaiter = {
@@ -158,7 +164,7 @@ export function createLocalAgentServer(options: {
           waiters.delete(waiter);
           if (waiters.size === 0) approvalWaiters.delete(actionId);
           resolve(null);
-        }, INLINE_APPROVAL_WAIT_MS)
+        }, waitMs)
       };
       waiter.timer.unref?.();
       waiters.add(waiter);
@@ -195,10 +201,26 @@ export function createLocalAgentServer(options: {
   };
 
   const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
-    permissionProvider: () => options.sessionApprovals
-      ? options.sessionApprovals.permissionsFor(authority, options.permissions)
-      : options.permissions,
-    onApprovalRequired: async (action: ActionRequest) => { await options.approvals?.register(action, authority); }
+    permissionProvider: async (action: ActionRequest) => {
+      const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
+      const sessionPermissions = options.sessionApprovals
+        ? options.sessionApprovals.permissionsFor(authority, options.permissions)
+        : options.permissions;
+      if (!oneTimeApproved) return sessionPermissions;
+      await options.approvals!.consume(action, authority);
+      return {
+        ...sessionPermissions,
+        approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+      };
+    },
+    onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
+      if (!options.approvals) return undefined;
+      const pending = await options.approvals.register(action, authority);
+      const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
+      if (decision === 'approve' || decision === 'session') return 'retry' as const;
+      if (decision === 'deny') return 'deny' as const;
+      return undefined;
+    }
   });
 
   const server = http.createServer(async (req, res) => {
