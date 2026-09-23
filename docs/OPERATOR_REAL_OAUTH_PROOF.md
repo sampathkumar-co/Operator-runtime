@@ -53,7 +53,9 @@ On 2026-09-18, the existing callback-ID URI entered the Authelia login flow whil
 
 A real ChatGPT OAuth sign-in/reconnect completed against the final production edge from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`.
 
-A live `computer.inspect` invocation reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline. This proves the hosted ChatGPT/OAuth/MCP route is active, but it does **not** close the device-backed read/write or revoke/reconnect requirements below.
+After the local runtime reconnected, the same current 9-tool deployment completed real device-backed inspection/read/Git/write certification on Windows x64. `file.create` succeeded, the created file was immediately visible and read back with its SHA-256, Git observed the real new file, duplicate create returned `TARGET_EXISTS`, and `file.replace` reached local policy but returned `APPROVAL_REQUIRED` with no mutation. Evidence file: `test/mecord-public-v1-write-cert-20260923.txt`, SHA-256 `4761fc381cb93c7c04e04d3907ce4b14455c6b35b5b0f5a13397c0d79717da37`.
+
+The remaining OAuth/E2E closure work is explicit disconnect/revoke failure + reconnect recovery, sanitized issued-token audience/scope evidence, and—separately from OAuth—a locally approved destructive replacement using the non-public approval authority.
 
 ## Phase B — Start the real ChatGPT authorization
 
