@@ -17,7 +17,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
 | G5 Browser safety | PASS | Browser control is not in `PUBLIC_PLUGIN_TOOL_NAMES`; no public OpenAI tool can invoke it. Internal runtime remains outside this public plugin surface. |
 | G6 UIA safety | PASS | UIA is not in the public MCP surface; Windows UIA native sidecar compiled, tested, and passed clippy on OCC-3M. |
-| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed; public surface is allowlisted to 9 tools and local policy remains authoritative. |
+| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed. Frozen OCC-3M production still exposes the bounded 10-tool surface including `device.claim`; the active Mecord Connect successor narrows this to the canonical 9-tool surface with web pairing. Local policy remains authoritative in both. |
 | G8 Approval integrity | PASS | Core runtime suite includes approval lifecycle, authority-generation, replay/expiry and recovery coverage; OCC-3M CI passed. |
 | G9 Prompt-injection resistance | PASS | Public surface has no open-world browser tool; restricted paths/data are blocked and cross-layer adversarial boundary tests passed. |
 | G10 Authentication | BLOCKED | Provider preflight, S256, predefined client, both currently documented OpenAI redirect forms are allowlisted and accepted into the real login flow, and authorization-request acceptance passes; one real human authorization/code exchange is still required. |
@@ -25,7 +25,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G12 Device isolation | PASS | Account/device authority, A-B-A generation, release/rebind, disabled-account and quota tests passed; real paired-device relay E2E passed. |
 | G13 Relay integrity | PASS | Relay WebSocket E2E passed; direct relay/result/control ports 8788/8789/8790 are unreachable from the Internet. |
 | G14 Secret handling | PASS | DPAPI helper round-trip passed; public responses and legal pages exclude live secrets; invalid-token and restricted-data paths fail closed. |
-| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free; public tool surface is intentionally only 9 tools; result projection and retention bounds are documented/tested. |
+| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free. Frozen OCC-3M currently exposes 10 bounded public tools; the active successor reduces the final submission surface to 9. Result projection and retention bounds are documented/tested. |
 | G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |

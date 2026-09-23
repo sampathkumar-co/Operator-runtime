@@ -16,7 +16,7 @@ Production remains intentionally frozen on OCC-3M:
 - edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
-- public surface: exactly 9 MCP tools
+- public surface: exactly 10 MCP tools, including the legacy public `device.claim` enrollment tool
 
 OCC-3M production is healthy and remains the rollback/safety baseline until the final successor is allowed to deploy.
 
