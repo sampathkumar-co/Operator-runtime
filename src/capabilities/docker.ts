@@ -216,7 +216,7 @@ export class DockerProvider implements CapabilityProvider {
 
   async #inspectProject(inputPath: string, signal?: AbortSignal): Promise<ProjectState> {
     const root = await this.#scope.resolveExisting(inputPath);
-    const context = await this.#localContext(context.signal);
+    const context = await this.#localContext(signal);
     const listed = await this.#run(context, ['ps', '--all', '--filter', 'label=com.docker.compose.project', '--format', '{{json .ID}}'], 20_000, signal);
     const ids = listed.stdout.split(/\r?\n/).filter(Boolean).slice(0, MAX_CONTAINERS).map((line) => {
       try { return String(JSON.parse(line)); } catch { throw new OperatorError('DOCKER_OUTPUT_INVALID', 'Docker container id output could not be parsed.'); }
