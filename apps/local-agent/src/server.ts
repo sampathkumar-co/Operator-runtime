@@ -216,6 +216,7 @@ export function createLocalAgentServer(options: {
     onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
       if (!options.approvals) return undefined;
       const pending = await options.approvals.register(action, authority);
+      if (!options.recoveryToken) return undefined;
       const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
       if (decision === 'approve' || decision === 'session') return 'retry' as const;
       if (decision === 'deny') return 'deny' as const;
@@ -621,7 +622,9 @@ export function createLocalAgentServer(options: {
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
-          const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId);
+          const decision = options.recoveryToken
+            ? await waitForApprovalDecision(action.id, pending.approvalRequestId)
+            : null;
           if (decision === 'deny') {
             result = {
               ok: false,
