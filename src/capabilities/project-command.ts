@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { readDurableStateBytes, readDurableStateText } from '../core/durable-state.ts';
@@ -115,7 +115,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
     return command.risk as ActionRisk;
   }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       const projectRoot = await this.#scope.resolveExisting(String(action.input.path ?? action.input.cwd ?? ''));
@@ -188,7 +188,7 @@ export class ProjectCommandProvider implements CapabilityProvider {
           timeoutMs: command.timeoutMs
         },
         provenance: { kind: 'trusted_policy', source: `project-command:${command.id}` }
-      });
+      }, context);
 
       const baseOutput = {
         command: {
