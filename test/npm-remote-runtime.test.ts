@@ -33,6 +33,26 @@ function manifest(overrides: Record<string, unknown> = {}) {
   };
 }
 
+test('native approval card exposes only local action metadata and three bounded choices', async () => {
+  const script = await fs.readFile(path.resolve('packages/mecord-connect/src/approval-window.ps1'), 'utf8');
+  const consoleSource = await fs.readFile(path.resolve('packages/mecord-connect/src/approval-console.mjs'), 'utf8');
+
+  assert.match(script, /Approve Once/);
+  assert.match(script, /Allow Session/);
+  assert.match(script, /Deny/);
+  assert.match(script, /\[Console\]::Out\.Write\("session"\)/);
+  assert.match(script, /\[Console\]::Out\.Write\("approve"\)/);
+  assert.match(script, /\[Console\]::Out\.Write\("deny"\)/);
+  assert.doesNotMatch(script, /OPERATOR_AGENT_TOKEN|OPERATOR_RECOVERY_TOKEN|authorization|x-operator-recovery-token/i);
+
+  assert.match(consoleSource, /approval-window\.ps1/);
+  assert.match(consoleSource, /capability:\s*String\(record\.capability/);
+  assert.match(consoleSource, /risk:\s*String\(record\.risk/);
+  assert.match(consoleSource, /target:\s*displayTarget\(record\.target\)/);
+  assert.doesNotMatch(consoleSource, /JSON\.stringify\(\{[\s\S]{0,300}(?:agentToken|recoveryToken)/);
+  assert.match(consoleSource, /MECORD_DISABLE_APPROVAL_UI/);
+});
+
 test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['remote']), { command: 'remote', root: process.cwd(), browser: true });
   assert.deepEqual(parseArgs(['remote', '--root', 'C:\\work', '--no-browser']), {
