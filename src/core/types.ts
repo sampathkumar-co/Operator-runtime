@@ -69,6 +69,7 @@ export interface CapabilityScore {
 
 export interface CapabilityExecutionContext {
   signal?: AbortSignal;
+  learningContext?: string;
 }
 
 export interface CapabilityProvider {
