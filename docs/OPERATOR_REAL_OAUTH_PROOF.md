@@ -49,6 +49,14 @@ Retain the metadata JSON only if it contains no secret or transient authorizatio
 
 On 2026-09-18, the existing callback-ID URI entered the Authelia login flow while the stable OpenAI redirect initially failed with a redirect-URI mismatch. The stable URI was added alongside the existing callback-ID URI, the candidate Authelia configuration passed isolated validation, and only `operator-auth` was recreated. After activation, both redirect forms entered the login flow, OIDC discovery remained healthy, and unauthenticated MCP continued to return the expected 401 protected-resource challenge. The rollback backup SHA-256 is `a72142e64efdc0974f8f71814081038bdffda4f60e886dbdfcef2bd36e9717cc`; the activated config SHA-256 is `0236ccba6808b109763c31b54308fb3687fb8691c18cb178ff37740a5d1e7300`, and a semantic comparison confirmed the stable redirect line is the only configuration difference. This changed OAuth provider configuration only; the OCC-3M source SHA and production edge image did not change.
 
+## Current live OAuth checkpoint — 2026-09-23
+
+A real ChatGPT OAuth sign-in/reconnect completed against the final production edge from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`.
+
+After the local runtime reconnected, the same current 9-tool deployment completed real device-backed inspection/read/Git/write certification on Windows x64. `file.create` succeeded, the created file was immediately visible and read back with its SHA-256, Git observed the real new file, duplicate create returned `TARGET_EXISTS`, and `file.replace` reached local policy but returned `APPROVAL_REQUIRED` with no mutation. Evidence file: `test/mecord-public-v1-write-cert-20260923.txt`, SHA-256 `4761fc381cb93c7c04e04d3907ce4b14455c6b35b5b0f5a13397c0d79717da37`.
+
+The remaining OAuth/E2E closure work is explicit disconnect/revoke failure + reconnect recovery, sanitized issued-token audience/scope evidence, and—separately from OAuth—a locally approved destructive replacement using the non-public approval authority.
+
 ## Phase B — Start the real ChatGPT authorization
 
 Use the dedicated reviewer account after H2 is complete. Start authorization from the actual OpenAI plugin draft/connection rather than constructing the URL manually.
@@ -149,7 +157,7 @@ Never retain:
 
 ## G10 closure rule
 
-G10 Authentication may move to PASS only after the actual OpenAI-hosted OAuth flow completes and a production MCP request succeeds through the OCC-3M verifier, plus revoke/reconnect behavior is demonstrated.
+G10 Authentication may move to PASS only after the actual OpenAI-hosted OAuth flow completes and a production MCP request succeeds through the current Mecord Connect verifier, plus explicit revoke/disconnect failure and reconnect behavior are demonstrated. The 2026-09-23 route reached production but stopped at `ROUTE_NO_DEVICE`, so G10 remains open.
 
 ## G11 closure rule
 

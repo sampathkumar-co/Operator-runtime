@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: Milestone M5 — publication hardening
+## Status: Mecord Connect v1 live — OpenAI submission hardening
 
-The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. Publication hardening is in progress.
+The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. The public Mecord Connect edge is deployed from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`, and `mecord-connect@1.0.0` is public on npm under `latest`. OpenAI reviewer/submission hardening remains in progress.
 
 ### Implemented and CI-certified
 
@@ -50,16 +50,17 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 ## Remaining release gates
 
-These are deliberately not represented as complete until their real external dependencies exist:
+Production deployment and npm publication are complete. The remaining v1 gates are external/reviewer-facing:
 
-- Microsoft Store lane: submit the exact Partner Center-identity MSIX and complete Partner Center certification; Store submission does not depend on the separate direct-distribution PFX lane
-- optional direct/npx lane: select a trusted Windows signer compatible with that package identity, pin its SHA-256 fingerprint in the applicable direct-distribution bootstrap, and produce an RFC 3161 timestamped direct release
-- optional direct/npx lane: publish the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location, then publish the applicable direct-distribution bootstrap if that optional lane is retained
-- supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
-- deployment and live certification of the implemented OAuth-authenticated public HTTPS MCP edge if public plugin distribution is targeted
-- real ChatGPT workflow against an explicitly paired physical device
-- final publication/submission artwork and marketplace/store metadata
-- production OAuth authorization/introspection service credentials and account integration for public multi-user deployment
+- OpenAI individual publisher verification and exact legal-name reconciliation;
+- reconnect the paired local runtime and complete real device-backed read/write + approval-path E2E;
+- explicit disconnect/revoke failure and reconnect recovery proof;
+- OpenAI **Scan Tools** reconciliation against the deployed nine-tool surface;
+- reviewer credential + canonical fixture pairing and reviewer simulation;
+- domain challenge only if the OpenAI portal issues one;
+- reviewer-accessible demo recording and final Submit for Review action.
+
+Microsoft Store/MSIX remains optional and outside Mecord Connect v1 release requirements.
 
 The CI signing smoke uses an **ephemeral test certificate only**. It proves direct package/sign/install mechanics; it is not a substitute for production trust and is not a Microsoft Store signing prerequisite.
 
@@ -144,7 +145,7 @@ npm run dev
 
 Local mode talks directly to the authenticated local agent. Relay mode preserves the same 24-tool private MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path. For public distribution, the OAuth-authenticated MCP edge is implemented but still requires a real DNS/TLS endpoint and production OAuth service before live certification. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md). Repository CI does not pretend those external gates are complete.
+The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The latest live `computer.inspect` reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline; device-backed E2E therefore remains pending. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md).
 
 ## Windows package model
 

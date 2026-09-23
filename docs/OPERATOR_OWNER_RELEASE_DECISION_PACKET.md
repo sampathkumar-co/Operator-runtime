@@ -1,6 +1,6 @@
 # Mecord Connect Owner Release Decisions
 
-Status date: 2026-09-18
+Status date: 2026-09-23
 
 Purpose: authoritative record of the owner decisions that previously blocked FG-013, FG-015 and the owner-input portion of FG-017.
 
@@ -17,7 +17,7 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 - **Software license:** PROPRIETARY
 - **npm Dual-Use classification:** DUAL_USE
 - **npm package:** mecord-connect
-- **npm account:** **mecrod** ? authenticated locally
+- **npm account:** **mecrod** — published `mecord-connect@1.0.0`
 - **Availability:** global wherever supported and legally/service-operationally supportable
 - **v1 public domain:** operator.splcart.in
 - **Auth issuer:** auth.splcart.in
@@ -27,9 +27,9 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Certified release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`.
+Current production source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66` on `main`.
 
-Active source branch: `main`. Its exact head and all required workflow results are live GitHub evidence and must be terminal success before release.
+Production deployment and first npm publication are complete; remaining owner actions are OpenAI/reviewer/device/submission gates.
 
 ## Applied source state
 
@@ -81,32 +81,36 @@ Before final OpenAI submission:
 1. complete individual publisher verification;
 2. compare the exact verified name with the source/public legal name;
 3. reconcile any identity-document spelling/order difference before submission;
-4. deploy the final legal pages and verify the live website/support/privacy/terms match.
+4. verify the already-deployed live website/support/privacy/terms match the exact OpenAI-verified identity before submission.
 
 ## npm account / 2FA status
 
-npm setup is now resolved and independently verified on the owner machine:
+npm release is complete:
 
-- `npm whoami` -> **mecrod**
+- publisher -> **mecrod**
 - npm 2FA mode -> **auth-and-writes**
-- package -> **mecord-connect** (unscoped; no npm organization/scope required)
-- registry -> unpublished before first release
+- package -> **mecord-connect@1.0.0** (unscoped)
+- registry -> **public under latest**
+- clean registry installation -> **PASS**
+- installed `doctor` -> **PASS**
+- `remote --help` -> **PASS**
+- vulnerability scan -> **0 reported vulnerabilities**
 
-The remaining npm work belongs to the explicit irreversible release gate: build/hash the exact final tarball, obtain owner publication authorization, publish that exact tarball with 2FA, verify registry metadata, then run clean-machine `npx mecord-connect@latest doctor` and reviewer-root startup.
+Reviewer-root startup remains a device/reviewer E2E gate because the latest live ChatGPT probe returned `ROUTE_NO_DEVICE` while the paired runtime was offline.
 
 ## OpenAI account actions still required
 
 - login to the real publisher/developer submission account;
 - complete individual publisher identity verification;
-- create/reconcile the Mecord Connect plugin draft;
+- keep the current Mecord Connect plugin draft/connection aligned with production;
 - use the current production MCP/OAuth endpoints;
 - complete a portal-issued domain challenge if one is issued;
 - run Scan Tools and verify the exact 9-tool public snapshot;
-- execute real ChatGPT OAuth read/write/refusal/revoke/reconnect testing;
+- complete device-backed ChatGPT read/write/refusal testing plus revoke/disconnect and reconnect recovery;
 - enter reviewer credentials without secondary verification;
 - record and host the required production demo;
 - select global availability only where OpenAI supports the listing and the service can legally/operationally support users;
-- submit only after final deployment and every release gate is green.
+- submit only after every remaining OpenAI/reviewer/device release gate is green.
 
 ## Domain and Store decisions
 
