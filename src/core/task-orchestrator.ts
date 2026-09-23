@@ -66,6 +66,11 @@ export interface TaskPlanner {
   fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
 }
 
+export interface TaskRunAuthorization {
+  permissionProvider?: () => PermissionProfile | Promise<PermissionProfile>;
+  onApprovalRequired?: (action: ActionRequest) => void | Promise<void>;
+}
+
 export interface SubmitTaskOptions {
   requestId?: string;
   objective: string;
@@ -168,12 +173,12 @@ export class TaskOrchestrator {
     }
   }
 
-  async run(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
+  async run(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) return await active;
     const controller = new AbortController();
     this.#controllers.set(taskId, controller);
-    const promise = this.#runWithLease(taskId, approvedActionIds, controller.signal).finally(() => {
+    const promise = this.#runWithLease(taskId, approvedActionIds, authorization, controller.signal).finally(() => {
       this.#active.delete(taskId);
       this.#controllers.delete(taskId);
       this.#controlRequests.delete(taskId);
@@ -182,13 +187,13 @@ export class TaskOrchestrator {
     return await promise;
   }
 
-  async #runWithLease(taskId: string, approvedActionIds: string[], signal: AbortSignal): Promise<TaskCapsule> {
+  async #runWithLease(taskId: string, approvedActionIds: string[], authorization: TaskRunAuthorization, signal: AbortSignal): Promise<TaskCapsule> {
     const lease = await this.#store.acquireExecutionLease(taskId);
-    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned, signal); }
+    try { return await this.#run(taskId, approvedActionIds, authorization, lease.assertOwned, signal); }
     finally { await lease.release(); }
   }
 
-  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
+  async #run(taskId: string, approvedActionIds: string[], authorization: TaskRunAuthorization, assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
@@ -268,9 +273,12 @@ export class TaskOrchestrator {
         input: structuredClone(decision.input), provenance: { kind: 'trusted_policy', source: `task-planner:${planner.id}` },
         ...(decision.target ? { target: decision.target } : {})
       };
-      const permissions = approvedActionIds.length === 0 ? this.#permissions : {
-        ...this.#permissions,
-        approvedActionIds: [...new Set([...(this.#permissions.approvedActionIds ?? []), ...approvedActionIds])]
+      const basePermissions = authorization.permissionProvider
+        ? await authorization.permissionProvider()
+        : this.#permissions;
+      const permissions = approvedActionIds.length === 0 ? basePermissions : {
+        ...basePermissions,
+        approvedActionIds: [...new Set([...(basePermissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       const learningContext = semanticLearningContext(goal, task);
       let result: ActionResult;
@@ -327,6 +335,7 @@ export class TaskOrchestrator {
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
+        await authorization.onApprovalRequired?.(action);
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
@@ -359,7 +368,7 @@ export class TaskOrchestrator {
     this.#controllers.get(taskId)?.abort();
     return task;
   }
-  async resume(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
+  async resume(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) await active;
     await this.#withStateWriteLock(taskId, async () => {
@@ -373,7 +382,7 @@ export class TaskOrchestrator {
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
       await this.#store.put(task);
     });
-    return await this.run(taskId, approvedActionIds);
+    return await this.run(taskId, approvedActionIds, authorization);
   }
 
   async #setControlState(taskId: string, state: 'PAUSED' | 'CANCELLED'): Promise<TaskCapsule> {
