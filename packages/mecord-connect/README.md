@@ -20,7 +20,7 @@ npx mecord-connect@latest remote --root C:\path\to\project
 
 Use `--no-browser` to disable automatic launch of Mecord Connect's managed-browser capability. Generic terminal execution remains disabled by default; project commands continue to use the existing policy/approval boundary.
 
-When ChatGPT requests an exact destructive action such as `file.replace`, it can return `APPROVAL_REQUIRED`. Keep the `mecord-connect remote` terminal open: it lists the pending local action and accepts `approve` or `deny` (or an ID prefix if several actions are pending). Approval is local-only, exact-action-bound, one-time, and expires after 10 minutes. ChatGPT never receives the recovery authority and cannot approve its own request. After approving, retry the same ChatGPT action.
+When ChatGPT requests an exact destructive action such as `file.replace`, it can return `APPROVAL_REQUIRED`. Keep the `mecord-connect remote` terminal open: it lists the pending local action and offers `approve` (once), `session` (allow risky actions for this runtime session), or `deny`. A session grant is memory-only, bound to the same account/device authority generation plus the current authorized roots/capability scope, expires after 8 hours or 60 minutes idle, and disappears when the runtime exits. It bypasses repeated external/system/destructive approval prompts but never bypasses root scoping, capability allowlists, emergency stop, path safety, restricted-data filtering, or provider-specific allowlists. ChatGPT never receives the recovery authority and cannot approve its own request. Use `session-status` to inspect the grant and `revoke-session` to require approval again.
 
 Before starting a session you can verify the package payload and all three Windows-native security helpers:
 
