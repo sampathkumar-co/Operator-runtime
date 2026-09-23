@@ -127,6 +127,13 @@ export function createLocalAgentServer(options: {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
 
+  const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
+    permissionProvider: () => options.sessionApprovals
+      ? options.sessionApprovals.permissionsFor(authority, options.permissions)
+      : options.permissions,
+    onApprovalRequired: async (action: ActionRequest) => { await options.approvals?.register(action, authority); }
+  });
+
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? '/', 'http://operator.local');
     const pathname = requestUrl.pathname;
@@ -163,6 +170,7 @@ export function createLocalAgentServer(options: {
       }
       try {
         const body = await readJson(req) as Record<string, unknown>;
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         const goal = body.goal as SemanticTaskGoal;
         const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
         if (!authorizedScope) {
@@ -184,7 +192,7 @@ export function createLocalAgentServer(options: {
           maxAttemptsPerStep: body.maxAttemptsPerStep,
           timeoutMs: body.timeoutMs
         } as SubmitTaskOptions);
-        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id) : submitted;
+        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority)) : submitted;
         send(res, body.run === true ? 200 : 202, { ok: true, task });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_SUBMISSION_INVALID';
@@ -215,16 +223,17 @@ export function createLocalAgentServer(options: {
       try {
         const taskId = taskRoute[1]!;
         const operation = taskRoute[2]!;
+        const body = await readJson(req) as { approvedActionId?: unknown; approvalAuthority?: unknown };
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         if ((operation === 'run' || operation === 'resume') && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
           return;
         }
         let task;
-        if (operation === 'run') task = await options.taskOrchestrator.run(taskId);
+        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority));
         else if (operation === 'pause') task = await options.taskOrchestrator.pause(taskId);
         else if (operation === 'cancel') task = await options.taskOrchestrator.cancel(taskId);
         else {
-          const body = await readJson(req) as { approvedActionId?: unknown };
           const approvedActionId = body.approvedActionId === undefined ? undefined : boundedString(body.approvedActionId, 'approvedActionId', 256);
           if (approvedActionId) {
             if (!options.recoveryToken) {
@@ -243,7 +252,7 @@ export function createLocalAgentServer(options: {
               return;
             }
           }
-          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : []);
+          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority));
         }
         send(res, 200, { ok: true, task });
       } catch (error) {
@@ -382,6 +391,10 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { decision?: unknown; approvalRequestId?: unknown };
         const decision = String(body.decision ?? '');
         const approvalRequestId = boundedString(body.approvalRequestId, 'approvalRequestId', 128);
+        if (decision === 'session' && !options.sessionApprovals) {
+          send(res, 503, { ok: false, error: { code: 'SESSION_APPROVAL_NOT_CONFIGURED', message: 'Session approvals are not configured.' } });
+          return;
+        }
         const record = decision === 'approve' || decision === 'session'
           ? await options.approvals.approve(actionId, approvalRequestId)
           : decision === 'deny'
