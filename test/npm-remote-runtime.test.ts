@@ -6,6 +6,7 @@ import {
   assertSupportedRuntime,
   assertSerializableAuthorizedRoot,
   parseArgs,
+  validatePairingRequestMessage,
   safeRuntimeEnvironment,
   validateRuntimeManifest
 } from '../packages/mecord-connect/src/cli.mjs';
@@ -73,6 +74,30 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 49152 }), { baseUrl: 'http://127.0.0.1:49152' });
   assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '0.0.0.0', port: 49152 }), null);
   assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 70000 }), null);
+  const pairingExpiry = new Date(Date.now() + 10 * 60_000).toISOString();
+  assert.deepEqual(
+    validatePairingRequestMessage({
+      type: 'mecord-pairing-required',
+      url: 'https://auth.splcart.in/pair?code=ABCD-2345',
+      expiresAt: pairingExpiry
+    }),
+    { url: 'https://auth.splcart.in/pair?code=ABCD-2345', expiresAt: pairingExpiry }
+  );
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://evil.example/pair?code=ABCD-2345',
+    expiresAt: pairingExpiry
+  }), null);
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://auth.splcart.in/pair?code=ABCD-2345&next=https://evil.example',
+    expiresAt: pairingExpiry
+  }), null);
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://auth.splcart.in/pair?code=ABCD-2345',
+    expiresAt: new Date(Date.now() - 60_000).toISOString()
+  }), null);
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
   assert.equal(assertSerializableAuthorizedRoot('C:\\work\\repo'), 'C:\\work\\repo');
@@ -89,6 +114,10 @@ test('remote launcher binds its local agent to an ephemeral loopback port', asyn
   assert.match(source, /remoteEntrypoint[\s\S]*remote\.js/);
   assert.match(source, /stdio: \['ignore', 'inherit', 'inherit', 'ipc'\]/);
   assert.match(source, /startLocalApprovalConsole/);
+  assert.match(source, /validatePairingRequestMessage/);
+  assert.match(source, /explorer\.exe/);
+  assert.match(source, /shell:\s*false/);
+  assert.match(source, /openedPairingUrls/);
   assert.doesNotMatch(source, /writeFile[\s\S]{0,200}OPERATOR_RECOVERY_TOKEN/);
   assert.doesNotMatch(source, /--experimental-strip-types/);
   assert.doesNotMatch(source, /env\.OPERATOR_AGENT_PORT = '47100'/);
@@ -180,6 +209,8 @@ test('relay-only main reports loopback readiness only to the trusted Mecord laun
   assert.match(source, /process\.env\.OPERATOR_REMOTE_PACKAGE === 'mecord-connect'/);
   assert.match(source, /typeof process\.send === 'function'/);
   assert.match(source, /type: 'mecord-local-agent-ready'/);
+  assert.match(source, /type: 'mecord-pairing-required'/);
+  assert.match(source, /url: url\.toString\(\), expiresAt/);
   assert.match(source, /host: bound\.host, port: bound\.port/);
 });
 
