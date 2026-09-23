@@ -332,6 +332,7 @@ export function createLocalAgentServer(options: {
       }
       try {
         const reset = await options.deviceReset();
+        options.sessionApprovals?.clear();
         send(res, 200, { ok: true, reset });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESET_FAILED';
@@ -355,6 +356,26 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+
+    if (pathname === '/v1/session-approval' && req.method === 'GET') {
+      send(res, 200, { ok: true, session: options.sessionApprovals?.summary() ?? { active: false }, configured: Boolean(options.sessionApprovals) });
+      return;
+    }
+
+    if (pathname === '/v1/session-approval' && req.method === 'DELETE') {
+      if (!options.sessionApprovals || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'SESSION_APPROVAL_NOT_CONFIGURED', message: 'Session approval revocation requires local recovery authority.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      options.sessionApprovals.clear();
+      send(res, 200, { ok: true, session: { active: false } });
+      return;
+    }
 
     if (pathname === '/v1/approvals' && req.method === 'GET') {
       if (!options.approvals) {
@@ -444,6 +465,7 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { reason?: unknown };
         const reason = body.reason === undefined ? undefined : String(body.reason);
         const state = await options.emergencyStop.engage(reason);
+        options.sessionApprovals?.clear();
         await options.onEmergencyStop?.();
         await options.audit?.append({
           capability: 'agent.emergency-stop',
