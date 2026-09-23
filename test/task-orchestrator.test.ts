@@ -81,6 +81,9 @@ test('task executor completes and durably verifies a real semantic multi-action 
   assert.deepEqual(completed.execution?.records.map((record) => record.state), ['SUCCEEDED', 'SUCCEEDED', 'SUCCEEDED', 'SUCCEEDED']);
   assert.deepEqual(completed.execution?.records.map((record) => record.observation?.domain), ['filesystem', 'filesystem', 'filesystem', 'git']);
   assert.ok(completed.execution?.records.every((record) => record.observation?.channel === 'semantic'));
+  assert.ok(completed.execution?.records.every((record) => record.observation?.schemaVersion === 2));
+  assert.ok(completed.execution?.records.every((record) => record.observation?.entityId?.match(/^[a-z]+:[0-9a-f]{32}$/)));
+  assert.ok(completed.execution?.records.every((record) => record.observation?.stateVersion?.match(/^[0-9a-f]{64}$/)));
   assert.equal(new Set(completed.execution?.records.map((record) => record.actionId)).size, 4);
   assert.ok(completed.execution?.records.every((record) => /^task-[0-9a-f]{64}$/.test(record.actionId)));
   assert.deepEqual(await store.get(submitted.id), completed);

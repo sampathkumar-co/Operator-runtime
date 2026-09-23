@@ -344,19 +344,30 @@ function validateActionRecord(input: unknown, index: number): TaskActionRecord {
 function validateObservation(input: unknown, index: number): TaskObservationSummary {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt(`Action record ${index} observation must be an object.`);
   const raw = input as Record<string, unknown>;
-  if (raw.schemaVersion !== 1) throw corrupt(`Action record ${index} observation schemaVersion is invalid.`);
+  if (raw.schemaVersion !== 1 && raw.schemaVersion !== 2) throw corrupt(`Action record ${index} observation schemaVersion is invalid.`);
   const channel = String(raw.channel ?? '');
   if (channel !== 'semantic' && channel !== 'visual') throw corrupt(`Action record ${index} observation channel is invalid.`);
   const domain = String(raw.domain ?? '');
-  if (!['project', 'filesystem', 'git', 'browser', 'uia', 'process', 'system', 'application', 'visual', 'unknown'].includes(domain)) {
+  if (!['project', 'filesystem', 'git', 'docker', 'database', 'ide', 'browser', 'uia', 'process', 'system', 'application', 'visual', 'unknown'].includes(domain)) {
     throw corrupt(`Action record ${index} observation domain is invalid.`);
   }
+  const provider = boundedText(raw.provider, 256, `action record ${index} observation provider`);
+  const observedAt = validIso(raw.observedAt, `action record ${index} observation observedAt`);
+  if (raw.schemaVersion === 1) {
+    return { schemaVersion: 1, channel, domain: domain as TaskObservationSummary['domain'], provider, observedAt };
+  }
+  const importantState = jsonObject(raw.importantState, `action record ${index} observation importantState`);
+  if (Buffer.byteLength(JSON.stringify(importantState), 'utf8') > 16 * 1024) throw corrupt(`Action record ${index} observation importantState is too large.`);
+  const confidence = Number(raw.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw corrupt(`Action record ${index} observation confidence is invalid.`);
+  if (typeof raw.ambiguous !== 'boolean') throw corrupt(`Action record ${index} observation ambiguous must be boolean.`);
+  const evidenceRefs = boundedHashArray(raw.evidenceRefs, 100, `action record ${index} observation evidenceRefs`);
+  const stateVersion = boundedHash(raw.stateVersion, `action record ${index} observation stateVersion`);
   return {
-    schemaVersion: 1,
-    channel,
-    domain: domain as TaskObservationSummary['domain'],
-    provider: boundedText(raw.provider, 256, `action record ${index} observation provider`),
-    observedAt: validIso(raw.observedAt, `action record ${index} observation observedAt`)
+    schemaVersion: 2, channel, domain: domain as TaskObservationSummary['domain'], provider,
+    capability: boundedText(raw.capability, 256, `action record ${index} observation capability`),
+    entityId: boundedText(raw.entityId, 256, `action record ${index} observation entityId`),
+    observedAt, stateVersion, importantState, ambiguous: raw.ambiguous, confidence, evidenceRefs
   };
 }
 
@@ -454,6 +465,17 @@ function validateIdArray(input: unknown, maxItems: number, label: string): strin
 function boundedText(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw corrupt(`${label} is invalid.`);
   return input;
+}
+
+function boundedHash(input: unknown, label: string): string {
+  const value = boundedText(input, 64, label);
+  if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${label} must be a SHA-256 hex digest.`);
+  return value;
+}
+
+function boundedHashArray(input: unknown, maxItems: number, label: string): string[] {
+  if (!Array.isArray(input) || input.length > maxItems) throw corrupt(`${label} must contain at most ${maxItems} hashes.`);
+  return input.map((value, index) => boundedHash(value, `${label}[${index}]`));
 }
 
 function boundedInteger(input: unknown, min: number, max: number, label: string): number {

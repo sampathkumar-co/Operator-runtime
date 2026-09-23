@@ -26,15 +26,34 @@ export interface TaskActionRecord {
   evidence: Evidence[];
 }
 
-export type TaskObservationDomain = 'project' | 'filesystem' | 'git' | 'browser' | 'uia' | 'process' | 'system' | 'application' | 'visual' | 'unknown';
+export type TaskObservationDomain =
+  | 'project' | 'filesystem' | 'git' | 'docker' | 'database' | 'ide'
+  | 'browser' | 'uia' | 'process' | 'system' | 'application' | 'visual' | 'unknown';
 
-export interface TaskObservationSummary {
+export interface TaskObservationSummaryV1 {
   schemaVersion: 1;
   channel: 'semantic' | 'visual';
   domain: TaskObservationDomain;
   provider: string;
   observedAt: string;
 }
+
+export interface TaskObservationSummaryV2 {
+  schemaVersion: 2;
+  channel: 'semantic' | 'visual';
+  domain: TaskObservationDomain;
+  provider: string;
+  capability: string;
+  entityId: string;
+  observedAt: string;
+  stateVersion: string;
+  importantState: Record<string, unknown>;
+  ambiguous: boolean;
+  confidence: number;
+  evidenceRefs: string[];
+}
+
+export type TaskObservationSummary = TaskObservationSummaryV1 | TaskObservationSummaryV2;
 
 export interface TaskExecution {
   schemaVersion: 1;

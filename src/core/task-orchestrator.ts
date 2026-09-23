@@ -8,6 +8,7 @@ import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
+import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -217,15 +218,10 @@ export class TaskOrchestrator {
       const latestNode = task.nodes.find((candidate) => candidate.title === decision.title);
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
+      const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
-      latestRecord.observation = {
-        schemaVersion: 1,
-        channel: observation.channel,
-        domain: observation.domain,
-        provider: observation.provider,
-        observedAt: observation.observedAt
-      };
+      latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
       if (result.ok) {
@@ -603,17 +599,6 @@ function observe(result: ActionResult): TaskObservation {
     evidence: structuredClone(result.evidence),
     ...(result.error === undefined ? {} : { error: structuredClone(result.error) })
   };
-}
-function observationDomain(capability: string, provider: string): TaskObservationDomain {
-  if (provider.toLowerCase().includes('uia')) return 'uia';
-  if (capability.startsWith('project.')) return 'project';
-  if (capability.startsWith('file.')) return 'filesystem';
-  if (capability.startsWith('git.')) return 'git';
-  if (capability.startsWith('browser.')) return 'browser';
-  if (capability.startsWith('terminal.') || capability.startsWith('process.')) return 'process';
-  if (capability.startsWith('computer.') || capability.startsWith('docker.')) return 'system';
-  if (capability.startsWith('app.') || capability.startsWith('vscode.') || capability.startsWith('postgres.')) return 'application';
-  return 'unknown';
 }
 function detectPlannerLoop(records: TaskActionRecord[], stepKey: string, inputHash: string): boolean {
   const signatures = records.filter((record) => record.state !== 'BLOCKED').map((record) => `${record.stepKey}:${record.inputHash}`);

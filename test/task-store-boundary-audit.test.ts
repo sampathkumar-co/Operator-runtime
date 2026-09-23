@@ -182,6 +182,39 @@ test('TaskStore rejects malformed durable execution records and impossible timin
   await expectCorrupt(() => new TaskStore(state).get(value.id), /cannot finish while STARTED/);
 });
 
+test('TaskStore keeps observation schema v1 readable while validating normalized schema v2', async (t) => {
+  const state = await tempDir(t, 'operator-task-observation-schema-');
+  const value = task();
+  const now = value.createdAt;
+  const record = {
+    stepKey: 'inspect', actionId: 'action-inspect', capability: 'file.read', risk: 'read',
+    inputHash: 'a'.repeat(64), attempt: 1, state: 'SUCCEEDED', startedAt: now, finishedAt: now,
+    observation: {
+      schemaVersion: 1, channel: 'semantic', domain: 'filesystem',
+      provider: 'filesystem', observedAt: now
+    },
+    evidence: []
+  };
+  value.execution = {
+    schemaVersion: 1, plannerId: 'test.planner', goalKind: 'test-goal',
+    plannerState: { phase: 'complete' }, maxSteps: 10, maxAttemptsPerStep: 2,
+    timeoutMs: 1000, stepCount: 1, startedAt: now,
+    deadlineAt: new Date(Date.parse(now) + 1000).toISOString(), records: [record]
+  };
+  await writePersisted(state, value.id, value);
+  const loaded = await new TaskStore(state).get(value.id);
+  assert.equal(loaded.execution?.records[0]?.observation?.schemaVersion, 1);
+
+  (record.observation as any) = {
+    schemaVersion: 2, channel: 'semantic', domain: 'filesystem', provider: 'filesystem',
+    capability: 'file.read', entityId: `filesystem:${'a'.repeat(32)}`, observedAt: now,
+    stateVersion: 'b'.repeat(64), importantState: { ok: true }, ambiguous: false,
+    confidence: 2, evidenceRefs: []
+  };
+  await writePersisted(state, value.id, value);
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /confidence is invalid/);
+});
+
 test('TaskStore rejects oversized persisted collections and strings', async (t) => {
   const state = await tempDir(t, 'operator-task-bounds-');
   const collectionTask = task();
