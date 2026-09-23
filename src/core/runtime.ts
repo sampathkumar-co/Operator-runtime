@@ -59,7 +59,7 @@ export class OperatorRuntime {
 
     let ranked: Awaited<ReturnType<CapabilityRouter['rank']>>;
     try {
-      ranked = await this.router.rank(canonicalAction);
+      ranked = await this.router.rank(canonicalAction, context.learningContext ?? 'global');
     } catch (error) {
       const op = error instanceof OperatorError
         ? error
