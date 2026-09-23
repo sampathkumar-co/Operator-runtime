@@ -18,7 +18,7 @@ import {
   type TaskPlanner,
   type TaskPlannerContext
 } from '../src/core/task-orchestrator.ts';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, PermissionProfile } from '../src/core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, PermissionProfile } from '../src/core/types.ts';
 import { supportedGitAvailable } from './git-test-support.ts';
 
 const SCORE: CapabilityScore = {
@@ -296,9 +296,23 @@ class DelayedProvider implements CapabilityProvider {
   }
   supports(action: ActionRequest): boolean { return action.capability === 'file.read'; }
   score(): CapabilityScore { return SCORE; }
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     this.started();
-    await this.releasePromise;
+    await new Promise<void>((resolve, reject) => {
+      if (context.signal?.aborted) {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+        return;
+      }
+      const onAbort = () => {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+      };
+      context.signal?.addEventListener('abort', onAbort, { once: true });
+      this.releasePromise.then(resolve, reject).finally(() => context.signal?.removeEventListener('abort', onAbort));
+    });
     return { ok: true, capability: action.capability, provider: this.name, output: { content: 'ok' }, evidence: [], durationMs: 0 };
   }
 }
@@ -759,6 +773,28 @@ test('an in-flight pause survives action completion and can be resumed durably',
   assert.equal(paused.state, 'PAUSED');
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
   assert.equal((await orchestrator.resume(task.id)).state, 'VERIFIED');
+});
+
+test('cancelling an in-flight task aborts provider execution and persists an interrupted record', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-');
+  const state = await tempDir(t, 'operator-task-cancel-state-');
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel immediately.', authorizedScope: [root], successConditions: ['provider stops'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.equal((await orchestrator.cancel(task.id)).state, 'CANCELLED');
+  const cancelled = await running;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
+  assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
 });
 
 test('a durable execution lease prevents a second orchestrator from duplicating an in-flight action', async (t) => {
