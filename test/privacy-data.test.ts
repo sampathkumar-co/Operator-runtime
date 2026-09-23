@@ -37,6 +37,7 @@ test('privacy inventory is bounded and purge requires recovery auth while protec
   await fs.writeFile(path.join(state, 'relay-client.json'), '{"version":1}', { mode: 0o600 });
   await fs.writeFile(path.join(state, 'device-sessions.json'), '{"version":1}', { mode: 0o600 });
   await fs.writeFile(path.join(state, 'relay-session.token'), 'header.payload', { mode: 0o600 });
+  await fs.writeFile(path.join(state, 'provider-learning.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
 
   const privacy = new LocalPrivacyDataStore(state);
   const inventory = await privacy.inventory();
@@ -87,6 +88,7 @@ test('privacy inventory is bounded and purge requires recovery auth while protec
   }
 
   await assert.rejects(fs.access(path.join(state, 'audit.ndjson')));
+  await assert.rejects(fs.access(path.join(state, 'provider-learning.json')));
   await assert.rejects(fs.access(path.join(state, 'tasks')));
   await assert.rejects(fs.access(path.join(state, 'task-leases')));
   await assert.rejects(fs.access(path.join(state, 'relay-client.json')));

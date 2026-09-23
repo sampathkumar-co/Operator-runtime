@@ -16,7 +16,7 @@ async function tempDir(t: test.TestContext): Promise<string> {
 const hostedAt = '2026-09-14T06:30:00.000Z';
 
 async function seedAuthorityState(dir: string): Promise<void> {
-  for (const name of ['relay-session-credential.json', 'relay-session.token', 'relay-client.json', 'device-sessions.json', 'device-registry.json', 'device-routing.json', 'approvals.json']) {
+  for (const name of ['relay-session-credential.json', 'relay-session.token', 'relay-client.json', 'device-sessions.json', 'device-registry.json', 'device-routing.json', 'approvals.json', 'provider-learning.json']) {
     await fs.writeFile(path.join(dir, name), `authority:${name}`, 'utf8');
   }
   await fs.mkdir(path.join(dir, 'relay-outbox'), { recursive: true });
@@ -50,7 +50,7 @@ test('local device reset revokes hosted authority before erasing local device au
   assert.equal(hostedCalls, 1);
   assert.ok(stopCalls >= 1);
   assert.equal(await identity.loadExisting(), null);
-  for (const name of ['relay-session-credential.json', 'relay-session.token', 'relay-client.json', 'device-sessions.json', 'device-registry.json', 'device-routing.json', 'approvals.json', 'relay-outbox']) {
+  for (const name of ['relay-session-credential.json', 'relay-session.token', 'relay-client.json', 'device-sessions.json', 'device-registry.json', 'device-routing.json', 'approvals.json', 'provider-learning.json', 'relay-outbox']) {
     await assert.rejects(fs.lstat(path.join(dir, name)), (error: any) => error?.code === 'ENOENT');
   }
   assert.equal(await fs.readFile(path.join(dir, 'bootstrap.json'), 'utf8'), '{"keep":true}');

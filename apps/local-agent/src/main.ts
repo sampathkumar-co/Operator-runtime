@@ -76,6 +76,7 @@ if (relayRequired && !relayUrl) {
 }
 
 const runtime = createRuntime({
+  stateDir,
   allowedRoots,
   allowedExecutables,
   terminalAllowedExecutables,

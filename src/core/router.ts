@@ -1,5 +1,6 @@
 import type { ActionRequest, ActionRisk, CapabilityProvider, CapabilityScore } from './types.ts';
 import { OperatorError } from './errors.ts';
+import type { ProviderLearning } from './provider-learning.ts';
 
 const WEIGHTS: Record<keyof CapabilityScore, number> = {
   reliability: 0.24,
@@ -26,6 +27,11 @@ function weightedScore(score: CapabilityScore): number {
 
 export class CapabilityRouter {
   #providers: CapabilityProvider[] = [];
+  #learning?: ProviderLearning;
+
+  constructor(options: { learning?: ProviderLearning } = {}) {
+    this.#learning = options.learning;
+  }
 
   register(provider: CapabilityProvider): void {
     this.#providers.push(provider);
@@ -46,15 +52,24 @@ export class CapabilityRouter {
     return false;
   }
 
-  async rank(action: ActionRequest): Promise<Array<{ provider: CapabilityProvider; score: number }>> {
-    const candidates: Array<{ provider: CapabilityProvider; score: number }> = [];
+  async rank(action: ActionRequest): Promise<Array<{ provider: CapabilityProvider; score: number; baseScore: number; learnedAdjustment: number }>> {
+    const candidates: Array<{ provider: CapabilityProvider; score: number; baseScore: number; learnedAdjustment: number }> = [];
     for (const provider of this.#providers) {
       if (await provider.supports(action)) {
-        candidates.push({ provider, score: weightedScore(await provider.score(action)) });
+        const baseScore = weightedScore(await provider.score(action));
+        const learnedAdjustment = this.#learning ? await this.#learning.adjustment(action.capability, provider.name) : 0;
+        candidates.push({ provider, baseScore, learnedAdjustment, score: normalize(baseScore + learnedAdjustment) });
       }
     }
-    candidates.sort((a, b) => b.score - a.score || a.provider.name.localeCompare(b.provider.name));
+    candidates.sort((a, b) => b.score - a.score || b.baseScore - a.baseScore || a.provider.name.localeCompare(b.provider.name));
     return candidates;
+  }
+
+  async recordOutcome(capability: string, providerName: string, outcome: 'verified' | 'failed'): Promise<boolean> {
+    if (!this.#learning) return false;
+    if (!this.#providers.some((provider) => provider.name === providerName)) return false;
+    await this.#learning.record(capability, providerName, outcome);
+    return true;
   }
 
   async resolveRisk(action: ActionRequest): Promise<ActionRisk> {

@@ -408,6 +408,14 @@ class SemanticDockerProvider implements CapabilityProvider {
   }
 }
 
+class CapturingLearning {
+  outcomes: Array<{ capability: string; provider: string; outcome: 'verified' | 'failed' }> = [];
+  async adjustment(): Promise<number> { return 0; }
+  async record(capability: string, provider: string, outcome: 'verified' | 'failed'): Promise<void> {
+    this.outcomes.push({ capability, provider, outcome });
+  }
+}
+
 class SemanticPostgresProvider implements CapabilityProvider {
   readonly name = 'test.postgres.structured';
   selectCalls = 0;
@@ -497,8 +505,9 @@ test('postgres select task verifies profile and current columns before bounded r
   const root = await tempDir(t, 'operator-task-postgres-root-');
   const state = await tempDir(t, 'operator-task-postgres-state-');
   const provider = new SemanticPostgresProvider();
+  const learning = new CapturingLearning();
   const orchestrator = new TaskOrchestrator({
-    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    runtime: new OperatorRuntime({ learning }).register(provider), store: new TaskStore(state),
     permissions: {
       allowedCapabilities: ['postgres.inspect', 'postgres.select'], allowedRoots: [root],
       allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
@@ -520,6 +529,9 @@ test('postgres select task verifies profile and current columns before bounded r
   assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['postgres.inspect', 'postgres.inspect', 'postgres.select']);
   assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'database'));
   assert.doesNotMatch(JSON.stringify(completed.execution?.records), /DB_SECRET_ROW_VALUE_5519/);
+  assert.deepEqual(learning.outcomes.map((item) => [item.capability, item.outcome]), [
+    ['postgres.inspect', 'verified'], ['postgres.inspect', 'verified'], ['postgres.select', 'verified']
+  ]);
 });
 
 test('postgres task fails before SELECT when requested column is absent from current metadata', async (t) => {
@@ -527,8 +539,9 @@ test('postgres task fails before SELECT when requested column is absent from cur
   const state = await tempDir(t, 'operator-task-postgres-missing-state-');
   const provider = new SemanticPostgresProvider();
   provider.metadataColumns = ['id'];
+  const learning = new CapturingLearning();
   const orchestrator = new TaskOrchestrator({
-    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    runtime: new OperatorRuntime({ learning }).register(provider), store: new TaskStore(state),
     permissions: { allowedCapabilities: ['postgres.inspect', 'postgres.select'], allowedRoots: [root] }
   });
   const task = await orchestrator.submit({
@@ -542,6 +555,9 @@ test('postgres task fails before SELECT when requested column is absent from cur
   assert.equal(failed.failures.at(-1)?.code, 'TASK_POSTCONDITION_FAILED');
   assert.match(failed.failures.at(-1)?.message ?? '', /column note/i);
   assert.equal(provider.selectCalls, 0);
+  assert.deepEqual(learning.outcomes.map((item) => [item.capability, item.outcome]), [
+    ['postgres.inspect', 'verified'], ['postgres.inspect', 'failed']
+  ]);
 });
 
 test('docker lifecycle task uses fresh fingerprint, exact approval, and semantic re-inspection', async (t) => {

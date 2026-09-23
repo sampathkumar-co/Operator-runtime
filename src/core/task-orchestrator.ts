@@ -236,11 +236,13 @@ export class TaskOrchestrator {
         try {
           planner.accept({ task, goal }, decision, observation);
         } catch (error) {
+          await this.#recordLearning(task, result, 'failed');
           latestRecord.state = 'FAILED';
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
           return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
+        await this.#recordLearning(task, result, 'verified');
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
         if (controlState) task.state = controlState;
@@ -251,6 +253,7 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
+      await this.#recordLearning(task, result, 'failed');
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
@@ -305,6 +308,22 @@ export class TaskOrchestrator {
     const rule = capabilityRiskRule(capability);
     if (rule !== 'dynamic') return rule;
     return await this.#runtime.router.resolveRisk({ id: 'task-risk-probe', capability, risk: 'read', input, provenance: { kind: 'trusted_policy' } });
+  }
+
+  async #recordLearning(task: TaskCapsule, result: ActionResult, outcome: 'verified' | 'failed'): Promise<void> {
+    try {
+      const recorded = await this.#runtime.router.recordOutcome(result.capability, result.provider, outcome);
+      if (recorded) {
+        task.evidence.push(evidence('adaptive_learning', 'info', 'Recorded a bounded provider outcome for future routing.', {
+          capability: result.capability,
+          provider: result.provider,
+          outcome
+        }));
+      }
+    } catch (error) {
+      const code = error instanceof OperatorError ? error.code : 'PROVIDER_LEARNING_UPDATE_FAILED';
+      task.evidence.push(evidence('adaptive_learning', 'fail', 'Provider learning update could not be persisted; the current action result remains authoritative.', { code }));
+    }
   }
 
   #markInterrupted(execution: TaskExecution): void {
