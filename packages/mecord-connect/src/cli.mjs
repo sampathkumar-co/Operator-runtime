@@ -48,7 +48,7 @@ ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install 
 When a destructive action needs approval, keep this terminal open and type "approve" or "deny".
 Approval stays local, exact-action-bound, and is never exposed to ChatGPT.
 --no-browser disables automatic managed-Chromium launch for private browser tasks;
-the secure authenticated pairing URL is still printed when pairing is required.`;
+first-time account/device pairing still opens the secure authenticated pairing page when required.`;
 }
 
 export function parseArgs(argv) {
@@ -78,6 +78,44 @@ export function parseArgs(argv) {
     throw new Error(`Unknown remote option '${arg}'.`);
   }
   return { command: 'remote', root, browser };
+}
+
+export function validatePairingRequestMessage(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  if (input.type !== 'mecord-pairing-required') return null;
+  let url;
+  try { url = new URL(String(input.url ?? '')); } catch { return null; }
+  if (url.protocol !== 'https:' || url.hostname !== 'auth.splcart.in' || url.port || url.username || url.password || url.hash || url.pathname !== '/pair') return null;
+  const keys = [...new Set([...url.searchParams.keys()])];
+  if (keys.length !== 1 || keys[0] !== 'code') return null;
+  const code = String(url.searchParams.get('code') ?? '').toUpperCase();
+  if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/.test(code)) return null;
+  const expiresAt = String(input.expiresAt ?? '');
+  const expiryMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiryMs) || new Date(expiryMs).toISOString() !== expiresAt || expiryMs <= Date.now()) return null;
+  url.search = '';
+  url.searchParams.set('code', code);
+  return { url: url.toString(), expiresAt };
+}
+
+function openPairingPage(url, env) {
+  const windowsRoot = String(env.SYSTEMROOT ?? env.WINDIR ?? '').trim();
+  if (!/^[A-Za-z]:\\/.test(windowsRoot)) return false;
+  const explorer = path.win32.join(windowsRoot, 'explorer.exe');
+  try {
+    const child = spawn(explorer, [url], {
+      env: nativeEnvironment(env),
+      shell: false,
+      windowsHide: true,
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.once('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function assertSupportedRuntime(
@@ -241,16 +279,26 @@ function runRemoteChild(executable, args, { cwd, env }) {
     });
     let stopApprovals = null;
     let settled = false;
+    const openedPairingUrls = new Set();
     const cleanup = () => { try { stopApprovals?.(); } catch { /* noop */ } stopApprovals = null; };
     child.on('message', (message) => {
-      if (stopApprovals) return;
       const ready = validateLocalAgentReadyMessage(message);
-      if (!ready) return;
-      stopApprovals = startLocalApprovalConsole({
-        baseUrl: ready.baseUrl,
-        agentToken: env.OPERATOR_AGENT_TOKEN,
-        recoveryToken: env.OPERATOR_RECOVERY_TOKEN
-      });
+      if (ready && !stopApprovals) {
+        stopApprovals = startLocalApprovalConsole({
+          baseUrl: ready.baseUrl,
+          agentToken: env.OPERATOR_AGENT_TOKEN,
+          recoveryToken: env.OPERATOR_RECOVERY_TOKEN
+        });
+      }
+
+      const pairing = validatePairingRequestMessage(message);
+      if (!pairing || openedPairingUrls.has(pairing.url)) return;
+      openedPairingUrls.add(pairing.url);
+      if (openPairingPage(pairing.url, env)) {
+        process.stdout.write('[mecord-connect] secure pairing page opened in your default browser.\n');
+      } else {
+        process.stdout.write(`[mecord-connect] open this secure pairing page: ${pairing.url}\n`);
+      }
     });
     child.once('error', (error) => {
       if (settled) return;
@@ -354,7 +402,7 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   console.log('[mecord-connect] starting secure remote runtime');
   console.log(`[mecord-connect] authorized root: ${authorizedRoot}`);
   console.log('[mecord-connect] ChatGPT uses the hosted MCP edge; no local MCP server is started.');
-  console.log('[mecord-connect] if this device is not paired yet, open the secure pairing link shown below and confirm the device in your Mecord account.');
+  console.log('[mecord-connect] paired devices reconnect automatically; first-time pairing opens the secure Mecord page when authorization is required.');
 
   const code = await runRemoteChild(process.execPath, [remoteEntrypoint], {
     cwd: authorizedRoot,
