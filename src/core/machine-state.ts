@@ -84,6 +84,24 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
     const services = normalizeDockerServices(output.services ?? output.states);
     if (services.length) state.services = services;
   }
+  if (result.capability.startsWith('postgres.')) {
+    const profileId = text(output.profileId);
+    const schema = text(output.schema);
+    const table = text(output.table);
+    if (profileId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profileId)) state.profileId = profileId;
+    if (schema && /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(schema)) state.schema = schema;
+    if (table && /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(table)) state.table = table;
+    for (const key of ['rowCount', 'limit', 'offset']) {
+      const value = Number(output[key]);
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 10_000) state[key] = value;
+    }
+    if (Array.isArray(output.columns)) {
+      const columns = output.columns.map(String).filter((column) => column === '*' || /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(column)).slice(0, 50);
+      if (columns.length) state.columns = columns;
+    }
+    if (Array.isArray(output.profiles)) state.profileCount = Math.min(output.profiles.length, 1000);
+    if (Array.isArray(output.rows) && output.operation === 'columns') state.columnCount = Math.min(output.rows.length, 500);
+  }
   const postcondition = record(output.postcondition);
   const safePostcondition: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(postcondition)) {

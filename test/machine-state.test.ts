@@ -91,3 +91,19 @@ test('docker normalized state retains safe fingerprint and service lifecycle sum
   assert.deepEqual(observation.importantState.services, [{ service: 'web', containers: 1, states: ['running'] }]);
   assert.doesNotMatch(JSON.stringify(observation), /PASSWORD=hidden|secret-project-container/);
 });
+
+test('postgres normalized state keeps query metadata but never persists row values', () => {
+  const request = action('postgres.select', { path: 'C:\\project', profileId: 'local-dev', table: 'items' }, 'C:\\project');
+  const observation = normalizeMachineObservation(request, result('postgres.select', 'postgres.psql.structured', {
+    profileId: 'local-dev', schema: 'public', table: 'items', columns: ['id', 'note'],
+    rowCount: 1, limit: 10, offset: 0,
+    rows: [{ id: '1', note: 'DB_SECRET_ROW_VALUE_5519' }]
+  }));
+  assert.equal(observation.domain, 'database');
+  assert.equal(observation.importantState.profileId, 'local-dev');
+  assert.equal(observation.importantState.schema, 'public');
+  assert.equal(observation.importantState.table, 'items');
+  assert.equal(observation.importantState.rowCount, 1);
+  assert.deepEqual(observation.importantState.columns, ['id', 'note']);
+  assert.doesNotMatch(JSON.stringify(observation), /DB_SECRET_ROW_VALUE_5519/);
+});

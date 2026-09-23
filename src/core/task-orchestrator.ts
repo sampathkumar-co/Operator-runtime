@@ -12,12 +12,19 @@ import { normalizeMachineObservation, observationDomain } from './machine-state.
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
+export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
+export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 
 export type SemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
   | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
+  | {
+      kind: 'postgres-select'; root: string; profileId: string; schema?: string; table: string;
+      columns?: string[]; filters?: PostgresTaskFilter[]; orderBy?: PostgresTaskOrder[];
+      limit?: number; offset?: number; timeoutMs?: number;
+    }
   | {
       kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
       value?: string; horizontalAmount?: string; verticalAmount?: string;
@@ -321,7 +328,7 @@ export class TaskOrchestrator {
 
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
-  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'app-operation'].includes(goal.kind); }
+  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
@@ -351,6 +358,30 @@ export class SemanticTaskPlanner implements TaskPlanner {
       };
       if (phase === 'verify') return { type: 'step', key: 'verify-docker-project', title: 'Re-inspect Docker lifecycle postcondition', capability: 'docker.inspect', input: { path: goal.root }, target: goal.root };
       return { type: 'complete', message: 'Docker lifecycle operation satisfied fresh-state, approval, and semantic service-state postconditions.' };
+    }
+    if (goal.kind === 'postgres-select') {
+      if (phase === 'start') return {
+        type: 'step', key: 'inspect-postgres-profiles', title: 'Inspect trusted PostgreSQL profiles',
+        capability: 'postgres.inspect', input: { path: goal.root, operation: 'profiles' }, target: goal.root
+      };
+      if (phase === 'columns') return {
+        type: 'step', key: 'inspect-postgres-columns', title: 'Inspect PostgreSQL table columns',
+        capability: 'postgres.inspect', input: {
+          path: goal.root, operation: 'columns', profileId: goal.profileId,
+          schema: goal.schema ?? 'public', table: goal.table, timeoutMs: goal.timeoutMs ?? 5_000
+        },
+        target: goal.root
+      };
+      if (phase === 'select') return {
+        type: 'step', key: 'select-postgres-rows', title: 'Read bounded PostgreSQL rows',
+        capability: 'postgres.select', input: {
+          path: goal.root, profileId: goal.profileId, schema: goal.schema ?? 'public', table: goal.table,
+          columns: goal.columns ?? [], filters: goal.filters ?? [], orderBy: goal.orderBy ?? [],
+          limit: goal.limit ?? 100, offset: goal.offset ?? 0, timeoutMs: goal.timeoutMs ?? 5_000
+        },
+        target: goal.root
+      };
+      return { type: 'complete', message: 'PostgreSQL task satisfied trusted-profile, current-column, and bounded read-only SELECT postconditions.' };
     }
     if (goal.kind === 'app-operation') {
       const selector = phase === 'verify' ? (goal.verifySelector ?? goal.selector) : goal.selector;
@@ -421,6 +452,28 @@ export class SemanticTaskPlanner implements TaskPlanner {
         const output = asRecord(result.output);
         if (output.scope !== 'project') throw new OperatorError('TASK_DOCKER_PROJECT_REQUIRED', 'Docker verification did not remain project-scoped.');
         verifyDockerServicesState(goal.operation, goal.services, output.services);
+        state.phase = 'complete';
+      }
+      return;
+    }
+    if (goal.kind === 'postgres-select') {
+      if (step.key === 'inspect-postgres-profiles') {
+        const profiles = Array.isArray(asRecord(result.output).profiles) ? asRecord(result.output).profiles as Array<Record<string, unknown>> : [];
+        const profile = profiles.find((item) => item.id === goal.profileId);
+        if (!profile) throw new OperatorError('TASK_POSTGRES_PROFILE_NOT_FOUND', 'Requested PostgreSQL profile is not registered for the authorized root.');
+        if (profile.endpoint !== 'loopback' && profile.endpoint !== 'unix_socket') {
+          throw new OperatorError('TASK_POSTGRES_PROFILE_NOT_LOCAL', 'PostgreSQL task requires a local trusted profile.');
+        }
+        state.phase = 'columns';
+      } else if (step.key === 'inspect-postgres-columns') {
+        const output = asRecord(result.output);
+        if (output.profileId !== goal.profileId || output.schema !== (goal.schema ?? 'public') || output.table !== goal.table) {
+          throw new OperatorError('TASK_POSTGRES_METADATA_MISMATCH', 'PostgreSQL metadata inspection did not match the requested profile and table.');
+        }
+        verifyPostgresRequestedColumns(goal, output.rows);
+        state.phase = 'select';
+      } else if (step.key === 'select-postgres-rows') {
+        verifyPostgresSelectResult(goal, result.output);
         state.phase = 'complete';
       }
       return;
@@ -526,6 +579,18 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
       return value;
     }))].sort();
     goal.timeoutMs = boundedInteger(goal.timeoutMs, 1_000, 300_000, 60_000);
+  } else if (goal.kind === 'postgres-select') {
+    goal.root = path.resolve(boundedText(goal.root, 4096, 'postgres root'));
+    goal.profileId = boundedText(goal.profileId, 64, 'postgres profileId');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(goal.profileId)) throw new OperatorError('TASK_GOAL_INVALID', 'PostgreSQL profileId is invalid.');
+    goal.schema = postgresIdentifier(goal.schema ?? 'public', 'postgres schema');
+    goal.table = postgresIdentifier(goal.table, 'postgres table');
+    goal.columns = normalizePostgresColumns(goal.columns ?? []);
+    goal.filters = normalizePostgresFilters(goal.filters ?? []);
+    goal.orderBy = normalizePostgresOrder(goal.orderBy ?? []);
+    goal.limit = boundedInteger(goal.limit, 1, 500, 100);
+    goal.offset = boundedInteger(goal.offset, 0, 10_000, 0);
+    goal.timeoutMs = boundedInteger(goal.timeoutMs, 100, 30_000, 5_000);
   } else if (goal.kind === 'app-operation') {
     goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
     if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');
@@ -543,6 +608,76 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     goal.waitMs = boundedInteger(goal.waitMs, 0, 10_000, 0);
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
+}
+
+function postgresIdentifier(input: unknown, label: string): string {
+  const value = boundedText(input, 63, label);
+  if (!/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/.test(value)) throw new OperatorError('TASK_GOAL_INVALID', `${label} is not a valid bounded PostgreSQL identifier.`);
+  return value;
+}
+
+function normalizePostgresColumns(input: unknown): string[] {
+  if (!Array.isArray(input) || input.length > 50) throw new OperatorError('TASK_GOAL_INVALID', 'PostgreSQL columns must contain at most 50 identifiers.');
+  const columns = input.map((value, index) => postgresIdentifier(value, `postgres columns[${index}]`));
+  if (new Set(columns).size !== columns.length) throw new OperatorError('TASK_GOAL_INVALID', 'PostgreSQL columns must not contain duplicates.');
+  return columns;
+}
+
+function normalizePostgresFilters(input: unknown): PostgresTaskFilter[] {
+  if (!Array.isArray(input) || input.length > 20) throw new OperatorError('TASK_GOAL_INVALID', 'PostgreSQL filters must contain at most 20 entries.');
+  const ops = new Set<PostgresTaskFilter['op']>(['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'ilike', 'is_null', 'not_null']);
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new OperatorError('TASK_GOAL_INVALID', `postgres filters[${index}] must be an object.`);
+    const raw = entry as Record<string, unknown>;
+    const column = postgresIdentifier(raw.column, `postgres filters[${index}].column`);
+    const op = String(raw.op ?? '') as PostgresTaskFilter['op'];
+    if (!ops.has(op)) throw new OperatorError('TASK_GOAL_INVALID', `postgres filters[${index}].op is invalid.`);
+    if (op === 'is_null' || op === 'not_null') return { column, op };
+    const value = raw.value === undefined ? '' : raw.value;
+    if (typeof value !== 'string' || value.length > 100_000 || value.includes('\0')) throw new OperatorError('TASK_GOAL_INVALID', `postgres filters[${index}].value is invalid.`);
+    return { column, op, value };
+  });
+}
+
+function normalizePostgresOrder(input: unknown): PostgresTaskOrder[] {
+  if (!Array.isArray(input) || input.length > 5) throw new OperatorError('TASK_GOAL_INVALID', 'PostgreSQL orderBy must contain at most 5 entries.');
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new OperatorError('TASK_GOAL_INVALID', `postgres orderBy[${index}] must be an object.`);
+    const raw = entry as Record<string, unknown>;
+    const column = postgresIdentifier(raw.column, `postgres orderBy[${index}].column`);
+    const direction = String(raw.direction ?? '');
+    if (direction !== 'asc' && direction !== 'desc') throw new OperatorError('TASK_GOAL_INVALID', `postgres orderBy[${index}].direction is invalid.`);
+    return { column, direction };
+  });
+}
+
+function verifyPostgresRequestedColumns(goal: Extract<SemanticTaskGoal, { kind: 'postgres-select' }>, input: unknown): void {
+  const rows = Array.isArray(input) ? input.map(asRecord) : [];
+  const available = new Set(rows.map((row) => String(row.column_name ?? '')).filter(Boolean));
+  const required = new Set([
+    ...(goal.columns ?? []),
+    ...(goal.filters ?? []).map((filter) => filter.column),
+    ...(goal.orderBy ?? []).map((order) => order.column)
+  ]);
+  for (const column of required) {
+    if (!available.has(column)) throw new OperatorError('TASK_POSTGRES_COLUMN_MISSING', `PostgreSQL column ${column} is not present in the current table metadata.`);
+  }
+}
+
+function verifyPostgresSelectResult(goal: Extract<SemanticTaskGoal, { kind: 'postgres-select' }>, input: unknown): void {
+  const output = asRecord(input);
+  if (output.profileId !== goal.profileId || output.schema !== (goal.schema ?? 'public') || output.table !== goal.table) {
+    throw new OperatorError('TASK_POSTGRES_SELECT_MISMATCH', 'PostgreSQL SELECT result did not match the requested profile and table.');
+  }
+  const rowCount = Number(output.rowCount);
+  const limit = goal.limit ?? 100;
+  if (!Number.isSafeInteger(rowCount) || rowCount < 0 || rowCount > limit) throw new OperatorError('TASK_POSTGRES_SELECT_MISMATCH', 'PostgreSQL SELECT returned an invalid row count.');
+  const rows = Array.isArray(output.rows) ? output.rows : [];
+  if (rows.length !== rowCount) throw new OperatorError('TASK_POSTGRES_SELECT_MISMATCH', 'PostgreSQL SELECT row count did not match returned rows.');
+  if (Number(output.limit) !== limit || Number(output.offset) !== (goal.offset ?? 0)) throw new OperatorError('TASK_POSTGRES_SELECT_MISMATCH', 'PostgreSQL SELECT pagination did not match the requested bounds.');
+  const expectedColumns = (goal.columns ?? []).length === 0 ? ['*'] : goal.columns!;
+  const actualColumns = Array.isArray(output.columns) ? output.columns.map(String) : [];
+  if (canonicalJson(actualColumns) !== canonicalJson(expectedColumns)) throw new OperatorError('TASK_POSTGRES_SELECT_MISMATCH', 'PostgreSQL SELECT columns did not match the requested projection.');
 }
 
 function verifyDockerServicesPresent(expectedServices: string[], input: unknown): void {

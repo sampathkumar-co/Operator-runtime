@@ -408,6 +408,56 @@ class SemanticDockerProvider implements CapabilityProvider {
   }
 }
 
+class SemanticPostgresProvider implements CapabilityProvider {
+  readonly name = 'test.postgres.structured';
+  selectCalls = 0;
+  metadataColumns = ['id', 'note'];
+
+  supports(action: ActionRequest): boolean { return ['postgres.inspect', 'postgres.select'].includes(action.capability); }
+  score(): CapabilityScore { return SCORE; }
+
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'postgres.inspect') {
+      if (action.input.operation === 'profiles') {
+        return {
+          ok: true, capability: action.capability, provider: this.name,
+          output: { profiles: [{ id: 'local-dev', endpoint: 'loopback' }] },
+          evidence: [], durationMs: 0
+        };
+      }
+      assert.equal(action.input.operation, 'columns');
+      assert.equal(action.input.profileId, 'local-dev');
+      assert.equal(action.input.schema, 'public');
+      assert.equal(action.input.table, 'items');
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: {
+          profileId: 'local-dev', operation: 'columns', schema: 'public', table: 'items',
+          rows: this.metadataColumns.map((column_name) => ({ column_name }))
+        },
+        evidence: [], durationMs: 0
+      };
+    }
+    this.selectCalls += 1;
+    assert.equal(action.input.profileId, 'local-dev');
+    assert.equal(action.input.schema, 'public');
+    assert.equal(action.input.table, 'items');
+    assert.deepEqual(action.input.columns, ['id', 'note']);
+    assert.deepEqual(action.input.filters, [{ column: 'id', op: 'gte', value: '1' }]);
+    assert.deepEqual(action.input.orderBy, [{ column: 'id', direction: 'asc' }]);
+    assert.equal(action.input.limit, 10);
+    assert.equal(action.input.offset, 0);
+    return {
+      ok: true, capability: action.capability, provider: this.name,
+      output: {
+        profileId: 'local-dev', schema: 'public', table: 'items', columns: ['id', 'note'],
+        rowCount: 1, limit: 10, offset: 0, rows: [{ id: '1', note: 'DB_SECRET_ROW_VALUE_5519' }]
+      },
+      evidence: [], durationMs: 0
+    };
+  }
+}
+
 class SemanticAppProvider implements CapabilityProvider {
   readonly name = 'test.windows.uia';
   value = 'before';
@@ -442,6 +492,57 @@ class SemanticAppProvider implements CapabilityProvider {
     };
   }
 }
+
+test('postgres select task verifies profile and current columns before bounded read-only query', async (t) => {
+  const root = await tempDir(t, 'operator-task-postgres-root-');
+  const state = await tempDir(t, 'operator-task-postgres-state-');
+  const provider = new SemanticPostgresProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['postgres.inspect', 'postgres.select'], allowedRoots: [root],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Read bounded item rows through the trusted local PostgreSQL profile.',
+    authorizedScope: [root], successConditions: ['profile is root-bound', 'columns exist now', 'bounded read-only query succeeds'],
+    goal: {
+      kind: 'postgres-select', root, profileId: 'local-dev', schema: 'public', table: 'items',
+      columns: ['id', 'note'], filters: [{ column: 'id', op: 'gte', value: '1' }],
+      orderBy: [{ column: 'id', direction: 'asc' }], limit: 10
+    }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.selectCalls, 1);
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['postgres.inspect', 'postgres.inspect', 'postgres.select']);
+  assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'database'));
+  assert.doesNotMatch(JSON.stringify(completed.execution?.records), /DB_SECRET_ROW_VALUE_5519/);
+});
+
+test('postgres task fails before SELECT when requested column is absent from current metadata', async (t) => {
+  const root = await tempDir(t, 'operator-task-postgres-missing-root-');
+  const state = await tempDir(t, 'operator-task-postgres-missing-state-');
+  const provider = new SemanticPostgresProvider();
+  provider.metadataColumns = ['id'];
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: { allowedCapabilities: ['postgres.inspect', 'postgres.select'], allowedRoots: [root] }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Never query a projection that current metadata does not contain.',
+    authorizedScope: [root], successConditions: ['fail closed before select'],
+    goal: { kind: 'postgres-select', root, profileId: 'local-dev', table: 'items', columns: ['id', 'note'], limit: 10 }
+  });
+
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'TASK_POSTCONDITION_FAILED');
+  assert.match(failed.failures.at(-1)?.message ?? '', /column note/i);
+  assert.equal(provider.selectCalls, 0);
+});
 
 test('docker lifecycle task uses fresh fingerprint, exact approval, and semantic re-inspection', async (t) => {
   const root = await tempDir(t, 'operator-task-docker-root-');
