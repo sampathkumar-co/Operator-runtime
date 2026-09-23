@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
 import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
@@ -13,6 +14,19 @@ async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   return dir;
+}
+
+async function waitForPendingApproval(base: string, token: string, actionId: string): Promise<any> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    const pending = body.approvals.find((entry: any) => entry.actionId === actionId && entry.status === 'pending');
+    if (pending) return pending;
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for pending approval ${actionId}.`);
 }
 
 test('one-time approval binds exact action, resumes once, and cannot be replayed', async (t) => {
@@ -54,42 +68,45 @@ test('one-time approval binds exact action, resumes once, and cannot be replayed
     provenance: { kind: 'chatgpt' }
   };
 
-  const first = await fetch(`${base}/v1/execute`, {
+  const firstPromise = fetch(`${base}/v1/execute`, {
     method: 'POST', headers: auth, body: JSON.stringify({ action })
   });
-  assert.equal(first.status, 409);
-  assert.equal((await first.json() as any).error.code, 'APPROVAL_REQUIRED');
+  const pending = await waitForPendingApproval(base, token, action.id);
+  assert.match(pending.approvalRequestId, /^[0-9a-f-]{36}$/i);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v1');
-
-  const pending = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
-  assert.equal(pending.status, 200);
-  const pendingBody = await pending.json() as any;
-  assert.equal(pendingBody.approvals[0].actionId, action.id);
-  assert.equal(pendingBody.approvals[0].status, 'pending');
-  assert.match(pendingBody.approvals[0].approvalRequestId, /^[0-9a-f-]{36}$/i);
-  const approvalRequestId = pendingBody.approvals[0].approvalRequestId;
 
   const approved = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
     method: 'POST',
     headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
-    body: JSON.stringify({ decision: 'approve', approvalRequestId })
+    body: JSON.stringify({ decision: 'approve', approvalRequestId: pending.approvalRequestId })
   });
   assert.equal(approved.status, 200);
   assert.equal((await approved.json() as any).approval.status, 'approved');
 
-  const second = await fetch(`${base}/v1/execute`, {
-    method: 'POST', headers: auth, body: JSON.stringify({ action })
-  });
-  const secondBody = await second.json() as any;
-  assert.equal(second.status, 200, JSON.stringify(secondBody));
-  assert.equal(secondBody.ok, true);
+  const first = await firstPromise;
+  const firstBody = await first.json() as any;
+  assert.equal(first.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.ok, true);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
 
-  const third = await fetch(`${base}/v1/execute`, {
+  const replayPromise = fetch(`${base}/v1/execute`, {
     method: 'POST', headers: auth, body: JSON.stringify({ action })
   });
-  assert.equal(third.status, 409);
-  assert.equal((await third.json() as any).error.code, 'APPROVAL_REQUIRED');
+  const replayPending = await waitForPendingApproval(base, token, action.id);
+  assert.notEqual(replayPending.approvalRequestId, pending.approvalRequestId);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
+
+  const denied = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'deny', approvalRequestId: replayPending.approvalRequestId })
+  });
+  assert.equal(denied.status, 200);
+
+  const replay = await replayPromise;
+  const replayBody = await replay.json() as any;
+  assert.equal(replay.status, 409);
+  assert.equal(replayBody.error.code, 'APPROVAL_DENIED');
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
 });
 
@@ -134,28 +151,23 @@ test('session approval allows subsequent destructive actions only inside the sam
     },
     provenance: { kind: 'chatgpt' }
   };
-  const blocked = await fetch(`${base}/v1/execute`, {
+  const firstPromise = fetch(`${base}/v1/execute`, {
     method: 'POST', headers: auth, body: JSON.stringify({ action: first })
   });
-  assert.equal(blocked.status, 409);
-  assert.equal((await blocked.json() as any).error.code, 'APPROVAL_REQUIRED');
-
-  const pending = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
-  const pendingBody = await pending.json() as any;
-  const approvalRequestId = pendingBody.approvals[0].approvalRequestId;
+  const pending = await waitForPendingApproval(base, token, first.id);
   const session = await fetch(`${base}/v1/approvals/${encodeURIComponent(first.id)}`, {
     method: 'POST',
     headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
-    body: JSON.stringify({ decision: 'session', approvalRequestId })
+    body: JSON.stringify({ decision: 'session', approvalRequestId: pending.approvalRequestId })
   });
   const sessionBody = await session.json() as any;
   assert.equal(session.status, 200, JSON.stringify(sessionBody));
   assert.equal(sessionBody.session.active, true);
 
-  const firstRetry = await fetch(`${base}/v1/execute`, {
-    method: 'POST', headers: auth, body: JSON.stringify({ action: first })
-  });
-  assert.equal(firstRetry.status, 200, JSON.stringify(await firstRetry.clone().json()));
+  const firstResponse = await firstPromise;
+  const firstBody = await firstResponse.json() as any;
+  assert.equal(firstResponse.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.ok, true);
   assert.equal(await fs.readFile(filePath, 'utf8'), firstContent);
 
   const second = {

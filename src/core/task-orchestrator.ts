@@ -67,8 +67,11 @@ export interface TaskPlanner {
 }
 
 export interface TaskRunAuthorization {
-  permissionProvider?: () => PermissionProfile | Promise<PermissionProfile>;
-  onApprovalRequired?: (action: ActionRequest) => void | Promise<void>;
+  permissionProvider?: (action: ActionRequest) => PermissionProfile | Promise<PermissionProfile>;
+  onApprovalRequired?: (
+    action: ActionRequest,
+    remainingMs: number
+  ) => 'retry' | 'deny' | void | Promise<'retry' | 'deny' | void>;
 }
 
 export interface SubmitTaskOptions {
@@ -274,7 +277,7 @@ export class TaskOrchestrator {
         ...(decision.target ? { target: decision.target } : {})
       };
       const basePermissions = authorization.permissionProvider
-        ? await authorization.permissionProvider()
+        ? await authorization.permissionProvider(action)
         : this.#permissions;
       const permissions = approvedActionIds.length === 0 ? basePermissions : {
         ...basePermissions,
@@ -333,15 +336,30 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      await this.#recordLearning(task, result, 'failed', learningContext);
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
-        await authorization.onApprovalRequired?.(action);
+        const remainingMs = Math.max(0, Date.parse(latestExecution.deadlineAt!) - Date.now());
+        const approvalOutcome = await authorization.onApprovalRequired?.(action, remainingMs);
+        if (approvalOutcome === 'retry') {
+          latestRecord.state = 'BLOCKED';
+          setNodeState(task, latestNode.id, 'BLOCKED');
+          task.state = 'RUNNING';
+          latestExecution.stepCount = Math.max(0, latestExecution.stepCount - 1);
+          await this.#persistRunState(task, assertLease);
+          continue;
+        }
+        if (approvalOutcome === 'deny') {
+          latestRecord.state = 'FAILED';
+          latestRecord.errorCode = 'APPROVAL_DENIED';
+          setNodeState(task, latestNode.id, 'FAILED');
+          return await this.#fail(task, 'TASK_APPROVAL_DENIED', 'The local user denied a required task action.', assertLease);
+        }
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
         await this.#persistRunState(task, assertLease);
         return task;
       }
+      await this.#recordLearning(task, result, 'failed', learningContext);
       if (planner.fallback?.({ task, goal }, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
