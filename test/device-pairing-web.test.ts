@@ -108,6 +108,10 @@ test('auth portal exposes only bounded Mecord pairing routes', () => {
   assert.match(source, /pairRateAllowed\(ip\)/);
   assert.match(source, /pairing\.start\(payload\?\.userCode\)/);
   assert.match(source, /pairing\.complete\(\{ code, state \}\)/);
+  assert.match(source, /if\(prefill\)\{button\.disabled=true;msg\.className='msg';msg\.textContent='Opening secure sign-in\.\.\.';setTimeout\(\(\)=>\{void startPairing\(\);\},0\);\}/);
+  assert.match(source, /pairingClient=data\.client_id==='mecord-device-pairing-v1'/);
+  assert.match(source, /Approve this computer/);
+  assert.match(source, /Approve device/);
   assert.match(dockerfile, /COPY server\.mjs pairing\.mjs \./);
   assert.match(caddy, /@mecord_ui path \/signup \/signup\/\* \/recover \/pair \/pair\/\*/);
   assert.match(caddy, /@authelia_backend path \/api\/\* \/\.well-known\/\* \/jwks\.json/);
