@@ -67,12 +67,16 @@ export interface CapabilityScore {
   interactionCost: number;
 }
 
+export interface CapabilityExecutionContext {
+  signal?: AbortSignal;
+}
+
 export interface CapabilityProvider {
   name: string;
   supports(action: ActionRequest): boolean | Promise<boolean>;
   advertises?(action: ActionRequest): boolean | Promise<boolean>;
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore>;
   resolveRisk?(action: ActionRequest): ActionRisk | Promise<ActionRisk>;
-  execute(action: ActionRequest): Promise<ActionResult>;
+  execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult>;
   close?(): void | Promise<void>;
 }
