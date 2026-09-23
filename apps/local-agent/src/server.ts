@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
+import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
@@ -130,7 +131,7 @@ export function createLocalAgentServer(options: {
 
     if (pathname === '/health' && req.method === 'GET') {
       const emergencyStopped = options.emergencyStop ? (await options.emergencyStop.status()).engaged : false;
-      send(res, 200, { ok: true, service: 'operator-local-agent', version: '0.1.0', emergencyStopped });
+      send(res, 200, { ok: true, service: 'operator-local-agent', version: PRODUCT_VERSION, emergencyStopped });
       return;
     }
 
