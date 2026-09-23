@@ -24,11 +24,14 @@ import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKe
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
+import { TOOL_NAMES } from './tool-surface.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
 const executionMode = (process.env.OPERATOR_EXECUTION_MODE ?? 'local').trim().toLowerCase();
 const publicEdge = readPublicMcpEdgeConfig();
+const developerEdge = process.env.OPERATOR_MCP_DEVELOPER_EDGE?.trim() === '1';
+if (developerEdge && !publicEdge?.developerScope) throw new Error('Developer MCP edge requires a dedicated OAuth developer scope.');
 const publicRequestLimiter = publicEdge ? new FixedWindowRateLimiter({
   limit: envRateLimit(process.env.OPERATOR_PUBLIC_REQUESTS_PER_MINUTE, 600, 'OPERATOR_PUBLIC_REQUESTS_PER_MINUTE'),
   windowMs: 60_000
@@ -185,14 +188,14 @@ app.all('/mcp', async (request, reply) => {
     try {
       authInfo = await verifyBearerToken(request.headers.authorization, {
         verifier: publicEdge.verifier,
-        requiredScopes: publicEdge.requiredScopes,
+        requiredScopes: developerEdge ? [publicEdge.developerScope!] : publicEdge.requiredScopes,
         resourceMetadataUrl
       });
     } catch (error) {
       const failed = publicAuthFailureLimiter!.hit(clientKey);
       if (!failed.allowed) return sendRateLimit(reply, failed);
       return sendSdkResponse(reply, bearerAuthChallengeResponse(error, {
-        requiredScopes: publicEdge.requiredScopes,
+        requiredScopes: developerEdge ? [publicEdge.developerScope!] : publicEdge.requiredScopes,
         resourceMetadataUrl
       }));
     }
@@ -211,13 +214,17 @@ app.get('/health', async () => ({
   service: PRODUCT_NAME,
   title: PRODUCT_TITLE,
   version: PRODUCT_VERSION,
-  publicToolSurfaceVersion: PUBLIC_PLUGIN_SURFACE_VERSION,
-  publicToolCount: PUBLIC_PLUGIN_TOOL_NAMES.length,
+  toolSurface: developerEdge ? 'developer' : publicEdge ? 'public' : 'local-private',
+  toolCount: developerEdge ? TOOL_NAMES.length : publicEdge ? PUBLIC_PLUGIN_TOOL_NAMES.length : TOOL_NAMES.length,
+  ...(developerEdge || !publicEdge ? {} : {
+    publicToolSurfaceVersion: PUBLIC_PLUGIN_SURFACE_VERSION,
+    publicToolCount: PUBLIC_PLUGIN_TOOL_NAMES.length
+  }),
   ...runtimeProvenance(process.env)
 }));
 
 await app.listen({ host, port });
-if (publicEdge) console.error(`[operator] public MCP edge listening behind trusted TLS proxy for ${publicEdge.publicUrl.toString()}`);
+if (publicEdge) console.error(`[operator] ${developerEdge ? 'developer' : 'public'} MCP edge listening behind trusted TLS proxy for ${publicEdge.publicUrl.toString()}`);
 else console.error(`[operator] MCP server listening on http://${host}:${port}/mcp`);
 
 function validatePublicHeaders(request: Request): Response | undefined {
@@ -251,7 +258,7 @@ function sendRateLimit(reply: FastifyReply, decision: RateLimitDecision): Fastif
 }
 
 function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
-  const publicMode = Boolean(publicEdge);
+  const publicMode = Boolean(publicEdge) && !developerEdge;
   const invoke = (capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) =>
     publicMode
       ? invokePublicWithAgent(agent, capability, risk, input, target, {
@@ -266,7 +273,9 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     { name: PRODUCT_NAME, title: PRODUCT_TITLE, version: PRODUCT_VERSION },
     { capabilities: { tools: {} }, instructions: publicMode
       ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'
-      : 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
+      : developerEdge
+        ? 'Developer-only Mecord surface. Operate only the authenticated developer account and user-authorized computers. All actions remain subject to local roots, capability policy, session approval, and emergency stop.'
+        : 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
   );
 
   if (publicMode) {
