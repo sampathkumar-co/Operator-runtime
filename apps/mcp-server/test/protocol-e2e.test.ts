@@ -241,9 +241,12 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
     name: 'task.submit',
     arguments: {
       requestId: durableTaskId,
-      objective: 'Run the trusted read-only project test command durably.',
-      successConditions: ['trusted test command verifies'],
-      goal: { kind: 'trusted-project-command', root: testRoot, commandKind: 'test' },
+      objective: 'Run the trusted read-only project test command through a durable semantic workflow.',
+      successConditions: ['workflow child trusted test command verifies'],
+      goal: {
+        kind: 'semantic-workflow',
+        steps: [{ kind: 'trusted-project-command', root: testRoot, commandKind: 'test' }]
+      },
       run: true
     }
   });
