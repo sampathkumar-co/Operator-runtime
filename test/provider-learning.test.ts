@@ -43,6 +43,7 @@ test('learned provider adjustment is bounded and requires repeated evidence', ()
   assert.ok(learnedAdjustment(0, 20) < 0);
   assert.ok(learnedAdjustment(1000, 0) <= 0.06);
   assert.ok(learnedAdjustment(0, 1000) >= -0.06);
+  assert.ok(learnedAdjustment(20, 0, 25, 20) > learnedAdjustment(20, 0, 10_000, 20));
 });
 
 test('verified local outcomes can change ranking only among already-supported providers', async (t) => {
@@ -58,6 +59,42 @@ test('verified local outcomes can change ranking only among already-supported pr
   assert.equal(await router.recordOutcome('file.read', 'not-registered', 'verified'), false);
 });
 
+test('learning is contextual and observed latency can break otherwise-equal routing ties', async (t) => {
+  const state = await tempDir(t, 'operator-learning-context-');
+  const learning = new ProviderLearningStore(state);
+  const router = new CapabilityRouter({ learning });
+  router.register(provider('fast-context', 0.80));
+  router.register(provider('slow-context', 0.80));
+
+  for (let i = 0; i < 20; i += 1) {
+    await router.recordOutcome('file.read', 'fast-context', 'verified', { context: 'browser-navigation', durationMs: 25 });
+    await router.recordOutcome('file.read', 'slow-context', 'verified', { context: 'browser-navigation', durationMs: 10_000 });
+  }
+
+  assert.equal((await router.select(action, 'browser-navigation')).name, 'fast-context');
+  assert.equal((await router.select(action, 'global')).name, 'fast-context');
+  assert.equal(await learning.adjustment('file.read', 'fast-context', 'docker-lifecycle'), 0);
+});
+
+test('version-1 learning state migrates without losing bounded reliability history', async (t) => {
+  const state = await tempDir(t, 'operator-learning-v1-migrate-');
+  await fs.writeFile(path.join(state, 'provider-learning.json'), JSON.stringify({
+    version: 1,
+    entries: [{
+      capability: 'file.read', provider: 'legacy-provider', verified: 20, failed: 0,
+      updatedAt: new Date(0).toISOString()
+    }]
+  }));
+  const learning = new ProviderLearningStore(state);
+  assert.ok(await learning.adjustment('file.read', 'legacy-provider', 'global') > 0);
+  await learning.record('file.read', 'legacy-provider', 'verified', { context: 'global', durationMs: 50 });
+  const migrated = JSON.parse(await fs.readFile(path.join(state, 'provider-learning.json'), 'utf8'));
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.entries[0].context, 'global');
+  assert.equal(migrated.entries[0].verified, 21);
+  assert.equal(migrated.entries[0].latencySamples, 1);
+});
+
 test('learning state persists only bounded capability/provider counters, never task inputs', async (t) => {
   const state = await tempDir(t, 'operator-learning-privacy-');
   const learning = new ProviderLearningStore(state);
@@ -65,7 +102,10 @@ test('learning state persists only bounded capability/provider counters, never t
   await learning.record('file.read', 'filesystem.native', 'failed');
   const persisted = await fs.readFile(path.join(state, 'provider-learning.json'), 'utf8');
   const decoded = JSON.parse(persisted);
-  assert.deepEqual(Object.keys(decoded.entries[0]).sort(), ['capability', 'failed', 'provider', 'updatedAt', 'verified']);
+  assert.equal(decoded.version, 2);
+  assert.deepEqual(Object.keys(decoded.entries[0]).sort(), [
+    'capability', 'context', 'failed', 'latencyEwmaMs', 'latencySamples', 'provider', 'updatedAt', 'verified'
+  ]);
   assert.doesNotMatch(persisted, /secret-project|customer\.txt|learning-route/);
 });
 
