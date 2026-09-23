@@ -367,6 +367,42 @@ test('task executor navigates and re-observes a semantic browser target before c
   assert.equal(completed.execution?.plannerState.targetId, 'tab-1');
 });
 
+test('semantic workflow composes multiple verified browser goals durably', async (t) => {
+  const state = await tempDir(t, 'operator-task-workflow-state-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new SemanticBrowserProvider()),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Navigate two destinations in order and verify each.',
+    authorizedScope: ['browser:https://example.test'],
+    successConditions: ['first destination verified', 'second destination verified'],
+    maxSteps: 10,
+    goal: {
+      kind: 'semantic-workflow',
+      steps: [
+        { kind: 'browser-navigation', url: 'https://example.test/first' },
+        { kind: 'browser-navigation', url: 'https://example.test/second' }
+      ]
+    }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), [
+    'browser.inspect', 'browser.navigate', 'browser.inspect',
+    'browser.inspect', 'browser.navigate', 'browser.inspect'
+  ]);
+  assert.ok(completed.execution?.records.slice(0, 3).every((record) => record.stepKey.startsWith('workflow:0:')));
+  assert.ok(completed.execution?.records.slice(3).every((record) => record.stepKey.startsWith('workflow:1:')));
+  assert.equal(completed.evidence.filter((item) => item.kind === 'workflow_step').length, 2);
+  assert.equal(completed.execution?.plannerState.workflowIndex, 2);
+});
+
 class RediscoveringBrowserProvider implements CapabilityProvider {
   readonly name = 'test.browser.rediscovery';
   #targetId = 'tab-old';
