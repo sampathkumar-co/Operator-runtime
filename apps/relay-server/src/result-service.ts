@@ -14,6 +14,7 @@ import { RelayDeliveryStore, type RelayDeliveryAuthority } from '../../../src/co
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
+import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 
 const MAX_BODY_BYTES = 256 * 1024;
 const DEFAULT_GC_INTERVAL_MS = 5 * 60_000;
@@ -138,7 +139,7 @@ export class RelayResultService {
           if (!before || before.accountId !== enrollment.accountId || before.authorityGeneration !== enrollment.authorityGeneration) {
             throw new OperatorError('DEVICE_ENROLLMENT_AUTHORITY_REVOKED', 'Device enrollment account authority is no longer active.');
           }
-          const issued = await this.#sessions.issueOrRecover({ jti: enrollment.enrollmentId, subjectDeviceId: enrollment.deviceId, audience: 'operator-relay', scopes: enrollmentSessionScopes() });
+          const issued = await this.#sessions.issueOrRecover({ jti: enrollment.enrollmentId, subjectDeviceId: enrollment.deviceId, audience: 'operator-relay', scopes: relaySessionScopesForAccount(enrollment.accountId!) });
           const after = await this.#accounts.activeMembershipForDevice(enrollment.deviceId);
           if (!after || after.accountId !== before.accountId || after.authorityGeneration !== before.authorityGeneration) {
             try { await this.#sessions.revoke(issued.payload.jti, 'account authority changed during enrollment'); } catch { /* already purged by authority release */ }
@@ -311,8 +312,38 @@ function enrollmentSignature(input: unknown): string {
   return value;
 }
 
-function enrollmentSessionScopes(): string[] {
-  return ['relay:connect', 'relay:result', ...PUBLIC_PLUGIN_CAPABILITIES.map((capability) => `cap:${capability}`)];
+export function relaySessionScopesForAccount(accountIdInput: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const accountId = normalizedAccountId(accountIdInput);
+  const developerAccounts = developerAccountIds(env.OPERATOR_DEVELOPER_ACCOUNT_IDS);
+  const capabilities = developerAccounts.has(accountId)
+    ? DEVELOPER_RELAY_CAPABILITIES
+    : PUBLIC_PLUGIN_CAPABILITIES;
+  return [
+    'relay:connect',
+    'relay:result',
+    ...(developerAccounts.has(accountId) ? ['relay:developer'] : []),
+    ...capabilities.map((capability) => `cap:${capability}`)
+  ];
+}
+
+export function developerAccountIds(input: string | undefined): Set<string> {
+  if (input === undefined || input.trim() === '') return new Set();
+  const values = input.split(',').map((value) => value.trim()).filter(Boolean);
+  const output = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizedAccountId(value);
+    if (output.has(normalized)) throw new OperatorError('DEVELOPER_ACCOUNT_CONFIG_INVALID', 'Developer account allowlist contains a duplicate account ID.');
+    output.add(normalized);
+  }
+  return output;
+}
+
+function normalizedAccountId(input: string): string {
+  const value = String(input ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new OperatorError('DEVELOPER_ACCOUNT_CONFIG_INVALID', 'Developer account allowlist entries must be UUIDs.');
+  }
+  return value;
 }
 
 async function readJson(request: http.IncomingMessage): Promise<unknown> {
