@@ -19,7 +19,7 @@ import type { LocalDeviceResetResult } from './device-reset.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
-const INLINE_APPROVAL_WAIT_MS = 45_000;
+const MAX_INLINE_APPROVAL_WAIT_MS = 45_000;
 
 type CompanionSettings = Record<string, boolean | number | string | string[]>;
 
@@ -125,6 +125,7 @@ export function createLocalAgentServer(options: {
   settings?: CompanionSettings;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
+  inlineApprovalWaitMs?: number;
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
@@ -152,9 +153,9 @@ export function createLocalAgentServer(options: {
   const waitForApprovalDecision = (
     actionId: string,
     approvalRequestId: string,
-    maxWaitMs = INLINE_APPROVAL_WAIT_MS
+    maxWaitMs = inlineApprovalWaitMs
   ): Promise<InlineApprovalDecision | null> => {
-    const waitMs = Math.min(INLINE_APPROVAL_WAIT_MS, Math.max(0, Math.floor(maxWaitMs)));
+    const waitMs = Math.min(inlineApprovalWaitMs, Math.max(0, Math.floor(maxWaitMs)));
     if (waitMs <= 0) return Promise.resolve(null);
     return new Promise((resolve) => {
       const waiters = approvalWaiters.get(actionId) ?? new Set<InlineApprovalWaiter>();
