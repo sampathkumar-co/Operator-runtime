@@ -168,8 +168,8 @@ function validateState(input: unknown): LearningState {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw corrupt(`Entry ${index} must be an object.`);
       const item = value as Record<string, unknown>;
       const entry: LearningEntry = {
-        capability: boundedKey(item.capability, `entry ${index} capability`),
-        provider: boundedKey(item.provider, `entry ${index} provider`),
+        capability: storedKey(item.capability, `entry ${index} capability`),
+        provider: storedKey(item.provider, `entry ${index} provider`),
         context: 'global',
         verified: boundedCount(item.verified),
         failed: boundedCount(item.failed),
@@ -191,9 +191,9 @@ function validateState(input: unknown): LearningState {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw corrupt(`Entry ${index} must be an object.`);
     const item = value as Record<string, unknown>;
     const entry: LearningEntry = {
-      capability: boundedKey(item.capability, `entry ${index} capability`),
-      provider: boundedKey(item.provider, `entry ${index} provider`),
-      context: boundedContext(item.context),
+      capability: storedKey(item.capability, `entry ${index} capability`),
+      provider: storedKey(item.provider, `entry ${index} provider`),
+      context: storedContext(item.context, `entry ${index} context`),
       verified: boundedCount(item.verified),
       failed: boundedCount(item.failed),
       latencyEwmaMs: boundedLatencyState(item.latencyEwmaMs),
@@ -210,6 +210,16 @@ function validateState(input: unknown): LearningState {
 
 function entryKey(entry: Pick<LearningEntry, 'capability' | 'provider' | 'context'>): string {
   return `${entry.capability}\0${entry.provider}\0${entry.context}`;
+}
+
+function storedKey(input: unknown, label: string): string {
+  try { return boundedKey(input, label); }
+  catch { throw corrupt(`${label} is invalid.`); }
+}
+
+function storedContext(input: unknown, label: string): string {
+  try { return boundedContext(input); }
+  catch { throw corrupt(`${label} is invalid.`); }
 }
 
 function boundedKey(input: unknown, label: string): string {
