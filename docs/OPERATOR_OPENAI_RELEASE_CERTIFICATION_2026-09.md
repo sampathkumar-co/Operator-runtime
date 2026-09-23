@@ -24,9 +24,9 @@ OCC-3M production is healthy and remains the rollback/safety baseline until the 
 
 Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the merge of exact-head green PR #28.
 
-Current source baseline: `main` merge `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`, which adds only the independently green PR #29 production-notice branding cleanup.
+Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-There is no active engineering successor at this checkpoint. Any future release-candidate branch must establish fresh exact-head evidence before deployment/submission.
+The release candidate is the exact current `main` head resolved live at the release checkpoint. Any descendant must establish fresh exact-head evidence before deployment/submission.
 
 This candidate includes:
 
@@ -56,7 +56,7 @@ PR #28 exact-head hardening result before merge:
 - NPM Remote Runtime #311: **PASS**
 - Windows Signing Smoke #682: **PASS**
 
-PR #29 notice-only cleanup then passed CI #914, Platform Matrix #684 and Windows Signing Smoke #685 before merge. The npm runtime payload was unchanged by PR #29. Current `main` is `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`.
+PR #29 notice-only cleanup then passed CI #914, Platform Matrix #684 and Windows Signing Smoke #685 before merge. PR #30 exact head `c6589dd6437c4efcacf88059a219b82ae8585a73` subsequently passed the full required check set before the release-alignment merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`. The exact current `main` head remains dynamic release evidence.
 
 ## Owner decisions already resolved in source
 

@@ -27,13 +27,13 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Certified source baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`.
+Certified release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`.
 
-Active hardening successor: PR #28 / `hardening/post-merge-completion`. Its exact head and four required workflow results are live GitHub evidence and must all be terminal success before merge/release.
+Active source branch: `main`. Its exact head and all required workflow results are live GitHub evidence and must be terminal success before release.
 
 ## Applied source state
 
-Current `main` plus the active PR #28 successor apply these decisions in source:
+Current `main` applies these decisions in source:
 
 - npm package renamed from @mecrod/operator to **mecord-connect**;
 - package folder renamed to packages/mecord-connect;

@@ -121,7 +121,7 @@ test('reviewer-facing evidence distinguishes frozen ten-tool production from the
   assert.match(certification, /Current Mecord Connect successor[\s\S]*exactly 9 public MCP tools/);
 
   const releaseGate = await fs.readFile(path.join(root, 'docs/OPERATOR_RELEASE_GATE.md'), 'utf8');
-  assert.match(releaseGate, /Frozen OCC-3M production still exposes the bounded 10-tool surface including `device\.claim`[\s\S]*successor narrows this to the canonical 9-tool surface/);
+  assert.match(releaseGate, /Frozen OCC-3M production still exposes the bounded 10-tool surface including `device\.claim`[\s\S]*current Mecord Connect source narrows this to the canonical 9-tool surface/);
 
   const masterGate = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
   assert.match(masterGate, /G3 MCP Truthfulness & Safety[\s\S]*exactly 9 allowlisted tools/);
@@ -130,6 +130,6 @@ test('reviewer-facing evidence distinguishes frozen ten-tool production from the
   const review = await json('docs/plugin-review-package.json');
   assert.equal(review.sourceSuccessor.pullRequest, null);
   assert.equal(review.sourceSuccessor.branch, 'main');
-  assert.equal(review.sourceSuccessor.sourceCommit, 'd51a3b2ee4746e1a29f9cf2ec87cef603ac76edf');
+  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_MAIN_HEAD');
   assert.equal(review.sourceSuccessor.status, 'SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES');
 });

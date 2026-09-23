@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../src/core/product-identity.ts';
-import { PUBLIC_PLUGIN_TOOL_NAMES } from '../src/core/public-plugin-surface.ts';
+import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../src/core/public-plugin-surface.ts';
 
 test('Mecord Connect product identity matches the publishable npm package', async () => {
   const pkg = JSON.parse(await fs.readFile(path.join(process.cwd(), 'packages', 'mecord-connect', 'package.json'), 'utf8'));
@@ -15,6 +15,7 @@ test('Mecord Connect product identity matches the publishable npm package', asyn
 
 test('public tool count is derived from the canonical allowlist', async () => {
   assert.equal(PUBLIC_PLUGIN_TOOL_NAMES.length, 9);
+  assert.equal(PUBLIC_PLUGIN_SURFACE_VERSION, 1);
   const readme = await fs.readFile(path.join(process.cwd(), 'README.md'), 'utf8');
   assert.match(readme, new RegExp(`\\*\\*${PUBLIC_PLUGIN_TOOL_NAMES.length} review-bounded tools\\*\\*`));
 });
@@ -27,4 +28,6 @@ test('runtime health surfaces no longer expose legacy product version or Operato
   assert.doesNotMatch(mcp, /version:\s*'0\.1\.0'/);
   assert.doesNotMatch(agent, /version:\s*'0\.1\.0'/);
   assert.match(agent, /version:\s*PRODUCT_VERSION/);
+  assert.match(mcp, /publicToolSurfaceVersion:\s*PUBLIC_PLUGIN_SURFACE_VERSION/);
+  assert.match(mcp, /publicToolCount:\s*PUBLIC_PLUGIN_TOOL_NAMES\.length/);
 });

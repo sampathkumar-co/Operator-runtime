@@ -23,6 +23,7 @@ import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
+import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -210,6 +211,8 @@ app.get('/health', async () => ({
   service: PRODUCT_NAME,
   title: PRODUCT_TITLE,
   version: PRODUCT_VERSION,
+  publicToolSurfaceVersion: PUBLIC_PLUGIN_SURFACE_VERSION,
+  publicToolCount: PUBLIC_PLUGIN_TOOL_NAMES.length,
   ...runtimeProvenance(process.env)
 }));
 

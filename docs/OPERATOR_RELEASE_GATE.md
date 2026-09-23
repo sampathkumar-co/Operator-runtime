@@ -1,8 +1,8 @@
 # Operator OpenAI Release Gate — OCC-3M
 
 Frozen production source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
-Current release successor: merged hardening baseline `71b7c122a04b97637d17e4ae296437d64ad20620`, plus notice-only cleanup on current `main` `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`
-Hardening certification: PR #28 exact head passed CI #911 / Platform Matrix #681 / NPM Runtime #311 / Signing #682 before merge to `71b7c122a04b97637d17e4ae296437d64ad20620`. PR #29 then passed CI #914 / Platform Matrix #684 / Signing #685 before its notice-only merge to current `main` `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
+Current release successor: current `main`, with merged hardening baseline `71b7c122a04b97637d17e4ae296437d64ad20620`, PR #29 notice cleanup and PR #30 release alignment merged at `7e43c14bafcd207d208a0744bd6d8910fafedd6e`.
+Hardening certification: PR #28 exact head passed CI #911 / Platform Matrix #681 / NPM Runtime #311 / Signing #682; PR #29 passed CI #914 / Platform Matrix #684 / Signing #685; PR #30 exact head `c6589dd6437c4efcacf88059a219b82ae8585a73` passed every required check. Resolve and revalidate the exact current `main` head before release. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
 Evidence date: 2026-09-23
@@ -17,7 +17,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
 | G5 Browser safety | PASS | Browser control is not in `PUBLIC_PLUGIN_TOOL_NAMES`; no public OpenAI tool can invoke it. Internal runtime remains outside this public plugin surface. |
 | G6 UIA safety | PASS | UIA is not in the public MCP surface; Windows UIA native sidecar compiled, tested, and passed clippy on OCC-3M. |
-| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed. Frozen OCC-3M production still exposes the bounded 10-tool surface including `device.claim`; the active Mecord Connect successor narrows this to the canonical 9-tool surface with web pairing. Local policy remains authoritative in both. |
+| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed. Frozen OCC-3M production still exposes the bounded 10-tool surface including `device.claim`; current Mecord Connect source narrows this to the canonical 9-tool surface with web pairing. Local policy remains authoritative in both. |
 | G8 Approval integrity | PASS | Core runtime suite includes approval lifecycle, authority-generation, replay/expiry and recovery coverage; OCC-3M CI passed. |
 | G9 Prompt-injection resistance | PASS | Public surface has no open-world browser tool; restricted paths/data are blocked and cross-layer adversarial boundary tests passed. |
 | G10 Authentication | BLOCKED | Provider preflight, S256, predefined client, both currently documented OpenAI redirect forms are allowlisted and accepted into the real login flow, and authorization-request acceptance passes; one real human authorization/code exchange is still required. |
@@ -25,8 +25,8 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G12 Device isolation | PASS | Account/device authority, A-B-A generation, release/rebind, disabled-account and quota tests passed; real paired-device relay E2E passed. |
 | G13 Relay integrity | PASS | Relay WebSocket E2E passed; direct relay/result/control ports 8788/8789/8790 are unreachable from the Internet. |
 | G14 Secret handling | PASS | DPAPI helper round-trip passed; public responses and legal pages exclude live secrets; invalid-token and restricted-data paths fail closed. |
-| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free. Frozen OCC-3M currently exposes 10 bounded public tools; the active successor reduces the final submission surface to 9. Result projection and retention bounds are documented/tested. |
-| G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
+| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free. Frozen OCC-3M currently exposes 10 bounded public tools; current Mecord Connect source reduces the final submission surface to 9. Result projection and retention bounds are documented/tested. |
+| G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation; authenticated web pairing remains outside the public tool set, and no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |
 | G19 Packaging / supply chain | BLOCKED | The candidate uses unscoped `mecord-connect`, proprietary `LICENSE`, mandatory dual-use `DISCLOSURE`, exact author metadata, immutable first-release artifact handling and staged future-release controls. npm account `mecrod` and 2FA mode `auth-and-writes` were previously verified; the publication shell must re-authenticate immediately before release and must not treat a stale CLI session as publication authority. No npm organization/scope is required. G19 remains BLOCKED until the exact first tarball is explicitly authorized/published and public-registry/clean-machine verification passes. |

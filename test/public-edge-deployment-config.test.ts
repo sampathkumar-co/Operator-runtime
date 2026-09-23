@@ -133,16 +133,23 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.doesNotMatch(gitignore, /deploy\/public-edge\/production-notices/);
   assert.doesNotMatch(caddy, /8790/);
 });
-test('shared-VPS profile preserves the trusted ingress and Caddy exec capability contract', () => {
+test('shared-VPS profile preserves trusted ingress with a capability-free non-root Caddy gateway', () => {
   const compose = text('deploy/public-edge/compose.shared-vps.example.yml');
   const caddy = text('deploy/public-edge/Caddyfile.shared-vps-internal.example');
+  const gatewayDockerfile = text('deploy/public-edge/Dockerfile.gateway');
   const privacy = text('deploy/public-edge/production-notices/privacy.md');
   const terms = text('deploy/public-edge/production-notices/terms.md');
   const support = text('deploy/public-edge/production-notices/support.md');
   assert.match(compose, /operator_ingress:\r?\n\s+ipv4_address: 172\.16\.3\.20/);
   assert.match(compose, /network_mode: service:operator-edge/);
-  assert.match(compose, /image: caddy:2\.11\.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648/);
-  assert.match(compose, /cap_drop:\r?\n\s+- ALL[\s\S]*cap_add:\r?\n\s+- NET_BIND_SERVICE/);
+  assert.match(compose, /dockerfile: deploy\/public-edge\/Dockerfile\.gateway/);
+  assert.match(compose, /image: operator-public-gateway:local/);
+  assert.match(compose, /cap_drop:\r?\n\s+- ALL/);
+  assert.doesNotMatch(compose, /cap_add:|NET_BIND_SERVICE/);
+  assert.match(gatewayDockerfile, /^FROM caddy:2\.11\.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648$/m);
+  assert.match(gatewayDockerfile, /RUN setcap -r \/usr\/bin\/caddy/);
+  assert.match(gatewayDockerfile, /test -z "\$\(getcap \/usr\/bin\/caddy\)"/);
+  assert.match(gatewayDockerfile, /^USER 1000:1000$/m);
   assert.match(compose, /external: true\r?\n\s+name: operator_ingress/);
   assert.match(compose, /source: \.\/production-notices/);
   assert.match(compose, /target: \/run\/operator-public-notices/);

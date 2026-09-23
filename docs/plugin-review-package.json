@@ -118,7 +118,8 @@
     "domainChallenge": "BLOCKED_OPENAI_PORTAL: OCC-3M is configuration-ready through OPENAI_APPS_CHALLENGE_TOKEN; keep 404 until the portal issues the exact token.",
     "reviewerCredentials": "PROVISIONED_UNVERIFIED: a dedicated production reviewer account and reviewer-only one-factor OIDC policy are provisioned; normal users retain the two-factor default and Authelia is healthy. The credential value is not in Git/chat. Owner-side password retrieval/login verification, canonical fixture-only pairing and real OpenAI reviewer execution are still required.",
     "publisherIdentity": "SOURCE_RESOLVED_BLOCKED_OPENAI_VERIFICATION: owner selected individual publisher Kinthala Samuel Sampath Kumar with Akkayapalem, Visakhapatnam, Andhra Pradesh, India and support@splcart.in. Source plugin/npm/license/disclosure/notices are aligned. OpenAI individual verification must confirm the exact legal-name spelling/order before submission.",
-    "toolScan": "BLOCKED_OPENAI_PORTAL: run Scan Tools against exact production MCP endpoint after draft creation.",
+    "hostedPluginRefresh": "BLOCKED_OPENAI_PORTAL_AND_DEPLOYMENT: deploy the certified Mecord Connect public edge first, then create or update the With MCP draft for https://operator.splcart.in/mcp in the OpenAI plugin submission portal, complete OAuth and domain verification, select Scan Tools, and verify exactly the canonical 9 tools with no device.claim before any review submission. Repository manifests and review packets do not update the hosted plugin by themselves.",
+    "toolScan": "BLOCKED_OPENAI_PORTAL: after the certified edge deployment and draft refresh, run Scan Tools against https://operator.splcart.in/mcp and reconcile names, schemas, security schemes, annotations, _meta and instructions against the canonical 9-tool source contract.",
     "demoRecording": "BLOCKED_REAL_E2E: current OpenAI final submission validation requires a demo recording URL for remote-MCP plugins. Record only after the real ChatGPT OAuth/reviewer path is working from the public package; do not expose credentials, tokens, private keys, personal paths or real user data.",
     "npmRuntimePublication": "BLOCKED_EXPLICIT_RELEASE_ACTION: unscoped mecord-connect@1.0.0 is not yet public. npm user mecord is authenticated and 2FA mode auth-and-writes is verified; no npm organization/scope is required. Remaining work is explicit publication authorization, exact-tarball publication, registry verification and clean-machine doctor/reviewer-root proof.",
     "reviewerFixture": "LOCAL_SEMANTICS_PASS_AWAITING_IDENTITY_PAIRING: baseline ab658c353fc3e0ce79d71e2968f53eedbc247537; exact 5 positive + 3 negative public-boundary cases pass on Node 22.23.2. Additional local checks: file.replace -> APPROVAL_REQUIRED without local approval; duplicate file.create -> TARGET_EXISTS.",
@@ -127,7 +128,7 @@
     "npmDualUseClassification": "RESOLVED_SOURCE: owner selected DUAL_USE. mecord-connect requires contentPolicy.class=dual-use, ships root DISCLOSURE and fails closed if the declaration is missing. npm account/2FA setup is resolved; final policy closure follows exact publication/registry verification.",
     "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into the merged PR #28 hardening baseline and retained by current main. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
     "occ3oPublicNoticeReproducibility": "PASS_ENGINEERING_DRAFT: PR #24 head 6edd3ee8eca2f5b8096424bac8750f0c945cec94 source-controls the exact live Privacy/Terms/Support notice bytes previously hidden by an ignore rule; CI #710, Platform Matrix #480 and Windows Signing Smoke #481 pass. A disposable merge preview with PR #22 is conflict-free, passes 24/24 focused tests and the full Windows-aware suite at 367 tests / 351 pass / 16 expected skips / 0 fail. FG-017 legal identity wording remains intentionally unresolved.",
-    "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that are now integrated into the merged PR #28 hardening baseline and current main d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
+    "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that were integrated into the merged PR #28 hardening baseline and retained through the PR #29 baseline d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
     "publicBrandingDeployment": "BLOCKED_FINAL_DEPLOYMENT: production remains OCC-3M and still serves the pre-rebrand/pre-final pages. After the five external/account gates permit release sequencing, deploy the final Mecord Connect successor and verify /, /privacy, /terms and /support show Mecord Connect with the approved individual publisher identity."
   },
   "releaseCandidate": {
@@ -140,13 +141,13 @@
     "name": "Mecord Connect current source candidate",
     "pullRequest": null,
     "branch": "main",
-    "sourceCommit": "d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf",
+    "sourceCommit": "DYNAMIC_CURRENT_MAIN_HEAD",
     "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",
     "workflowRuns": {
-      "ci": "PR28 #911 PASS; PR29 #914 PASS",
-      "platformMatrix": "PR28 #681 PASS; PR29 #684 PASS",
-      "npmRemoteRuntime": "PR28 #311 PASS; payload unchanged by PR29",
-      "windowsSigningSmoke": "PR28 #682 PASS; PR29 #685 PASS"
+      "ci": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release",
+      "platformMatrix": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS on Windows, Ubuntu and macOS; revalidate current main before release",
+      "npmRemoteRuntime": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release",
+      "windowsSigningSmoke": "PR30 exact head c6589dd6437c4efcacf88059a219b82ae8585a73 PASS; revalidate current main before release"
     },
     "status": "SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES",
     "workflowConclusions": {

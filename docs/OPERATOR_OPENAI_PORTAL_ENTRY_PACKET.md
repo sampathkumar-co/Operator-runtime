@@ -1,8 +1,8 @@
 # Mecord Connect — OpenAI Plugin Submission Portal Entry Packet
 
-Status date: 2026-09-18
+Status date: 2026-09-23
 Purpose: canonical non-secret source for entering the Mecord Connect submission in the OpenAI Plugin Submission Portal.
-Submission type: **Includes MCP**
+Submission type: **With MCP**
 
 This packet does **not** authorize publication or submission. Passwords, OTP/2FA codes, tokens, cookies, authorization codes, PKCE verifiers, private keys and portal-issued challenge secrets must never be written here.
 
@@ -55,9 +55,9 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
 Current engineering source candidate:
-- certified baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`
-- active successor: PR #28 branch `hardening/post-merge-completion`
-- exact PR head and workflow run IDs: **read live from GitHub immediately before merge/submission; all four required workflows must be terminal success**
+- certified release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`
+- active source branch: `main`; resolve its exact head live immediately before deployment or submission
+- exact head and workflow run IDs: **read live from GitHub immediately before deployment/submission; every required workflow must be terminal success on that head**
 
 ## 3. npm runtime distribution
 
@@ -88,6 +88,8 @@ MSIX / Microsoft Store is **not a Mecord Connect v1 submission requirement**.
 - Required write scope for mutations: `operator:write`
 - Refresh capability: `offline_access`
 - PKCE: **S256**
+
+The hosted/private ChatGPT connection is not updated by committing `.codex-plugin/plugin.json`. After the certified edge is deployed, create or update the **With MCP** draft/connection for the universal URL above, configure OAuth, complete any domain challenge, select **Scan Tools**, and compare the imported live metadata with this packet. A new ChatGPT conversation must then expose exactly the nine tools in section 9 and no legacy enrollment tool before reviewer execution begins.
 - Public OAuth client ID currently provisioned: `splcart-operator-chatgpt-prod-8HymKNOT2aqK`
 - Token endpoint client authentication: `none`
 - Authorization-code + refresh-token grants

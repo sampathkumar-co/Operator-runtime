@@ -113,7 +113,7 @@ OAuth proof must verify:
 - revoke/disconnect causes failure;
 - reconnect succeeds.
 
-Scan Tools must show exactly the 10 public tools and no private terminal/browser/UIA/PostgreSQL surface.
+Scan Tools must show exactly the canonical 9 public tools, must not show `device.claim`, and must expose no private terminal/browser/UIA/PostgreSQL surface.
 
 Run the canonical five positive + three negative reviewer cases.
 

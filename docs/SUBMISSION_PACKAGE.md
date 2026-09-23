@@ -7,12 +7,12 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Display name: **Mecord Connect**
 - Package name: `mecord-connect`
 - Category: **Developer Tools**
-- Initial plugin version: `0.1.0`
+- Initial plugin version: `1.0.0`
 - Public MCP target: `https://operator.splcart.in/mcp`
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin and OAuth provider are live on frozen OCC-3M. Certified source baseline `main` is merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; the active engineering successor is PR #28 / `hardening/post-merge-completion`, whose exact head and four required workflow results must be read live from GitHub before merge/submission. Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the five external/account categories: OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
+The production HTTPS origin and OAuth provider are live on frozen OCC-3M. PR #30 merged the release-aligned Mecord Connect source baseline at `7e43c14bafcd207d208a0744bd6d8910fafedd6e`; the exact current `main` head and all required workflow results must be read live from GitHub immediately before deployment or submission. Source legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the external/account categories: OpenAI identity verification and app-management access, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
 
 ## What the public plugin does
 
