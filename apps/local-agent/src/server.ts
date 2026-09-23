@@ -18,7 +18,8 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
-const INLINE_APPROVAL_WAIT_MS = 2 * 60_000;
+// Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
+const INLINE_APPROVAL_WAIT_MS = 45_000;
 
 type CompanionSettings = Record<string, boolean | number | string | string[]>;
 
