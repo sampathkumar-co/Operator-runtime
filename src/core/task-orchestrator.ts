@@ -414,17 +414,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
-    if (goal.kind === 'semantic-workflow') {
-    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) {
-      throw new OperatorError('TASK_GOAL_INVALID', 'Semantic workflow requires 1-20 typed child goals.');
-    }
-    goal.steps = goal.steps.map((step, index) => {
-      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Workflow step ${index} is invalid.`);
-      const kind = String((step as { kind?: unknown }).kind ?? '');
-      if (kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Nested semantic workflows are not permitted.');
-      return parseGoal(step, kind) as AtomicSemanticTaskGoal;
-    });
-  } else if (goal.kind === 'controlled-file-change') {
+    if (goal.kind === 'controlled-file-change') {
       if (phase === 'start') return { type: 'step', key: 'list-parent', title: 'Observe target directory', capability: 'file.list', input: { path: path.dirname(goal.path) || '.' } };
       if (phase === 'create') return { type: 'step', key: 'create-file', title: 'Create requested file', capability: 'file.create', input: { path: goal.path, content: goal.content } };
       if (phase === 'read') return { type: 'step', key: 'verify-file', title: 'Verify exact file content', capability: 'file.read', input: { path: goal.path, encoding: 'utf8' } };
@@ -742,7 +732,17 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', 'Stored task goal is invalid.');
   const goal = structuredClone(input) as SemanticTaskGoal;
   if (goal.kind !== expectedKind) throw new OperatorError('TASK_GOAL_INVALID', 'Stored task goal kind does not match execution metadata.');
-  if (goal.kind === 'controlled-file-change') {
+  if (goal.kind === 'semantic-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Semantic workflow requires 1-20 typed child goals.');
+    }
+    goal.steps = goal.steps.map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Workflow step ${index} is invalid.`);
+      const kind = String((step as { kind?: unknown }).kind ?? '');
+      if (kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Nested semantic workflows are not permitted.');
+      return parseGoal(step, kind) as AtomicSemanticTaskGoal;
+    });
+  } else if (goal.kind === 'controlled-file-change') {
     boundedText(goal.root, 4096, 'goal root'); boundedText(goal.path, 4096, 'goal path'); boundedText(goal.content, 2 * 1024 * 1024, 'goal content');
     const root = path.resolve(goal.root);
     const target = path.resolve(root, goal.path);
