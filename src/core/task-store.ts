@@ -66,6 +66,13 @@ export class TaskStore {
     await writeDurableStateText(file, JSON.stringify(task, null, 2), TASK_OPTIONS);
   }
 
+  async create(taskInput: TaskCapsule): Promise<void> {
+    await this.init();
+    const task = validateTaskCapsule(taskInput);
+    const file = this.#file(task.id);
+    await createDurableStateBytes(file, Buffer.from(JSON.stringify(task, null, 2), 'utf8'), TASK_OPTIONS);
+  }
+
   async get(taskIdInput: string): Promise<TaskCapsule> {
     await this.init();
     const taskId = validTaskId(taskIdInput);

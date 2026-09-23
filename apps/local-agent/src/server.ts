@@ -171,6 +171,7 @@ export function createLocalAgentServer(options: {
           return;
         }
         const submitted = await options.taskOrchestrator.submit({
+          requestId: body.requestId,
           objective: body.objective,
           authorizedScope,
           prohibitedScope: Array.isArray(body.prohibitedScope) ? body.prohibitedScope : [],

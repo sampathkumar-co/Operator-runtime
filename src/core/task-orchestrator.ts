@@ -63,6 +63,7 @@ export interface TaskPlanner {
 }
 
 export interface SubmitTaskOptions {
+  requestId?: string;
   objective: string;
   authorizedScope: string[];
   prohibitedScope?: string[];
@@ -101,26 +102,63 @@ export class TaskOrchestrator {
     const goal = parseGoal(input.goal, goalKind);
     const planner = [...this.#planners.values()].find((candidate) => candidate.supports(goal));
     if (!planner) throw new OperatorError('TASK_PLANNER_UNAVAILABLE', `No task planner supports ${goal.kind}.`);
-    const task = createTask({
+
+    const normalized = {
       userObjective: boundedText(input.objective, 16_384, 'objective'),
-      interpretedObjective: `${goal.kind}:${boundedText(input.objective, 16_384, 'objective')}`,
       authorizedScope: boundedTextArray(input.authorizedScope, 1000, 4096, 'authorizedScope'),
       prohibitedScope: boundedTextArray(input.prohibitedScope ?? [], 1000, 4096, 'prohibitedScope'),
-      successConditions: boundedTextArray(input.successConditions, 1000, 16_384, 'successConditions')
+      successConditions: boundedTextArray(input.successConditions, 1000, 16_384, 'successConditions'),
+      maxSteps: boundedInteger(input.maxSteps, 1, 100, 20),
+      maxAttemptsPerStep: boundedInteger(input.maxAttemptsPerStep, 1, 5, 2),
+      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000)
+    };
+    const requestId = input.requestId === undefined ? undefined : validTaskRequestId(input.requestId);
+    if (requestId) {
+      try {
+        const existing = await this.#store.get(requestId);
+        if (!sameTaskSubmission(existing, planner.id, goal, normalized)) {
+          throw new OperatorError('TASK_SUBMISSION_ID_CONFLICT', 'Task submission requestId is already bound to a different durable task request.');
+        }
+        return existing;
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'TASK_NOT_FOUND') throw error;
+      }
+    }
+
+    const task = createTask({
+      userObjective: normalized.userObjective,
+      interpretedObjective: `${goal.kind}:${normalized.userObjective}`,
+      authorizedScope: normalized.authorizedScope,
+      prohibitedScope: normalized.prohibitedScope,
+      successConditions: normalized.successConditions
     });
+    if (requestId) task.id = requestId;
     task.execution = {
       schemaVersion: 1,
       plannerId: planner.id,
       goalKind: goal.kind,
       plannerState: { goal: structuredClone(goal), phase: 'start' },
-      maxSteps: boundedInteger(input.maxSteps, 1, 100, 20),
-      maxAttemptsPerStep: boundedInteger(input.maxAttemptsPerStep, 1, 5, 2),
-      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000),
+      maxSteps: normalized.maxSteps,
+      maxAttemptsPerStep: normalized.maxAttemptsPerStep,
+      timeoutMs: normalized.timeoutMs,
       stepCount: 0,
       records: []
     };
-    await this.#store.put(task);
-    return task;
+    if (!requestId) {
+      await this.#store.put(task);
+      return task;
+    }
+    try {
+      await this.#store.create(task);
+      return task;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const existing = await this.#store.get(requestId);
+      if (!sameTaskSubmission(existing, planner.id, goal, normalized)) {
+        throw new OperatorError('TASK_SUBMISSION_ID_CONFLICT', 'Task submission requestId is already bound to a different durable task request.');
+      }
+      return existing;
+    }
   }
 
   async run(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
@@ -809,6 +847,43 @@ function verifyUiaReinspection(
   if (goal.operation === 'select' && element.selected !== true) throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm selection.');
   if (goal.operation === 'expand' && element.expand_collapse_state !== 'Expanded') throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm expansion.');
   if (goal.operation === 'collapse' && element.expand_collapse_state !== 'Collapsed') throw new OperatorError('TASK_UIA_POSTCONDITION_FAILED', 'UIA re-inspection did not confirm collapse.');
+}
+
+function validTaskRequestId(input: unknown): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new OperatorError('TASK_SUBMISSION_ID_INVALID', 'Task submission requestId must be a UUID.');
+  }
+  return value;
+}
+
+function sameTaskSubmission(
+  task: TaskCapsule,
+  plannerId: string,
+  goal: SemanticTaskGoal,
+  normalized: {
+    userObjective: string;
+    authorizedScope: string[];
+    prohibitedScope: string[];
+    successConditions: string[];
+    maxSteps: number;
+    maxAttemptsPerStep: number;
+    timeoutMs: number;
+  }
+): boolean {
+  const execution = task.execution;
+  if (!execution) return false;
+  return task.userObjective === normalized.userObjective
+    && task.interpretedObjective === `${goal.kind}:${normalized.userObjective}`
+    && canonicalJson(task.authorizedScope) === canonicalJson(normalized.authorizedScope)
+    && canonicalJson(task.prohibitedScope) === canonicalJson(normalized.prohibitedScope)
+    && canonicalJson(task.successConditions) === canonicalJson(normalized.successConditions)
+    && execution.plannerId === plannerId
+    && execution.goalKind === goal.kind
+    && canonicalJson(execution.plannerState.goal) === canonicalJson(goal)
+    && execution.maxSteps === normalized.maxSteps
+    && execution.maxAttemptsPerStep === normalized.maxAttemptsPerStep
+    && execution.timeoutMs === normalized.timeoutMs;
 }
 
 function deterministicActionId(taskId: string, stepKey: string, attempt: number, inputHash: string): string {

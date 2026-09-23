@@ -51,6 +51,44 @@ function filesystem(root: string): FilesystemProvider {
   });
 }
 
+test('task submission requestId is durable-idempotent and conflicts on changed request content', async (t) => {
+  const root = await tempDir(t, 'operator-task-submit-idempotent-root-');
+  const state = await tempDir(t, 'operator-task-submit-idempotent-state-');
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store,
+    permissions: permissions(root, ['file.read'])
+  });
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId,
+    objective: 'Create one durable task identity.',
+    authorizedScope: [root],
+    successConditions: ['submission is idempotent'],
+    goal: { kind: 'controlled-file-change' as const, root, path: 'one.txt', content: 'one' }
+  };
+  const [first, concurrentRetry] = await Promise.all([
+    orchestrator.submit(request),
+    orchestrator.submit(request)
+  ]);
+  const retry = await orchestrator.submit(request);
+  assert.equal(first.id, requestId);
+  assert.deepEqual(concurrentRetry, first);
+  assert.deepEqual(retry, first);
+
+  first.state = 'PAUSED';
+  await store.put(first);
+  const progressedRetry = await orchestrator.submit(request);
+  assert.equal(progressedRetry.state, 'PAUSED');
+  assert.equal(progressedRetry.id, requestId);
+
+  await assert.rejects(
+    () => orchestrator.submit({ ...request, objective: 'Different request under reused identity.' }),
+    (error: any) => error?.code === 'TASK_SUBMISSION_ID_CONFLICT'
+  );
+  assert.equal((await store.get(requestId)).userObjective, request.objective);
+});
+
 test('task executor completes and durably verifies a real semantic multi-action file goal', async (t) => {
   if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
   const root = await tempDir(t, 'operator-task-goal-');
