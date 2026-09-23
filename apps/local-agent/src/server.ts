@@ -554,6 +554,17 @@ function withinAuthorizedRoots(input: string, roots: string[]): boolean {
 
 function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] | null {
   if (!goal || typeof goal !== 'object') return null;
+  if (goal.kind === 'semantic-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) return null;
+    const scopes: string[] = [];
+    for (const step of goal.steps) {
+      if ((step as SemanticTaskGoal).kind === 'semantic-workflow') return null;
+      const child = taskAuthorizedScope(step, roots);
+      if (!child) return null;
+      scopes.push(...child);
+    }
+    return [...new Set(scopes)].sort();
+  }
   if (goal.kind === 'browser-navigation') {
     try {
       const url = new URL(String(goal.url ?? ''));
