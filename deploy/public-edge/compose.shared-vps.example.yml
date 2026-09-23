@@ -13,6 +13,8 @@ services:
     env_file:
       - ./operator-edge.env
     environment:
+      OPERATOR_PUBLIC_HOST: "${OPERATOR_PUBLIC_HOST:-operator.splcart.in}"
+      OPERATOR_DEVELOPER_HOST: "${OPERATOR_DEVELOPER_HOST:-developer.operator.splcart.in}"
       OPERATOR_RELAY_STATE_DIR: /var/lib/operator-relay
       OPERATOR_RELAY_HOST: 127.0.0.1
       OPERATOR_RELAY_PORT: "8788"
@@ -25,6 +27,10 @@ services:
       OPERATOR_MCP_PUBLIC_BIND_ACK: TLS_TERMINATES_UPSTREAM
       OPERATOR_MCP_HOST: 127.0.0.1
       OPERATOR_MCP_PORT: "47200"
+      OPERATOR_MCP_DEVELOPER_ENABLED: "${OPERATOR_MCP_DEVELOPER_ENABLED:-0}"
+      OPERATOR_MCP_DEVELOPER_URL: "${OPERATOR_MCP_DEVELOPER_URL:-}"
+      OPERATOR_OAUTH_DEVELOPER_SCOPE: "${OPERATOR_OAUTH_DEVELOPER_SCOPE:-operator:developer}"
+      OPERATOR_DEVELOPER_ACCOUNT_IDS: "${OPERATOR_DEVELOPER_ACCOUNT_IDS:-}"
       OPERATOR_PUBLIC_NOTICES_DIR: /run/operator-public-notices
     volumes:
       - operator_relay_state:/var/lib/operator-relay
