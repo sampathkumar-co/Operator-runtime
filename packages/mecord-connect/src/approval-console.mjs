@@ -6,6 +6,8 @@ export function parseApprovalConsoleCommand(input) {
   const verb = parts[0].toLowerCase();
   if (verb === 'approvals' && parts.length === 1) return { kind: 'list' };
   if (verb === 'help' && parts.length === 1) return { kind: 'help' };
+  if (verb === 'session-status' && parts.length === 1) return { kind: 'session-status' };
+  if ((verb === 'revoke-session' || verb === 'require-approval') && parts.length === 1) return { kind: 'revoke-session' };
   const sessionVerb = verb === 'session' || verb === 'allow-session' || verb === 'approve-session';
   if ((verb === 'approve' || verb === 'deny' || sessionVerb) && parts.length <= 2) {
     return { kind: 'decision', decision: sessionVerb ? 'session' : verb, selector: parts[1]?.toLowerCase() };
@@ -124,11 +126,28 @@ export function startLocalApprovalConsole({
         const command = parseApprovalConsoleCommand(line);
         if (!command) return;
         if (command.kind === 'help') {
-          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix]\n');
+          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
           return;
         }
         if (command.kind === 'invalid') {
           output.write('[mecord-connect] unknown approval command. Type "help".\n');
+          return;
+        }
+        if (command.kind === 'session-status') {
+          const payload = await localAgentJson(baseUrl, agentToken, { pathName: '/v1/session-approval' });
+          const session = payload?.session;
+          output.write(session?.active
+            ? `[mecord-connect] session access active until ${session.expiresAt} (idle expiry ${session.idleExpiresAt}).\n`
+            : '[mecord-connect] session access is not active.\n');
+          return;
+        }
+        if (command.kind === 'revoke-session') {
+          await localAgentJson(baseUrl, agentToken, {
+            pathName: '/v1/session-approval',
+            method: 'DELETE',
+            recoveryToken
+          });
+          output.write('[mecord-connect] session access revoked; risky actions require approval again.\n');
           return;
         }
         const current = await refresh(false);
