@@ -56,10 +56,12 @@ test('public-edge supervisor shares loopback relay control and waits for both se
   const exitPromise = supervisor.indexOf('const exit = new Promise');
   const relayStart = supervisor.indexOf("const relay = start('relay'");
   const signalHandler = supervisor.indexOf("for (const signal of ['SIGTERM', 'SIGINT'])");
-  const mcpStart = supervisor.indexOf("const mcp = start('mcp'");
+  const mcpStart = supervisor.indexOf("const mcp = start('mcp-public'");
   const waitForChildExit = supervisor.indexOf('const firstExit = await Promise.race');
   assert.ok(exitPromise >= 0 && exitPromise < relayStart, 'start() must register child exit before returning it');
-  assert.ok(signalHandler > relayStart && signalHandler < mcpStart, 'signal handlers must be installed before MCP startup waits');
+  assert.ok(mcpStart > signalHandler, 'public MCP process must start only after signal handlers are installed');
+  const developerMcpStart = supervisor.indexOf("const developerMcp = start('mcp-developer'");
+  assert.ok(developerMcpStart < 0 || developerMcpStart > signalHandler, 'developer MCP process must also start only after signal handlers are installed');
   assert.ok(waitForChildExit > mcpStart, 'supervisor must race the pre-registered child exit promises');
   assert.match(supervisor, /Promise\.race\(children\.map\(\(\{ exit \}\) => exit\)\)/);
   assert.match(supervisor, /sourceCommit, buildTimestamp/);
