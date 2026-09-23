@@ -559,6 +559,7 @@ function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] 
       return [`browser:${url.origin}`];
     } catch { return ['browser:invalid']; }
   }
+  if (goal.kind === 'app-operation') return ['application:uia'];
   if (typeof goal.root !== 'string' || !withinAuthorizedRoots(goal.root, roots)) return null;
   return [path.resolve(goal.root)];
 }
