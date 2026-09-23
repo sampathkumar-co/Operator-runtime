@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
-import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
+import type { ActionRequest, ActionResult, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
@@ -18,6 +18,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const INLINE_APPROVAL_WAIT_MS = 2 * 60_000;
 
 type CompanionSettings = Record<string, boolean | number | string | string[]>;
 
