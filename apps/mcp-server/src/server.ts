@@ -271,6 +271,49 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     return server;
   }
 
+  const taskUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  const taskSelector = z.object({
+    name: z.string().min(1).max(512).optional(), automationId: z.string().min(1).max(512).optional(),
+    className: z.string().min(1).max(512).optional(), controlType: z.string().min(1).max(128).optional(),
+    processId: z.number().int().positive().optional()
+  }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
+  const taskGoal = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('controlled-file-change'), root: z.string().min(1).max(4096), path: z.string().min(1).max(4096), content: z.string().max(256 * 1024) }),
+    z.object({ kind: z.literal('trusted-project-command'), root: z.string().min(1).max(4096), commandKind: z.enum(['build', 'test', 'lint']) }),
+    z.object({ kind: z.literal('browser-navigation'), url: z.string().min(1).max(8192), targetId: z.string().min(1).max(512).optional() }),
+    z.object({ kind: z.literal('docker-lifecycle'), root: z.string().min(1).max(4096), operation: z.enum(['start', 'stop', 'restart']), services: z.array(z.string().min(1).max(256)).min(1).max(100), timeoutMs: z.number().int().min(100).max(30 * 60_000).optional() }),
+    z.object({
+      kind: z.literal('postgres-select'), root: z.string().min(1).max(4096), profileId: z.string().min(1).max(256), schema: z.string().min(1).max(128).optional(), table: z.string().min(1).max(128),
+      columns: z.array(z.string().min(1).max(128)).max(50).optional(),
+      filters: z.array(z.object({ column: z.string().min(1).max(128), op: z.enum(['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'ilike', 'is_null', 'not_null']), value: z.string().max(16_384).optional() })).max(20).optional(),
+      orderBy: z.array(z.object({ column: z.string().min(1).max(128), direction: z.enum(['asc', 'desc']) })).max(5).optional(),
+      limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).max(10_000).optional(), timeoutMs: z.number().int().min(100).max(30_000).optional()
+    }),
+    z.object({
+      kind: z.literal('app-operation'), operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']), selector: taskSelector,
+      value: z.string().max(65_536).optional(), horizontalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(),
+      verticalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(), verifySelector: taskSelector.optional(), waitMs: z.number().int().min(0).max(10_000).optional()
+    })
+  ]);
+
+  server.registerTool('task.submit', {
+    title: 'Submit durable semantic task',
+    description: 'Create one durable, UUID-addressed semantic task and optionally start it. The UUID makes submission retry-safe. All task actions still pass local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
+    inputSchema: z.object({
+      requestId: taskUuid, objective: z.string().min(1).max(16_384), successConditions: z.array(z.string().min(1).max(16_384)).min(1).max(1000),
+      prohibitedScope: z.array(z.string().min(1).max(4096)).max(1000).optional(), goal: taskGoal,
+      run: z.boolean().default(true), maxSteps: z.number().int().min(1).max(100).optional(), maxAttemptsPerStep: z.number().int().min(1).max(5).optional(), timeoutMs: z.number().int().min(100).max(60 * 60_000).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (input) => taskResultWithAgent(agent, await agent.submitTask(input as any), 'task.submit'));
+
+  server.registerTool('task.control', {
+    title: 'Control durable semantic task',
+    description: 'Inspect, run, pause, resume, or cancel a durable task on its originally bound device. Resume never accepts an approval ID or recovery token; locally blocked actions remain blocked until approved through the separate local approval authority.',
+    inputSchema: z.object({ taskId: taskUuid, operation: z.enum(['inspect', 'run', 'pause', 'resume', 'cancel']) }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ taskId, operation }) => taskResultWithAgent(agent, await agent.controlTask(taskId, operation), 'task.control'));
+
   server.registerTool('computer.inspect', {
     title: 'Inspect computer',
     description: 'Inspect bounded native state of the authorized computer without reading unrelated files or secrets.',
@@ -689,6 +732,22 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   }));
 
   return server;
+}
+
+function taskResultWithAgent(
+  _agent: LocalAgentClient,
+  result: Awaited<ReturnType<LocalAgentClient['submitTask']>>,
+  capability: 'task.submit' | 'task.control'
+) {
+  const task = result.task as Record<string, unknown> | undefined;
+  const summary = result.ok
+    ? `${capability}: ${String(task?.state ?? 'PENDING')} task ${String(task?.id ?? '')}`.trim()
+    : `${capability}: NOT VERIFIED (${result.error?.code ?? 'UNKNOWN'}) ${result.error?.message ?? ''}`;
+  return {
+    isError: !result.ok,
+    content: [{ type: 'text' as const, text: summary }],
+    structuredContent: result
+  };
 }
 
 async function invokeWithAgent(agent: LocalAgentClient, capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) {

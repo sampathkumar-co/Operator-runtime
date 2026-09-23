@@ -138,7 +138,7 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. Relay mode preserves the same 22-tool MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. Relay mode preserves the same 24-tool private MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
 A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path. For public distribution, the OAuth-authenticated MCP edge is implemented but still requires a real DNS/TLS endpoint and production OAuth service before live certification. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md). Repository CI does not pretend those external gates are complete.
 

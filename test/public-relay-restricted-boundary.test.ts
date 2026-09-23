@@ -86,6 +86,9 @@ test('uncertain relay recovery retries only a validated read action when no stor
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, risk: 'write' } } }), false);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, provenance: { kind: 'observed' } } } }), false);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task.dispatch' }), false);
+  const taskId = crypto.randomUUID();
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task', payload: { task: { operation: 'inspect', taskId } } }), true);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task', payload: { task: { operation: 'resume', taskId, approvedActionId: 'forbidden' } } }), false);
 });
 
 test('missing crash-window result replays a read through the normal bounded execution path', async (t) => {

@@ -416,3 +416,79 @@ test('relay control preserves retryable routing failures for the public boundary
   assert.equal(body.error.code, 'ROUTE_DEVICE_OFFLINE');
   assert.equal(body.error.retryable, true);
 });
+
+test('durable task submission persists device affinity and later control uses the bound device', async (t) => {
+  const taskId = '77777777-7777-4777-8777-777777777777';
+  let bound: { key: string; deviceId: string } | undefined;
+  const dispatches: any[] = [];
+  const hub = {
+    async boundProjectDevice(_accountId: string, key: string) {
+      if (!bound || bound.key !== key) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'missing');
+      return bound.deviceId;
+    },
+    async bindProject(_accountId: string, key: string, deviceId: string) { bound = { key, deviceId }; },
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatches.push(input);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `task-${dispatches.length}`, seq: 40 + dispatches.length } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get(_deviceId: string, seq: number) {
+      return {
+        deliveryId: `task-${seq - 40}`,
+        result: { ok: true, task: { id: taskId, state: 'PENDING' } },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const accounts = { async activeMembershipForDevice() { return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }; } };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const submit = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'submit', request: {
+      requestId: taskId, objective: 'inspect browser', successConditions: ['submitted'],
+      goal: { kind: 'browser-navigation', url: 'https://example.com' }, run: false
+    } }, waitMs: 1000 })
+  });
+  assert.equal(submit.status, 200, await submit.text());
+  assert.deepEqual(bound, { key: `task:${taskId}`, deviceId: DEVICE_ID });
+  assert.deepEqual(dispatches[0].requiredCapabilities, ['browser.inspect', 'browser.navigate']);
+  const inspect = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'inspect', taskId }, waitMs: 1000 })
+  });
+  assert.equal(inspect.status, 200, await inspect.text());
+  assert.equal(dispatches[1].explicitDeviceId, DEVICE_ID);
+  assert.equal(dispatches[1].projectKey, `task:${taskId}`);
+  assert.deepEqual(dispatches[1].requiredCapabilities, []);
+});
+
+test('relay durable task control rejects remote approval authority', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => DEVICE_ID,
+      bindProject: async () => undefined,
+      recoverIdempotent: async () => null,
+      dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch'); }
+    } as any,
+    results: {} as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      task: { operation: 'resume', taskId: '88888888-8888-4888-8888-888888888888', approvedActionId: 'forbidden' },
+      waitMs: 1000
+    })
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_CONTROL_INPUT_INVALID');
+  assert.equal(dispatchCalls, 0);
+});
