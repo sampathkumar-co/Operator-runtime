@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { isDeveloperAccount } from '../../../src/core/developer-relay-surface.ts';
+import { developerAccountIds } from '../../../src/core/developer-relay-surface.ts';
 import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
@@ -23,9 +23,10 @@ export class RelayControlService {
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
   #token: string;
+  #developerAccounts: Set<string>;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -33,6 +34,7 @@ export class RelayControlService {
     this.#enrollments = options.enrollments;
     this.#devices = options.devices;
     this.#token = options.token;
+    this.#developerAccounts = developerAccountIds(options.developerAccountIds ?? process.env.OPERATOR_DEVELOPER_ACCOUNT_IDS);
   }
 
   async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
@@ -104,7 +106,7 @@ export class RelayControlService {
         if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
         const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
         const developerBoundary = body.developerBoundary === true;
-        if (developerBoundary && !isDeveloperAccount(accountId)) {
+        if (developerBoundary && !this.#developerAccounts.has(accountId)) {
           throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This relay request requires an explicitly entitled Mecord developer account.');
         }
         const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
@@ -208,7 +210,7 @@ export class RelayControlService {
     if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
     const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
     const developerBoundary = body.developerBoundary === true;
-    if (developerBoundary && !isDeveloperAccount(accountId)) {
+    if (developerBoundary && !this.#developerAccounts.has(accountId)) {
       throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'This task request requires an explicitly entitled Mecord developer account.');
     }
     const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
