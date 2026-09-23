@@ -308,6 +308,29 @@ class StaleRunnerWriteStore extends TaskStore {
   }
 }
 
+class BlockingResumeStore extends TaskStore {
+  #blockedOnce = false;
+  blocked!: () => void;
+  release!: () => void;
+  readonly blockedPromise: Promise<void>;
+  readonly releasePromise: Promise<void>;
+
+  constructor(stateDir: string) {
+    super(stateDir);
+    this.blockedPromise = new Promise((resolve) => { this.blocked = resolve; });
+    this.releasePromise = new Promise((resolve) => { this.release = resolve; });
+  }
+
+  override async put(task: Parameters<TaskStore['put']>[0]): Promise<void> {
+    if (!this.#blockedOnce && task.state === 'PENDING' && task.execution?.startedAt !== undefined) {
+      this.#blockedOnce = true;
+      this.blocked();
+      await this.releasePromise;
+    }
+    await super.put(task);
+  }
+}
+
 class DelayedProvider implements CapabilityProvider {
   readonly name = 'test.delayed';
   calls = 0;
@@ -870,6 +893,39 @@ test('pause during a stale pre-dispatch runner write prevents provider execution
   assert.equal(provider.calls, 1);
   provider.release();
   assert.equal((await resumed).state, 'VERIFIED');
+});
+
+test('concurrent cancel cannot be overwritten by resume', async (t) => {
+  const root = await tempDir(t, 'operator-task-resume-cancel-race-');
+  const state = await tempDir(t, 'operator-task-resume-cancel-race-state-');
+  const store = new BlockingResumeStore(state);
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: permissions(root, ['file.read']), planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel must win over a concurrent resume.',
+    authorizedScope: [root],
+    successConditions: ['no provider dispatch after cancellation'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const initialRun = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  provider.release();
+  assert.equal((await initialRun).state, 'PAUSED');
+
+  const resumed = orchestrator.resume(task.id);
+  await store.blockedPromise;
+  const cancelling = orchestrator.cancel(task.id);
+  store.release();
+
+  assert.equal((await cancelling).state, 'CANCELLED');
+  assert.equal((await resumed).state, 'CANCELLED');
+  assert.equal(provider.calls, 1);
+  assert.equal((await store.get(task.id)).state, 'CANCELLED');
 });
 
 test('cancel survives a stale runner write that started before the control request', async (t) => {
