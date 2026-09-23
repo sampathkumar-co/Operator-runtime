@@ -245,15 +245,15 @@ export class TaskOrchestrator {
       if (!blockedReplay) current.records.push(record);
       else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
       current.stepCount += 1;
-      await this.#persistRunState(task, assertLease);
-      if (task.state === 'PAUSED') {
+      const preDispatchControl = await this.#persistRunState(task, assertLease);
+      if (preDispatchControl === 'PAUSED') {
         current.records = current.records.filter((candidate) => candidate !== record);
         current.stepCount = Math.max(0, current.stepCount - 1);
         setNodeState(task, node.id, 'PENDING');
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (task.state === 'CANCELLED') {
+      if (preDispatchControl === 'CANCELLED') {
         record.state = 'INTERRUPTED';
         record.finishedAt = new Date().toISOString();
         record.errorCode = 'EXECUTION_ABORTED';
@@ -400,13 +400,20 @@ export class TaskOrchestrator {
     }
   }
 
-  #applyControlRequest(task: TaskCapsule): void {
+  #applyControlRequest(task: TaskCapsule): 'PAUSED' | 'CANCELLED' | undefined {
     const requested = this.#controlRequests.get(task.id);
-    if (requested === 'CANCELLED') task.state = 'CANCELLED';
-    else if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) task.state = 'PAUSED';
+    if (requested === 'CANCELLED') {
+      task.state = 'CANCELLED';
+      return 'CANCELLED';
+    }
+    if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) {
+      task.state = 'PAUSED';
+      return 'PAUSED';
+    }
+    return undefined;
   }
 
-  async #persistRunState(task: TaskCapsule, assertLease: () => Promise<void>): Promise<void> {
+  async #persistRunState(task: TaskCapsule, assertLease: () => Promise<void>): Promise<'PAUSED' | 'CANCELLED' | undefined> {
     await this.#withStateWriteLock(task.id, async () => {
       this.#applyControlRequest(task);
       await assertLease();
@@ -414,7 +421,7 @@ export class TaskOrchestrator {
     });
     // Control intent is published before its serialized durable write. Re-apply
     // synchronously so the runner cannot dispatch work while that write waits.
-    this.#applyControlRequest(task);
+    return this.#applyControlRequest(task);
   }
 
   async #withStateWriteLock<T>(taskId: string, work: () => Promise<T>): Promise<T> {
