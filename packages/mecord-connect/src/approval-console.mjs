@@ -6,8 +6,9 @@ export function parseApprovalConsoleCommand(input) {
   const verb = parts[0].toLowerCase();
   if (verb === 'approvals' && parts.length === 1) return { kind: 'list' };
   if (verb === 'help' && parts.length === 1) return { kind: 'help' };
-  if ((verb === 'approve' || verb === 'deny') && parts.length <= 2) {
-    return { kind: 'decision', decision: verb, selector: parts[1]?.toLowerCase() };
+  const sessionVerb = verb === 'session' || verb === 'allow-session' || verb === 'approve-session';
+  if ((verb === 'approve' || verb === 'deny' || sessionVerb) && parts.length <= 2) {
+    return { kind: 'decision', decision: sessionVerb ? 'session' : verb, selector: parts[1]?.toLowerCase() };
   }
   return { kind: 'invalid' };
 }
@@ -45,8 +46,8 @@ function writeApprovalList(output, pending) {
     output.write(`  ${String(record.actionId).slice(0, 12)}  ${record.capability}  ${record.risk}  ${displayTarget(record.target)}\n`);
   }
   output.write(pending.length === 1
-    ? '[mecord-connect] type "approve" or "deny" and press Enter.\n'
-    : '[mecord-connect] type "approve <id-prefix>" or "deny <id-prefix>" and press Enter.\n');
+    ? '[mecord-connect] choose: "approve" (once), "session" (allow this runtime session), or "deny".\n'
+    : '[mecord-connect] choose "approve <id-prefix>", "session <id-prefix>", or "deny <id-prefix>".\n');
 }
 
 async function localAgentJson(baseUrl, agentToken, { pathName, method = 'GET', recoveryToken, body } = {}) {
@@ -99,8 +100,8 @@ export function startLocalApprovalConsole({
           announced.add(record.approvalRequestId);
           output.write(`\n[mecord-connect] approval required: ${record.capability} (${record.risk}) ${displayTarget(record.target)}\n`);
           output.write(pending.length === 1
-            ? '[mecord-connect] type "approve" or "deny" in this terminal.\n'
-            : `[mecord-connect] type "approve ${String(record.actionId).slice(0, 12)}" or "deny ${String(record.actionId).slice(0, 12)}".\n`);
+            ? '[mecord-connect] choose "approve" once, "session" for this runtime session, or "deny".\n'
+            : `[mecord-connect] choose "approve ${String(record.actionId).slice(0, 12)}", "session ${String(record.actionId).slice(0, 12)}", or "deny ${String(record.actionId).slice(0, 12)}".\n`);
         }
       }
       return pending;
@@ -123,7 +124,7 @@ export function startLocalApprovalConsole({
         const command = parseApprovalConsoleCommand(line);
         if (!command) return;
         if (command.kind === 'help') {
-          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | deny [id-prefix]\n');
+          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix]\n');
           return;
         }
         if (command.kind === 'invalid') {
@@ -154,7 +155,12 @@ export function startLocalApprovalConsole({
           const status = payload?.approval?.status ?? command.decision;
           output.write(`[mecord-connect] ${status}: ${record.capability} ${displayTarget(record.target)}\n`);
           if (command.decision === 'approve') {
-            output.write('[mecord-connect] approval is one-time and exact-action-bound. Retry the same ChatGPT request within 10 minutes.\n');
+            output.write('[mecord-connect] approved once for this exact action. Retry the same ChatGPT request within 10 minutes.\n');
+          } else if (command.decision === 'session') {
+            const expiresAt = payload?.session?.expiresAt;
+            const idleExpiresAt = payload?.session?.idleExpiresAt;
+            output.write(`[mecord-connect] session access enabled for this account/device/root${expiresAt ? ` until ${expiresAt}` : ''}${idleExpiresAt ? ` (idle expiry ${idleExpiresAt})` : ''}.\n`);
+            output.write('[mecord-connect] external, system, and destructive actions inside the current authorized scope will not re-prompt during this session.\n');
           }
           announced.delete(record.approvalRequestId);
           await refresh(false);
