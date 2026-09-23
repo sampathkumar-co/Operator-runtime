@@ -245,6 +245,22 @@ export class TaskOrchestrator {
       else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
       current.stepCount += 1;
       await this.#persistRunState(task, assertLease);
+      if (task.state === 'PAUSED') {
+        current.records = current.records.filter((candidate) => candidate !== record);
+        current.stepCount = Math.max(0, current.stepCount - 1);
+        setNodeState(task, node.id, 'PENDING');
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
+      if (task.state === 'CANCELLED') {
+        record.state = 'INTERRUPTED';
+        record.finishedAt = new Date().toISOString();
+        record.errorCode = 'EXECUTION_ABORTED';
+        setNodeState(task, node.id, 'SKIPPED');
+        task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
 
       const action: ActionRequest = {
         id: actionId, taskId: task.id, capability: decision.capability, risk,
