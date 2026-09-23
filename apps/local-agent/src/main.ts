@@ -16,7 +16,7 @@ import { RelaySessionCredentialManager, deriveRelayDeviceResetUrl, deriveRelaySe
 import { LocalDeviceResetCoordinator } from './device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
-import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
+import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 
@@ -149,7 +149,7 @@ function startRelay(): void {
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
-    getSupportedCapabilities: () => runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES),
+    getSupportedCapabilities: () => runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES),
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
   const runner = relayRunner;
@@ -278,7 +278,7 @@ console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabl
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 if (relayUrl) {
-  const relayCapabilities = await runtime.supportedCapabilities(PUBLIC_PLUGIN_CAPABILITIES);
+  const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
 }
 
