@@ -36,6 +36,29 @@ async function pairBoth(a: Device, b: Device): Promise<void> {
   await pair(b, a);
 }
 
+test('default relay session lifetime is 30 minutes and longer sessions are rejected', async (t) => {
+  const nowMs = Date.parse('2026-09-16T12:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const a = await device('operator-session-30m-a-', 'A', clock);
+  const b = await device('operator-session-30m-b-', 'B', clock);
+  t.after(() => Promise.all([fs.rm(a.state, { recursive: true, force: true }), fs.rm(b.state, { recursive: true, force: true })]));
+  await pairBoth(a, b);
+
+  const peer = await b.identity.loadOrCreate();
+  const sessions = new DeviceSessionTokenStore(a.state, a.identity, a.registry, { clock });
+  const issued = await sessions.issue({ subjectDeviceId: peer.deviceId, audience: 'operator-relay', scopes: ['relay:connect'] });
+  assert.equal(Date.parse(issued.payload.expiresAt) - Date.parse(issued.payload.issuedAt), 30 * 60_000);
+
+  const replacement = await sessions.rotate(issued.payload.jti);
+  assert.notEqual(replacement.payload.jti, issued.payload.jti);
+  assert.equal(Date.parse(replacement.payload.expiresAt) - Date.parse(replacement.payload.issuedAt), 30 * 60_000);
+
+  await assert.rejects(
+    sessions.issue({ subjectDeviceId: peer.deviceId, audience: 'operator-relay', scopes: ['relay:connect'], ttlMs: 30 * 60_000 + 1 }),
+    (error: any) => error?.code === 'SESSION_TTL_INVALID'
+  );
+});
+
 function tamperSignature(signature: string): string {
   const bytes = Buffer.from(signature, 'base64url');
   assert.ok(bytes.length > 0);

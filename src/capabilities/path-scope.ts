@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from '../core/errors.ts';
+import { normalizeScopedPathSyntax } from '../core/scoped-path-syntax.ts';
 import { withWindowsPathLease } from '../core/windows-path-lease.ts';
 
 function lexicalInside(candidate: string, root: string): boolean {
@@ -19,7 +20,7 @@ export class PathScope {
   }
 
   async resolveExisting(inputPath: string): Promise<string> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const real = await fs.realpath(absolute);
     const realRoots = await Promise.all(this.roots.map(async (root) => {
       try { return await fs.realpath(root); } catch { return root; }
@@ -31,7 +32,7 @@ export class PathScope {
   }
 
   async resolveForWrite(inputPath: string): Promise<string> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const parent = await fs.realpath(path.dirname(absolute));
     const realRoots = await Promise.all(this.roots.map(async (root) => {
       try { return await fs.realpath(root); } catch { return root; }
@@ -43,7 +44,7 @@ export class PathScope {
   }
 
   async withExisting<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const root = this.#lexicalRoot(absolute);
     return await withWindowsPathLease({
       root,
@@ -54,7 +55,7 @@ export class PathScope {
   }
 
   async withForWrite<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
-    const absolute = path.resolve(inputPath);
+    const absolute = this.#absolute(inputPath);
     const root = this.#lexicalRoot(absolute);
     return await withWindowsPathLease({
       root,
@@ -62,6 +63,18 @@ export class PathScope {
       mode: 'parent',
       executable: this.#windowsPathLeaseExecutable
     }, async () => await operation(await this.resolveForWrite(absolute)));
+  }
+
+  #absolute(inputPath: string): string {
+    const syntax = normalizeScopedPathSyntax(inputPath);
+    if (syntax.kind === 'native-absolute') return syntax.value;
+    if (syntax.kind === 'foreign-windows-absolute') {
+      throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Foreign absolute paths are outside the authorized roots.');
+    }
+    if (this.roots.length !== 1) {
+      throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative paths require exactly one authorized root.');
+    }
+    return path.resolve(this.roots[0]!, syntax.value);
   }
 
   #lexicalRoot(absolute: string): string {

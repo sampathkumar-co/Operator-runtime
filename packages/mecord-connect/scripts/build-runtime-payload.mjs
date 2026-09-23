@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fsNative, { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { stripTypeScriptTypes } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,20 +52,26 @@ function assertTrackedRuntimeSourcesClean() {
   if (status) throw new Error('Runtime source tree contains tracked changes; refusing to bind modified bytes to HEAD.');
 }
 
-async function copyTrackedTree(repoRelativeRoot, destinationRoot) {
+function rewriteTypeScriptSpecifiers(source) {
+  return source.replace(/(['"])([^'"\r\n]+)\.ts\1/g, '$1$2.js$1');
+}
+
+async function compileTrackedTree(repoRelativeRoot, destinationRoot) {
   const raw = execFileSync(gitExecutable, ['ls-files', '-z', '--', repoRelativeRoot], { cwd: repoRoot, encoding: 'utf8' });
   const prefix = `${repoRelativeRoot}/`;
   const files = raw.split('\0').filter(Boolean);
   if (files.length === 0) throw new Error(`No tracked runtime sources found under ${repoRelativeRoot}.`);
   for (const repoRelative of files) {
     if (!repoRelative.startsWith(prefix) || !repoRelative.endsWith('.ts')) throw new Error(`Unexpected tracked runtime source: ${repoRelative}`);
-    const relative = repoRelative.slice(prefix.length);
+    const relative = repoRelative.slice(prefix.length).replace(/\.ts$/, '.js');
     const source = path.join(repoRoot, ...repoRelative.split('/'));
     const destination = path.join(destinationRoot, ...relative.split('/'));
     const stat = await fs.lstat(source);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing non-file tracked runtime source: ${repoRelative}`);
+    const typescript = await fs.readFile(source, 'utf8');
+    const javascript = rewriteTypeScriptSpecifiers(stripTypeScriptTypes(typescript, { mode: 'strip' }));
     await fs.mkdir(path.dirname(destination), { recursive: true });
-    await fs.copyFile(source, destination);
+    await fs.writeFile(destination, javascript, 'utf8');
   }
 }
 
@@ -105,8 +112,8 @@ const commit = sourceCommit();
 assertTrackedRuntimeSourcesClean();
 await fs.rm(runtimeRoot, { recursive: true, force: true });
 await fs.mkdir(nativeRoot, { recursive: true });
-await copyTrackedTree('src', path.join(appRoot, 'src'));
-await copyTrackedTree('apps/local-agent/src', path.join(appRoot, 'apps', 'local-agent', 'src'));
+await compileTrackedTree('src', path.join(appRoot, 'src'));
+await compileTrackedTree('apps/local-agent/src', path.join(appRoot, 'apps', 'local-agent', 'src'));
 
 await fs.writeFile(path.join(appRoot, 'package.json'), JSON.stringify({ private: true, type: 'module' }, null, 2) + '\n', 'utf8');
 
@@ -126,7 +133,7 @@ for (const relative of paths) {
 
 const manifest = {
   schemaVersion: 1,
-  package: '@mecrod/operator',
+  package: 'mecord-connect',
   version: pkg.version,
   platform: 'win32',
   arch: 'x64',

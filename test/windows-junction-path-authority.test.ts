@@ -71,6 +71,23 @@ test('Windows static junction create is denied and outside bytes stay unchanged'
   await assert.rejects(fs.access(path.join(outside, 'created.txt')));
 });
 
+test('Windows static junction replace is denied and outside bytes stay unchanged', async (t) => {
+  const lease = requireWindows(t); if (!lease) return;
+  const { root, outside } = await fixture(t, 'operator-junction-static-replace-');
+  const outsideFile = path.join(outside, 'target.txt');
+  await fs.writeFile(outsideFile, 'OUTSIDE-ORIGINAL');
+  const link = path.join(root, 'safe');
+  await fs.symlink(outside, link, 'junction');
+  const provider = new FilesystemProvider({ allowedRoots: [root], windowsPathLeaseExecutable: lease });
+  const expectedSha256 = crypto.createHash('sha256').update('OUTSIDE-ORIGINAL').digest('hex');
+  const result = await provider.execute(action('file.replace', {
+    path: path.join(link, 'target.txt'), content: 'ATTACK', expectedSha256
+  }));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'WINDOWS_PATH_LEASE_DENIED');
+  assert.equal(await fs.readFile(outsideFile, 'utf8'), 'OUTSIDE-ORIGINAL');
+});
+
 test('Windows junction insertion after validation cannot redirect file.read', async (t) => {
   const lease = requireWindows(t); if (!lease) return;
   const { root, outside } = await fixture(t, 'operator-junction-race-read-');

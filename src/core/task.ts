@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Evidence, TaskState } from './types.ts';
+import type { ActionRisk, Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 export interface TaskNode {
@@ -9,6 +9,64 @@ export interface TaskNode {
   required: boolean;
   dependsOn: string[];
   evidence: Evidence[];
+}
+
+export interface TaskActionRecord {
+  stepKey: string;
+  actionId: string;
+  capability: string;
+  risk: ActionRisk;
+  inputHash: string;
+  attempt: number;
+  state: 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'INTERRUPTED';
+  startedAt: string;
+  finishedAt?: string;
+  errorCode?: string;
+  observation?: TaskObservationSummary;
+  evidence: Evidence[];
+}
+
+export type TaskObservationDomain =
+  | 'project' | 'filesystem' | 'git' | 'docker' | 'database' | 'ide'
+  | 'browser' | 'uia' | 'process' | 'system' | 'application' | 'visual' | 'unknown';
+
+export interface TaskObservationSummaryV1 {
+  schemaVersion: 1;
+  channel: 'semantic' | 'visual';
+  domain: TaskObservationDomain;
+  provider: string;
+  observedAt: string;
+}
+
+export interface TaskObservationSummaryV2 {
+  schemaVersion: 2;
+  channel: 'semantic' | 'visual';
+  domain: TaskObservationDomain;
+  provider: string;
+  capability: string;
+  entityId: string;
+  observedAt: string;
+  stateVersion: string;
+  importantState: Record<string, unknown>;
+  ambiguous: boolean;
+  confidence: number;
+  evidenceRefs: string[];
+}
+
+export type TaskObservationSummary = TaskObservationSummaryV1 | TaskObservationSummaryV2;
+
+export interface TaskExecution {
+  schemaVersion: 1;
+  plannerId: string;
+  goalKind: string;
+  plannerState: Record<string, unknown>;
+  maxSteps: number;
+  maxAttemptsPerStep: number;
+  timeoutMs: number;
+  stepCount: number;
+  startedAt?: string;
+  deadlineAt?: string;
+  records: TaskActionRecord[];
 }
 
 export interface TaskCapsule {
@@ -22,6 +80,7 @@ export interface TaskCapsule {
   nodes: TaskNode[];
   evidence: Evidence[];
   failures: Array<{ at: string; code: string; message: string }>;
+  execution?: TaskExecution;
   createdAt: string;
   updatedAt: string;
 }

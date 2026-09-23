@@ -13,6 +13,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - instruction-provenance boundary for prompt-injection defense
 - evidence-rich structured action results
 - persistent Task Capsules and dependency gates
+- durable semantic task executor with cross-process ownership, bounded planning, retries, loop detection, pause/resume/cancel, crash recovery and evidence-backed postconditions
 - rooted filesystem provider with realpath/symlink escape defense
 - atomic file writes with expected-SHA protection
 - argv-only process execution with no command shell and executable allowlists
@@ -35,7 +36,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
 - full/private MCP runtime with **22 semantic tools**
-- curated public SPLCART Operator MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
+- curated public Mecord Connect MCP surface with **10 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
 - official MCP client and MCP Inspector end-to-end certification
@@ -125,6 +126,8 @@ npm run dev:agent
 
 The local agent is **loopback-only**: startup rejects wildcard, LAN, DNS-name, and other non-literal-loopback bind hosts. Remote ingress must go through the approved relay/Secure MCP Tunnel boundary; the agent is intentionally **not** a public shell endpoint.
 
+The authenticated local boundary also exposes durable task execution: `POST /v1/tasks` submits controlled-file-change, trusted-project-command, semantic browser-navigation, semantic app-operation, Docker lifecycle, or bounded PostgreSQL SELECT goals, while `POST /v1/tasks/:id/run`, `/pause`, `/resume`, and `/cancel` control them. `GET /v1/tasks/:id` returns the persisted Task Capsule, including action attempts, normalized machine observations, and evidence. The private MCP surface exposes the same durable boundary through `task.submit` and `task.control`, including relay-persisted task-to-device affinity; neither private MCP tool accepts recovery credentials or an approval action ID. Approval of a blocked action remains a separate local recovery-authority operation bound to the exact deterministic blocked action ID.
+
 ## MCP development adapter
 
 From `apps/mcp-server`:
@@ -135,7 +138,7 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. Relay mode preserves the same 22-tool MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. Relay mode preserves the same 24-tool private MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
 A real ChatGPT deployment still requires platform-side connectivity evidence: Secure MCP Tunnel can certify the supported private/live path. For public distribution, the OAuth-authenticated MCP edge is implemented but still requires a real DNS/TLS endpoint and production OAuth service before live certification. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md). Repository CI does not pretend those external gates are complete.
 

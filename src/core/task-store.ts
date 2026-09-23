@@ -1,9 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { TaskCapsule, TaskNode } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
 import type { Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
-import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_TASK_BYTES = 8 * 1024 * 1024;
 const MAX_LIST = 500;
@@ -17,13 +18,37 @@ const TASK_OPTIONS = {
   errorCode: 'TASK_STATE_CORRUPT',
   invalidMessage: 'Stored task capsule is invalid.'
 } as const;
-const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
+const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
+const MAX_ACTION_RECORDS = 5000;
+const LEASE_OPTIONS = {
+  maxBytes: 16 * 1024,
+  errorCode: 'TASK_LEASE_CORRUPT',
+  invalidMessage: 'Stored task execution lease is invalid.'
+} as const;
+
+type TaskLeaseRecord = {
+  version: 1;
+  taskId: string;
+  ownerId: string;
+  pid: number;
+  acquiredAt: string;
+};
+
+export interface TaskExecutionLease {
+  readonly taskId: string;
+  readonly ownerId: string;
+  assertOwned(): Promise<void>;
+  release(): Promise<void>;
+}
 
 export class TaskStore {
   #dir: string;
+  #leaseDir: string;
 
   constructor(stateDir: string) {
-    this.#dir = path.join(path.resolve(stateDir), 'tasks');
+    const root = path.resolve(stateDir);
+    this.#dir = path.join(root, 'tasks');
+    this.#leaseDir = path.join(root, 'task-leases');
   }
 
   async init(): Promise<void> {
@@ -39,6 +64,13 @@ export class TaskStore {
     const task = validateTaskCapsule(taskInput);
     const file = this.#file(task.id);
     await writeDurableStateText(file, JSON.stringify(task, null, 2), TASK_OPTIONS);
+  }
+
+  async create(taskInput: TaskCapsule): Promise<void> {
+    await this.init();
+    const task = validateTaskCapsule(taskInput);
+    const file = this.#file(task.id);
+    await createDurableStateBytes(file, Buffer.from(JSON.stringify(task, null, 2), 'utf8'), TASK_OPTIONS);
   }
 
   async get(taskIdInput: string): Promise<TaskCapsule> {
@@ -83,9 +115,121 @@ export class TaskStore {
     await fs.rm(this.#file(taskId), { force: true });
   }
 
+  async acquireExecutionLease(taskIdInput: string): Promise<TaskExecutionLease> {
+    const taskId = validTaskId(taskIdInput);
+    await this.#initLeaseDir();
+    const leasePath = path.join(this.#leaseDir, `${taskId}.json`);
+    const record: TaskLeaseRecord = {
+      version: 1,
+      taskId,
+      ownerId: crypto.randomUUID(),
+      pid: process.pid,
+      acquiredAt: new Date().toISOString()
+    };
+    const serialized = Buffer.from(JSON.stringify(record), 'utf8');
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await createDurableStateBytes(leasePath, serialized, LEASE_OPTIONS);
+        return taskExecutionLease(leasePath, record);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      let existing: TaskLeaseRecord;
+      try { existing = await readTaskLease(leasePath, taskId); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      if (processIsAlive(existing.pid)) {
+        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned by an active executor.`, {
+          details: { acquiredAt: existing.acquiredAt }
+        });
+      }
+      const stale = `${leasePath}.${crypto.randomUUID()}.stale`;
+      try {
+        await fs.rename(leasePath, stale);
+        await fs.rm(stale, { force: true });
+      } catch (error) {
+        if (!['ENOENT', 'EEXIST'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
+    }
+    throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} execution ownership changed concurrently.`);
+  }
+
   #file(taskId: string): string {
     return path.join(this.#dir, `${validTaskId(taskId)}.json`);
   }
+
+  async #initLeaseDir(): Promise<void> {
+    await fs.mkdir(this.#leaseDir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(this.#leaseDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new OperatorError('TASK_LEASE_CORRUPT', 'Task lease directory must be a real directory, not a link or special file.');
+    }
+  }
+}
+
+function taskExecutionLease(leasePath: string, expected: TaskLeaseRecord): TaskExecutionLease {
+  let released = false;
+  const assertOwned = async (): Promise<void> => {
+    if (released) throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease has already been released.');
+    const current = await readTaskLease(leasePath, expected.taskId).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease no longer exists.');
+      throw error;
+    });
+    if (current.ownerId !== expected.ownerId || current.pid !== expected.pid) {
+      throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease ownership changed.');
+    }
+  };
+  return {
+    taskId: expected.taskId,
+    ownerId: expected.ownerId,
+    assertOwned,
+    async release(): Promise<void> {
+      if (released) return;
+      await assertOwned();
+      await fs.rm(leasePath);
+      await syncLeaseDirectory(path.dirname(leasePath));
+      released = true;
+    }
+  };
+}
+
+async function readTaskLease(file: string, expectedTaskId: string): Promise<TaskLeaseRecord> {
+  let raw: unknown;
+  try { raw = JSON.parse(await readDurableStateText(file, LEASE_OPTIONS)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+    if (error instanceof OperatorError) throw error;
+    throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease is not valid JSON.');
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease must be an object.');
+  const value = raw as Record<string, unknown>;
+  if (value.version !== 1 || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
+  const ownerId = validLeaseId(value.ownerId, 'ownerId');
+  const pid = Number(value.pid);
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease PID is invalid.');
+  return { version: 1, taskId: expectedTaskId, ownerId, pid, acquiredAt: validIso(value.acquiredAt, 'lease acquiredAt') };
+}
+
+function validLeaseId(input: unknown, label: string): string {
+  try { return validTaskId(String(input ?? '')); }
+  catch { throw new OperatorError('TASK_LEASE_CORRUPT', `Stored task execution lease ${label} is invalid.`); }
+}
+
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+async function syncLeaseDirectory(directory: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const handle = await fs.open(directory, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 function parseStoredTask(text: string, expectedTaskId: string): TaskCapsule {
@@ -133,6 +277,7 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
   const nodes = validateNodes(raw.nodes);
   const evidence = validateEvidenceArray(raw.evidence, MAX_EVIDENCE, 'task evidence');
   const failures = validateFailures(raw.failures);
+  const execution = raw.execution === undefined ? undefined : validateExecution(raw.execution);
   const createdAt = validIso(raw.createdAt, 'createdAt');
   const updatedAt = validIso(raw.updatedAt, 'updatedAt');
   if (Date.parse(updatedAt) < Date.parse(createdAt)) throw corrupt('Task updatedAt cannot precede createdAt.');
@@ -147,8 +292,89 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
     nodes,
     evidence,
     failures,
+    ...(execution ? { execution } : {}),
     createdAt,
     updatedAt
+  };
+}
+
+function validateExecution(input: unknown): TaskExecution {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('execution must be an object.');
+  const raw = input as Record<string, unknown>;
+  if (raw.schemaVersion !== 1) throw corrupt('execution schemaVersion is invalid.');
+  const plannerId = boundedText(raw.plannerId, 256, 'execution plannerId');
+  const goalKind = boundedText(raw.goalKind, 256, 'execution goalKind');
+  const plannerState = jsonObject(raw.plannerState, 'execution plannerState');
+  const maxSteps = boundedInteger(raw.maxSteps, 1, 1000, 'execution maxSteps');
+  const maxAttemptsPerStep = boundedInteger(raw.maxAttemptsPerStep, 1, 20, 'execution maxAttemptsPerStep');
+  const timeoutMs = boundedInteger(raw.timeoutMs, 100, 24 * 60 * 60 * 1000, 'execution timeoutMs');
+  const stepCount = boundedInteger(raw.stepCount, 0, maxSteps, 'execution stepCount');
+  const startedAt = raw.startedAt === undefined ? undefined : validIso(raw.startedAt, 'execution startedAt');
+  const deadlineAt = raw.deadlineAt === undefined ? undefined : validIso(raw.deadlineAt, 'execution deadlineAt');
+  if ((startedAt === undefined) !== (deadlineAt === undefined)) throw corrupt('execution timing fields must appear together.');
+  if (startedAt && deadlineAt && Date.parse(deadlineAt) <= Date.parse(startedAt)) throw corrupt('execution deadline must follow start.');
+  if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
+  const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
+  return { schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount, ...(startedAt ? { startedAt, deadlineAt } : {}), records };
+}
+
+function validateActionRecord(input: unknown, index: number): TaskActionRecord {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt(`Action record ${index} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const state = String(raw.state ?? '');
+  if (!['STARTED', 'SUCCEEDED', 'FAILED', 'BLOCKED', 'INTERRUPTED'].includes(state)) throw corrupt(`Action record ${index} state is invalid.`);
+  const inputHash = boundedText(raw.inputHash, 64, `action record ${index} inputHash`);
+  if (!/^[0-9a-f]{64}$/.test(inputHash)) throw corrupt(`Action record ${index} inputHash is invalid.`);
+  const risk = String(raw.risk ?? '');
+  if (!['read', 'write', 'external', 'system', 'destructive'].includes(risk)) throw corrupt(`Action record ${index} risk is invalid.`);
+  const startedAt = validIso(raw.startedAt, `action record ${index} startedAt`);
+  const finishedAt = raw.finishedAt === undefined ? undefined : validIso(raw.finishedAt, `action record ${index} finishedAt`);
+  if (state === 'STARTED' && finishedAt !== undefined) throw corrupt(`Action record ${index} cannot finish while STARTED.`);
+  if (state !== 'STARTED' && finishedAt === undefined) throw corrupt(`Action record ${index} must include finishedAt.`);
+  if (finishedAt && Date.parse(finishedAt) < Date.parse(startedAt)) throw corrupt(`Action record ${index} finishedAt cannot precede startedAt.`);
+  return {
+    stepKey: boundedText(raw.stepKey, 256, `action record ${index} stepKey`),
+    actionId: boundedText(raw.actionId, 256, `action record ${index} actionId`),
+    capability: boundedText(raw.capability, 256, `action record ${index} capability`),
+    risk: risk as TaskActionRecord['risk'],
+    inputHash,
+    attempt: boundedInteger(raw.attempt, 1, 20, `action record ${index} attempt`),
+    state: state as TaskActionRecord['state'],
+    startedAt,
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(raw.errorCode === undefined ? {} : { errorCode: boundedText(raw.errorCode, 256, `action record ${index} errorCode`) }),
+    ...(raw.observation === undefined ? {} : { observation: validateObservation(raw.observation, index) }),
+    evidence: validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `action record ${index} evidence`)
+  };
+}
+
+function validateObservation(input: unknown, index: number): TaskObservationSummary {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt(`Action record ${index} observation must be an object.`);
+  const raw = input as Record<string, unknown>;
+  if (raw.schemaVersion !== 1 && raw.schemaVersion !== 2) throw corrupt(`Action record ${index} observation schemaVersion is invalid.`);
+  const channel = String(raw.channel ?? '');
+  if (channel !== 'semantic' && channel !== 'visual') throw corrupt(`Action record ${index} observation channel is invalid.`);
+  const domain = String(raw.domain ?? '');
+  if (!['project', 'filesystem', 'git', 'docker', 'database', 'ide', 'browser', 'uia', 'process', 'system', 'application', 'visual', 'unknown'].includes(domain)) {
+    throw corrupt(`Action record ${index} observation domain is invalid.`);
+  }
+  const provider = boundedText(raw.provider, 256, `action record ${index} observation provider`);
+  const observedAt = validIso(raw.observedAt, `action record ${index} observation observedAt`);
+  if (raw.schemaVersion === 1) {
+    return { schemaVersion: 1, channel, domain: domain as TaskObservationSummary['domain'], provider, observedAt };
+  }
+  const importantState = jsonObject(raw.importantState, `action record ${index} observation importantState`);
+  if (Buffer.byteLength(JSON.stringify(importantState), 'utf8') > 16 * 1024) throw corrupt(`Action record ${index} observation importantState is too large.`);
+  const confidence = Number(raw.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw corrupt(`Action record ${index} observation confidence is invalid.`);
+  if (typeof raw.ambiguous !== 'boolean') throw corrupt(`Action record ${index} observation ambiguous must be boolean.`);
+  const evidenceRefs = boundedHashArray(raw.evidenceRefs, 100, `action record ${index} observation evidenceRefs`);
+  const stateVersion = boundedHash(raw.stateVersion, `action record ${index} observation stateVersion`);
+  return {
+    schemaVersion: 2, channel, domain: domain as TaskObservationSummary['domain'], provider,
+    capability: boundedText(raw.capability, 256, `action record ${index} observation capability`),
+    entityId: boundedText(raw.entityId, 256, `action record ${index} observation entityId`),
+    observedAt, stateVersion, importantState, ambiguous: raw.ambiguous, confidence, evidenceRefs
   };
 }
 
@@ -246,6 +472,23 @@ function validateIdArray(input: unknown, maxItems: number, label: string): strin
 function boundedText(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw corrupt(`${label} is invalid.`);
   return input;
+}
+
+function boundedHash(input: unknown, label: string): string {
+  const value = boundedText(input, 64, label);
+  if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${label} must be a SHA-256 hex digest.`);
+  return value;
+}
+
+function boundedHashArray(input: unknown, maxItems: number, label: string): string[] {
+  if (!Array.isArray(input) || input.length > maxItems) throw corrupt(`${label} must contain at most ${maxItems} hashes.`);
+  return input.map((value, index) => boundedHash(value, `${label}[${index}]`));
+}
+
+function boundedInteger(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw corrupt(`${label} is invalid.`);
+  return value;
 }
 
 function validIso(input: unknown, label: string): string {

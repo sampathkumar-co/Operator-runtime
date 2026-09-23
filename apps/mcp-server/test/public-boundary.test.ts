@@ -4,13 +4,13 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { McpServer } from '@modelcontextprotocol/server';
 import type { ActionResult } from '../../../src/core/types.ts';
 import type { LocalAgentClient } from '../src/local-agent-client.ts';
-import { invokePublicServerWrite, invokePublicWithAgent } from '../src/public-boundary.ts';
+import { invokePublicWithAgent } from '../src/public-boundary.ts';
 import { PUBLIC_TOOL_NAMES, registerPublicTools } from '../src/public-tools.ts';
 import { assertPublicSafePath, containsRestrictedData } from '../src/restricted-data.ts';
 
 test('public tool surface excludes generic high-power capabilities', () => {
   for (const denied of [
-    'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact',
+    'device.claim', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact',
     'app.inspect', 'app.operate', 'postgres.query', 'file.write'
   ]) assert.equal(PUBLIC_TOOL_NAMES.includes(denied), false, denied);
   assert.deepEqual(PUBLIC_TOOL_NAMES, [...PUBLIC_TOOL_NAMES].sort());
@@ -37,27 +37,12 @@ test('public tools/list advertises exact OAuth scopes at top level and compatibi
   const response = sent.find((message) => Array.isArray(message?.result?.tools));
   assert.ok(response, 'raw tools/list response was not observed');
   for (const tool of response.result.tools as Array<Record<string, any>>) {
-    const scopes = ['device.claim', 'file.create', 'file.replace'].includes(String(tool.name))
+    const scopes = ['file.create', 'file.replace'].includes(String(tool.name))
       ? ['operator:read', 'operator:write'] : ['operator:read'];
     const expected = [{ type: 'oauth2', scopes }];
     assert.deepEqual(tool.securitySchemes, expected, `${tool.name} top-level securitySchemes`);
     assert.deepEqual(tool._meta?.securitySchemes, expected, `${tool.name} compatibility securitySchemes`);
   }
-});
-
-test('device claim bootstrap requires write scope before calling server-side claim authority', async () => {
-  let claims = 0;
-  const auth = { writeScope: 'operator:write', resourceMetadataUrl: 'https://edge.operator-runtime.dev/.well-known/oauth-protected-resource/mcp' };
-  const denied = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read'] });
-  assert.equal(claims, 0);
-  assert.equal(denied.isError, true);
-  assert.equal((denied.structuredContent as any).error.code, 'OAUTH_SCOPE_REQUIRED');
-  assert.ok(Array.isArray((denied as any)._meta?.['mcp/www_authenticate']));
-
-  const allowed = await invokePublicServerWrite('device.claim', async () => { claims += 1; return { status: 'claimed' }; }, { ...auth, grantedScopes: ['operator:read', 'operator:write'] });
-  assert.equal(claims, 1);
-  assert.equal(allowed.isError, false);
-  assert.deepEqual((allowed.structuredContent as any).output, { status: 'claimed' });
 });
 
 test('restricted-data guard rejects credential paths and high-confidence secrets', () => {
@@ -323,4 +308,58 @@ test('public file list filters sensitive entry names instead of failing the whol
   assert.equal(json.includes('.ssh'), false);
   assert.equal(json.includes('credentials.json'), false);
   assert.equal(json.includes('Alice'), false);
+});
+
+
+test('public relay liveness errors keep only safe code, message, and retryability', async () => {
+  const agent = { execute: async () => ({
+    ok: false,
+    capability: 'file.create',
+    provider: 'relay.control',
+    evidence: [],
+    durationMs: 1,
+    error: {
+      code: 'ROUTE_DEVICE_OFFLINE',
+      message: 'deviceId=private-device-id internal route details',
+      retryable: true
+    }
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'file.create', 'write', {
+    path: 'C:\\repo\\safe.txt',
+    content: 'safe'
+  });
+  const structured = response.structuredContent as Record<string, any>;
+  assert.equal(response.isError, true);
+  assert.equal(structured.error.code, 'ROUTE_DEVICE_OFFLINE');
+  assert.equal(structured.error.message, 'The paired device is currently offline or stale.');
+  assert.equal(structured.error.retryable, true);
+  assert.equal(JSON.stringify(response).includes('private-device-id'), false);
+});
+
+test('public boundary preserves safe operational error codes without leaking internal messages', async () => {
+  const cases = [
+    ['WINDOWS_PATH_LEASE_HELPER_REQUIRED', 'The Windows path authority helper is unavailable.'],
+    ['WINDOWS_PATH_LEASE_TIMEOUT', 'Windows path authority validation timed out.'],
+    ['CAPABILITY_UNAVAILABLE', 'The requested capability is not currently available on the paired device.'],
+    ['RELAY_DELIVERY_CAPABILITY_RETIRED', 'The routed action was retired because the active device no longer advertised the required capability.']
+  ] as const;
+
+  for (const [code, message] of cases) {
+    const agent = { execute: async () => ({
+      ok: false,
+      capability: 'file.read',
+      provider: 'internal-provider',
+      evidence: [],
+      durationMs: 1,
+      error: { code, message: 'private deviceId=secret-device C:\\Users\\Alice\\private.txt', retryable: true }
+    }) } as unknown as LocalAgentClient;
+    const response = await invokePublicWithAgent(agent, 'file.read', 'read', { path: 'C:\\repo\\safe.txt' });
+    const structured = response.structuredContent as Record<string, any>;
+    assert.equal(structured.error.code, code);
+    assert.equal(structured.error.message, message);
+    assert.equal(structured.error.retryable, true);
+    const json = JSON.stringify(response);
+    assert.equal(json.includes('secret-device'), false);
+    assert.equal(json.includes('Alice'), false);
+  }
 });

@@ -3,6 +3,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/public-edge/Dockerfile
+      args:
+        OPERATOR_SOURCE_COMMIT: ${OPERATOR_SOURCE_COMMIT:-unknown}
+        OPERATOR_BUILD_TIMESTAMP: ${OPERATOR_BUILD_TIMESTAMP:-unknown}
     image: operator-public-edge:local
     init: true
     restart: unless-stopped

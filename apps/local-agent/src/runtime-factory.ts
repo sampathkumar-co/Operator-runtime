@@ -1,7 +1,9 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
 import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
+import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
 
 export function createRuntime(config: {
+  stateDir?: string;
   allowedRoots: string[];
   allowedExecutables: string[];
   terminalAllowedExecutables?: string[];
@@ -18,7 +20,7 @@ export function createRuntime(config: {
   windowsUiaPath?: string;
   windowsPathLeasePath?: string;
 }): OperatorRuntime {
-  return new OperatorRuntime()
+  return new OperatorRuntime(config.stateDir ? { learning: new ProviderLearningStore(config.stateDir) } : {})
     .register(new SystemInspectProvider())
     .register(new FilesystemProvider({ allowedRoots: config.allowedRoots, windowsPathLeaseExecutable: config.windowsPathLeasePath }))
     .register(new ProjectInspectProvider({ allowedRoots: config.allowedRoots }))

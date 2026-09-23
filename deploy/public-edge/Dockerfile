@@ -1,7 +1,14 @@
 FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
+ARG OPERATOR_SOURCE_COMMIT=unknown
+ARG OPERATOR_BUILD_TIMESTAMP=unknown
+LABEL org.opencontainers.image.revision="${OPERATOR_SOURCE_COMMIT}" \
+      org.opencontainers.image.created="${OPERATOR_BUILD_TIMESTAMP}"
+
 WORKDIR /opt/operator
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    OPERATOR_SOURCE_COMMIT="${OPERATOR_SOURCE_COMMIT}" \
+    OPERATOR_BUILD_TIMESTAMP="${OPERATOR_BUILD_TIMESTAMP}"
 
 COPY apps/mcp-server/package.json apps/mcp-server/package-lock.json ./apps/mcp-server/
 COPY apps/relay-server/package.json apps/relay-server/package-lock.json ./apps/relay-server/

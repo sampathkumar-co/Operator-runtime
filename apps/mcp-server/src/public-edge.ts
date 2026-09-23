@@ -90,7 +90,7 @@ export function readPublicMcpEdgeConfig(
     },
     resourceServerUrl: publicUrl,
     scopesSupported: [readScope, writeScope],
-    resourceName: 'SPLCART Operator'
+    resourceName: 'Mecord Connect'
   };
   return {
     publicUrl,

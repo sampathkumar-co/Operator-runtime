@@ -4,10 +4,15 @@ import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
+import type { ProviderLearning } from './provider-learning.ts';
 
 export class OperatorRuntime {
-  readonly router = new CapabilityRouter();
+  readonly router: CapabilityRouter;
   readonly policy = new PolicyEngine();
+
+  constructor(options: { learning?: ProviderLearning } = {}) {
+    this.router = new CapabilityRouter({ learning: options.learning });
+  }
 
   register(provider: CapabilityProvider): this {
     this.router.register(provider);
@@ -51,7 +56,22 @@ export class OperatorRuntime {
       };
     }
 
-    const ranked = await this.router.rank(canonicalAction);
+    let ranked: Awaited<ReturnType<CapabilityRouter['rank']>>;
+    try {
+      ranked = await this.router.rank(canonicalAction);
+    } catch (error) {
+      const op = error instanceof OperatorError
+        ? error
+        : new OperatorError('ROUTING_STATE_ERROR', error instanceof Error ? error.message : String(error));
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'router',
+        evidence: [evidence('routing', 'fail', 'Provider ranking failed closed before execution.', { code: op.code })],
+        error: { code: op.code, message: op.message, retryable: false },
+        durationMs: Math.round(performance.now() - start)
+      };
+    }
     if (ranked.length === 0) {
       return {
         ok: false,
@@ -64,10 +84,10 @@ export class OperatorRuntime {
     }
 
     const failures = [];
-    for (const { provider, score } of ranked) {
+    for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
       try {
         const result = await provider.execute(canonicalAction);
-        result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score }));
+        result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
         result.durationMs = Math.round(performance.now() - start);
         if (result.ok) return result;
         failures.push(result.error ?? { code: 'PROVIDER_FAILED', message: `${provider.name} failed.` });

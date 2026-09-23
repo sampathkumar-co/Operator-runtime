@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
-import { actionHash } from '../../../src/core/action-identity.ts';
+import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
@@ -16,7 +16,7 @@ const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
@@ -24,7 +24,7 @@ export class RelayControlService {
   #token: string;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -44,7 +44,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/account/erase', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -84,6 +84,10 @@ export class RelayControlService {
           send(response, 200, { ok: true, enrollment: { status: claimed.status } });
           return;
         }
+        if (request.url === '/v1/task') {
+          await this.#handleTaskRequest(request, response);
+          return;
+        }
         const body = await readJson(request) as {
           accountId?: unknown;
           principal?: unknown;
@@ -102,7 +106,20 @@ export class RelayControlService {
         const action = validAction(body.action);
         const publicBoundary = body.publicBoundary === true;
         const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
-        const idempotencyKey = actionIdempotencyKey(accountId, action, publicBoundary);
+        // Stateless MCP clients commonly reuse the same JSON-RPC request ID for
+        // separate tool calls. A durable receipt keyed only by that ID would
+        // therefore turn later reads into permanent snapshots (and can replay
+        // an old failure after the device has been upgraded). Reads are safe to
+        // execute again, so give each control request a fresh relay receipt.
+        // Public file.create is protected by exclusive-create semantics and
+        // file.replace by its required content-SHA precondition plus one-shot
+        // approval. They can also be safely re-evaluated: doing so makes a
+        // genuinely new identical create observe TARGET_EXISTS instead of an
+        // old success. Other mutations retain the deterministic receipt so a
+        // transport retry cannot duplicate an unguarded side effect.
+        const idempotencyKey = requiresFreshReceipt(action)
+          ? freshExecutionReceiptKey(accountId, action, publicBoundary)
+          : actionIdempotencyKey(accountId, action, publicBoundary);
 
         const completed = await this.#results.findByIdempotencyKey(idempotencyKey);
         if (completed) {
@@ -163,7 +180,7 @@ export class RelayControlService {
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('RELAY_CONTROL_FAILED', error instanceof Error ? error.message : String(error));
         const status = op.code === 'REQUEST_TOO_LARGE' ? 413 : op.code === 'UNAUTHORIZED' ? 401 : 409;
-        send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message));
+        send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message, undefined, undefined, op.retryable));
       }
     });
     applyBoundedHttpServerPolicy(server);
@@ -174,6 +191,62 @@ export class RelayControlService {
     this.#server = server;
     const address = server.address() as AddressInfo;
     return { host, port: address.port };
+  }
+
+  async #handleTaskRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const body = await readJson(request) as {
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; waitMs?: unknown;
+    };
+    const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+    const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
+    const requestedProjectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+    const task = validTaskRelayRequest(body.task);
+    const bindingKey = taskBindingKey(task.taskId);
+    let boundDeviceId: string | undefined;
+    try { boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey); }
+    catch (error) {
+      if (!(error instanceof OperatorError) || error.code !== 'ROUTE_PROJECT_UNBOUND' || task.operation !== 'submit') throw error;
+    }
+    if (requestedDeviceId && boundDeviceId && requestedDeviceId !== boundDeviceId) {
+      throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Explicit device conflicts with the durable task-to-device binding.');
+    }
+    if (task.operation !== 'submit' && !boundDeviceId) {
+      throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Durable task control requires its persisted task-to-device binding.');
+    }
+
+    const dispatched = await this.#hub.dispatch({
+      accountId,
+      explicitDeviceId: boundDeviceId ?? requestedDeviceId,
+      projectKey: boundDeviceId ? bindingKey : requestedProjectKey,
+      requiredCapabilities: task.requiredCapabilities,
+      kind: 'task',
+      payload: { task: task.payload },
+      idempotencyKey: freshTaskReceiptKey(accountId, task.payload)
+    });
+    const routedDeviceId = dispatched.route.deviceId;
+    if (task.operation === 'submit') await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+
+    const deadline = Date.now() + waitMs;
+    while (Date.now() <= deadline) {
+      if (request.aborted || response.destroyed) return;
+      const stored = await this.#results.get(routedDeviceId, dispatched.delivery.seq);
+      if (stored && stored.deliveryId === dispatched.delivery.id) {
+        await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
+        const result = stored.result as unknown;
+        if (!isTaskTransportResult(result)) {
+          send(response, 502, { ok: false, error: { code: 'RELAY_TASK_RESULT_INVALID', message: 'Device returned a malformed durable task result.' } });
+          return;
+        }
+        send(response, 200, result);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    send(response, 504, { ok: false, error: { code: 'RELAY_TASK_RESULT_PENDING', message: 'The routed durable task operation has no result yet; retry with the same task UUID.' } });
   }
 
   async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
@@ -194,7 +267,7 @@ export class RelayControlService {
   }
 }
 
-function relayFailure(capability: string, startedAt: number, code: string, message: string, deviceId?: string, seq?: number): ActionResult {
+function relayFailure(capability: string, startedAt: number, code: string, message: string, deviceId?: string, seq?: number, retryable = false): ActionResult {
   return {
     ok: false,
     capability,
@@ -206,7 +279,7 @@ function relayFailure(capability: string, startedAt: number, code: string, messa
       data: { code, ...(deviceId ? { deviceId } : {}), ...(seq ? { deliverySeq: seq } : {}) },
       timestamp: new Date().toISOString()
     }],
-    error: { code, message, retryable: false },
+    error: { code, message, retryable },
     durationMs: Math.round(performance.now() - startedAt)
   };
 }
@@ -223,6 +296,78 @@ async function readJson(request: http.IncomingMessage): Promise<unknown> {
   if (chunks.length === 0) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Relay control request body is required.');
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Relay control request must contain valid JSON.'); }
+}
+
+type ValidatedTaskRelayRequest = {
+  operation: 'submit' | 'inspect' | 'run' | 'pause' | 'resume' | 'cancel';
+  taskId: string;
+  payload: Record<string, unknown>;
+  requiredCapabilities: string[];
+};
+
+function validTaskRelayRequest(input: unknown): ValidatedTaskRelayRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task request is required.');
+  const raw = input as Record<string, unknown>;
+  const operation = String(raw.operation ?? '');
+  if (operation === 'submit') {
+    if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task submit request is required.');
+    const request = structuredClone(raw.request as Record<string, unknown>);
+    const taskId = validUuid(String(request.requestId ?? ''), 'task requestId');
+    if (!request.goal || typeof request.goal !== 'object' || Array.isArray(request.goal)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal is required.');
+    const encoded = canonicalJson(request);
+    if (Buffer.byteLength(encoded, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task request exceeds the bounded size.');
+    request.requestId = taskId;
+    return {
+      operation: 'submit', taskId,
+      payload: { operation: 'submit', request },
+      requiredCapabilities: taskRequiredCapabilities(request.goal)
+    };
+  }
+  if (!['inspect', 'run', 'pause', 'resume', 'cancel'].includes(operation)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task operation is invalid.');
+  if (raw.approvedActionId !== undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Remote task control cannot carry local approval authority.');
+  const taskId = validUuid(String(raw.taskId ?? ''), 'taskId');
+  return {
+    operation: operation as ValidatedTaskRelayRequest['operation'],
+    taskId,
+    payload: { operation, taskId },
+    requiredCapabilities: []
+  };
+}
+
+function taskRequiredCapabilities(goalInput: unknown): string[] {
+  const goal = goalInput as Record<string, unknown>;
+  switch (String(goal.kind ?? '')) {
+    case 'controlled-file-change': return ['file.list', 'file.create', 'file.read', 'git.status'];
+    case 'trusted-project-command': return ['project.inspect', 'project.command.inspect', 'project.command.run'];
+    case 'browser-navigation': return ['browser.inspect', 'browser.navigate'];
+    case 'app-operation': return ['app.inspect', 'app.operate'];
+    case 'docker-lifecycle': return ['docker.inspect', 'docker.manage'];
+    case 'postgres-select': return ['postgres.inspect', 'postgres.select'];
+    default: throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal kind is unsupported.');
+  }
+}
+
+function taskBindingKey(taskId: string): string { return `task:${validUuid(taskId, 'taskId')}`; }
+
+function freshTaskReceiptKey(accountId: string, payload: Record<string, unknown>): string {
+  return crypto.createHash('sha256')
+    .update('operator-relay-task-receipt-v1:')
+    .update(accountId)
+    .update(':')
+    .update(canonicalJson(payload))
+    .update(':')
+    .update(crypto.randomBytes(32))
+    .digest('hex');
+}
+
+function isTaskTransportResult(input: unknown): input is { ok: boolean; task?: Record<string, unknown>; error?: { code?: string; message?: string } } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.ok !== 'boolean') return false;
+  if (raw.ok) return Boolean(raw.task && typeof raw.task === 'object' && !Array.isArray(raw.task));
+  if (!raw.error || typeof raw.error !== 'object' || Array.isArray(raw.error)) return false;
+  const error = raw.error as Record<string, unknown>;
+  return typeof error.code === 'string' && typeof error.message === 'string';
 }
 
 function validAction(input: unknown): ActionRequest {
@@ -269,7 +414,29 @@ function validSeq(input: unknown): number {
 }
 
 function actionIdempotencyKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
-  return crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0').digest('hex');
+  const digest = crypto.createHash('sha256').update('operator-relay-action-receipt-v1:').update(accountId).update(':').update(action.id).update(':').update(action.taskId ?? '').update(':').update(actionHash(action)).update(':').update(publicBoundary ? '1' : '0');
+  return digest.digest('hex');
+}
+
+function requiresFreshReceipt(action: ActionRequest): boolean {
+  if (action.risk === 'read') return true;
+  if (action.capability === 'file.create') return true;
+  return action.capability === 'file.replace'
+    && typeof action.input.expectedSha256 === 'string'
+    && /^[0-9a-f]{64}$/i.test(action.input.expectedSha256);
+}
+
+function freshExecutionReceiptKey(accountId: string, action: ActionRequest, publicBoundary: boolean): string {
+  return crypto.createHash('sha256')
+    .update('operator-relay-fresh-execution-receipt-v1:')
+    .update(accountId)
+    .update(':')
+    .update(actionHash(action))
+    .update(':')
+    .update(publicBoundary ? '1' : '0')
+    .update(':')
+    .update(crypto.randomBytes(32))
+    .digest('hex');
 }
 
 function boundedWait(input: unknown): number {

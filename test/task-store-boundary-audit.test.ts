@@ -153,6 +153,68 @@ test('TaskStore rejects malformed persisted timestamps', async (t) => {
   await expectCorrupt(() => new TaskStore(state).get(value.id), /ISO timestamp/);
 });
 
+test('TaskStore rejects malformed durable execution records and impossible timing', async (t) => {
+  const state = await tempDir(t, 'operator-task-bad-execution-');
+  const value = task();
+  const now = value.createdAt;
+  const execution = {
+    schemaVersion: 1,
+    plannerId: 'test.planner',
+    goalKind: 'test-goal',
+    plannerState: { phase: 'start' },
+    maxSteps: 10,
+    maxAttemptsPerStep: 2,
+    timeoutMs: 1000,
+    stepCount: 1,
+    startedAt: now,
+    deadlineAt: new Date(Date.parse(now) + 1000).toISOString(),
+    records: [{
+      stepKey: 'one', actionId: 'action-one', capability: 'file.read', risk: 'owner',
+      inputHash: 'a'.repeat(64), attempt: 1, state: 'STARTED', startedAt: now, evidence: []
+    }]
+  };
+  await writePersisted(state, value.id, { ...value, execution });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /risk is invalid/);
+
+  execution.records[0]!.risk = 'read';
+  (execution.records[0] as any).finishedAt = now;
+  await writePersisted(state, value.id, { ...value, execution });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /cannot finish while STARTED/);
+});
+
+test('TaskStore keeps observation schema v1 readable while validating normalized schema v2', async (t) => {
+  const state = await tempDir(t, 'operator-task-observation-schema-');
+  const value = task();
+  const now = value.createdAt;
+  const record = {
+    stepKey: 'inspect', actionId: 'action-inspect', capability: 'file.read', risk: 'read',
+    inputHash: 'a'.repeat(64), attempt: 1, state: 'SUCCEEDED', startedAt: now, finishedAt: now,
+    observation: {
+      schemaVersion: 1, channel: 'semantic', domain: 'filesystem',
+      provider: 'filesystem', observedAt: now
+    },
+    evidence: []
+  };
+  value.execution = {
+    schemaVersion: 1, plannerId: 'test.planner', goalKind: 'test-goal',
+    plannerState: { phase: 'complete' }, maxSteps: 10, maxAttemptsPerStep: 2,
+    timeoutMs: 1000, stepCount: 1, startedAt: now,
+    deadlineAt: new Date(Date.parse(now) + 1000).toISOString(), records: [record]
+  };
+  await writePersisted(state, value.id, value);
+  const loaded = await new TaskStore(state).get(value.id);
+  assert.equal(loaded.execution?.records[0]?.observation?.schemaVersion, 1);
+
+  (record.observation as any) = {
+    schemaVersion: 2, channel: 'semantic', domain: 'filesystem', provider: 'filesystem',
+    capability: 'file.read', entityId: `filesystem:${'a'.repeat(32)}`, observedAt: now,
+    stateVersion: 'b'.repeat(64), importantState: { ok: true }, ambiguous: false,
+    confidence: 2, evidenceRefs: []
+  };
+  await writePersisted(state, value.id, value);
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /confidence is invalid/);
+});
+
 test('TaskStore rejects oversized persisted collections and strings', async (t) => {
   const state = await tempDir(t, 'operator-task-bounds-');
   const collectionTask = task();
@@ -247,4 +309,67 @@ test('TaskStore durable writes leave no stale temporary files', async (t) => {
   const entries = await fs.readdir(path.join(state, 'tasks'));
   assert.deepEqual(entries, [`${value.id}.json`]);
   assert.equal(entries.some((name) => name.endsWith('.tmp')), false);
+});
+
+test('TaskStore execution lease excludes a second process-local owner and releases cleanly', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-exclusive-');
+  const value = task();
+  const firstStore = new TaskStore(state);
+  const secondStore = new TaskStore(state);
+  const lease = await firstStore.acquireExecutionLease(value.id);
+
+  await assert.rejects(
+    () => secondStore.acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_ALREADY_RUNNING'
+  );
+  await lease.assertOwned();
+  await lease.release();
+  const replacement = await secondStore.acquireExecutionLease(value.id);
+  await replacement.release();
+});
+
+test('TaskStore reclaims an execution lease left by a crashed child process', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-crash-');
+  const value = task();
+  const script = [
+    "import { TaskStore } from './src/core/task-store.ts'",
+    'const store = new TaskStore(process.argv[1])',
+    'await store.acquireExecutionLease(process.argv[2])'
+  ].join(';');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => {
+    execFile(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, state, value.id], { cwd: process.cwd() }, (error) => error ? reject(error) : resolve());
+  });
+
+  const recovered = await new TaskStore(state).acquireExecutionLease(value.id);
+  await recovered.assertOwned();
+  await recovered.release();
+});
+
+test('TaskStore refuses a symlinked execution-lease directory', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-link-state-');
+  const outside = await tempDir(t, 'operator-task-lease-link-outside-');
+  const value = task();
+  if (!(await makeSymlinkOrSkip(t, outside, path.join(state, 'task-leases'), 'junction'))) return;
+
+  await assert.rejects(
+    () => new TaskStore(state).acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /real directory/.test(error.message)
+  );
+  assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test('TaskStore fails closed on malformed execution-lease ownership', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-corrupt-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  await fs.writeFile(path.join(leases, `${value.id}.json`), JSON.stringify({
+    version: 1, taskId: value.id, ownerId: 'forged', pid: process.pid, acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  await assert.rejects(
+    () => new TaskStore(state).acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /ownerId/.test(error.message)
+  );
 });

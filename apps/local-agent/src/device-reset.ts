@@ -196,6 +196,7 @@ function authorityTargets(): string[] {
     'device-registry.json',
     'device-routing.json',
     'approvals.json',
+    'provider-learning.json',
     'relay-outbox'
   ];
 }

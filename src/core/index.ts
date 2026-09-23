@@ -7,6 +7,7 @@ export * from './router.ts';
 export * from './runtime.ts';
 export * from './task.ts';
 export * from './task-store.ts';
+export * from './task-orchestrator.ts';
 export * from './audit.ts';
 export * from './device-identity.ts';
 export * from './device-registry.ts';

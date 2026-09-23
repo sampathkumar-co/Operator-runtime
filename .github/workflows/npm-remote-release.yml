@@ -4,10 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       npm_tag:
-        description: npm dist-tag for @mecrod/operator
+        description: npm dist-tag for mecord-connect
         required: true
         default: latest
         type: string
+      publication_mode:
+        description: Build first-release artifact or stage a later release
+        required: true
+        default: artifact
+        type: choice
+        options:
+          - artifact
+          - stage
 
 permissions:
   actions: read
@@ -16,13 +24,13 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: mecrod-operator-production-publish
+  group: mecord-connect-production-publish
   cancel-in-progress: false
 
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
-    name: Build and publish @mecrod/operator
+    name: Build and hand off mecord-connect
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -56,6 +64,32 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Require resolved public distribution metadata
+        shell: pwsh
+        run: |
+          $pkg = Get-Content packages/mecord-connect/package.json -Raw | ConvertFrom-Json
+          if ($pkg.name -ne 'mecord-connect') {
+            throw 'public npm release package name must be mecord-connect'
+          }
+          if ($pkg.license -ne 'SEE LICENSE IN LICENSE') {
+            throw 'Mecord Connect public npm release requires the owner-approved proprietary LICENSE'
+          }
+          if (-not (Test-Path -LiteralPath 'packages/mecord-connect/LICENSE' -PathType Leaf)) {
+            throw 'Mecord Connect public npm release requires packages/mecord-connect/LICENSE'
+          }
+          if (-not $pkg.contentPolicy -or $pkg.contentPolicy.class -ne 'dual-use') {
+            throw 'Mecord Connect public npm release must declare contentPolicy.class as dual-use'
+          }
+          if (-not (Test-Path -LiteralPath 'packages/mecord-connect/DISCLOSURE' -PathType Leaf)) {
+            throw 'declared dual-use package requires packages/mecord-connect/DISCLOSURE'
+          }
+          if ($pkg.author.name -ne 'Kinthala Samuel Sampath Kumar') {
+            throw 'Mecord Connect npm author must match the approved individual publisher identity'
+          }
+
+      - name: Preserve npm dual-use declaration continuity
+        run: node scripts/verify-npm-policy-continuity.mjs
+
       - name: Build Windows security helpers from locked source
         shell: pwsh
         run: |
@@ -84,7 +118,7 @@ jobs:
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          node packages/mecrod-operator/scripts/build-runtime-payload.mjs
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs
           if ($LASTEXITCODE -ne 0) { throw 'runtime payload build failed' }
 
       - name: Remote CLI security tests
@@ -92,9 +126,9 @@ jobs:
         run: |
           node --experimental-strip-types --test test/npm-remote-runtime.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'remote CLI tests failed' }
-          node packages/mecrod-operator/bin/operator.mjs doctor
+          node packages/mecord-connect/bin/operator.mjs doctor
           if ($LASTEXITCODE -ne 0) { throw 'packaged runtime doctor failed' }
-          node packages/mecrod-operator/scripts/test-required-relay-failure.mjs
+          node packages/mecord-connect/scripts/test-required-relay-failure.mjs
           if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Validate publishable tarball and installed-package doctor
@@ -107,9 +141,19 @@ jobs:
           $packDir = Join-Path $env:RUNNER_TEMP 'operator-pack'
           $smokeDir = Join-Path $env:RUNNER_TEMP 'operator-pack-smoke'
           New-Item -ItemType Directory -Force -Path $packDir, $smokeDir | Out-Null
-          $json = npm pack --json ./packages/mecrod-operator --pack-destination $packDir | ConvertFrom-Json
+          $json = npm pack --json ./packages/mecord-connect --pack-destination $packDir | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $json.Count -ne 1) { throw 'npm pack failed' }
           $files = @($json[0].files | ForEach-Object { $_.path })
+          $pkg = Get-Content packages/mecord-connect/package.json -Raw | ConvertFrom-Json
+          if ($pkg.license -like 'SEE LICENSE IN *') {
+            $licenseFile = $pkg.license.Substring('SEE LICENSE IN '.Length).Trim()
+            if ($licenseFile -notin $files) { throw "npm tarball missing declared license file $licenseFile" }
+          } elseif (-not ($files | Where-Object { $_ -match '^(?i:licen[cs]e)(?:[._-].*)?$' })) {
+            throw 'npm tarball missing a root license file for the declared software license'
+          }
+          if ($pkg.contentPolicy -and $pkg.contentPolicy.class -eq 'dual-use' -and 'DISCLOSURE' -notin $files) {
+            throw 'declared dual-use npm tarball is missing root DISCLOSURE'
+          }
           foreach ($required in @(
             'bin/operator.mjs',
             'src/cli.mjs',
@@ -117,41 +161,117 @@ jobs:
             'runtime/native/operator-windows-dpapi.exe',
             'runtime/native/operator-windows-uia.exe',
             'runtime/native/operator-windows-path-lease.exe',
-            'runtime/app/apps/local-agent/src/remote.ts'
+            'runtime/app/apps/local-agent/src/remote.js'
           )) {
             if ($required -notin $files) { throw "npm tarball missing $required" }
           }
+          $typescriptRuntime = @($files | Where-Object { $_ -match '^runtime/.*\.ts$' })
+          if ($typescriptRuntime.Count -ne 0) {
+            throw "npm tarball must not contain TypeScript runtime files: $($typescriptRuntime -join ', ')"
+          }
           $tgz = Join-Path $packDir $json[0].filename
+          $tgzHash = (Get-FileHash -LiteralPath $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$tgz.sha256"
+          Set-Content -LiteralPath $checksumPath -Value "$tgzHash  $($json[0].filename)" -NoNewline -Encoding ascii
           npm install --prefix $smokeDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed npm install failed' }
-          node (Join-Path $smokeDir 'node_modules/@mecrod/operator/bin/operator.mjs') doctor
+          node (Join-Path $smokeDir 'node_modules/mecord-connect/bin/operator.mjs') doctor
           if ($LASTEXITCODE -ne 0) { throw 'installed runtime entrypoint doctor failed' }
-          $shim = Join-Path $smokeDir 'node_modules/.bin/operator.cmd'
-          if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create operator.cmd bin shim' }
+          $shim = Join-Path $smokeDir 'node_modules/.bin/mecord-connect.cmd'
+          if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw 'npm install did not create mecord-connect.cmd bin shim' }
           & $shim doctor
           if ($LASTEXITCODE -ne 0) { throw 'installed npm bin shim doctor failed' }
+          $env:OPERATOR_AGENT_TOKEN = ''
+          $env:OPERATOR_RECOVERY_TOKEN = ''
+          $installedRemote = Join-Path $smokeDir 'node_modules/mecord-connect/runtime/app/apps/local-agent/src/remote.js'
+          $previousErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            $remoteGuard = @(& node $installedRemote 2>&1)
+            $remoteGuardCode = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+          }
+          if ($remoteGuardCode -eq 0 -or ($remoteGuard -join "`n") -notmatch 'requires an ephemeral local agent token') {
+            throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
+          }
+          $global:LASTEXITCODE = 0
           "package_version=$($json[0].version)" >> $env:GITHUB_OUTPUT
+          "package_filename=$($json[0].filename)" >> $env:GITHUB_OUTPUT
+          "package_path=$tgz" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+          "package_sha256=$tgzHash" >> $env:GITHUB_OUTPUT
 
       - name: Refuse duplicate npm version
         shell: pwsh
         env:
           PACKAGE_VERSION: ${{ steps.pack.outputs.package_version }}
         run: |
-          npm view "@mecrod/operator@$env:PACKAGE_VERSION" version *> $null
+          npm view "mecord-connect@$env:PACKAGE_VERSION" version *> $null
           if ($LASTEXITCODE -eq 0) {
-            throw "@mecrod/operator@$env:PACKAGE_VERSION is already published; refusing overwrite"
+            throw "mecord-connect@$env:PACKAGE_VERSION is already published; refusing overwrite"
           }
           exit 0
 
-      - name: Revalidate exact source binding immediately before publish
+      - name: Revalidate exact source binding before release handoff
         env:
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
-        run: node packages/mecrod-operator/src/publish-check.mjs
+        run: node packages/mecord-connect/src/publish-check.mjs
 
-      - name: Publish npm runtime with provenance
+      - name: Upload immutable npm release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mecord-connect-${{ steps.pack.outputs.package_version }}-${{ github.sha }}
+          path: |
+            ${{ steps.pack.outputs.package_path }}
+            ${{ steps.pack.outputs.checksum_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: First-release artifact handoff
+        if: inputs.publication_mode == 'artifact'
+        shell: pwsh
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TAG: ${{ inputs.npm_tag }}
+          PACKAGE_VERSION: ${{ steps.pack.outputs.package_version }}
+          PACKAGE_FILENAME: ${{ steps.pack.outputs.package_filename }}
+          PACKAGE_SHA256: ${{ steps.pack.outputs.package_sha256 }}
+        run: |
+          "## npm first-release artifact" >> $env:GITHUB_STEP_SUMMARY
+          "Version: ``$env:PACKAGE_VERSION``" >> $env:GITHUB_STEP_SUMMARY
+          "Tag: ``$env:NPM_TAG``" >> $env:GITHUB_STEP_SUMMARY
+          "Artifact file: ``$env:PACKAGE_FILENAME``" >> $env:GITHUB_STEP_SUMMARY
+          "SHA-256: ``$env:PACKAGE_SHA256``" >> $env:GITHUB_STEP_SUMMARY
+          "No registry mutation occurred. After licensing/policy gates pass, publish this exact artifact interactively with npm 2FA." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Install npm stage-capable CLI
+        if: inputs.publication_mode == 'stage'
+        shell: pwsh
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'npm 11.19.1 install failed' }
+          if ((npm --version).Trim() -ne '11.19.1') { throw 'unexpected npm CLI version' }
+
+      - name: Require existing package before staged release
+        if: inputs.publication_mode == 'stage'
+        shell: pwsh
+        run: |
+          npm view mecord-connect name --json *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'npm stage requires mecord-connect to already exist; use artifact mode for the first release' }
+
+      - name: Stage npm runtime with provenance
+        if: inputs.publication_mode == 'stage'
+        shell: pwsh
+        env:
+          NPM_TAG: ${{ inputs.npm_tag }}
+          PACKAGE_PATH: ${{ steps.pack.outputs.package_path }}
+          PACKAGE_SHA256: ${{ steps.pack.outputs.package_sha256 }}
           OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
           NPM_CONFIG_IGNORE_SCRIPTS: 'false'
-        run: npm publish ./packages/mecrod-operator --access public --tag "$env:NPM_TAG" --provenance --ignore-scripts=false
+        run: |
+          $actual = (Get-FileHash -LiteralPath $env:PACKAGE_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:PACKAGE_SHA256) { throw 'release tarball hash changed before staging' }
+          npm stage publish "$env:PACKAGE_PATH" --access public --tag "$env:NPM_TAG" --provenance --ignore-scripts=false
+          if ($LASTEXITCODE -ne 0) { throw 'npm stage publish failed' }
+          "Package staged successfully. Approve the exact staged version with human 2FA from npmjs.com or npm stage approve." >> $env:GITHUB_STEP_SUMMARY

@@ -43,6 +43,12 @@ class FakeSocket implements RelaySocketLike {
   }
 }
 
+class StubbornCloseSocket extends FakeSocket {
+  override close(): void {
+    if (this.readyState !== 3) this.readyState = 2;
+  }
+}
+
 async function stateDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -55,6 +61,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   await identity.loadOrCreate('Relay Test PC');
   const sockets: FakeSocket[] = [];
   const delivered: any[] = [];
+  const acknowledged: any[] = [];
   let client!: RelayClient;
 
   const factory = () => {
@@ -94,6 +101,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     getSessionToken: async () => 'ephemeral-session-token',
     supportedCapabilities: ['git.status', 'file.read'],
     onDelivery: async (delivery) => { delivered.push(delivery); },
+    onAcknowledged: async (delivery) => { acknowledged.push({ delivery, state: await client.state() }); },
     sleep: async () => {}
   });
 
@@ -102,6 +110,9 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   assert.equal(delivered[0].id, 'delivery-1');
   assert.equal((await client.state()).lastAckedServerSeq, 1);
   assert.equal((await client.state()).processing, undefined);
+  assert.equal(acknowledged.length, 1);
+  assert.deepEqual(acknowledged[0].delivery, { seq: 1, id: 'delivery-1' });
+  assert.equal(acknowledged[0].state.lastAckedServerSeq, 1);
   assert.equal(sockets.length, 2);
   assert.equal(sockets[0].sent.some((frame) => frame.type === 'ack' && frame.seq === 1), true);
 });
@@ -138,7 +149,7 @@ test('relay recomputes signed capabilities before every reconnect hello', async 
         capabilities: expected
       });
       setTimeout(() => {
-        if (connectionNumber === 1) socket.close(1012, 'simulate network reconnect');
+        if (connectionNumber === 1) client.reconnect();
         else { client.stop(); socket.close(); }
       }, 0);
     };
@@ -352,4 +363,56 @@ test('client durably adopts authenticated expired-history reconciliation before 
   await client.run();
   assert.deepEqual(delivered, [2]);
   assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 2 });
+});
+
+
+test('explicit reconnect does not depend on the current WebSocket emitting close', async (t) => {
+  const state = await stateDir(t, 'operator-relay-reconnect-interrupt-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Reconnect Interrupt PC');
+  const sockets: FakeSocket[] = [];
+  let client!: RelayClient;
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket: FakeSocket = connectionNumber === 1 ? new StubbornCloseSocket() : new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type !== 'hello') return;
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: `interrupt-${connectionNumber}`,
+        resumeFromSeq: 0,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: ['file.read']
+      });
+      setTimeout(() => {
+        if (connectionNumber === 1) client.reconnect();
+        else {
+          client.stop();
+          socket.close();
+        }
+      }, 0);
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(sockets.length, 2);
+  assert.equal(sockets[0]?.readyState, 2);
 });

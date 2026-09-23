@@ -184,6 +184,15 @@ export class RelayHub {
     await this.#routingFor(accountId).bindProject(projectKey, deviceId);
   }
 
+  async boundProjectDevice(accountId: string, projectKey: string): Promise<string> {
+    const binding = (await this.#routingFor(accountId).listBindings()).find((candidate) => candidate.projectKey === projectKey);
+    if (!binding) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Required task-to-device binding is missing.');
+    if (!(await this.#accounts.ownsDevice(accountId, binding.deviceId))) {
+      throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Bound task device is no longer actively owned by the account.');
+    }
+    return binding.deviceId;
+  }
+
   async dispatch(request: RelayDispatchRequest): Promise<RelayDispatchResult> {
     const requiredCapabilities = request.requiredCapabilities ?? [];
     const memberships = await this.#accounts.listDevices(request.accountId);

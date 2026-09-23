@@ -1375,3 +1375,86 @@ test('authority lease prevents release purge from overtaking an in-flight delive
   client.stop();
   await run;
 });
+
+
+test('session rotation preserves public read create and Git capabilities across reconnect', { timeout: 20_000 }, async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-rotate-caps-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-rotate-caps-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'rotate-public-caps-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+
+  const capabilities = ['file.read', 'file.create', 'git.status', 'git.diff'] as const;
+  const initial = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', ...capabilities.map((capability) => `cap:${capability}`)],
+    ttlMs: 60_000
+  });
+  let currentToken = initial.token;
+  const seen: string[] = [];
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => currentToken,
+    getSupportedCapabilities: async () => capabilities,
+    onDelivery: async (delivery) => { seen.push(delivery.id); },
+    sleep: async () => undefined
+  });
+  const run = client.run();
+  t.after(() => client.stop());
+
+  let firstSessionId = '';
+  await waitFor(async () => {
+    const online = (await hub.onlineDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+    if (!online || capabilities.some((capability) => !online.capabilities.includes(capability))) return false;
+    firstSessionId = online.sessionId;
+    return true;
+  });
+
+  const rotated = await sessions.rotate(initial.payload.jti, { ttlMs: 60_000 });
+  currentToken = rotated.token;
+  client.reconnect();
+
+  await waitFor(async () => {
+    const online = (await hub.onlineDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+    return Boolean(
+      online
+      && online.sessionId !== firstSessionId
+      && capabilities.every((capability) => online.capabilities.includes(capability))
+    );
+  });
+
+  for (const capability of capabilities) {
+    const dispatched = await hub.dispatch({
+      accountId: account.accountId,
+      explicitDeviceId: device.deviceId,
+      requiredCapabilities: [capability],
+      kind: 'task.dispatch',
+      payload: { capability }
+    });
+    await waitFor(() => seen.includes(dispatched.delivery.id));
+  }
+
+  const online = (await hub.onlineDevices(account.accountId)).find((entry) => entry.deviceId === device.deviceId);
+  assert.ok(online);
+  assert.deepEqual([...online.capabilities].sort(), [...capabilities].sort());
+  assert.equal(seen.length, capabilities.length);
+
+  client.stop();
+  await run;
+});

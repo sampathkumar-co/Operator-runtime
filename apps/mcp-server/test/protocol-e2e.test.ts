@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -187,6 +188,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       OPERATOR_AGENT_HOST: '127.0.0.1',
       OPERATOR_AGENT_PORT: String(agentPort),
       OPERATOR_AGENT_TOKEN: TOKEN,
+      OPERATOR_STATE_DIR: path.join(authorityRoot, 'state'),
       OPERATOR_ALLOWED_ROOTS: testRoot,
       OPERATOR_ALLOWED_EXECUTABLES: 'node',
       OPERATOR_PROJECT_COMMAND_REGISTRY: commandRegistryPath,
@@ -233,6 +235,27 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
 
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
+
+  const durableTaskId = crypto.randomUUID();
+  const submittedTask = await client.callTool({
+    name: 'task.submit',
+    arguments: {
+      requestId: durableTaskId,
+      objective: 'Run the trusted read-only project test command durably.',
+      successConditions: ['trusted test command verifies'],
+      goal: { kind: 'trusted-project-command', root: testRoot, commandKind: 'test' },
+      run: true
+    }
+  });
+  assert.notEqual(submittedTask.isError, true);
+  const submittedTaskStructured = submittedTask.structuredContent as Record<string, unknown>;
+  assert.equal(submittedTaskStructured.ok, true);
+  const submittedTaskCapsule = submittedTaskStructured.task as Record<string, unknown>;
+  assert.equal(submittedTaskCapsule.id, durableTaskId);
+  assert.equal(submittedTaskCapsule.state, 'VERIFIED');
+  const inspectedTask = await client.callTool({ name: 'task.control', arguments: { taskId: durableTaskId, operation: 'inspect' } });
+  assert.notEqual(inspectedTask.isError, true);
+  assert.equal(((inspectedTask.structuredContent as Record<string, unknown>).task as Record<string, unknown>).state, 'VERIFIED');
 
   const preflightReceipt = await runLocalCertificationPreflight(mcpUrl);
   const preflightMcp = preflightReceipt.mcp as Record<string, unknown>;

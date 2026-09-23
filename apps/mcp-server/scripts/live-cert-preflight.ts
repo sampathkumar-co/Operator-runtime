@@ -77,7 +77,21 @@ export async function runLocalCertificationPreflight(rawUrl = process.env.OPERAT
     const probe = await client.callTool({ name: 'computer.inspect', arguments: {} });
     const structured = probe.structuredContent as Record<string, unknown> | undefined;
     if (probe.isError === true || structured?.ok !== true || structured?.capability !== 'computer.inspect') {
-      throw new Error('MCP computer.inspect read probe did not return a verified successful Operator result.');
+      const error = structured?.error && typeof structured.error === 'object' && !Array.isArray(structured.error)
+        ? structured.error as Record<string, unknown>
+        : undefined;
+      const safeCode = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+        ? error.code
+        : 'UNKNOWN';
+      const safeMessage = typeof error?.message === 'string'
+        ? error.message.replace(/[^A-Za-z0-9 .,():_-]/g, '?').slice(0, 160)
+        : 'unavailable';
+      throw new Error(
+        `MCP computer.inspect read probe did not return a verified successful Operator result `
+        + `(isError=${probe.isError === true}; ok=${structured?.ok === true}; `
+        + `capability=${structured?.capability === 'computer.inspect' ? 'computer.inspect' : 'unexpected'}; `
+        + `code=${safeCode}; message=${safeMessage}).`
+      );
     }
     const serializedProbe = JSON.stringify(structured);
     if (/BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|"(?:password|privateKey|recoveryToken|bearerToken)"\s*:/i.test(serializedProbe)) {

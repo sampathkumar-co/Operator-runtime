@@ -18,6 +18,16 @@ function action() {
   };
 }
 
+function writeAction() {
+  return {
+    id: 'write-retry-test',
+    capability: 'file.create',
+    risk: 'write',
+    input: { path: 'safe-retry.txt', content: 'safe retry fixture' },
+    provenance: { kind: 'chatgpt' }
+  };
+}
+
 async function post(port: number, body: unknown) {
   return await fetch(`http://127.0.0.1:${port}/v1/execute`, {
     method: 'POST',
@@ -141,7 +151,7 @@ test('public relay control preserves trusted public-boundary marker in delivery 
   assert.equal(payload.action.capability, 'computer.inspect');
 });
 
-test('completed idempotent result is recovered before routing even when the device is offline', async (t) => {
+test('completed non-read result is recovered before routing even when the device is offline', async (t) => {
   const deliveryId = '44444444-4444-4444-8444-444444444444';
   let recoverCalls = 0;
   let dispatchCalls = 0;
@@ -162,7 +172,7 @@ test('completed idempotent result is recovered before routing even when the devi
   t.after(() => service.close());
   const response = await post(port, {
     accountId: ACCOUNT_A,
-    action: { ...action(), taskId: 'mcp-request-retry' },
+    action: { ...action(), risk: 'write', taskId: 'mcp-request-retry' },
     waitMs: 1000
   });
   assert.equal(response.status, 200);
@@ -263,4 +273,222 @@ test('new device registration rolls back when serialized account binding fails',
   assert.equal(response.status, 409);
   assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
   assert.equal(rollbacks, 1);
+});
+
+
+test('read requests dispatch fresh work even when a stateless MCP client reuses its invocation ID', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  const completedByKey = new Map<string, any>();
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `fresh-read-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey(key: string) { return completedByKey.get(key) ?? null; },
+    async get(_deviceId: string, seq: number) {
+      const key = keyBySeq.get(seq)!;
+      const result = {
+        deliveryId: `fresh-read-${seq}`,
+        result: { ok: true, capability: 'computer.inspect', provider: `fresh-${seq}`, evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+      completedByKey.set(key, { deviceId: DEVICE_ID, result: { seq, ...result } });
+      return result;
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: accounts as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await post(port, {
+      accountId: ACCOUNT_A,
+      action: { ...action(), taskId: 'same-read-request-id' },
+      waitMs: 1000
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+
+  const fresh = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'new-read-request-id' },
+    waitMs: 1000
+  });
+  assert.equal(fresh.status, 200, await fresh.text());
+  assert.equal(dispatchCalls, 3);
+  assert.notEqual(keyBySeq.get(2), keyBySeq.get(3));
+});
+
+test('precondition-guarded public file writes re-evaluate reused stateless invocation IDs', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `fresh-write-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get(_deviceId: string, seq: number) {
+      return {
+        deliveryId: `fresh-write-${seq}`,
+        result: {
+          ok: seq === 1,
+          capability: 'file.create',
+          provider: 'filesystem.native',
+          evidence: [],
+          ...(seq === 1 ? {} : { error: { code: 'TARGET_EXISTS', message: 'Target exists.', retryable: false } }),
+          durationMs: 1
+        },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: accounts as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await post(port, {
+      accountId: ACCOUNT_A,
+      publicBoundary: true,
+      action: { ...writeAction(), taskId: 'same-stateless-request-id' },
+      waitMs: 1000
+    });
+    assert.equal(response.status, 200, await response.text());
+  }
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+});
+
+
+test('relay control preserves retryable routing failures for the public boundary', async (t) => {
+  const service = new RelayControlService({
+    hub: {
+      recoverIdempotent: async () => null,
+      dispatch: async () => {
+        throw new OperatorError('ROUTE_DEVICE_OFFLINE', 'private routing detail', { retryable: true });
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    action: { ...action(), taskId: 'route-offline-retryable' },
+    waitMs: 1000
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'ROUTE_DEVICE_OFFLINE');
+  assert.equal(body.error.retryable, true);
+});
+
+test('durable task submission persists device affinity and later control uses the bound device', async (t) => {
+  const taskId = '77777777-7777-4777-8777-777777777777';
+  let bound: { key: string; deviceId: string } | undefined;
+  const dispatches: any[] = [];
+  const hub = {
+    async boundProjectDevice(_accountId: string, key: string) {
+      if (!bound || bound.key !== key) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'missing');
+      return bound.deviceId;
+    },
+    async bindProject(_accountId: string, key: string, deviceId: string) { bound = { key, deviceId }; },
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatches.push(input);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `task-${dispatches.length}`, seq: 40 + dispatches.length } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get(_deviceId: string, seq: number) {
+      return {
+        deliveryId: `task-${seq - 40}`,
+        result: { ok: true, task: { id: taskId, state: 'PENDING' } },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const accounts = { async activeMembershipForDevice() { return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }; } };
+  const service = new RelayControlService({ hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const submit = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'submit', request: {
+      requestId: taskId, objective: 'inspect browser', successConditions: ['submitted'],
+      goal: { kind: 'browser-navigation', url: 'https://example.com' }, run: false
+    } }, waitMs: 1000 })
+  });
+  assert.equal(submit.status, 200, await submit.text());
+  assert.deepEqual(bound, { key: `task:${taskId}`, deviceId: DEVICE_ID });
+  assert.deepEqual(dispatches[0].requiredCapabilities, ['browser.inspect', 'browser.navigate']);
+  const inspect = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, task: { operation: 'inspect', taskId }, waitMs: 1000 })
+  });
+  assert.equal(inspect.status, 200, await inspect.text());
+  assert.equal(dispatches[1].explicitDeviceId, DEVICE_ID);
+  assert.equal(dispatches[1].projectKey, `task:${taskId}`);
+  assert.deepEqual(dispatches[1].requiredCapabilities, []);
+});
+
+test('relay durable task control rejects remote approval authority', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => DEVICE_ID,
+      bindProject: async () => undefined,
+      recoverIdempotent: async () => null,
+      dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch'); }
+    } as any,
+    results: {} as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      task: { operation: 'resume', taskId: '88888888-8888-4888-8888-888888888888', approvedActionId: 'forbidden' },
+      waitMs: 1000
+    })
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_CONTROL_INPUT_INVALID');
+  assert.equal(dispatchCalls, 0);
 });

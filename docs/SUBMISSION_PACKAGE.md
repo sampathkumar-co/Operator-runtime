@@ -1,22 +1,22 @@
-# SPLCART Operator public plugin submission package
+# Mecord Connect public plugin submission package
 
 This document is the reviewer-facing source of truth for the public ChatGPT plugin. It intentionally describes the restricted public MCP surface, not the larger private/local Operator runtime.
 
 ## Publication identity
 
-- Display name: **SPLCART Operator**
-- Package name: `splcart-operator`
+- Display name: **Mecord Connect**
+- Package name: `mecord-connect`
 - Category: **Developer Tools**
 - Initial plugin version: `0.1.0`
 - Public MCP target: `https://operator.splcart.in/mcp`
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The public endpoint must not be submitted until the target HTTPS origin, OAuth provider, legal/support pages, domain challenge, reviewer account, demo recording and Scan Tools snapshot are live and verified.
+The production HTTPS origin and OAuth provider are live on frozen OCC-3M, while PR #27 head `11abc578488f5deb4df83299554b6a4eae3bbe2e` is the fully green Mecord Connect release successor (CI #765 / Platform #535 / NPM Runtime #174 / Signing #536 PASS). Source legal/package metadata already identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the five external/account categories: OpenAI identity verification, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
 
 ## What the public plugin does
 
-SPLCART Operator lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
+Mecord Connect lets ChatGPT work with development projects on a computer the user explicitly paired and authorized. The paired local agent remains the execution-policy boundary.
 
 Public v1 exposes only these ten tools:
 
@@ -61,7 +61,7 @@ The production MCP edge requires OAuth. `operator:read` is required to connect a
 
 The edge also provides:
 
-- exact `/.well-known/openai-apps-challenge` domain verification;
+- a fail-closed `/.well-known/openai-apps-challenge` route that remains 404 until the OpenAI portal supplies an exact verification token;
 - host/origin validation;
 - per-client request throttling;
 - repeated-auth-failure throttling;
@@ -79,7 +79,7 @@ Positive coverage:
 - read a safe source file;
 - inspect Git status;
 - create a previously absent safe file;
-- read then replace a disposable file using the fresh SHA precondition.
+- inspect a bounded Git diff for the known modified fixture file.
 
 Negative coverage:
 
@@ -89,34 +89,33 @@ Negative coverage:
 
 Reviewer credentials must work without MFA, SMS, email confirmation or private-network access. The review account should already have one dedicated demo device paired and one non-sensitive fixture project authorized.
 
-## Demo recording
+## Required demo recording
 
-The submission needs a real recording from the production path. Because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
+Current OpenAI final submission validation for remote-MCP plugins requires a reviewer-accessible demo recording URL showing the plugin's major use cases across supported platforms. This is **not** satisfied by screenshots, and because public v1 has no custom MCP UI, do not provide fabricated UI screenshots.
 
-Recommended recording sequence:
+Create the recording only after the real production ChatGPT OAuth/reviewer path works from the public package. Use this sequence:
 
 1. connect the reviewer/demo account through production OAuth;
 2. inspect the demo project and Git status;
 3. read a safe source file;
 4. demonstrate `.env` credential-path refusal;
 5. create a new file;
-6. read and replace the disposable fixture using the fresh SHA;
-7. show a stale-SHA or missing-write-scope refusal;
-8. show that the result contains task-relevant data but not internal relay/provider telemetry.
+6. inspect the bounded Git diff for the known modified fixture file;
+7. show a missing-write-scope refusal;
+8. optionally demonstrate that file.replace correctly requests local approval rather than bypassing policy;
+9. show that the result contains task-relevant data but not internal relay/provider telemetry.
 
-Never expose OAuth tokens, recovery credentials, device private keys, absolute personal home paths, signing material or real user data in the recording.
+Never expose OAuth tokens, recovery credentials, reviewer passwords, device private keys, absolute personal home paths, signing material or real user data in the recording. Host the final recording at a URL the OpenAI reviewer can access without private-network access or additional authentication.
 
 ## Claims that must NOT be made yet
 
 Do not claim any of the following until the external gate is actually complete:
 
 - OpenAI marketplace/plugin approval;
-- production MCP origin is live;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- business/developer identity is verified in the OpenAI Platform;
-- demo recording URL exists;
-- production Windows release is signed by the final trusted certificate;
+- `mecord-connect@1.0.0` is publicly published and clean-machine `doctor` / reviewer-root startup have passed. (The proprietary license and DUAL_USE source decisions themselves are already resolved and certified.)
+- the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
 
@@ -125,17 +124,17 @@ Do not claim any of the following until the external gate is actually complete:
 Before pressing Submit for Review, verify all of these against the real deployment:
 
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
-- the OpenAI challenge token is served exactly at the required well-known path;
+- if the OpenAI portal issues a challenge token, that exact token is served only at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS; the repository-root privacy/terms/support documents are drafts and are never production inputs. The canonical edge requires git-ignored deployment files `production-notices/{privacy,terms,support}.md` plus an explicit finalization acknowledgement before it will start; publisher/contact, jurisdiction, hosting/region, actual retention, subprocessors and the private security-reporting path must be real deployment values before submission;
+- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. The final descendant already contains the approved publisher/contact/jurisdiction source wording; before submission it must be deployed so all four live pages visibly match the Mecord Connect listing and the verified identity; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
-- the demo recording URL is reachable by reviewers;
 - Scan Tools imports exactly the intended ten-tool public surface and current annotations;
 - all ten annotation justifications match the scanned server values;
 - the exact five positive and three negative cases are reproducible;
+- the reviewer demo fixture is reset to baseline before the review run and the local runtime is installed from the public npm package, not a source checkout;
 - country/region availability is limited to places where support/legal obligations are ready;
 - release notes describe this as the initial public submission.
 
-## Separate Microsoft Store flow
+## Microsoft Store / MSIX
 
-The Microsoft Store package identity/signing flow is independent from this public MCP submission. Public-plugin hardening may require a refreshed Windows binary if local-agent code changes, but it does not require a new Store identity reservation. Keep the Store identity and Partner Center work on its existing release branch and rebuild/re-certify the final MSIX only when the local runtime changes are frozen.
+Microsoft Store/MSIX distribution is **outside Mecord Connect v1 scope**. Existing packaging tests may remain as engineering coverage, but Store identity reservation, Partner Center submission, Store signing and MSIX publication are not prerequisites for the npm runtime or OpenAI plugin submission and must not create extra v1 owner work.

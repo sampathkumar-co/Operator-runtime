@@ -97,14 +97,24 @@ async function runInspector(mcpUrl: string, home: string): Promise<Record<string
 
 test('official MCP client and Inspector execute through relay control mode with unchanged tool schemas', async (t) => {
   const seen: Array<{ accountId: string; deviceId?: string; projectKey?: string; action: ActionRequest }> = [];
+  const seenTasks: Array<Record<string, unknown>> = [];
   const control = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-    if (req.method !== 'POST' || req.url !== '/v1/execute') return send(res, 404, { ok: false });
+    if (req.method !== 'POST' || !['/v1/execute', '/v1/task'].includes(req.url ?? '')) return send(res, 404, { ok: false });
     assert.equal(req.headers.authorization, `Bearer ${CONTROL_TOKEN}`);
     const body = await readBody(req);
     assert.equal(body.accountId, ACCOUNT_ID);
     assert.equal(body.deviceId, DEVICE_ID);
     assert.equal(body.projectKey, PROJECT_KEY);
+    if (req.url === '/v1/task') {
+      const task = body.task as Record<string, unknown>;
+      seenTasks.push(task);
+      const operation = String(task.operation ?? '');
+      const taskId = operation === 'submit'
+        ? String((task.request as Record<string, unknown>)?.requestId ?? '')
+        : String(task.taskId ?? '');
+      return send(res, 200, { ok: true, task: { id: taskId, state: 'PENDING' } });
+    }
     const action = body.action as ActionRequest;
     seen.push({ accountId: body.accountId, deviceId: body.deviceId, projectKey: body.projectKey, action });
     const result: ActionResult = action.capability === 'browser.interact'
@@ -165,6 +175,25 @@ test('official MCP client and Inspector execute through relay control mode with 
 
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
+
+  const durableTaskId = '99999999-9999-4999-8999-999999999999';
+  const submittedTask = await client.callTool({
+    name: 'task.submit',
+    arguments: {
+      requestId: durableTaskId,
+      objective: 'Create a durable remote browser task without starting it.',
+      successConditions: ['task is durably accepted'],
+      goal: { kind: 'browser-navigation', url: 'https://example.com' },
+      run: false
+    }
+  });
+  assert.notEqual(submittedTask.isError, true);
+  assert.equal(((submittedTask.structuredContent as Record<string, unknown>).task as Record<string, unknown>).id, durableTaskId);
+  const taskInspect = await client.callTool({ name: 'task.control', arguments: { taskId: durableTaskId, operation: 'inspect' } });
+  assert.notEqual(taskInspect.isError, true);
+  assert.equal(seenTasks.length, 2);
+  assert.equal(seenTasks[0]?.operation, 'submit');
+  assert.equal(seenTasks[1]?.operation, 'inspect');
 
   const inspect = await client.callTool({ name: 'computer.inspect', arguments: {} });
   assert.notEqual(inspect.isError, true);

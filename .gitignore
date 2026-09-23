@@ -9,6 +9,6 @@ coverage/
 .DS_Store
 Thumbs.db
 native/*/target/
+packages/mecord-connect/runtime/
 
 deploy/public-edge/operator-edge.env
-deploy/public-edge/production-notices/

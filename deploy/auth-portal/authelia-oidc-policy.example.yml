@@ -1,0 +1,47 @@
+# Mecord Connect OIDC policy fragment for Authelia.
+# Merge under identity_providers.oidc in the production configuration.
+authorization_policies:
+  chatgpt_reviewer_policy:
+    # Known Mecord groups are explicitly password-authenticated. Keep the
+    # stronger Authelia fallback for unrelated accounts; stale Mecord flows are
+    # intercepted by the branded recovery route before raw MFA UI is exposed.
+    default_policy: 'two_factor'
+    rules:
+      - policy: 'one_factor'
+        subject: 'group:operator-reviewers'
+      - policy: 'one_factor'
+        subject: 'group:operator-users'
+
+clients:
+  - client_id: 'splcart-operator-chatgpt-prod-8HymKNOT2aqK'
+    client_name: 'Mecord Connect'
+    public: true
+    authorization_policy: 'chatgpt_reviewer_policy'
+    # The user already initiates this authorization by clicking Connect in
+    # ChatGPT. Avoid exposing the raw Authelia consent portal in the normal flow.
+    consent_mode: 'implicit'
+    require_pkce: true
+    pkce_challenge_method: 'S256'
+
+  - client_id: 'mecord-device-pairing-v1'
+    client_name: 'Mecord Device Pairing'
+    public: true
+    authorization_policy: 'chatgpt_reviewer_policy'
+    consent_mode: 'implicit'
+    require_pkce: true
+    pkce_challenge_method: 'S256'
+    redirect_uris:
+      - 'https://auth.splcart.in/pair/callback'
+    scopes:
+      - 'openid'
+      - 'operator:read'
+      - 'operator:write'
+    audience:
+      - 'https://operator.splcart.in/mcp'
+    requested_audience_mode: 'explicit'
+    grant_types:
+      - 'authorization_code'
+    response_types:
+      - 'code'
+    token_endpoint_auth_method: 'none'
+    access_token_signed_response_alg: 'RS256'

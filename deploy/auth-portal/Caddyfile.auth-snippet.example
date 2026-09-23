@@ -1,0 +1,37 @@
+# Public auth.splcart.in routing for Mecord Connect.
+# Authelia stays as the OAuth/API engine, but its browser UI is not exposed.
+
+@oauth_entry {
+	path / /consent/openid/decision
+	query flow=openid_connect
+}
+handle @oauth_entry {
+	reverse_proxy 172.16.3.31:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+@mecord_ui path /signup /signup/* /recover /pair /pair/*
+handle @mecord_ui {
+	request_body {
+		max_size 16KB
+	}
+	reverse_proxy 172.16.3.31:8090 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# Only machine-facing Authelia endpoints remain public.
+@authelia_backend path /api/* /.well-known/* /jwks.json
+handle @authelia_backend {
+	reverse_proxy 172.16.3.30:9091 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# Any other browser/page route is intentionally hidden from the public surface.
+handle {
+	redir * /recover 303
+}

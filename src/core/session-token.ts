@@ -8,7 +8,8 @@ import { readDurableStateText, writeDurableStateText } from './durable-state.ts'
 const PURPOSE = 'operator-session-v1';
 const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_PAYLOAD_BYTES = 8 * 1024;
-const MAX_TTL_MS = 15 * 60_000;
+const DEFAULT_TTL_MS = 30 * 60_000;
+const MAX_TTL_MS = 30 * 60_000;
 const MIN_TTL_MS = 30_000;
 const MAX_SCOPES = 64;
 const MAX_RECORDS = 4096;
@@ -61,7 +62,7 @@ export class DeviceSessionTokenStore {
     const peer = await this.#activePeer(options.subjectDeviceId);
     const audience = validAudience(options.audience);
     const scopes = validScopes(options.scopes);
-    const ttlMs = boundedTtl(options.ttlMs ?? 5 * 60_000);
+    const ttlMs = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
     const now = this.#clock();
     const payload: DeviceSessionPayload = {
       version: 1,
@@ -95,7 +96,7 @@ export class DeviceSessionTokenStore {
     const peer = await this.#activePeer(options.subjectDeviceId);
     const audience = validAudience(options.audience);
     const scopes = validScopes(options.scopes);
-    const ttlMs = boundedTtl(options.ttlMs ?? 5 * 60_000);
+    const ttlMs = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
     const record = await this.#mutate((state) => {
       const now = this.#clock();
       prune(state, now.getTime());
@@ -136,7 +137,7 @@ export class DeviceSessionTokenStore {
 
     const local = await this.#identity.loadOrCreate();
     const peer = await this.#activePeer(snapshot.subjectDeviceId);
-    const ttlMs = boundedTtl(options.ttlMs ?? 5 * 60_000);
+    const ttlMs = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
     const payload: DeviceSessionPayload = {
       version: 1,
       purpose: PURPOSE,

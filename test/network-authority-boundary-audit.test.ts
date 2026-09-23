@@ -64,9 +64,9 @@ test('authenticated local-agent fetch refuses redirects before forwarding the re
 test('network authority fetches remain redirect-disabled', async () => {
   const root = path.resolve(import.meta.dirname, '..');
   const cases = [
-    ['apps/mcp-server/src/local-agent-client.ts', 1],
-    ['apps/mcp-server/src/relay-agent-client.ts', 2],
-    ['apps/local-agent/src/relay-agent.ts', 2],
+    ['apps/mcp-server/src/local-agent-client.ts', 2],
+    ['apps/mcp-server/src/relay-agent-client.ts', 3],
+    ['apps/local-agent/src/relay-agent.ts', 3],
     ['src/capabilities/browser-cdp.ts', 5],
     ['src/capabilities/browser-managed.ts', 1]
   ] as const;

@@ -18,7 +18,7 @@ import { mcpInvocationScope, withMcpInvocation } from './request-context.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
-import { invokePublicServerWrite, invokePublicWithAgent } from './public-boundary.ts';
+import { invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
@@ -97,6 +97,74 @@ if (publicEdge) {
       return sendSdkResponse(reply, response);
     });
   }
+
+  app.post('/pair/api/claim', async (request, reply) => {
+    const webRequest = await toWebRequest(request.raw, request.body);
+    const rejected = validatePublicHeaders(webRequest);
+    if (rejected) return sendSdkResponse(reply, rejected);
+
+    const clientKey = requestClientKey(request.raw);
+    const requestDecision = publicRequestLimiter!.hit(clientKey);
+    if (!requestDecision.allowed) return sendRateLimit(reply, requestDecision);
+    const failureDecision = publicAuthFailureLimiter!.isLimited(clientKey);
+    if (!failureDecision.allowed) return sendRateLimit(reply, failureDecision);
+
+    const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
+    let authInfo: AuthInfo;
+    try {
+      authInfo = await verifyBearerToken(request.headers.authorization, {
+        verifier: publicEdge.verifier,
+        requiredScopes: [publicEdge.writeScope],
+        resourceMetadataUrl
+      });
+    } catch (error) {
+      const failed = publicAuthFailureLimiter!.hit(clientKey);
+      if (!failed.allowed) return sendRateLimit(reply, failed);
+      return sendSdkResponse(reply, bearerAuthChallengeResponse(error, {
+        requiredScopes: [publicEdge.writeScope],
+        resourceMetadataUrl
+      }));
+    }
+    publicAuthFailureLimiter!.clear(clientKey);
+
+    const principal = principalFromAuthInfo(authInfo, publicEdge.publicUrl);
+    const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
+    if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);
+
+    const body = request.body as { userCode?: unknown } | undefined;
+    const compact = typeof body?.userCode === 'string'
+      ? body.userCode.toUpperCase().replace(/[^A-Z0-9]/g, '')
+      : '';
+    if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/.test(compact)) {
+      return reply.header('cache-control', 'no-store').code(400).send({
+        ok: false,
+        error: { code: 'DEVICE_ENROLLMENT_CODE_INVALID', message: 'Pairing code is invalid or expired.' }
+      });
+    }
+    const userCode = `${compact.slice(0, 4)}-${compact.slice(4)}`;
+
+    try {
+      const agent = new LocalAgentClient(agentUrl, agentToken, principal);
+      const result = await agent.claimDevice(userCode);
+      return reply.header('cache-control', 'no-store').code(200).send({ ok: true, status: result.status });
+    } catch (error) {
+      const code = typeof (error as { code?: unknown })?.code === 'string'
+        ? String((error as { code: string }).code)
+        : 'DEVICE_ENROLLMENT_CLAIM_FAILED';
+      const safeCode = [
+        'DEVICE_ENROLLMENT_CODE_INVALID',
+        'DEVICE_ENROLLMENT_EXPIRED',
+        'DEVICE_ENROLLMENT_ALREADY_CLAIMED',
+        'DEVICE_ALREADY_OWNED',
+        'ACCOUNT_DISABLED',
+        'ACCOUNT_ERASING'
+      ].includes(code) ? code : 'DEVICE_ENROLLMENT_CLAIM_FAILED';
+      return reply.header('cache-control', 'no-store').code(409).send({
+        ok: false,
+        error: { code: safeCode, message: 'Device pairing could not be completed.' }
+      });
+    }
+  });
 }
 
 app.all('/mcp', async (request, reply) => {
@@ -136,7 +204,12 @@ app.all('/mcp', async (request, reply) => {
   }
   return withMcpInvocation(request.body, invocationScope, () => nodeHandler(request.raw, reply.raw, request.body));
 });
-app.get('/health', async () => ({ ok: true, service: 'operator-mcp-server', version: '0.1.0' }));
+app.get('/health', async () => ({
+  ok: true,
+  service: 'operator-mcp-server',
+  version: '0.1.0',
+  ...runtimeProvenance(process.env)
+}));
 
 await app.listen({ host, port });
 if (publicEdge) console.error(`[operator] public MCP edge listening behind trusted TLS proxy for ${publicEdge.publicUrl.toString()}`);
@@ -146,6 +219,16 @@ function validatePublicHeaders(request: Request): Response | undefined {
   if (!publicEdge) return undefined;
   return hostHeaderValidationResponse(request, publicEdge.allowedHostnames)
     ?? originValidationResponse(request, publicEdge.allowedHostnames);
+}
+
+function runtimeProvenance(env: NodeJS.ProcessEnv): { sourceCommit: string; buildTimestamp: string } {
+  const sourceCommit = /^[0-9a-f]{40}$/i.test(env.OPERATOR_SOURCE_COMMIT ?? '')
+    ? env.OPERATOR_SOURCE_COMMIT!.toLowerCase()
+    : 'unknown';
+  const buildTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(env.OPERATOR_BUILD_TIMESTAMP ?? '')
+    ? env.OPERATOR_BUILD_TIMESTAMP!
+    : 'unknown';
+  return { sourceCommit, buildTimestamp };
 }
 
 async function sendSdkResponse(reply: FastifyReply, response: Response): Promise<FastifyReply> {
@@ -176,7 +259,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   const server = new McpServer(
     publicMode
-      ? { name: 'splcart-operator', title: 'SPLCART Operator', version: '0.1.0' }
+      ? { name: 'mecord-connect', title: 'Mecord Connect', version: '0.1.0' }
       : { name: 'Operator', title: 'Operator', version: '0.1.0' },
     { capabilities: { tools: {} }, instructions: publicMode
       ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'
@@ -184,9 +267,52 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   );
 
   if (publicMode) {
-    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope }, { claimDevice: (userCode) => invokePublicServerWrite('device.claim', () => agent.claimDevice(userCode), { grantedScopes: authInfo?.scopes, writeScope: publicEdge!.writeScope, resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(publicEdge!.publicUrl).toString() }) });
+    registerPublicTools(server, invoke, { readScope: publicEdge!.readScope, writeScope: publicEdge!.writeScope });
     return server;
   }
+
+  const taskUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  const taskSelector = z.object({
+    name: z.string().min(1).max(512).optional(), automationId: z.string().min(1).max(512).optional(),
+    className: z.string().min(1).max(512).optional(), controlType: z.string().min(1).max(128).optional(),
+    processId: z.number().int().positive().optional()
+  }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
+  const taskGoal = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('controlled-file-change'), root: z.string().min(1).max(4096), path: z.string().min(1).max(4096), content: z.string().max(256 * 1024) }),
+    z.object({ kind: z.literal('trusted-project-command'), root: z.string().min(1).max(4096), commandKind: z.enum(['build', 'test', 'lint']) }),
+    z.object({ kind: z.literal('browser-navigation'), url: z.string().min(1).max(8192), targetId: z.string().min(1).max(512).optional() }),
+    z.object({ kind: z.literal('docker-lifecycle'), root: z.string().min(1).max(4096), operation: z.enum(['start', 'stop', 'restart']), services: z.array(z.string().min(1).max(256)).min(1).max(100), timeoutMs: z.number().int().min(100).max(30 * 60_000).optional() }),
+    z.object({
+      kind: z.literal('postgres-select'), root: z.string().min(1).max(4096), profileId: z.string().min(1).max(256), schema: z.string().min(1).max(128).optional(), table: z.string().min(1).max(128),
+      columns: z.array(z.string().min(1).max(128)).max(50).optional(),
+      filters: z.array(z.object({ column: z.string().min(1).max(128), op: z.enum(['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'like', 'ilike', 'is_null', 'not_null']), value: z.string().max(16_384).optional() })).max(20).optional(),
+      orderBy: z.array(z.object({ column: z.string().min(1).max(128), direction: z.enum(['asc', 'desc']) })).max(5).optional(),
+      limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).max(10_000).optional(), timeoutMs: z.number().int().min(100).max(30_000).optional()
+    }),
+    z.object({
+      kind: z.literal('app-operation'), operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']), selector: taskSelector,
+      value: z.string().max(65_536).optional(), horizontalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(),
+      verticalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(), verifySelector: taskSelector.optional(), waitMs: z.number().int().min(0).max(10_000).optional()
+    })
+  ]);
+
+  server.registerTool('task.submit', {
+    title: 'Submit durable semantic task',
+    description: 'Create one durable, UUID-addressed semantic task and optionally start it. The UUID makes submission retry-safe. All task actions still pass local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
+    inputSchema: z.object({
+      requestId: taskUuid, objective: z.string().min(1).max(16_384), successConditions: z.array(z.string().min(1).max(16_384)).min(1).max(1000),
+      prohibitedScope: z.array(z.string().min(1).max(4096)).max(1000).optional(), goal: taskGoal,
+      run: z.boolean().default(true), maxSteps: z.number().int().min(1).max(100).optional(), maxAttemptsPerStep: z.number().int().min(1).max(5).optional(), timeoutMs: z.number().int().min(100).max(60 * 60_000).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (input) => taskResultWithAgent(agent, await agent.submitTask(input as any), 'task.submit'));
+
+  server.registerTool('task.control', {
+    title: 'Control durable semantic task',
+    description: 'Inspect, run, pause, resume, or cancel a durable task on its originally bound device. Resume never accepts an approval ID or recovery token; locally blocked actions remain blocked until approved through the separate local approval authority.',
+    inputSchema: z.object({ taskId: taskUuid, operation: z.enum(['inspect', 'run', 'pause', 'resume', 'cancel']) }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ taskId, operation }) => taskResultWithAgent(agent, await agent.controlTask(taskId, operation), 'task.control'));
 
   server.registerTool('computer.inspect', {
     title: 'Inspect computer',
@@ -606,6 +732,22 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   }));
 
   return server;
+}
+
+function taskResultWithAgent(
+  _agent: LocalAgentClient,
+  result: Awaited<ReturnType<LocalAgentClient['submitTask']>>,
+  capability: 'task.submit' | 'task.control'
+) {
+  const task = result.task as Record<string, unknown> | undefined;
+  const summary = result.ok
+    ? `${capability}: ${String(task?.state ?? 'PENDING')} task ${String(task?.id ?? '')}`.trim()
+    : `${capability}: NOT VERIFIED (${result.error?.code ?? 'UNKNOWN'}) ${result.error?.message ?? ''}`;
+  return {
+    isError: !result.ok,
+    content: [{ type: 'text' as const, text: summary }],
+    structuredContent: result
+  };
 }
 
 async function invokeWithAgent(agent: LocalAgentClient, capability: string, risk: ActionRisk, input: Record<string, unknown>, target?: string) {

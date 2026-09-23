@@ -16,6 +16,8 @@ import { LocalDeviceResetCoordinator } from './device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
+import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { evidence } from '../../../src/core/evidence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -61,11 +63,20 @@ const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
 const relayTokenFile = path.resolve(process.env.OPERATOR_RELAY_SESSION_TOKEN_FILE?.trim() || path.join(stateDir, 'relay-session.token'));
 const relayAllowInsecureLoopback = process.env.OPERATOR_RELAY_ALLOW_INSECURE_LOOPBACK === '1';
 const relayRequired = process.env.OPERATOR_RELAY_REQUIRED === '1';
+const pairUrlBase = process.env.OPERATOR_PAIR_URL_BASE?.trim();
+let pairUrl: URL | undefined;
+if (pairUrlBase) {
+  pairUrl = new URL(pairUrlBase);
+  if (pairUrl.protocol !== 'https:' || pairUrl.username || pairUrl.password || pairUrl.hash || pairUrl.search || pairUrl.pathname !== '/pair') {
+    throw new OperatorError('PAIR_URL_INVALID', 'Device pairing URL must be credential-free HTTPS ending exactly at /pair.');
+  }
+}
 if (relayRequired && !relayUrl) {
   throw new OperatorError('RELAY_REQUIRED_CONFIGURATION_MISSING', 'Relay-only mode requires an explicit relay URL.');
 }
 
 const runtime = createRuntime({
+  stateDir,
   allowedRoots,
   allowedExecutables,
   terminalAllowedExecutables,
@@ -110,6 +121,11 @@ function startRelay(): void {
     allowLoopbackInsecure: relayAllowInsecureLoopback,
     onUserCode: ({ userCode, expiresAt }) => {
       console.error(`[operator] device pairing code: ${userCode} (expires ${expiresAt})`);
+      if (pairUrl) {
+        const url = new URL(pairUrl);
+        url.searchParams.set('code', userCode);
+        console.error(`[operator] pair this device: ${url.toString()}`);
+      }
     }
   });
   const sessionCredentials = new RelaySessionCredentialManager({
@@ -118,7 +134,8 @@ function startRelay(): void {
     rotateUrl: deriveRelaySessionRotateUrl(relayUrl, relayResultUrl, relayAllowInsecureLoopback),
     protector: windowsBootstrapProtector(),
     allowLoopbackInsecure: relayAllowInsecureLoopback,
-    enrollment
+    enrollment,
+    onBackgroundRefreshFailure: () => relayRunner?.reconnect()
   });
   relaySessionCredentials = sessionCredentials;
   relayRunner = new LocalAgentRelayRunner({
@@ -171,6 +188,41 @@ async function resetLocalDevice() {
   return await coordinator.reset();
 }
 
+const permissions = {
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+  allowedRoots,
+  allowExternalWrites: false,
+  allowSystemChanges: false,
+  allowDestructive: false
+};
+const taskOrchestrator = new TaskOrchestrator({
+  runtime,
+  store: tasks,
+  permissions,
+  executeAction: async (action, actionPermissions) => {
+    if ((await emergencyStop.status()).engaged) {
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'policy',
+        evidence: [evidence('emergency_stop', 'fail', 'Operator execution is disabled by the local emergency stop.')],
+        error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.', retryable: false },
+        durationMs: 0
+      };
+    }
+    const result = await runtime.execute(action, actionPermissions);
+    await audit.append({
+      taskId: action.taskId,
+      capability: action.capability,
+      target: action.target,
+      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
+      risk: action.risk,
+      details: { actionId: action.id, provider: result.provider, durationMs: result.durationMs, errorCode: result.error?.code }
+    });
+    return result;
+  }
+});
+
 const agent = createLocalAgentServer({
   runtime,
   token,
@@ -179,6 +231,7 @@ const agent = createLocalAgentServer({
   approvals,
   audit,
   tasks,
+  taskOrchestrator,
   deviceIdentity,
   deviceRegistry,
   privacy,
@@ -205,13 +258,7 @@ const agent = createLocalAgentServer({
     projectExecutableAllowlistCount: allowedExecutables.length,
     terminalExecutableAllowlistCount: terminalAllowedExecutables.length
   },
-  permissions: {
-    allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
-    allowedRoots,
-    allowExternalWrites: false,
-    allowSystemChanges: false,
-    allowDestructive: false
-  }
+  permissions
 });
 
 const host = process.env.OPERATOR_AGENT_HOST ?? '127.0.0.1';

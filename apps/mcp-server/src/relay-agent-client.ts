@@ -1,6 +1,7 @@
 import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
+import type { TaskControlOperation, TaskSubmitInput, TaskTransportResult } from './local-agent-client.ts';
 import { currentMcpTaskId } from './request-context.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
@@ -80,6 +81,35 @@ export class RelayAgentClient {
     const body = await response.json() as ActionResult;
     if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean' || !Array.isArray(body.evidence) || typeof body.provider !== 'string') {
       throw new Error(`Relay control returned malformed HTTP ${response.status} response.`);
+    }
+    return body;
+  }
+
+  async submitTask(input: TaskSubmitInput): Promise<TaskTransportResult> {
+    return await this.#taskRequest({ operation: 'submit', request: input });
+  }
+
+  async controlTask(taskId: string, operation: TaskControlOperation): Promise<TaskTransportResult> {
+    return await this.#taskRequest({ operation, taskId: validUuid(taskId, 'taskId') });
+  }
+
+  async #taskRequest(task: Record<string, unknown>): Promise<TaskTransportResult> {
+    const response = await fetch(new URL('/v1/task', this.#url), {
+      redirect: 'error', method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify({
+        ...(this.#accountId ? { accountId: this.#accountId } : {}),
+        ...(this.#principal ? { principal: this.#principal } : {}),
+        ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
+        ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
+        task,
+        waitMs: this.#waitMs
+      }),
+      signal: AbortSignal.timeout(this.#waitMs + 5_000)
+    });
+    const body = await response.json() as TaskTransportResult;
+    if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean') {
+      throw new Error(`Relay task control returned malformed HTTP ${response.status} response.`);
     }
     return body;
   }

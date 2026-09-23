@@ -33,6 +33,7 @@ export class LocalAgentRelayRunner {
   #outbox: RelayResultStore;
   #sessionCredentials: RelaySessionCredentialProvider;
   #resultUrl: string;
+  #localAgentBaseUrl: string;
   #localExecuteUrl: string;
   #agentToken: string;
 
@@ -46,7 +47,8 @@ export class LocalAgentRelayRunner {
       stop: () => undefined
     };
     this.#resultUrl = validateResultUrl(options.resultUrl ?? deriveResultUrl(options.relayUrl), options.relayUrl, Boolean(options.allowLoopbackInsecure));
-    this.#localExecuteUrl = new URL('/v1/execute', ensureHttpBase(options.localAgentBaseUrl)).toString();
+    this.#localAgentBaseUrl = ensureHttpBase(options.localAgentBaseUrl);
+    this.#localExecuteUrl = new URL('/v1/execute', this.#localAgentBaseUrl).toString();
     this.#agentToken = options.agentToken;
     this.#client = new RelayClient({
       stateDir: options.stateDir,
@@ -58,31 +60,40 @@ export class LocalAgentRelayRunner {
       supportedCapabilities: options.supportedCapabilities,
       getSupportedCapabilities: options.getSupportedCapabilities,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
-      onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id),
-      onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id)
+      onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id, context.delivery),
+      onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id),
+      onAcknowledged: (delivery) => this.#discardStoredResult(delivery.seq, delivery.id)
     });
   }
 
   run(): Promise<void> { return this.#client.run(); }
   stop(): void { this.#client.stop(); this.#sessionCredentials.stop(); }
+  reconnect(): void { this.#client.reconnect(); }
   state(): ReturnType<RelayClient['state']> { return this.#client.state(); }
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
     const identity = await this.#identity.loadOrCreate();
     const result = delivery.kind === 'action'
       ? await this.#executeActionPayload(delivery.payload)
-      : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
+      : delivery.kind === 'task'
+        ? await this.#executeTaskPayload(delivery.payload)
+        : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
     const safe = boundedResult(result);
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
     await this.#submitResult(delivery.seq, delivery.id, safe);
   }
 
-  async #recoverStoredResult(seq: number, deliveryId: string): Promise<RelayRecoveryDecision> {
+  async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, seq);
-    if (!stored || stored.deliveryId !== deliveryId) return 'stop';
+    if (!stored || stored.deliveryId !== deliveryId) return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
     await this.#submitResult(seq, deliveryId, stored.result);
     return 'ack';
+  }
+
+  async #discardStoredResult(seq: number, deliveryId: string): Promise<void> {
+    const identity = await this.#identity.loadOrCreate();
+    await this.#outbox.removeExact(identity.deviceId, seq, deliveryId);
   }
 
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {
@@ -109,6 +120,41 @@ export class LocalAgentRelayRunner {
     return boundedResult(body);
   }
 
+  async #executeTaskPayload(payload: JsonObject): Promise<JsonObject> {
+    const task = validateRelayTaskRequest(payload.task);
+    if (task.operation === 'submit') {
+      return await this.#callTaskApi('/v1/tasks', 'POST', task.request);
+    }
+
+    const path = `/v1/tasks/${task.taskId}`;
+    const current = await this.#callTaskApi(path, 'GET');
+    if (!current.ok || task.operation === 'inspect') return current;
+    const state = current.task && typeof current.task === 'object' ? String((current.task as Record<string, unknown>).state ?? '') : '';
+    if (task.operation === 'pause' && state === 'PAUSED') return current;
+    if (task.operation === 'cancel' && state === 'CANCELLED') return current;
+    if (task.operation === 'run' && ['VERIFIED', 'FAILED', 'CANCELLED'].includes(state)) return current;
+    if (task.operation === 'resume' && ['VERIFIED', 'FAILED'].includes(state)) return current;
+    return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', {});
+  }
+
+  async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
+    const response = await fetch(new URL(pathname, this.#localAgentBaseUrl), {
+      redirect: 'error', method,
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
+      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
+    });
+    let bodyValue: unknown;
+    try { bodyValue = await response.json(); }
+    catch { throw new OperatorError('RELAY_LOCAL_TASK_RESULT_INVALID', 'Local agent returned a non-JSON durable task response.', { retryable: false }); }
+    if (!bodyValue || typeof bodyValue !== 'object' || Array.isArray(bodyValue) || typeof (bodyValue as Record<string, unknown>).ok !== 'boolean') {
+      throw new OperatorError('RELAY_LOCAL_TASK_RESULT_INVALID', 'Local agent returned a malformed durable task response.', { retryable: false });
+    }
+    if (![200, 202, 400, 403, 404, 409, 423, 503].includes(response.status)) {
+      throw new OperatorError('RELAY_LOCAL_TASK_UNCERTAIN', `Local task API returned HTTP ${response.status}; durable task state must be reconciled before retry.`, { retryable: true });
+    }
+    return boundedResult(bodyValue);
+  }
+
   async #submitResult(seq: number, deliveryId: string, result: JsonObject): Promise<void> {
     const token = await this.#sessionCredentials.forRequest();
     let response: Response;
@@ -133,6 +179,44 @@ export class LocalAgentRelayRunner {
 }
 
 export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
+
+export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean {
+  try {
+    if (delivery.kind === 'task') { validateRelayTaskRequest(delivery.payload.task); return true; }
+    if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+type RelayTaskRequest =
+  | { operation: 'submit'; request: Record<string, unknown> }
+  | { operation: 'inspect' | 'run' | 'pause' | 'resume' | 'cancel'; taskId: string };
+
+function validateRelayTaskRequest(input: unknown): RelayTaskRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task payload must be an object.');
+  const raw = input as Record<string, unknown>;
+  const operation = String(raw.operation ?? '');
+  if (operation === 'submit') {
+    if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task submit payload requires a request object.');
+    const request = structuredClone(raw.request as Record<string, unknown>);
+    request.requestId = validTaskUuid(request.requestId, 'requestId');
+    if (!request.goal || typeof request.goal !== 'object' || Array.isArray(request.goal)) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task submit payload requires a goal object.');
+    const text = JSON.stringify(request);
+    if (Buffer.byteLength(text, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task submit payload exceeds the bounded size.');
+    return { operation: 'submit', request };
+  }
+  if (!['inspect', 'run', 'pause', 'resume', 'cancel'].includes(operation)) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task operation is invalid.');
+  if (raw.approvedActionId !== undefined) throw new OperatorError('RELAY_TASK_INVALID', 'Relay task control cannot carry local approval authority.');
+  return { operation: operation as 'inspect' | 'run' | 'pause' | 'resume' | 'cancel', taskId: validTaskUuid(raw.taskId, 'taskId') };
+}
+
+function validTaskUuid(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('RELAY_TASK_INVALID', `Relay task ${label} must be a UUID.`);
+  return value;
+}
 
 function validateRemoteAction(input: unknown): ActionRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_ACTION_INVALID', 'Relay action payload must contain an action object.');

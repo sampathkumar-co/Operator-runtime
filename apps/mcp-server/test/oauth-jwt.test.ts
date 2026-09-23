@@ -27,8 +27,8 @@ async function fixture() {
     audience: resource,
     resourceUrl: new URL(resource)
   }, { fetchFn });
-  const sign = (overrides: { issuer?: string; audience?: string; exp?: boolean } = {}) => {
-    let jwt = new SignJWT({ scope: 'operator:read operator:write', client_id: 'chatgpt-client' })
+  const sign = (overrides: { issuer?: string; audience?: string; exp?: boolean; claims?: Record<string, unknown> } = {}) => {
+    let jwt = new SignJWT({ scope: 'operator:read operator:write', client_id: 'chatgpt-client', ...overrides.claims })
       .setProtectedHeader({ alg: 'RS256', kid: 'operator-test-key' })
       .setIssuer(overrides.issuer ?? issuer)
       .setAudience(overrides.audience ?? resource)
@@ -75,4 +75,18 @@ test('JWT verifier rejects algorithm downgrade and cross-origin JWKS authority',
     audience: resource,
     resourceUrl: new URL(resource)
   }), /same origin/i);
+});
+
+test('JWT verifier accepts Authelia scp list claims', async () => {
+  const f = await fixture();
+  const auth = await f.verifier.verifyAccessToken(await f.sign({
+    claims: { scope: undefined, scp: ['operator:read', 'operator:write'] }
+  }));
+  assert.deepEqual(auth.scopes, ['operator:read', 'operator:write']);
+});
+
+test('JWT verifier rejects conflicting scope and scp claims', async () => {
+  const f = await fixture();
+  const token = await f.sign({ claims: { scope: 'operator:read', scp: ['operator:write'] } });
+  await assert.rejects(() => f.verifier.verifyAccessToken(token), /scope claims do not match/i);
 });

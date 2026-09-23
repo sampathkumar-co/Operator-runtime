@@ -108,7 +108,7 @@ Before public registration, verify:
 
 - `GET /.well-known/oauth-protected-resource/mcp` returns the canonical HTTPS MCP resource and authorization server
 - `GET /.well-known/oauth-authorization-server` returns the configured OAuth server metadata
-- `GET /` returns the intentional Operator reviewer landing page, while `GET /privacy`, `GET /terms`, and `GET /support` return the reviewed production-page sources over HTTPS; wrong Host/Origin values remain rejected
+- `GET /` returns the intentional Mecord Connect reviewer landing page, while `GET /privacy`, `GET /terms`, and `GET /support` return the reviewed production-page sources over HTTPS; wrong Host/Origin values remain rejected
 - `certify:production-edge` passes against the production environment and issuer, including S256 and CIMD/DCR registration compatibility
 - a real authorization verifies the exact ChatGPT redirect URI and `resource` -> access-token audience binding
 - unauthenticated `/mcp` receives `401` with a bearer challenge pointing at protected-resource metadata

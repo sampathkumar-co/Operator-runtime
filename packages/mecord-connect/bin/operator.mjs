@@ -5,6 +5,6 @@ try {
   await main(process.argv.slice(2));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`[operator] ${message}`);
+  console.error(`[mecord-connect] ${message}`);
   process.exitCode = 1;
 }

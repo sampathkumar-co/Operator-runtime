@@ -97,6 +97,7 @@ export interface RelayClientOptions {
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
+  onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
   allowLoopbackInsecureWs?: boolean;
   random?: () => number;
   clock?: () => Date;
@@ -115,6 +116,7 @@ export class RelayClient {
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
+  #onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
@@ -124,6 +126,7 @@ export class RelayClient {
   #attempt = 0;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #lastPongAt = 0;
+  #interruptConnection: (() => void) | null = null;
 
   constructor(options: RelayClientOptions) {
     this.#stateFile = path.join(path.resolve(options.stateDir), 'relay-client.json');
@@ -142,6 +145,7 @@ export class RelayClient {
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
     this.#onExpiredRecovery = options.onExpiredRecovery;
+    this.#onAcknowledged = options.onAcknowledged;
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -168,6 +172,16 @@ export class RelayClient {
     this.#clearHeartbeat();
     try { this.#socket?.close(1000, 'operator stopping'); } catch { /* already closed */ }
     this.#socket = null;
+  }
+
+  reconnect(): void {
+    if (this.#stopped) return;
+    const interrupt = this.#interruptConnection;
+    if (interrupt) {
+      interrupt();
+      return;
+    }
+    try { this.#socket?.close(1012, 'session refresh recovery'); } catch { /* reconnect loop handles the next attempt */ }
   }
 
   async state(): Promise<Readonly<RelayState>> {
@@ -209,11 +223,13 @@ export class RelayClient {
       let welcomed = false;
       let settled = false;
       let messageQueue: Promise<void> = Promise.resolve();
+      let interrupt: (() => void) | null = null;
 
       const cleanup = () => {
         socket.removeEventListener?.('message', onMessage);
         socket.removeEventListener?.('error', onError);
         socket.removeEventListener?.('close', onClose);
+        if (this.#interruptConnection === interrupt) this.#interruptConnection = null;
       };
       const succeed = () => {
         if (settled) return;
@@ -234,6 +250,8 @@ export class RelayClient {
         if (this.#stopped) succeed();
         else fail(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
       };
+      interrupt = () => fail(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested.', { retryable: true }));
+      this.#interruptConnection = interrupt;
       const processMessage = async (event: any) => {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
@@ -306,6 +324,9 @@ export class RelayClient {
       }
     }
     await this.#writeState({ version: 1, lastAckedServerSeq: frame.resumeFromSeq });
+    if (state.processing && state.processing.seq <= frame.resumeFromSeq) {
+      await this.#notifyAcknowledged(state.processing);
+    }
   }
 
   async #handleDelivery(socket: RelaySocketLike, frame: DeliveryFrame): Promise<void> {
@@ -313,6 +334,7 @@ export class RelayClient {
     let state = await this.#readState();
 
     if (delivery.seq <= state.lastAckedServerSeq) {
+      await this.#notifyAcknowledged(delivery);
       sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
       return;
     }
@@ -335,6 +357,7 @@ export class RelayClient {
       } else if (decision === 'ack') {
         const completed = { version: 1 as const, lastAckedServerSeq: delivery.seq };
         await this.#writeState(completed);
+        await this.#notifyAcknowledged(delivery);
         sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, recovered: true });
         return;
       } else {
@@ -346,7 +369,13 @@ export class RelayClient {
     await this.#writeState({ ...state, processing });
     await this.#onDelivery(delivery);
     await this.#writeState({ version: 1, lastAckedServerSeq: delivery.seq });
+    await this.#notifyAcknowledged(delivery);
     sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id });
+  }
+
+  async #notifyAcknowledged(delivery: Pick<RelayDelivery, 'seq' | 'id'>): Promise<void> {
+    try { await this.#onAcknowledged?.({ seq: delivery.seq, id: delivery.id }); }
+    catch { /* acknowledgement is already durable; cleanup is best-effort */ }
   }
 
   #startHeartbeat(socket: RelaySocketLike, heartbeatMs: number): void {

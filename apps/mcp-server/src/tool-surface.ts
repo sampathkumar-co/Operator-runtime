@@ -1,6 +1,8 @@
 export type ToolSurfaceRisk = 'read' | 'write' | 'external' | 'system' | 'destructive' | 'dynamic';
 
 export const TOOL_SURFACE: ReadonlyArray<{ name: string; risk: ToolSurfaceRisk; description: string }> = [
+  { name: 'task.submit', risk: 'dynamic', description: 'Submit an idempotent durable semantic task that remains subject to local policy and approval.' },
+  { name: 'task.control', risk: 'dynamic', description: 'Inspect, run, pause, resume, or cancel a durable semantic task without remote approval authority.' },
   { name: 'computer.inspect', risk: 'read', description: 'Inspect bounded native state of an authorized computer.' },
   { name: 'project.inspect', risk: 'read', description: 'Inspect semantic metadata for an authorized project root.' },
   { name: 'project.command', risk: 'dynamic', description: 'Inspect or run a trusted project command; run risk is read, write, or external from the trusted registry.' },

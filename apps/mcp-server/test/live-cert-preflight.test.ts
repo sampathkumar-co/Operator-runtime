@@ -32,7 +32,7 @@ test('tool-surface fingerprint is stable across enumeration and object-key order
     ...tool,
     inputSchema: { properties: { a: { type: 'boolean' }, z: { type: 'string' } }, type: 'object' }
   })));
-  assert.equal(first.count, 22);
+  assert.equal(first.count, TOOL_NAMES.length);
   assert.deepEqual(first.names, TOOL_NAMES);
   assert.equal(first.sha256, second.sha256);
   assert.match(first.sha256, /^[0-9a-f]{64}$/);

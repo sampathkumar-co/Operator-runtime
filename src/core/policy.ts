@@ -3,14 +3,22 @@ import type { ActionRequest, PermissionProfile } from './types.ts';
 import { PolicyError } from './errors.ts';
 import { assertInstructionAuthority } from './provenance.ts';
 import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
+import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
 
 function capabilityAllowed(capability: string, allowed: string[]): boolean {
   return allowed.some((rule) => rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1))));
 }
 
 function pathWithin(child: string, root: string): boolean {
-  const rel = path.relative(path.resolve(root), path.resolve(child));
+  const rel = path.relative(path.resolve(root), child);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function policyPath(inputPath: string, roots: string[]): string | undefined {
+  const syntax = normalizeScopedPathSyntax(inputPath);
+  if (syntax.kind === 'native-absolute') return syntax.value;
+  if (syntax.kind === 'foreign-windows-absolute' || roots.length !== 1) return undefined;
+  return path.resolve(roots[0]!, syntax.value);
 }
 
 export class PolicyEngine {
@@ -28,7 +36,8 @@ export class PolicyEngine {
         : undefined;
 
     if (targetPath && permissions.allowedRoots.length > 0) {
-      if (!permissions.allowedRoots.some((root) => pathWithin(targetPath, root))) {
+      const candidate = policyPath(targetPath, permissions.allowedRoots);
+      if (!candidate || !permissions.allowedRoots.some((root) => pathWithin(candidate, root))) {
         throw new PolicyError('PATH_OUTSIDE_SCOPE', 'Requested path is outside the authorized roots.', { targetPath });
       }
     }

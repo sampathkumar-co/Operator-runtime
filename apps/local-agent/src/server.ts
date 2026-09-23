@@ -1,11 +1,13 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
+import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
@@ -112,6 +114,7 @@ export function createLocalAgentServer(options: {
   onEmergencyClear?: () => Promise<void> | void;
   audit?: AuditLog;
   tasks?: TaskStore;
+  taskOrchestrator?: TaskOrchestrator;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
@@ -147,6 +150,103 @@ export function createLocalAgentServer(options: {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
       send(res, 200, { ok: true, tasks: options.tasks ? await options.tasks.list(limit) : [], configured: Boolean(options.tasks) });
+      return;
+    }
+
+    if (pathname === '/v1/tasks' && req.method === 'POST') {
+      if (!options.taskOrchestrator) {
+        send(res, 503, { ok: false, error: { code: 'TASK_EXECUTOR_NOT_CONFIGURED', message: 'Task execution is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const goal = body.goal as SemanticTaskGoal;
+        const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
+        if (!authorizedScope) {
+          send(res, 403, { ok: false, error: { code: 'TASK_SCOPE_DENIED', message: 'Task goal root is outside the authorized roots.' } });
+          return;
+        }
+        if (body.run === true && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
+          return;
+        }
+        const submitted = await options.taskOrchestrator.submit({
+          requestId: body.requestId,
+          objective: body.objective,
+          authorizedScope,
+          prohibitedScope: Array.isArray(body.prohibitedScope) ? body.prohibitedScope : [],
+          successConditions: body.successConditions,
+          goal,
+          maxSteps: body.maxSteps,
+          maxAttemptsPerStep: body.maxAttemptsPerStep,
+          timeoutMs: body.timeoutMs
+        } as SubmitTaskOptions);
+        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id) : submitted;
+        send(res, body.run === true ? 200 : 202, { ok: true, task });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_SUBMISSION_INVALID';
+        send(res, 400, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const taskRoute = /^\/v1\/tasks\/([0-9a-f-]{36})(?:\/(run|pause|resume|cancel))?$/i.exec(pathname);
+    if (taskRoute && req.method === 'GET' && !taskRoute[2]) {
+      if (!options.tasks) {
+        send(res, 503, { ok: false, error: { code: 'TASK_STORE_NOT_CONFIGURED', message: 'Task state is not configured.' } });
+        return;
+      }
+      try { send(res, 200, { ok: true, task: await options.tasks.get(taskRoute[1]!) }); }
+      catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_READ_FAILED';
+        send(res, code === 'TASK_NOT_FOUND' ? 404 : 409, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (taskRoute && req.method === 'POST' && taskRoute[2]) {
+      if (!options.taskOrchestrator) {
+        send(res, 503, { ok: false, error: { code: 'TASK_EXECUTOR_NOT_CONFIGURED', message: 'Task execution is not configured.' } });
+        return;
+      }
+      try {
+        const taskId = taskRoute[1]!;
+        const operation = taskRoute[2]!;
+        if ((operation === 'run' || operation === 'resume') && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
+          return;
+        }
+        let task;
+        if (operation === 'run') task = await options.taskOrchestrator.run(taskId);
+        else if (operation === 'pause') task = await options.taskOrchestrator.pause(taskId);
+        else if (operation === 'cancel') task = await options.taskOrchestrator.cancel(taskId);
+        else {
+          const body = await readJson(req) as { approvedActionId?: unknown };
+          const approvedActionId = body.approvedActionId === undefined ? undefined : boundedString(body.approvedActionId, 'approvedActionId', 256);
+          if (approvedActionId) {
+            if (!options.recoveryToken) {
+              send(res, 503, { ok: false, error: { code: 'TASK_APPROVAL_NOT_CONFIGURED', message: 'Task approval requires a separate recovery token.' } });
+              return;
+            }
+            const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+            if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+              send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+              return;
+            }
+            const current = options.tasks ? await options.tasks.get(taskId) : null;
+            const blocked = current?.execution?.records.find((record) => record.state === 'BLOCKED');
+            if (!blocked || blocked.actionId !== approvedActionId) {
+              send(res, 409, { ok: false, error: { code: 'TASK_APPROVAL_MISMATCH', message: 'Approval must match the task current blocked action.' } });
+              return;
+            }
+          }
+          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : []);
+        }
+        send(res, 200, { ok: true, task });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_CONTROL_FAILED';
+        send(res, 409, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
@@ -442,4 +542,25 @@ export function createLocalAgentServer(options: {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   };
+}
+
+function withinAuthorizedRoots(input: string, roots: string[]): boolean {
+  const candidate = path.resolve(input);
+  return roots.some((root) => {
+    const relative = path.relative(path.resolve(root), candidate);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  });
+}
+
+function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] | null {
+  if (!goal || typeof goal !== 'object') return null;
+  if (goal.kind === 'browser-navigation') {
+    try {
+      const url = new URL(String(goal.url ?? ''));
+      return [`browser:${url.origin}`];
+    } catch { return ['browser:invalid']; }
+  }
+  if (goal.kind === 'app-operation') return ['application:uia'];
+  if (typeof goal.root !== 'string' || !withinAuthorizedRoots(goal.root, roots)) return null;
+  return [path.resolve(goal.root)];
 }
