@@ -146,6 +146,8 @@ The certified example uses the external Docker bridge `operator_ingress` with th
 
 The public proxy must join `operator_ingress` at `172.16.3.10` and reverse-proxy the Operator hostname to `http://172.16.3.20:8080`. TLS, strict SNI/Host policy, certificate automation, and public-domain routing remain owned by the public proxy. The internal Caddy trusts forwarded client addresses only from `172.16.3.10/32` and never exposes relay control `8790`.
 
+The public `/health` route is intentionally read-only and exposes only non-secret release comparison fields: product name/title/version, public-tool surface version/count, source commit, and build timestamp. Use it to detect source/deployment skew; it must never include tokens, device/account identifiers, host paths, or private runtime state.
+
 The shared-VPS gateway is built from the pinned Caddy 2.11.4 image by `Dockerfile.gateway`. That build removes Caddy's upstream `cap_net_bind_service` file capability because this internal gateway listens only on port 8080. It then runs as numeric UID/GID `1000:1000` with `cap_drop: ALL` and `no-new-privileges`, so the gateway does not need a capability exception merely to execute the Caddy binary. If the pinned Caddy base image changes, re-run the shared-VPS container smoke before deployment.
 
 Before activation, validate both files and verify the outer proxy can reach `172.16.3.20:8080` with the canonical Operator `Host` header. Recreate only the affected proxy/gateway services, then confirm the outer proxy remains healthy and external HTTPS succeeds before proceeding with OAuth or OpenAI review.

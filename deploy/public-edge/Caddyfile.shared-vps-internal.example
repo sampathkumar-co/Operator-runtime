@@ -23,7 +23,7 @@
 		Referrer-Policy "no-referrer"
 		-Server
 	}
-	@public_pages path / /privacy /terms /support
+	@public_pages path / /privacy /terms /support /health
 	handle @public_pages {
 		reverse_proxy 127.0.0.1:47200 {
 			header_up X-Forwarded-Proto https

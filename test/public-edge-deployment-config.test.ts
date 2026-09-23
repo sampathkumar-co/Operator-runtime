@@ -110,7 +110,7 @@ test('public-edge deployment templates contain routes but no committed credentia
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
   assert.match(caddy, /@pair_claim path \/pair\/api\/claim/);
   assert.match(caddy, /@pair_claim[\s\S]*max_size 16KB[\s\S]*reverse_proxy 127\.0\.0\.1:47200/);
-  for (const page of ['/', '/privacy', '/terms', '/support']) {
+  for (const page of ['/', '/privacy', '/terms', '/support', '/health']) {
     assert.ok(caddy.includes(page), `Caddy ingress must expose ${page}`);
   }
   for (const route of [
@@ -166,6 +166,7 @@ test('shared-VPS profile preserves trusted ingress with a capability-free non-ro
   assert.match(caddy, /trusted_proxies static 172\.16\.3\.10\/32/);
   assert.match(caddy, /trusted_proxies_strict/);
   assert.match(caddy, /^:8080 \{/m);
+  assert.match(caddy, /@public_pages path \/ \/privacy \/terms \/support \/health/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:47200/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8788/);
   assert.match(caddy, /reverse_proxy 127\.0\.0\.1:8789/);
