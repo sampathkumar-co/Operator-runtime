@@ -212,9 +212,7 @@ export class RelayHub {
     };
     await this.#beforeEnqueue?.({ ...authority });
     await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
-    const payload = request.kind === 'action'
-      ? { ...request.payload, approvalAuthority: { ...authority } }
-      : request.payload;
+    const payload = { ...request.payload, approvalAuthority: { ...authority } };
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
