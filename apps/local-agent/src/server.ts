@@ -595,20 +595,33 @@ export function createLocalAgentServer(options: {
         }
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
-        const sessionPermissions = options.sessionApprovals
-          ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
-          : options.permissions;
-        const permissions = oneTimeApproved
-          ? {
-              ...sessionPermissions,
-              approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
-            }
-          : sessionPermissions;
-        if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-        const result = await options.runtime.execute(action, permissions);
-        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
-          await options.approvals?.register(action, approvalAuthority);
+        let result = await executeActionWithCurrentApproval(action, approvalAuthority);
+        let autoResumedAfterApproval = false;
+        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
+          const pending = await options.approvals.register(action, approvalAuthority);
+          const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId);
+          if (decision === 'deny') {
+            result = {
+              ok: false,
+              capability: action.capability,
+              provider: 'policy',
+              evidence: [{
+                kind: 'approval',
+                status: 'fail',
+                message: 'The local user denied this action.',
+                timestamp: new Date().toISOString()
+              }],
+              error: {
+                code: 'APPROVAL_DENIED',
+                message: 'The local user denied this action.',
+                retryable: false
+              },
+              durationMs: result.durationMs
+            };
+          } else if (decision === 'approve' || decision === 'session') {
+            result = await executeActionWithCurrentApproval(action, approvalAuthority);
+            autoResumedAfterApproval = true;
+          }
         }
         await options.audit?.append({
           taskId: action.taskId,
@@ -622,7 +635,8 @@ export function createLocalAgentServer(options: {
             provider: result.provider,
             durationMs: result.durationMs,
             errorCode: result.error?.code,
-            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions))
+            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
+            autoResumedAfterApproval
           }
         });
         send(res, result.ok ? 200 : 409, result);
@@ -652,6 +666,7 @@ export function createLocalAgentServer(options: {
       return { host: bindHost, port: address.port };
     },
     async close(): Promise<void> {
+      clearApprovalWaiters();
       if (!server.listening) return;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
