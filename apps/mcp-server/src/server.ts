@@ -103,7 +103,7 @@ if (publicEdge) {
     });
   }
 
-  app.post('/pair/api/claim', async (request, reply) => {
+  if (!developerEdge) app.post('/pair/api/claim', async (request, reply) => {
     const webRequest = await toWebRequest(request.raw, request.body);
     const rejected = validatePublicHeaders(webRequest);
     if (rejected) return sendSdkResponse(reply, rejected);
