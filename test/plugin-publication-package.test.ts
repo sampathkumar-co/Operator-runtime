@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { PUBLIC_PLUGIN_TOOL_NAMES as PUBLIC_TOOL_NAMES } from '../src/core/public-plugin-surface.ts';
+import { PRODUCT_VERSION } from '../src/core/product-identity.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
 
@@ -15,8 +16,11 @@ test('public plugin manifest satisfies final directory field limits', async () =
   const ui = manifest.interface;
   assert.match(manifest.name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
   assert.match(manifest.version, /^\d+\.\d+\.\d+/);
+  assert.equal(manifest.version, PRODUCT_VERSION, 'plugin manifest version must match the public MCP product version');
   const runtimePackage = await json('packages/mecord-connect/package.json');
-  assert.equal(manifest.version, runtimePackage.version, 'plugin manifest version must match mecord-connect runtime package version');
+  assert.match(runtimePackage.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(runtimePackage.name, 'mecord-connect');
+  assert.equal(runtimePackage.version.split('.')[0], manifest.version.split('.')[0], 'npm runtime major must remain compatible with the public plugin major');
   assert.ok(ui.displayName.length <= 30);
   assert.ok(ui.shortDescription.length <= 30);
   assert.ok(ui.longDescription.length <= 4000);
