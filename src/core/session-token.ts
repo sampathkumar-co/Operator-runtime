@@ -119,7 +119,7 @@ export class DeviceSessionTokenStore {
     return await this.#reissue(record);
   }
 
-  async rotate(jtiInput: string, options: { ttlMs?: number } = {}): Promise<{ token: string; payload: DeviceSessionPayload }> {
+  async rotate(jtiInput: string, options: { ttlMs?: number; scopes?: string[] } = {}): Promise<{ token: string; payload: DeviceSessionPayload }> {
     const jti = validUuid(jtiInput, 'jti');
     const snapshotState = await this.#read();
     const snapshot = snapshotState.issued.find((candidate) => candidate.jti === jti);
@@ -138,6 +138,7 @@ export class DeviceSessionTokenStore {
     const local = await this.#identity.loadOrCreate();
     const peer = await this.#activePeer(snapshot.subjectDeviceId);
     const ttlMs = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
+    const scopes = options.scopes === undefined ? [...snapshot.scopes] : validScopes(options.scopes);
     const payload: DeviceSessionPayload = {
       version: 1,
       purpose: PURPOSE,
@@ -147,7 +148,7 @@ export class DeviceSessionTokenStore {
       subjectDeviceId: peer.deviceId,
       subjectFingerprint: peer.fingerprint,
       audience: snapshot.audience,
-      scopes: [...snapshot.scopes],
+      scopes,
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ttlMs).toISOString()
     };
