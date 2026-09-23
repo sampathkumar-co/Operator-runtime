@@ -17,6 +17,7 @@ export type SemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
+  | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
   | {
       kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
       value?: string; horizontalAmount?: string; verticalAmount?: string;
@@ -320,7 +321,7 @@ export class TaskOrchestrator {
 
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
-  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'app-operation'].includes(goal.kind); }
+  supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
@@ -337,6 +338,19 @@ export class SemanticTaskPlanner implements TaskPlanner {
       if (phase === 'commands') return { type: 'step', key: 'inspect-commands', title: 'Discover trusted project commands', capability: 'project.command.inspect', input: { path: goal.root } };
       if (phase === 'run') return { type: 'step', key: 'run-command', title: 'Execute trusted project command', capability: 'project.command.run', input: { path: goal.root, commandId: state.commandId, expectedRisk: state.commandRisk } };
       return { type: 'complete', message: 'Trusted project command completed with its registered postcondition validation.' };
+    }
+    if (goal.kind === 'docker-lifecycle') {
+      if (phase === 'start') return { type: 'step', key: 'inspect-docker-project', title: 'Inspect Docker project state', capability: 'docker.inspect', input: { path: goal.root }, target: goal.root };
+      if (phase === 'manage') return {
+        type: 'step', key: 'manage-docker-services', title: 'Manage verified Docker services', capability: 'docker.manage',
+        input: {
+          path: goal.root, operation: goal.operation, services: goal.services,
+          expectedCurrentFingerprint: state.dockerFingerprint, timeoutMs: goal.timeoutMs ?? 60_000
+        },
+        target: goal.root
+      };
+      if (phase === 'verify') return { type: 'step', key: 'verify-docker-project', title: 'Re-inspect Docker lifecycle postcondition', capability: 'docker.inspect', input: { path: goal.root }, target: goal.root };
+      return { type: 'complete', message: 'Docker lifecycle operation satisfied fresh-state, approval, and semantic service-state postconditions.' };
     }
     if (goal.kind === 'app-operation') {
       const selector = phase === 'verify' ? (goal.verifySelector ?? goal.selector) : goal.selector;
@@ -387,6 +401,28 @@ export class SemanticTaskPlanner implements TaskPlanner {
         state.commandRisk = selected.risk;
         state.phase = 'run';
       } else if (step.key === 'run-command') state.phase = 'complete';
+      return;
+    }
+    if (goal.kind === 'docker-lifecycle') {
+      if (step.key === 'inspect-docker-project') {
+        const output = asRecord(result.output);
+        if (output.scope !== 'project') throw new OperatorError('TASK_DOCKER_PROJECT_REQUIRED', 'Docker lifecycle tasks require project-scoped inspection.');
+        const fingerprint = String(output.fingerprint ?? '');
+        if (!/^[0-9a-f]{64}$/i.test(fingerprint)) throw new OperatorError('TASK_DOCKER_FINGERPRINT_MISSING', 'Docker inspection did not return a valid project fingerprint.');
+        verifyDockerServicesPresent(goal.services, output.services);
+        state.dockerFingerprint = fingerprint.toLowerCase();
+        state.phase = 'manage';
+      } else if (step.key === 'manage-docker-services') {
+        const output = asRecord(result.output);
+        if (output.operation !== goal.operation) throw new OperatorError('TASK_DOCKER_POSTCONDITION_FAILED', 'Docker manage result did not match the requested operation.');
+        verifyDockerServicesState(goal.operation, goal.services, output.states);
+        state.phase = 'verify';
+      } else if (step.key === 'verify-docker-project') {
+        const output = asRecord(result.output);
+        if (output.scope !== 'project') throw new OperatorError('TASK_DOCKER_PROJECT_REQUIRED', 'Docker verification did not remain project-scoped.');
+        verifyDockerServicesState(goal.operation, goal.services, output.services);
+        state.phase = 'complete';
+      }
       return;
     }
     if (goal.kind === 'app-operation') {
@@ -440,6 +476,12 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.evidence.push(evidence('strategy_fallback', 'info', 'Browser target disappeared; switched to semantic target re-discovery.'));
       return true;
     }
+    if (step.key === 'manage-docker-services' && result.error?.code === 'DOCKER_STATE_CHANGED') {
+      task.execution!.plannerState.phase = 'start';
+      delete task.execution!.plannerState.dockerFingerprint;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'Docker project state changed; switched to fresh inspection before requesting a new approval.'));
+      return true;
+    }
     if (step.key === 'operate-app-target' && ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT'].includes(result.error?.code ?? '')) {
       task.execution!.plannerState.phase = 'start';
       delete task.execution!.plannerState.targetIdentity;
@@ -474,6 +516,16 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (url.username || url.password) throw new OperatorError('TASK_GOAL_INVALID', 'Browser goal URL must not contain credentials.');
     goal.url = url.toString();
     if (goal.targetId !== undefined) goal.targetId = boundedText(goal.targetId, 256, 'browser targetId');
+  } else if (goal.kind === 'docker-lifecycle') {
+    goal.root = path.resolve(boundedText(goal.root, 4096, 'docker root'));
+    if (!['start', 'stop', 'restart'].includes(goal.operation)) throw new OperatorError('TASK_GOAL_INVALID', 'Docker lifecycle operation must be start, stop, or restart.');
+    if (!Array.isArray(goal.services) || goal.services.length < 1 || goal.services.length > 50) throw new OperatorError('TASK_GOAL_INVALID', 'Docker lifecycle requires 1-50 service names.');
+    goal.services = [...new Set(goal.services.map((service, index) => {
+      const value = boundedText(service, 128, `docker services[${index}]`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)) throw new OperatorError('TASK_GOAL_INVALID', 'Docker service names must use bounded alphanumeric/._- characters.');
+      return value;
+    }))].sort();
+    goal.timeoutMs = boundedInteger(goal.timeoutMs, 1_000, 300_000, 60_000);
   } else if (goal.kind === 'app-operation') {
     goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
     if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');
@@ -491,6 +543,30 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     goal.waitMs = boundedInteger(goal.waitMs, 0, 10_000, 0);
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
+}
+
+function verifyDockerServicesPresent(expectedServices: string[], input: unknown): void {
+  const services = Array.isArray(input) ? input.map(asRecord) : [];
+  for (const service of expectedServices) {
+    const found = services.find((item) => item.service === service);
+    if (!found) throw new OperatorError('TASK_DOCKER_SERVICE_MISSING', `Docker inspection did not report service ${service}.`);
+    const containers = Number(found.containers ?? 0);
+    if (!Number.isSafeInteger(containers) || containers < 1) throw new OperatorError('TASK_DOCKER_SERVICE_MISSING', `Docker service ${service} has no created containers.`);
+  }
+}
+
+function verifyDockerServicesState(operation: 'start' | 'stop' | 'restart', expectedServices: string[], input: unknown): void {
+  const services = Array.isArray(input) ? input.map(asRecord) : [];
+  for (const service of expectedServices) {
+    const found = services.find((item) => item.service === service);
+    if (!found) throw new OperatorError('TASK_DOCKER_POSTCONDITION_FAILED', `Docker service ${service} disappeared during verification.`);
+    const states = Array.isArray(found.states) ? found.states.map(String) : [];
+    if (states.length === 0) throw new OperatorError('TASK_DOCKER_POSTCONDITION_FAILED', `Docker service ${service} returned no container states.`);
+    const expectedState = operation === 'stop' ? 'exited' : 'running';
+    if (!states.every((state) => state === expectedState)) {
+      throw new OperatorError('TASK_DOCKER_POSTCONDITION_FAILED', `Docker service ${service} did not reach ${expectedState}.`);
+    }
+  }
 }
 
 const UIA_TASK_OPERATIONS: readonly UiaTaskOperation[] = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'];

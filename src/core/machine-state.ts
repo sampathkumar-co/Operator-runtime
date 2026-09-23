@@ -3,7 +3,7 @@ import type { ActionRequest, ActionResult, Evidence } from './types.ts';
 import type { TaskObservationDomain, TaskObservationSummaryV2 } from './task.ts';
 
 const SAFE_STATE_KEYS = new Set([
-  'sha256', 'size', 'bytes', 'count', 'clean', 'status', 'operation', 'verified',
+  'sha256', 'size', 'bytes', 'count', 'clean', 'operation', 'verified',
   'exitCode', 'state', 'healthy', 'selected', 'expand_collapse_state', 'truncated',
   'events_truncated', 'waited_ms', 'observed_ms', 'max_nodes', 'max_depth'
 ]);
@@ -74,6 +74,16 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
   for (const [key, value] of Object.entries(output)) {
     if (SAFE_STATE_KEYS.has(key) && isSafeScalar(value)) state[key] = value;
   }
+  if (result.capability.startsWith('docker.')) {
+    const scope = text(output.scope);
+    if (scope === 'project' || scope === 'daemon') state.scope = scope;
+    for (const key of ['fingerprint', 'beforeFingerprint', 'afterFingerprint']) {
+      const value = text(output[key]);
+      if (value && /^[0-9a-f]{64}$/i.test(value)) state[key] = value.toLowerCase();
+    }
+    const services = normalizeDockerServices(output.services ?? output.states);
+    if (services.length) state.services = services;
+  }
   const postcondition = record(output.postcondition);
   const safePostcondition: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(postcondition)) {
@@ -81,6 +91,23 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
   }
   if (Object.keys(safePostcondition).length) state.postcondition = safePostcondition;
   return state;
+}
+
+function normalizeDockerServices(input: unknown): Array<{ service: string; containers: number; states: string[] }> {
+  if (!Array.isArray(input)) return [];
+  const output: Array<{ service: string; containers: number; states: string[] }> = [];
+  for (const item of input.slice(0, 50)) {
+    const raw = record(item);
+    const service = text(raw.service);
+    const containers = Number(raw.containers ?? 0);
+    const states = Array.isArray(raw.states)
+      ? [...new Set(raw.states.map(String).filter((state) => /^[a-z][a-z0-9_-]{0,63}$/i.test(state)))].sort().slice(0, 20)
+      : [];
+    if (!service || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(service)) continue;
+    if (!Number.isSafeInteger(containers) || containers < 0 || containers > 1000) continue;
+    output.push({ service, containers, states });
+  }
+  return output.sort((a, b) => a.service.localeCompare(b.service));
 }
 
 function observationConfidence(result: ActionResult): number {

@@ -76,3 +76,18 @@ test('ambiguous provider result is represented explicitly without claiming confi
   assert.equal(observation.confidence, 0);
   assert.equal(observation.importantState.errorCode, 'UIA_AMBIGUOUS_SELECTOR');
 });
+
+test('docker normalized state retains safe fingerprint and service lifecycle summary', () => {
+  const request = action('docker.inspect', { path: 'C:\\project' }, 'C:\\project');
+  const fingerprint = 'c'.repeat(64);
+  const observation = normalizeMachineObservation(request, result('docker.inspect', 'docker.local.semantic', {
+    scope: 'project',
+    fingerprint,
+    services: [{ service: 'web', containers: 1, states: ['running'] }],
+    containers: [{ name: 'secret-project-container', env: ['PASSWORD=hidden'] }]
+  }));
+  assert.equal(observation.importantState.scope, 'project');
+  assert.equal(observation.importantState.fingerprint, fingerprint);
+  assert.deepEqual(observation.importantState.services, [{ service: 'web', containers: 1, states: ['running'] }]);
+  assert.doesNotMatch(JSON.stringify(observation), /PASSWORD=hidden|secret-project-container/);
+});

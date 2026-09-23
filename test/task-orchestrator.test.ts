@@ -361,6 +361,53 @@ test('browser task re-discovers a disappeared semantic target before retrying na
   assert.ok(completed.evidence.some((item) => item.kind === 'strategy_fallback' && /re-discovery/.test(item.message)));
 });
 
+class SemanticDockerProvider implements CapabilityProvider {
+  readonly name = 'test.docker.semantic';
+  state: 'running' | 'exited' = 'running';
+  manageCalls = 0;
+  failStateChangedOnce = false;
+  #failed = false;
+
+  supports(action: ActionRequest): boolean { return ['docker.inspect', 'docker.manage'].includes(action.capability); }
+  score(): CapabilityScore { return SCORE; }
+
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    const fingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    if (action.capability === 'docker.inspect') {
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: {
+          scope: 'project', fingerprint,
+          services: [{ service: 'web', containers: 1, states: [this.state] }]
+        },
+        evidence: [], durationMs: 0
+      };
+    }
+    this.manageCalls += 1;
+    if (this.failStateChangedOnce && !this.#failed) {
+      this.#failed = true;
+      this.state = 'exited';
+      return {
+        ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 0,
+        error: { code: 'DOCKER_STATE_CHANGED', message: 'state changed after inspection', retryable: true }
+      };
+    }
+    assert.equal(action.input.expectedCurrentFingerprint, fingerprint);
+    assert.deepEqual(action.input.services, ['web']);
+    assert.equal(action.input.operation, 'stop');
+    this.state = 'exited';
+    const afterFingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    return {
+      ok: true, capability: action.capability, provider: this.name,
+      output: {
+        operation: 'stop', beforeFingerprint: fingerprint, afterFingerprint,
+        states: [{ service: 'web', containers: 1, states: ['exited'] }]
+      },
+      evidence: [], durationMs: 0
+    };
+  }
+}
+
 class SemanticAppProvider implements CapabilityProvider {
   readonly name = 'test.windows.uia';
   value = 'before';
@@ -395,6 +442,71 @@ class SemanticAppProvider implements CapabilityProvider {
     };
   }
 }
+
+test('docker lifecycle task uses fresh fingerprint, exact approval, and semantic re-inspection', async (t) => {
+  const root = await tempDir(t, 'operator-task-docker-root-');
+  const state = await tempDir(t, 'operator-task-docker-state-');
+  const provider = new SemanticDockerProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['docker.inspect', 'docker.manage'], allowedRoots: [root],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Stop the existing web service and verify it is stopped.',
+    authorizedScope: [root], successConditions: ['fresh Docker state is inspected', 'web is exited after approved stop'],
+    goal: { kind: 'docker-lifecycle', root, operation: 'stop', services: ['web'] }
+  });
+
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(provider.manageCalls, 0);
+  assert.deepEqual(blocked.execution?.records.map((record) => record.capability), ['docker.inspect', 'docker.manage']);
+  const actionId = blocked.execution!.records[1]!.actionId;
+
+  const completed = await orchestrator.resume(task.id, [actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.manageCalls, 1);
+  assert.equal(provider.state, 'exited');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['docker.inspect', 'docker.manage', 'docker.inspect']);
+  assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'docker'));
+});
+
+test('docker state race forces re-inspection and a new approval identity before retry', async (t) => {
+  const root = await tempDir(t, 'operator-task-docker-race-root-');
+  const state = await tempDir(t, 'operator-task-docker-race-state-');
+  const provider = new SemanticDockerProvider();
+  provider.failStateChangedOnce = true;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['docker.inspect', 'docker.manage'], allowedRoots: [root],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Stop web without acting on stale Docker state.',
+    authorizedScope: [root], successConditions: ['stale fingerprint is never reused', 'fresh approval is required after state change'],
+    goal: { kind: 'docker-lifecycle', root, operation: 'stop', services: ['web'] }
+  });
+
+  const firstBlocked = await orchestrator.run(task.id);
+  const firstApprovalId = firstBlocked.execution!.records.at(-1)!.actionId;
+  const secondBlocked = await orchestrator.resume(task.id, [firstApprovalId]);
+  assert.equal(secondBlocked.state, 'BLOCKED');
+  assert.equal(provider.manageCalls, 1);
+  const manageRecords = secondBlocked.execution!.records.filter((record) => record.capability === 'docker.manage');
+  assert.equal(manageRecords.length, 2);
+  assert.equal(manageRecords[0]!.errorCode, 'DOCKER_STATE_CHANGED');
+  assert.notEqual(manageRecords[0]!.actionId, manageRecords[1]!.actionId);
+  assert.ok(secondBlocked.evidence.some((item) => item.kind === 'strategy_fallback' && /fresh inspection/.test(item.message)));
+
+  const completed = await orchestrator.resume(task.id, [manageRecords[1]!.actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.manageCalls, 2);
+});
 
 test('app task inspects a unique UIA target, blocks for approval, operates once, and re-inspects the postcondition', async (t) => {
   const state = await tempDir(t, 'operator-task-app-state-');
