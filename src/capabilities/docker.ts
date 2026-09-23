@@ -59,13 +59,13 @@ export class DockerProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
+  async execute(action: ActionRequest, executionContext: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       if (action.capability === 'docker.inspect') {
         const rootInput = String(action.input.path ?? '').trim();
         if (rootInput) {
-          const state = await this.#inspectProject(rootInput, context.signal);
+          const state = await this.#inspectProject(rootInput, executionContext.signal);
           return success(action, started, {
             scope: 'project',
             root: state.root,
@@ -83,9 +83,9 @@ export class DockerProvider implements CapabilityProvider {
           ]);
         }
 
-        const context = await this.#localContext(context.signal);
-        const serverVersion = await this.#serverVersion(context, context.signal);
-        const containers = await this.#listDaemonContainers(context, context.signal);
+        const context = await this.#localContext(executionContext.signal);
+        const serverVersion = await this.#serverVersion(context, executionContext.signal);
+        const containers = await this.#listDaemonContainers(context, executionContext.signal);
         return success(action, started, {
           scope: 'daemon',
           context: { ...context, local: true },
@@ -111,7 +111,7 @@ export class DockerProvider implements CapabilityProvider {
         throw new OperatorError('DOCKER_FINGERPRINT_REQUIRED', 'A fresh expectedCurrentFingerprint from docker.inspect is required.');
       }
 
-      const before = await this.#inspectProject(String(action.input.path ?? ''), context.signal);
+      const before = await this.#inspectProject(String(action.input.path ?? ''), executionContext.signal);
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('DOCKER_STATE_CHANGED', 'Docker project state changed after the supplied precondition was captured.', {
           retryable: true,
@@ -128,9 +128,9 @@ export class DockerProvider implements CapabilityProvider {
       }
       const ids = [...new Set(selected.map((container) => container.id))].sort();
       const timeoutMs = boundedInteger(action.input.timeoutMs, 60_000, 1_000, 5 * 60_000);
-      await this.#run(before.context, [operation, ...ids], timeoutMs, context.signal);
+      await this.#run(before.context, [operation, ...ids], timeoutMs, executionContext.signal);
 
-      const after = await this.#inspectProject(before.root, context.signal);
+      const after = await this.#inspectProject(before.root, executionContext.signal);
       verifyLifecyclePostcondition(operation, services, after.containers);
       return success(action, started, {
         operation,
