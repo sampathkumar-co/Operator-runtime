@@ -2,7 +2,7 @@
 
 Frozen production source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
 Current release successor: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
-Current exact-head certification: CI #765 / Platform Matrix #535 / NPM Runtime #174 / Signing #536 ? all PASS
+Current exact-main certification: merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; CI #806 / Platform Matrix #576 / NPM Runtime #206 / Signing #577 — all PASS. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
 Evidence date: 2026-09-18
@@ -29,7 +29,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |
-| G19 Packaging / supply chain | BLOCKED | The candidate uses unscoped `mecord-connect`, proprietary `LICENSE`, mandatory dual-use `DISCLOSURE`, exact author metadata, immutable first-release artifact handling and staged future-release controls. npm user `mecrod` is authenticated and 2FA mode `auth-and-writes` is verified; no npm organization/scope is required. G19 remains BLOCKED only until the exact first tarball is explicitly authorized/published and public-registry/clean-machine verification passes. |
+| G19 Packaging / supply chain | BLOCKED | The candidate uses unscoped `mecord-connect`, proprietary `LICENSE`, mandatory dual-use `DISCLOSURE`, exact author metadata, immutable first-release artifact handling and staged future-release controls. npm account `mecrod` and 2FA mode `auth-and-writes` were previously verified; the publication shell must re-authenticate immediately before release and must not treat a stale CLI session as publication authority. No npm organization/scope is required. G19 remains BLOCKED until the exact first tarball is explicitly authorized/published and public-registry/clean-machine verification passes. |
 | G20 Production edge | PASS | TLS 1.3, valid certificate, HSTS/CSP, wrong Host -> 421, evil Origin -> 403, missing/invalid bearer -> 401, oversized header -> 431, oversized body -> 413. |
 | G21 Performance / resource control | PASS | Performance regression suite passed; hostile bounded-input probes left the exact edge healthy with no crash/error signatures. |
 | G22 Legal / public docs | BLOCKED | Source legal materials now identify **Kinthala Samuel Sampath Kumar**, Akkayapalem/Visakhapatnam/Andhra Pradesh/India, support@splcart.in, India governing law, and the proprietary Mecord Connect runtime license. Production still serves OCC-3M/pre-final pages, and OpenAI individual publisher verification is not yet complete. Final live deployment + identity-verification consistency are required before submission. |
