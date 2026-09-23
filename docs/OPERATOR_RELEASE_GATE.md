@@ -17,7 +17,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
 | G5 Browser safety | PASS | Browser control is not in `PUBLIC_PLUGIN_TOOL_NAMES`; no public OpenAI tool can invoke it. Internal runtime remains outside this public plugin surface. |
 | G6 UIA safety | PASS | UIA is not in the public MCP surface; Windows UIA native sidecar compiled, tested, and passed clippy on OCC-3M. |
-| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed; public surface is allowlisted to 10 tools and local policy remains authoritative. |
+| G7 Policy enforcement | PASS | Cross-layer Security red-team suite passed; public surface is allowlisted to 9 tools and local policy remains authoritative. |
 | G8 Approval integrity | PASS | Core runtime suite includes approval lifecycle, authority-generation, replay/expiry and recovery coverage; OCC-3M CI passed. |
 | G9 Prompt-injection resistance | PASS | Public surface has no open-world browser tool; restricted paths/data are blocked and cross-layer adversarial boundary tests passed. |
 | G10 Authentication | BLOCKED | Provider preflight, S256, predefined client, both currently documented OpenAI redirect forms are allowlisted and accepted into the real login flow, and authorization-request acceptance passes; one real human authorization/code exchange is still required. |
@@ -45,7 +45,7 @@ Only five owner/external categories remain:
 1. **OpenAI publisher/developer verification** ? verify the exact individual identity and reconcile spelling/order if needed.
 2. **Reviewer credential entry / real pairing** ? owner-controlled credential entry and canonical fixture pairing.
 3. **Portal domain challenge if issued** ? use only the real OpenAI token.
-4. **Real OAuth / Scan Tools / reviewer E2E / demo** ? exact 10-tool scan, issued-token proof, reviewer cases, revoke/reconnect and demo recording.
+4. **Real OAuth / Scan Tools / reviewer E2E / demo** ? exact 9-tool scan, issued-token proof, reviewer cases, revoke/reconnect and demo recording.
 5. **Explicit irreversible publication / deployment / submission authorization** ? exact `mecord-connect` tarball publication with 2FA, final transactional deployment, then OpenAI Submit for Review only after final proof.
 
 npm account setup itself is resolved: user `mecrod`, authenticated, 2FA `auth-and-writes`; no npm organization/scope is required.
