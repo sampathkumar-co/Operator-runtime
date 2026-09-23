@@ -293,8 +293,19 @@ export class BrowserCdpProvider implements CapabilityProvider {
     let resolveDone!: (value: { guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }) => void;
     let rejectDone!: (error: Error) => void;
     const done = new Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectDone(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => {
-      if (!settled) rejectDone(new OperatorError('BROWSER_DOWNLOAD_TIMEOUT', `No completed download event arrived within ${timeoutMs}ms.`, { retryable: true }));
+      if (!settled) {
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        rejectDone(new OperatorError('BROWSER_DOWNLOAD_TIMEOUT', `No completed download event arrived within ${timeoutMs}ms.`, { retryable: true }));
+      }
     }, timeoutMs);
     const offBegin = browser.on('Browser.downloadWillBegin', (params) => {
       if (activeGuid) return;
@@ -311,6 +322,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       activeGuid = activeGuid ?? guid;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolveDone({
         guid,
         state,
@@ -320,7 +332,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         filePath: typeof params.filePath === 'string' ? params.filePath.slice(0, 2000) : undefined
       });
     });
-    return { done, stop: () => { clearTimeout(timer); offBegin(); offProgress(); } };
+    return { done, stop: () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); offBegin(); offProgress(); } };
   }
 
   async #listTargets(signal?: AbortSignal): Promise<CdpTarget[]> {
