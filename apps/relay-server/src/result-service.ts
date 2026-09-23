@@ -192,7 +192,7 @@ export class RelayResultService {
         if (isRotateRequest) {
           const before = await this.#accounts.activeMembershipForDevice(session.subjectDeviceId);
           if (!before) throw new OperatorError('SESSION_AUTHORITY_REVOKED', 'Device no longer has active account authority.');
-          const rotated = await this.#sessions.rotate(session.jti);
+          const rotated = await this.#sessions.rotate(session.jti, { scopes: relaySessionScopesForAccount(before.accountId) });
           const after = await this.#accounts.activeMembershipForDevice(session.subjectDeviceId);
           if (!after || after.accountId !== before.accountId || after.authorityGeneration !== before.authorityGeneration) {
             try { await this.#sessions.revoke(rotated.payload.jti, 'account authority changed during rotation'); }
