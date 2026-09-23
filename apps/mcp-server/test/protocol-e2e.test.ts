@@ -260,6 +260,26 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.notEqual(inspectedTask.isError, true);
   assert.equal(((inspectedTask.structuredContent as Record<string, unknown>).task as Record<string, unknown>).state, 'VERIFIED');
 
+  const qualityTaskId = crypto.randomUUID();
+  const qualityTask = await client.callTool({
+    name: 'task.submit',
+    arguments: {
+      requestId: qualityTaskId,
+      objective: 'Verify the project through the runtime-compiled trusted test quality gate.',
+      successConditions: ['runtime discovers and executes the trusted test check'],
+      goal: { kind: 'project-quality-gate', root: testRoot, checks: ['test'], requireAll: true },
+      run: true
+    }
+  });
+  assert.notEqual(qualityTask.isError, true);
+  const qualityCapsule = (qualityTask.structuredContent as Record<string, unknown>).task as Record<string, unknown>;
+  assert.equal(qualityCapsule.id, qualityTaskId);
+  assert.equal(qualityCapsule.state, 'VERIFIED');
+  const qualityExecution = qualityCapsule.execution as Record<string, unknown>;
+  const qualityPlannerState = qualityExecution.plannerState as Record<string, unknown>;
+  assert.equal(qualityExecution.plannerId, 'operator.project-quality-gate.v1');
+  assert.equal((qualityPlannerState.qualityChecks as Array<Record<string, unknown>>)[0]?.kind, 'test');
+
   const preflightReceipt = await runLocalCertificationPreflight(mcpUrl);
   const preflightMcp = preflightReceipt.mcp as Record<string, unknown>;
   const preflightRead = preflightReceipt.readProbe as Record<string, unknown>;

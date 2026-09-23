@@ -14,6 +14,7 @@ export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'ex
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
+export type ProjectQualityCheck = 'lint' | 'test' | 'build';
 
 export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
@@ -33,6 +34,7 @@ export type AtomicSemanticTaskGoal =
 
 export type SemanticTaskGoal =
   | AtomicSemanticTaskGoal
+  | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
   | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
 
 export interface TaskPlannerContext {
@@ -106,7 +108,7 @@ export class TaskOrchestrator {
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
+    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
@@ -507,6 +509,91 @@ export class TaskOrchestrator {
   }
 }
 
+export class ProjectQualityGatePlanner implements TaskPlanner {
+  readonly id = 'operator.project-quality-gate.v1';
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'project-quality-gate'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Project quality planner requires a project-quality-gate goal.');
+    const state = task.execution!.plannerState;
+    const phase = String(state.phase ?? 'start');
+    if (phase === 'start') {
+      return { type: 'step', key: 'quality-inspect-project', title: 'Inspect project before compiling quality gate', capability: 'project.inspect', input: { path: goal.root }, target: goal.root };
+    }
+    if (phase === 'commands') {
+      return { type: 'step', key: 'quality-inspect-commands', title: 'Discover trusted quality checks', capability: 'project.command.inspect', input: { path: goal.root }, target: goal.root };
+    }
+    if (phase === 'run') {
+      const checks = Array.isArray(state.qualityChecks) ? state.qualityChecks.map(asRecord) : [];
+      const index = Number(state.qualityIndex ?? 0);
+      if (!Number.isSafeInteger(index) || index < 0 || index > checks.length) throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Quality gate check index is invalid.');
+      if (index >= checks.length) return { type: 'complete', message: `Project quality gate completed ${checks.length} trusted check(s).` };
+      const current = checks[index]!;
+      const kind = String(current.kind ?? '');
+      const commandId = String(current.id ?? '');
+      const risk = String(current.risk ?? '');
+      if (!['lint', 'test', 'build'].includes(kind) || !commandId || !['read', 'write', 'external'].includes(risk)) {
+        throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Compiled quality gate contains an invalid trusted command.');
+      }
+      return {
+        type: 'step', key: `quality-run:${index}:${kind}`, title: `Run trusted ${kind} quality check`,
+        capability: 'project.command.run', input: { path: goal.root, commandId, expectedRisk: risk }, target: goal.root
+      };
+    }
+    return { type: 'complete', message: 'Project quality gate satisfied its compiled trusted checks.' };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
+    if (goal.kind !== 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Project quality planner requires a project-quality-gate goal.');
+    const state = task.execution!.plannerState;
+    if (step.key === 'quality-inspect-project') {
+      state.phase = 'commands';
+      return;
+    }
+    if (step.key === 'quality-inspect-commands') {
+      const output = asRecord(result.output);
+      const commands = Array.isArray(output.commands) ? output.commands.map(asRecord) : [];
+      const requested = goal.checks ?? ['lint', 'test', 'build'];
+      const selected: Array<{ kind: ProjectQualityCheck; id: string; risk: string }> = [];
+      const missing: ProjectQualityCheck[] = [];
+      for (const kind of requested) {
+        const command = commands.find((candidate) => candidate.kind === kind);
+        const id = String(command?.id ?? '');
+        const risk = String(command?.risk ?? '');
+        if (!command || !id || !['read', 'write', 'external'].includes(risk)) missing.push(kind);
+        else selected.push({ kind, id, risk });
+      }
+      if (goal.requireAll && missing.length > 0) {
+        task.evidence.push(evidence('goal_compilation', 'fail', 'Required trusted quality checks are unavailable.', { code: 'TASK_QUALITY_GATE_REQUIRED_CHECK_MISSING', missing }));
+        throw new OperatorError('TASK_QUALITY_GATE_REQUIRED_CHECK_MISSING', `Required trusted quality checks are unavailable: ${missing.join(', ')}.`);
+      }
+      if (selected.length === 0) {
+        task.evidence.push(evidence('goal_compilation', 'fail', 'No requested trusted quality checks are configured.', { code: 'TASK_QUALITY_GATE_EMPTY', requested }));
+        throw new OperatorError('TASK_QUALITY_GATE_EMPTY', 'No requested trusted lint, test, or build command is configured for this project.');
+      }
+      state.qualityChecks = selected;
+      state.missingChecks = missing;
+      state.qualityIndex = 0;
+      state.phase = 'run';
+      task.evidence.push(evidence('goal_compilation', 'pass', `Compiled project quality goal into ${selected.length} trusted check(s).`, { checks: selected.map((item) => item.kind) }));
+      if (missing.length > 0) task.evidence.push(evidence('goal_compilation', 'info', 'Skipped unavailable optional quality checks.', { missing }));
+      return;
+    }
+    if (step.key.startsWith('quality-run:')) {
+      const checks = Array.isArray(state.qualityChecks) ? state.qualityChecks.map(asRecord) : [];
+      const index = Number(state.qualityIndex ?? 0);
+      const current = checks[index];
+      if (!current || step.key !== `quality-run:${index}:${String(current.kind ?? '')}`) {
+        throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Quality gate action does not match the compiled check state.');
+      }
+      task.evidence.push(evidence('quality_check', 'pass', `Trusted ${String(current.kind)} check completed.`, { commandId: String(current.id ?? '') }));
+      state.qualityIndex = index + 1;
+      if (index + 1 >= checks.length) state.phase = 'complete';
+    }
+  }
+}
+
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
   supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
@@ -856,6 +943,21 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     boundedText(goal.root, 4096, 'goal root');
     if (!['build', 'test', 'lint'].includes(goal.commandKind)) throw new OperatorError('TASK_GOAL_INVALID', 'Trusted command kind is invalid.');
     goal.root = path.resolve(goal.root);
+  } else if (goal.kind === 'project-quality-gate') {
+    goal.root = path.resolve(boundedText(goal.root, 4096, 'quality gate root'));
+    const requested = goal.checks === undefined ? ['lint', 'test', 'build'] : goal.checks;
+    if (!Array.isArray(requested) || requested.length < 1 || requested.length > 3) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate requires 1-3 lint/test/build checks.');
+    }
+    const checks = requested.map((check) => String(check) as ProjectQualityCheck);
+    if (checks.some((check) => !['lint', 'test', 'build'].includes(check)) || new Set(checks).size !== checks.length) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate checks must be unique lint/test/build values.');
+    }
+    if (goal.requireAll !== undefined && typeof goal.requireAll !== 'boolean') {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate requireAll must be boolean.');
+    }
+    goal.checks = checks;
+    goal.requireAll = goal.requireAll ?? false;
   } else if (goal.kind === 'browser-navigation') {
     const rawUrl = boundedText(goal.url, 16_384, 'goal URL');
     let url: URL;
