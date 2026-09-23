@@ -44,7 +44,8 @@ Usage:
 
 remote starts the local policy/runtime agent and its secure relay connection only.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.
---no-browser disables automatic launch of Mecord Connect's managed-browser capability.`;
+--no-browser disables automatic managed-Chromium launch for private browser tasks;
+the secure authenticated pairing URL is still printed when pairing is required.`;
 }
 
 export function parseArgs(argv) {
@@ -56,6 +57,7 @@ export function parseArgs(argv) {
     return { command: 'doctor' };
   }
   if (argv[0] !== 'remote') throw new Error(`Unknown command '${argv[0]}'. Use --help.`);
+  if (argv.length === 2 && (argv[1] === '--help' || argv[1] === '-h')) return { command: 'help' };
   let root = process.cwd();
   let browser = true;
   for (let index = 1; index < argv.length; index += 1) {

@@ -34,6 +34,8 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['remote', '--root', 'C:\\work', '--no-browser']), {
     command: 'remote', root: 'C:\\work', browser: false
   });
+  assert.deepEqual(parseArgs(['remote', '--help']), { command: 'help' });
+  assert.deepEqual(parseArgs(['remote', '-h']), { command: 'help' });
   assert.deepEqual(parseArgs(['doctor']), { command: 'doctor' });
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
