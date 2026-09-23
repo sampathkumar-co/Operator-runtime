@@ -7,7 +7,7 @@ Authoritative references:
 - https://developers.openai.com/plugins/deploy/submission
 - https://developers.openai.com/plugins/deploy/submission-errors
 
-This recording is **blocked until the real production ChatGPT OAuth + reviewer + public-package path works**. Do not fabricate a recording from mocks or a source-checkout-only path.
+Production OAuth, the final nine-tool ChatGPT connection, and the public npm package are now live. This recording remains **blocked on reviewer/device E2E, revoke/reconnect proof, and Scan Tools**. Do not fabricate a recording from mocks or a source-checkout-only path.
 
 ## Preconditions
 
@@ -16,8 +16,8 @@ All must be true before recording:
 1. final successor SHA is frozen and green;
 2. exact owner-approved software license and npm policy classification are applied;
 3. public legal identity is reconciled and matches the verified OpenAI publisher identity;
-4. `mecord-connect@1.0.0` (or the final first public version) is published;
-5. a clean-machine `npx mecord-connect@latest doctor` passes;
+4. `mecord-connect@1.0.0` is published; **PASS**
+5. a clean-machine `npx mecord-connect@latest doctor` passes; **PASS**
 6. the reviewer account works without MFA, SMS, email confirmation or private-network access;
 7. the canonical reviewer fixture is reset to baseline;
 8. the actual OpenAI draft connects through production OAuth;
