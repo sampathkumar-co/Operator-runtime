@@ -54,27 +54,28 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
-Current engineering source candidate:
-- certified release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`
-- active source branch: `main`; resolve its exact head live immediately before deployment or submission
-- exact head and workflow run IDs: **read live from GitHub immediately before deployment/submission; every required workflow must be terminal success on that head**
+Current production release:
+- deployed source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
+- branch: `main`
+- deployment evidence: 19/19 CI checks green; 437 passed / 17 expected skips / 0 failures
+- fresh ChatGPT OAuth reconnect imported exactly the canonical nine tools with no `device.claim`
 
 ## 3. npm runtime distribution
 
 - npm account status: **RESOLVED ? user `mecrod`, authenticated, 2FA `auth-and-writes`**
 - npm organization/scope: **not required** for the unscoped package
 - package: **`mecord-connect`**
-- intended first public version: **1.0.0**
+- public version: **1.0.0** (`latest`)
 - executable shim: **`mecord-connect`**
 - license: **proprietary**
 - package metadata: `SEE LICENSE IN LICENSE`
 - npm policy: **DUAL_USE**
 - required policy declaration: `contentPolicy.class = "dual-use"`
 - required root policy files: `LICENSE`, `DISCLOSURE`
-- first publication: immutable exact tarball + owner interactive 2FA
+- first publication: **completed** through owner interactive npm authorization
 - future publication: staged/human-approval path as supported for the dual-use package
 
-Current registry state before first publication: package not yet public.
+Current registry state: **`mecord-connect@1.0.0` is public under `latest`**. Clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported.
 
 MSIX / Microsoft Store is **not a Mecord Connect v1 submission requirement**.
 
@@ -89,7 +90,7 @@ MSIX / Microsoft Store is **not a Mecord Connect v1 submission requirement**.
 - Refresh capability: `offline_access`
 - PKCE: **S256**
 
-The hosted/private ChatGPT connection is not updated by committing `.codex-plugin/plugin.json`. After the certified edge is deployed, create or update the **With MCP** draft/connection for the universal URL above, configure OAuth, complete any domain challenge, select **Scan Tools**, and compare the imported live metadata with this packet. A new ChatGPT conversation must then expose exactly the nine tools in section 9 and no legacy enrollment tool before reviewer execution begins.
+The production **With MCP** connection has been refreshed through a real OAuth login. A fresh ChatGPT conversation exposes exactly the nine tools in section 9 and no legacy `device.claim`. Final portal closure still requires **Scan Tools** capture/reconciliation and the remaining reviewer/device E2E evidence.
 - Public OAuth client ID currently provisioned: `splcart-operator-chatgpt-prod-8HymKNOT2aqK`
 - Token endpoint client authentication: `none`
 - Authorization-code + refresh-token grants
@@ -177,7 +178,7 @@ Use the exact annotation justifications in `docs/plugin-review-package.json`.
 
 ## 10. Reviewer credentials
 
-Status: **PROVISIONED; OWNER LOGIN/PAIRING VERIFICATION REQUIRED**
+Status: **PROVISIONED; DEVICE/REVIEWER E2E STILL REQUIRED**
 
 A dedicated production reviewer identity and reviewer-only one-factor policy are provisioned.
 
@@ -230,9 +231,9 @@ All must be true:
 - Mecord Connect logo/composer icon render correctly;
 - website/support/privacy/terms are live with final Mecord Connect product branding and approved publisher identity;
 - proprietary LICENSE and DUAL_USE classification are present in the public npm package;
-- `mecord-connect@1.0.0` exists;
-- clean-machine `npx mecord-connect@latest doctor` passes;
-- clean-machine reviewer-root startup/pairing works;
+- `mecord-connect@1.0.0` exists; **PASS**
+- clean-machine `npx mecord-connect@latest doctor` passes; **PASS**
+- clean-machine reviewer-root startup/pairing works; **PENDING — latest live probe returned `ROUTE_NO_DEVICE` because the paired local runtime was offline**
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
 - Scan Tools imports exactly 9 tools;
