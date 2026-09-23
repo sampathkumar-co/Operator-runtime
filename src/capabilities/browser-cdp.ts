@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
@@ -54,17 +54,18 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
-      if (action.capability === 'browser.inspect') return await this.#inspect(action, started);
-      if (action.capability === 'browser.navigate') return await this.#navigate(action, started);
-      if (action.capability === 'browser.interact') return await this.#interact(action, started);
-      if (action.capability === 'browser.tab.focus') return await this.#focusTab(action, started);
-      if (action.capability === 'browser.tab.close') return await this.#closeTab(action, started);
+      throwIfAborted(context.signal);
+      if (action.capability === 'browser.inspect') return await this.#inspect(action, started, context.signal);
+      if (action.capability === 'browser.navigate') return await this.#navigate(action, started, context.signal);
+      if (action.capability === 'browser.interact') return await this.#interact(action, started, context.signal);
+      if (action.capability === 'browser.tab.focus') return await this.#focusTab(action, started, context.signal);
+      if (action.capability === 'browser.tab.close') return await this.#closeTab(action, started, context.signal);
       throw new OperatorError('UNSUPPORTED_ACTION', action.capability);
     } catch (error) {
-      return failure(action, this.name, started, error);
+      return failure(action, this.name, started, context.signal?.aborted ? abortError() : error);
     }
   }
 
@@ -74,8 +75,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
     this.#browserSession = undefined;
   }
 
-  async #inspect(action: ActionRequest, started: number): Promise<ActionResult> {
-    const tabs = await this.#listTargets();
+  async #inspect(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    const tabs = await this.#listTargets(signal);
     const targetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
     if (!targetId) {
       return {
@@ -90,10 +91,12 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
+    throwIfAborted(signal);
     const [mainPage, frames] = await Promise.all([
       inspectPage(session),
       inspectOopifFrames(session)
     ]);
+    throwIfAborted(signal);
     const page = { ...mainPage, frames };
     return {
       ok: true,
@@ -108,16 +111,16 @@ export class BrowserCdpProvider implements CapabilityProvider {
     };
   }
 
-  async #navigate(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #navigate(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const url = validateNavigationUrl(String(action.input.url ?? ''));
     const newTab = action.input.newTab === true;
     const requestedTargetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
 
     let target: CdpTarget;
     if (newTab) {
-      target = await this.#createTarget(url);
+      target = await this.#createTarget(url, signal);
     } else {
-      const tabs = await this.#listTargets();
+      const tabs = await this.#listTargets(signal);
       target = requestedTargetId ? requireTarget(tabs, requestedTargetId) : requirePageTarget(tabs);
     }
 
@@ -132,7 +135,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
           throw new OperatorError('BROWSER_NAVIGATION_FAILED', result.errorText, { retryable: true });
         }
       }
-      await waitForReadyState(session, 10_000);
+      await waitForReadyState(session, 10_000, signal);
+      throwIfAborted(signal);
       const state = await pageIdentity(session);
       if (!sameDestination(state.url, url)) {
         throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Browser did not reach the requested destination.', { retryable: true, details: { requested: url, actual: state.url } });
@@ -153,14 +157,14 @@ export class BrowserCdpProvider implements CapabilityProvider {
     }
   }
 
-  async #focusTab(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #focusTab(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
-    const tabs = await this.#listTargets();
+    const tabs = await this.#listTargets(signal);
     const target = requireTarget(tabs, targetId);
     const response = await fetch(new URL(`/json/activate/${encodeURIComponent(targetId)}`, this.#endpoint), {
       redirect: 'error',
-      signal: AbortSignal.timeout(3_000)
+      signal: combinedSignal(signal, 3_000)
     });
     if (!response.ok) throw new OperatorError('CDP_ACTIVATE_TAB_FAILED', `CDP returned HTTP ${response.status} while focusing a tab.`, { retryable: true });
     const session = this.#sessions.get(target);
@@ -182,17 +186,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
     };
   }
 
-  async #closeTab(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #closeTab(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
-    requireTarget(await this.#listTargets(), targetId);
+    requireTarget(await this.#listTargets(signal), targetId);
     const response = await fetch(new URL(`/json/close/${encodeURIComponent(targetId)}`, this.#endpoint), {
       redirect: 'error',
-      signal: AbortSignal.timeout(3_000)
+      signal: combinedSignal(signal, 3_000)
     });
     if (!response.ok) throw new OperatorError('CDP_CLOSE_TAB_FAILED', `CDP returned HTTP ${response.status} while closing a tab.`, { retryable: true });
     this.#sessions.forget(targetId);
-    const remaining = await this.#listTargets();
+    const remaining = await this.#listTargets(signal);
     if (remaining.some((item) => item.id === targetId)) {
       throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Target still exists after close command.', { retryable: true, details: { targetId } });
     }
@@ -209,7 +213,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     };
   }
 
-  async #interact(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #interact(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
@@ -220,7 +224,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide css, text, or role+name for semantic targeting.');
     }
 
-    const tabs = await this.#listTargets();
+    const tabs = await this.#listTargets(signal);
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
     const diagnostics = await collectDiagnostics(session);
@@ -230,7 +234,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       await session.send('Runtime.enable');
       if (expectDownload) {
         if (operation !== 'click') throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload is only valid for click operations.');
-        download = await this.#prepareDownload(Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000));
+        download = await this.#prepareDownload(Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000), signal);
       }
       const before = await pageIdentity(session);
       const interaction = await performSemanticInteraction(session, {
@@ -243,7 +247,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
         const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
-      await settleAfterInteraction(session);
+      await settleAfterInteraction(session, signal);
+      throwIfAborted(signal);
       const after = await pageIdentity(session);
       const downloadResult = download ? await download.done : undefined;
       if (downloadResult?.state === 'canceled') {
@@ -268,9 +273,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
     }
   }
 
-  async #browserConnection(): Promise<CdpConnection> {
+  async #browserConnection(signal?: AbortSignal): Promise<CdpConnection> {
     if (this.#browserSession && !this.#browserSession.closed) return this.#browserSession;
-    const response = await fetch(new URL('/json/version', this.#endpoint), { redirect: 'error', signal: AbortSignal.timeout(3_000) });
+    const response = await fetch(new URL('/json/version', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status} while discovering browser endpoint.`, { retryable: true });
     const version = await response.json() as Record<string, unknown>;
     const ws = typeof version.webSocketDebuggerUrl === 'string' ? version.webSocketDebuggerUrl : '';
@@ -279,8 +284,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
     return this.#browserSession;
   }
 
-  async #prepareDownload(timeoutMs: number): Promise<DownloadTracker> {
-    const browser = await this.#browserConnection();
+  async #prepareDownload(timeoutMs: number, signal?: AbortSignal): Promise<DownloadTracker> {
+    const browser = await this.#browserConnection(signal);
     await browser.send('Browser.setDownloadBehavior', { behavior: 'default', eventsEnabled: true });
     let activeGuid: string | undefined;
     let meta: { url?: string; suggestedFilename?: string } = {};
@@ -318,8 +323,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
     return { done, stop: () => { clearTimeout(timer); offBegin(); offProgress(); } };
   }
 
-  async #listTargets(): Promise<CdpTarget[]> {
-    const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: AbortSignal.timeout(3_000) });
+  async #listTargets(signal?: AbortSignal): Promise<CdpTarget[]> {
+    const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
     const raw = await response.json() as Array<Record<string, unknown>>;
     return raw.slice(0, MAX_TABS).map((tab) => ({
@@ -331,10 +336,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
     })).filter((tab) => tab.id.length > 0);
   }
 
-  async #createTarget(url: string): Promise<CdpTarget> {
+  async #createTarget(url: string, signal?: AbortSignal): Promise<CdpTarget> {
     const endpoint = new URL('/json/new', this.#endpoint);
     endpoint.search = url;
-    const response = await fetch(endpoint, { method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(4_000) });
+    const response = await fetch(endpoint, { method: 'PUT', redirect: 'error', signal: combinedSignal(signal, 4_000) });
     if (!response.ok) throw new OperatorError('CDP_CREATE_TAB_FAILED', `CDP returned HTTP ${response.status} while creating a tab.`, { retryable: true });
     const tab = await response.json() as Record<string, unknown>;
     const target: CdpTarget = {
@@ -347,6 +352,19 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (!target.id) throw new OperatorError('CDP_CREATE_TAB_FAILED', 'Browser returned an invalid new-tab target.', { retryable: true });
     return target;
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function abortError(): OperatorError {
+  return new OperatorError('EXECUTION_ABORTED', 'Browser execution was cancelled.', { retryable: false });
+}
+
+function combinedSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 // Backward-compatible M0 name.
