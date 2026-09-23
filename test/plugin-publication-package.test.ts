@@ -103,7 +103,7 @@ test('review package has exact cases and complete public-tool annotation justifi
   }
 });
 
-test('reviewer-facing evidence distinguishes frozen ten-tool production from the canonical nine-tool successor', async () => {
+test('reviewer-facing evidence reflects the deployed canonical nine-tool production surface', async () => {
   const finalSurfaceDocs = [
     'docs/OPERATOR_DEMO_RECORDING_RUNBOOK.md',
     'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
@@ -117,19 +117,20 @@ test('reviewer-facing evidence distinguishes frozen ten-tool production from the
   }
 
   const certification = await fs.readFile(path.join(root, 'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md'), 'utf8');
-  assert.match(certification, /Frozen production baseline[\s\S]*public surface: exactly 10 MCP tools[\s\S]*legacy public `device\.claim`/);
-  assert.match(certification, /Current Mecord Connect successor[\s\S]*exactly 9 public MCP tools/);
+  assert.match(certification, /Current production baseline[\s\S]*source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`[\s\S]*public surface: exactly 9 MCP tools/);
+  assert.match(certification, /legacy public `device\.claim`: absent/);
 
   const releaseGate = await fs.readFile(path.join(root, 'docs/OPERATOR_RELEASE_GATE.md'), 'utf8');
-  assert.match(releaseGate, /Frozen OCC-3M production still exposes the bounded 10-tool surface including `device\.claim`[\s\S]*current Mecord Connect source narrows this to the canonical 9-tool surface/);
+  assert.match(releaseGate, /Current production source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`[\s\S]*exactly 9 tools with no `device\.claim`/);
 
   const masterGate = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
   assert.match(masterGate, /G3 MCP Truthfulness & Safety[\s\S]*exactly 9 allowlisted tools/);
-  assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*final deployed Mecord Connect 9-tool surface[\s\S]*older 10-tool baseline/);
+  assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*fresh ChatGPT conversation now exposes exactly the deployed 9-tool Mecord Connect surface/);
 
   const review = await json('docs/plugin-review-package.json');
   assert.equal(review.sourceSuccessor.pullRequest, null);
   assert.equal(review.sourceSuccessor.branch, 'main');
-  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_MAIN_HEAD');
-  assert.equal(review.sourceSuccessor.status, 'SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES');
+  assert.equal(review.sourceSuccessor.sourceCommit, '3b3b1bff35f8e78519f114b603f98e8acc56cd66');
+  assert.equal(review.sourceSuccessor.status, 'PRODUCTION_DEPLOYED_NPM_PUBLISHED_AWAITING_FINAL_OPENAI_REVIEW_GATES');
+  assert.equal(review.releaseCandidate.npmPackage, 'mecord-connect@1.0.0');
 });
