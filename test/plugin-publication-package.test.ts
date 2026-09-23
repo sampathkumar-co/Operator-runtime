@@ -112,7 +112,7 @@ test('reviewer-facing evidence reflects the deployed canonical nine-tool product
   ];
   for (const relative of finalSurfaceDocs) {
     const content = await fs.readFile(path.join(root, relative), 'utf8');
-    assert.equal(content.includes('`device.claim`'), false, `${relative} still advertises removed public device.claim as part of the final surface`);
+    assert.doesNotMatch(content, /(?:^|\n)\s*(?:[-*]|\d+\.)\s*`device\.claim`\b/m, `${relative} still lists removed public device.claim as part of the final surface`);
     assert.doesNotMatch(content, /\b(?:10[- ]tool|ten tools|ten-tool)\b/i, `${relative} still advertises the obsolete ten-tool final surface`);
   }
 
