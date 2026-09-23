@@ -362,12 +362,17 @@ export class TaskOrchestrator {
   async resume(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) await active;
-    const task = await this.#store.get(taskId);
-    if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
-    this.#controlRequests.delete(taskId);
-    task.state = 'PENDING';
-    for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
-    await this.#store.put(task);
+    await this.#withStateWriteLock(taskId, async () => {
+      const task = await this.#store.get(taskId);
+      if (this.#controlRequests.get(taskId) === 'CANCELLED') {
+        throw new OperatorError('TASK_TERMINAL', 'Task cancellation is already in progress.');
+      }
+      if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
+      if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
+      task.state = 'PENDING';
+      for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
+      await this.#store.put(task);
+    });
     return await this.run(taskId, approvedActionIds);
   }
 
