@@ -25,7 +25,7 @@ Status is deliberately binary: **PASS** means the OCC-3M release has direct evid
 | G12 Device isolation | PASS | Account/device authority, A-B-A generation, release/rebind, disabled-account and quota tests passed; real paired-device relay E2E passed. |
 | G13 Relay integrity | PASS | Relay WebSocket E2E passed; direct relay/result/control ports 8788/8789/8790 are unreachable from the Internet. |
 | G14 Secret handling | PASS | DPAPI helper round-trip passed; public responses and legal pages exclude live secrets; invalid-token and restricted-data paths fail closed. |
-| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free; public tool surface is intentionally only 10 tools; result projection and retention bounds are documented/tested. |
+| G15 Privacy / minimization | PASS | Production notices are live and placeholder-free; public tool surface is intentionally only 9 tools; result projection and retention bounds are documented/tested. |
 | G16 OpenAI Usage Policy alignment | PASS | Public tools are bounded to authorized local development-project inspection/mutation and device claim; no raw terminal, browser or UIA tool is published. Final OpenAI review remains authoritative. |
 | G17 Recovery / rollback | PASS | Core suite passed durable account/device cleanup and failure-recovery phases; production OCC-3M deployment retained a tested rollback compose. |
 | G18 Audit integrity | PASS | Core/security suites passed audit/path-authority protections; no production secret/error leakage appeared during hostile probes. |
