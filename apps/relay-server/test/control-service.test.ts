@@ -525,6 +525,62 @@ test('durable task submission persists device affinity and later control uses th
   assert.deepEqual(dispatches[1].requiredCapabilities, []);
 });
 
+test('project quality task requests only the trusted project capability set', async (t) => {
+  const taskId = '79797979-7979-4797-8797-797979797979';
+  let dispatched: any;
+  const service = new RelayControlService({
+    hub: {
+      async boundProjectDevice() { throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'missing'); },
+      async bindProject() {},
+      async recoverIdempotent() { return null; },
+      async dispatch(input: any) {
+        dispatched = input;
+        return { route: { deviceId: DEVICE_ID }, delivery: { id: 'quality-task-delivery', seq: 79 } };
+      }
+    } as any,
+    results: {
+      async findByIdempotencyKey() { return null; },
+      async get() {
+        return {
+          deliveryId: 'quality-task-delivery',
+          result: { ok: true, task: { id: taskId, state: 'PENDING' } },
+          replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+        };
+      }
+    } as any,
+    accounts: {
+      async activeMembershipForDevice() {
+        return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+      }
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/task`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      task: {
+        operation: 'submit',
+        request: {
+          requestId: taskId,
+          objective: 'Run a runtime-compiled project quality gate.',
+          successConditions: ['trusted checks pass'],
+          goal: { kind: 'project-quality-gate', root: '/tmp/project', checks: ['test', 'build'], requireAll: true },
+          run: false
+        }
+      },
+      waitMs: 1000
+    })
+  });
+
+  assert.equal(response.status, 200, await response.text());
+  assert.deepEqual(dispatched.requiredCapabilities, ['project.inspect', 'project.command.inspect', 'project.command.run']);
+});
+
 test('relay durable task control rejects remote approval authority', async (t) => {
   let dispatchCalls = 0;
   const service = new RelayControlService({

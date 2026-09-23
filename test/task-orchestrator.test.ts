@@ -167,6 +167,102 @@ test('task executor discovers and runs only a trusted registered project command
   ]);
 });
 
+test('project quality goal compiles available trusted checks at runtime and executes the verified plan', async (t) => {
+  const root = await tempDir(t, 'operator-quality-goal-project-');
+  const authority = await tempDir(t, 'operator-quality-goal-authority-');
+  const state = await tempDir(t, 'operator-quality-goal-state-');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'quality-goal-fixture' }));
+
+  const definitions = [
+    { id: 'quality-lint', kind: 'lint', marker: 'lint.marker' },
+    { id: 'quality-test', kind: 'test', marker: 'test.marker' },
+    { id: 'quality-build', kind: 'build', marker: 'build.marker' }
+  ] as const;
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root,
+      commands: definitions.map((entry) => ({
+        id: entry.id, kind: entry.kind, executable: 'node',
+        args: ['-e', `require('fs').writeFileSync(${JSON.stringify(path.join(root, entry.marker))},${JSON.stringify(entry.kind)})`],
+        cwd: '.', risk: 'read',
+        artifacts: [{ path: entry.marker, kind: 'file', minBytes: 1, mustChange: true }]
+      }))
+    }]
+  }));
+
+  const runtime = new OperatorRuntime()
+    .register(new ProjectInspectProvider({ allowedRoots: [root] }))
+    .register(new ProjectCommandProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath }));
+  const orchestrator = new TaskOrchestrator({
+    runtime, store: new TaskStore(state),
+    permissions: permissions(root, ['project.inspect', 'project.command.inspect', 'project.command.run'])
+  });
+
+  const submitted = await orchestrator.submit({
+    objective: 'Prove this project passes its available trusted quality gates.',
+    authorizedScope: [root],
+    successConditions: ['all discovered requested checks complete through trusted commands'],
+    goal: { kind: 'project-quality-gate', root }
+  });
+  const completed = await orchestrator.run(submitted.id);
+
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), [
+    'project.inspect', 'project.command.inspect',
+    'project.command.run', 'project.command.run', 'project.command.run'
+  ]);
+  assert.deepEqual(
+    (completed.execution?.plannerState.qualityChecks as Array<Record<string, unknown>>).map((item) => item.kind),
+    ['lint', 'test', 'build']
+  );
+  assert.ok(completed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'pass'));
+  assert.equal(await fs.readFile(path.join(root, 'lint.marker'), 'utf8'), 'lint');
+  assert.equal(await fs.readFile(path.join(root, 'test.marker'), 'utf8'), 'test');
+  assert.equal(await fs.readFile(path.join(root, 'build.marker'), 'utf8'), 'build');
+});
+
+test('project quality goal fails closed when requireAll names a missing trusted check', async (t) => {
+  const root = await tempDir(t, 'operator-quality-required-project-');
+  const authority = await tempDir(t, 'operator-quality-required-authority-');
+  const state = await tempDir(t, 'operator-quality-required-state-');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'quality-required-fixture' }));
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root,
+      commands: [{
+        id: 'only-test', kind: 'test', executable: 'node', args: ['-e', 'process.exit(0)'],
+        cwd: '.', risk: 'read', artifacts: []
+      }]
+    }]
+  }));
+
+  const runtime = new OperatorRuntime()
+    .register(new ProjectInspectProvider({ allowedRoots: [root] }))
+    .register(new ProjectCommandProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath }));
+  const orchestrator = new TaskOrchestrator({
+    runtime, store: new TaskStore(state),
+    permissions: permissions(root, ['project.inspect', 'project.command.inspect', 'project.command.run'])
+  });
+
+  const submitted = await orchestrator.submit({
+    objective: 'Require lint and test before accepting this project.',
+    authorizedScope: [root],
+    successConditions: ['both requested checks must exist and pass'],
+    goal: { kind: 'project-quality-gate', root, checks: ['lint', 'test'], requireAll: true }
+  });
+  const completed = await orchestrator.run(submitted.id);
+
+  assert.equal(completed.state, 'FAILED');
+  assert.equal(completed.failures.at(-1)?.code, 'TASK_POSTCONDITION_FAILED');
+  assert.match(completed.failures.at(-1)?.message ?? '', /lint/i);
+  assert.ok(completed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'fail'));
+  assert.equal(completed.execution?.records.some((record) => record.capability === 'project.command.run'), false);
+});
+
 test('task executor recovers an interrupted create without duplicating the mutation', async (t) => {
   if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
   const root = await tempDir(t, 'operator-task-recovery-');
