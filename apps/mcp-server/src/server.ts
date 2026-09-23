@@ -22,6 +22,7 @@ import { invokePublicWithAgent } from './public-boundary.ts';
 import { registerPublicTools } from './public-tools.ts';
 import { FixedWindowRateLimiter, envRateLimit, principalRateKey, requestClientKey, type RateLimitDecision } from './rate-limit.ts';
 import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-pages.ts';
+import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -206,8 +207,9 @@ app.all('/mcp', async (request, reply) => {
 });
 app.get('/health', async () => ({
   ok: true,
-  service: 'operator-mcp-server',
-  version: '0.1.0',
+  service: PRODUCT_NAME,
+  title: PRODUCT_TITLE,
+  version: PRODUCT_VERSION,
   ...runtimeProvenance(process.env)
 }));
 
@@ -258,9 +260,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       : invokeWithAgent(agent, capability, risk, input, target);
 
   const server = new McpServer(
-    publicMode
-      ? { name: 'mecord-connect', title: 'Mecord Connect', version: '0.1.0' }
-      : { name: 'Operator', title: 'Operator', version: '0.1.0' },
+    { name: PRODUCT_NAME, title: PRODUCT_TITLE, version: PRODUCT_VERSION },
     { capabilities: { tools: {} }, instructions: publicMode
       ? 'Operate only user-authorized project data through the restricted public tool surface. Never request or process credentials, authentication secrets, payment data, or other restricted data.'
       : 'Operate only user-authorized computers. Prefer semantic/native capabilities and return evidence-rich results.' }
