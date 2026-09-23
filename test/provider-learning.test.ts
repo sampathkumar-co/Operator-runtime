@@ -109,6 +109,28 @@ test('learning state persists only bounded capability/provider counters, never t
   assert.doesNotMatch(persisted, /secret-project|customer\.txt|learning-route/);
 });
 
+test('malformed structured learning state is classified as corrupt rather than caller input', async (t) => {
+  const state = await tempDir(t, 'operator-learning-structured-corrupt-');
+  await fs.writeFile(path.join(state, 'provider-learning.json'), JSON.stringify({
+    version: 2,
+    entries: [{
+      capability: 'file.read\nforged',
+      provider: 'native',
+      context: 'global',
+      verified: 1,
+      failed: 0,
+      latencyEwmaMs: 0,
+      latencySamples: 0,
+      updatedAt: new Date(0).toISOString()
+    }]
+  }));
+  const learning = new ProviderLearningStore(state);
+  await assert.rejects(
+    () => learning.adjustment('file.read', 'native', 'global'),
+    (error: any) => error?.code === 'PROVIDER_LEARNING_STATE_CORRUPT'
+  );
+});
+
 test('corrupt learning state fails routing closed before any provider executes', async (t) => {
   const state = await tempDir(t, 'operator-learning-corrupt-');
   await fs.writeFile(path.join(state, 'provider-learning.json'), '{not-json', { mode: 0o600 });
