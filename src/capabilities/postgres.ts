@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
@@ -76,7 +76,7 @@ export class PostgresProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       const root = await this.#scope.resolveExisting(String(action.input.path ?? ''));
@@ -107,20 +107,20 @@ export class PostgresProvider implements CapabilityProvider {
         if (operation === 'server') {
           const rows = await this.#query(profile, root,
             "SELECT current_database() AS database, current_user AS user_name, current_setting('server_version') AS server_version, current_setting('transaction_read_only') AS transaction_read_only",
-            {}, timeoutMs);
+            {}, timeoutMs, context.signal);
           return success(action, started, { profileId: profile.id, operation, rows }, [readOnlyEvidence(profile, operation)]);
         }
         if (operation === 'schemas') {
           const rows = await this.#query(profile, root,
             "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT LIKE 'pg_toast%' ORDER BY schema_name LIMIT 200",
-            {}, timeoutMs);
+            {}, timeoutMs, context.signal);
           return success(action, started, { profileId: profile.id, operation, rows }, [readOnlyEvidence(profile, operation)]);
         }
         if (operation === 'tables') {
           const schema = identifier(String(action.input.schema ?? 'public'), 'schema');
           const rows = await this.#query(profile, root,
             "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = :'op_schema' ORDER BY table_name LIMIT 500",
-            { op_schema: schema }, timeoutMs);
+            { op_schema: schema }, timeoutMs, context.signal);
           return success(action, started, { profileId: profile.id, operation, schema, rows }, [readOnlyEvidence(profile, operation)]);
         }
         if (operation === 'columns') {
@@ -128,7 +128,7 @@ export class PostgresProvider implements CapabilityProvider {
           const table = identifier(String(action.input.table ?? ''), 'table');
           const rows = await this.#query(profile, root,
             "SELECT column_name, data_type, is_nullable, ordinal_position FROM information_schema.columns WHERE table_schema = :'op_schema' AND table_name = :'op_table' ORDER BY ordinal_position LIMIT 500",
-            { op_schema: schema, op_table: table }, timeoutMs);
+            { op_schema: schema, op_table: table }, timeoutMs, context.signal);
           return success(action, started, { profileId: profile.id, operation, schema, table, rows }, [readOnlyEvidence(profile, operation)]);
         }
         throw new OperatorError('INVALID_POSTGRES_INSPECT_OPERATION', 'operation must be profiles, server, schemas, tables, or columns.');
@@ -144,7 +144,7 @@ export class PostgresProvider implements CapabilityProvider {
       const offset = boundedInteger(action.input.offset, 0, 0, 10_000);
       const timeoutMs = boundedTimeout(action.input.timeoutMs);
       const built = buildSelect(schema, table, columns, filters, orderBy, limit, offset);
-      const rows = await this.#query(profile, root, built.sql, built.variables, timeoutMs);
+      const rows = await this.#query(profile, root, built.sql, built.variables, timeoutMs, context.signal);
       return success(action, started, {
         profileId: profile.id,
         schema,
@@ -242,7 +242,7 @@ export class PostgresProvider implements CapabilityProvider {
     return profile;
   }
 
-  async #query(profile: Profile, cwd: string, sql: string, variables: Record<string, string>, timeoutMs: number): Promise<Array<Record<string, string | null>>> {
+  async #query(profile: Profile, cwd: string, sql: string, variables: Record<string, string>, timeoutMs: number, signal?: AbortSignal): Promise<Array<Record<string, string | null>>> {
     const args = [
       ...this.#psqlArgsPrefix,
       '-X',
@@ -260,7 +260,7 @@ export class PostgresProvider implements CapabilityProvider {
       args.push(`--set=${name}=${value}`);
     }
     args.push('--command', sql);
-    const output = await runPsql(this.#psqlExecutable, args, cwd, profile, timeoutMs);
+    const output = await runPsql(this.#psqlExecutable, args, cwd, profile, timeoutMs, signal);
     if (output.truncated) throw new OperatorError('POSTGRES_OUTPUT_TOO_LARGE', 'PostgreSQL output exceeded the bounded response size.');
     return parseCsvObjects(output.stdout, MAX_ROWS);
   }
@@ -429,8 +429,12 @@ function psqlEnvironment(profile: Profile, timeoutMs: number): NodeJS.ProcessEnv
   return env;
 }
 
-async function runPsql(executable: string, args: string[], cwd: string, profile: Profile, timeoutMs: number): Promise<PsqlOutput> {
+async function runPsql(executable: string, args: string[], cwd: string, profile: Profile, timeoutMs: number, signal?: AbortSignal): Promise<PsqlOutput> {
   return await new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new OperatorError('EXECUTION_ABORTED', 'PostgreSQL execution was cancelled.', { retryable: false }));
+      return;
+    }
     const environment = psqlEnvironment(profile, timeoutMs);
     const psqlExecutable = resolveTrustedExecutable(executable, environment);
     const child = spawn(psqlExecutable, args, {
@@ -445,6 +449,8 @@ async function runPsql(executable: string, args: string[], cwd: string, profile:
     let bytes = 0;
     let truncated = false;
     let timedOut = false;
+    let aborted = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
     const capture = (bucket: Buffer[]) => (chunk: Buffer) => {
       if (bytes >= MAX_OUTPUT_BYTES) { truncated = true; return; }
       const sliced = chunk.subarray(0, MAX_OUTPUT_BYTES - bytes);
@@ -455,14 +461,31 @@ async function runPsql(executable: string, args: string[], cwd: string, profile:
     child.stdout.on('data', capture(stdout));
     child.stderr.on('data', capture(stderr));
     child.once('error', reject);
+    const terminate = () => {
+      try { child.kill('SIGTERM'); } catch { /* child may already be gone */ }
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* child may already be gone */ }
+        }, 1000);
+        forceKillTimer.unref();
+      }
+    };
+    const onAbort = () => { aborted = true; terminate(); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 1000).unref();
+      terminate();
     }, timeoutMs + 1500);
     timer.unref();
     child.once('close', (code) => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener('abort', onAbort);
+      if (aborted) {
+        reject(new OperatorError('EXECUTION_ABORTED', 'PostgreSQL execution was cancelled.', { retryable: false }));
+        return;
+      }
       if (timedOut) {
         reject(new OperatorError('POSTGRES_TIMEOUT', `PostgreSQL command exceeded ${timeoutMs}ms statement window.`, { retryable: true }));
         return;
