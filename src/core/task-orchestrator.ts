@@ -412,6 +412,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
@@ -487,6 +488,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   }
 
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
+    if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
