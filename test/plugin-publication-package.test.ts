@@ -15,6 +15,8 @@ test('public plugin manifest satisfies final directory field limits', async () =
   const ui = manifest.interface;
   assert.match(manifest.name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
   assert.match(manifest.version, /^\d+\.\d+\.\d+/);
+  const runtimePackage = await json('packages/mecord-connect/package.json');
+  assert.equal(manifest.version, runtimePackage.version, 'plugin manifest version must match mecord-connect runtime package version');
   assert.ok(ui.displayName.length <= 30);
   assert.ok(ui.shortDescription.length <= 30);
   assert.ok(ui.longDescription.length <= 4000);
