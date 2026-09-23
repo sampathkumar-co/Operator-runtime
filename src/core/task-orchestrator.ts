@@ -359,6 +359,10 @@ export class TaskOrchestrator {
     this.#controlRequests.set(taskId, state);
     try {
       const task = await this.#store.get(taskId);
+      if (task.state === state) {
+        if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
+        return task;
+      }
       if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
       task.state = state;
       task.updatedAt = new Date().toISOString();
