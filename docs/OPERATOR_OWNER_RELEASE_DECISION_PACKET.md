@@ -101,7 +101,7 @@ The remaining npm work belongs to the explicit irreversible release gate: build/
 - create/reconcile the Mecord Connect plugin draft;
 - use the current production MCP/OAuth endpoints;
 - complete a portal-issued domain challenge if one is issued;
-- run Scan Tools and verify the exact 10-tool public snapshot;
+- run Scan Tools and verify the exact 9-tool public snapshot;
 - execute real ChatGPT OAuth read/write/refusal/revoke/reconnect testing;
 - enter reviewer credentials without secondary verification;
 - record and host the required production demo;

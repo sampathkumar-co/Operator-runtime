@@ -100,3 +100,17 @@ test('review package has exact cases and complete public-tool annotation justifi
     assert.equal(PUBLIC_TOOL_NAMES.includes(forbidden), false);
   }
 });
+
+test('current reviewer-facing docs match the canonical nine-tool public surface', async () => {
+  const currentDocs = [
+    'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
+    'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
+    'docs/OPERATOR_OWNER_RELEASE_DECISION_PACKET.md',
+    'docs/SUBMISSION_PACKAGE.md'
+  ];
+  for (const relative of currentDocs) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.equal(content.includes('`device.claim`'), false, `${relative} still advertises removed public device.claim`);
+    assert.doesNotMatch(content, /\b(?:10[- ]tool|ten tools|ten-tool)\b/i, `${relative} still advertises the obsolete ten-tool surface`);
+  }
+});

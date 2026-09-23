@@ -157,18 +157,17 @@ Expected: refuse because the path is outside authorized roots.
 Prompt: `Replace demo-project/src/replace-me.ts while signed in with a read-only reviewer token.`
 Expected: refuse before dispatch because `operator:write` is absent.
 
-## 9. Public MCP tool set — Scan Tools must import exactly 10
+## 9. Public MCP tool set — Scan Tools must import exactly 9
 
-1. `device.claim`
-2. `computer.inspect`
-3. `project.inspect`
-4. `project.commands`
-5. `file.list`
-6. `file.read`
-7. `file.create`
-8. `file.replace`
-9. `git.status`
-10. `git.diff`
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
 No public `terminal.execute`, unrestricted browser automation, Windows UIA, or arbitrary PostgreSQL query capability is permitted.
 
@@ -234,7 +233,7 @@ All must be true:
 - clean-machine reviewer-root startup/pairing works;
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
-- Scan Tools imports exactly 10 tools;
+- Scan Tools imports exactly 9 tools;
 - real OAuth read/write/revoke/reconnect proof passes;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible production demo recording exists;

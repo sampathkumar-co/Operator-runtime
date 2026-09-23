@@ -107,18 +107,17 @@ The package is not yet public. npm account setup is resolved: `npm whoami` = **m
 
 ## Public MCP surface
 
-Exactly 10 tools:
+Exactly 9 tools:
 
-1. `device.claim`
-2. `computer.inspect`
-3. `project.inspect`
-4. `project.commands`
-5. `file.list`
-6. `file.read`
-7. `file.create`
-8. `file.replace`
-9. `git.status`
-10. `git.diff`
+1. `computer.inspect`
+2. `project.inspect`
+3. `project.commands`
+4. `file.list`
+5. `file.read`
+6. `file.create`
+7. `file.replace`
+8. `git.status`
+9. `git.diff`
 
 Generic terminal, unrestricted browser automation, raw Windows UI Automation and arbitrary PostgreSQL access are deliberately not exposed by the public plugin.
 
@@ -205,7 +204,7 @@ Owner enters the provisioned reviewer credential, proves no secondary verificati
 Use only the exact OpenAI-issued challenge token.
 
 ### 4. Real OpenAI/ChatGPT OAuth + Scan Tools + E2E + demo
-Prove issued-token resource/scopes, exact 10-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
+Prove issued-token resource/scopes, exact 9-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
 
 ### 5. Explicit irreversible publication / deployment / submission authorization
 Authorize publication of the exact certified `mecord-connect` tarball with 2FA, final transactional deployment, then OpenAI Submit for Review only after the real review proof is green.
