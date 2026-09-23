@@ -256,8 +256,9 @@ export class TaskOrchestrator {
         ...this.#permissions,
         approvedActionIds: [...new Set([...(this.#permissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
+      const learningContext = semanticLearningContext(goal, task);
       let result: ActionResult;
-      try { result = await this.#executeAction(action, permissions, { signal }); }
+      try { result = await this.#executeAction(action, permissions, { signal, learningContext }); }
       catch (error) {
         result = {
           ok: false, capability: action.capability, provider: 'task-executor', evidence: [], durationMs: 0,
@@ -284,13 +285,13 @@ export class TaskOrchestrator {
         try {
           planner.accept({ task, goal }, decision, observation);
         } catch (error) {
-          await this.#recordLearning(task, result, 'failed');
+          await this.#recordLearning(task, result, 'failed', learningContext);
           latestRecord.state = 'FAILED';
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
           return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
-        await this.#recordLearning(task, result, 'verified');
+        await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
         if (controlState) task.state = controlState;
@@ -310,7 +311,7 @@ export class TaskOrchestrator {
         await this.#store.put(task);
         return task;
       }
-      await this.#recordLearning(task, result, 'failed');
+      await this.#recordLearning(task, result, 'failed', learningContext);
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
@@ -371,9 +372,9 @@ export class TaskOrchestrator {
     return await this.#runtime.router.resolveRisk({ id: 'task-risk-probe', capability, risk: 'read', input, provenance: { kind: 'trusted_policy' } });
   }
 
-  async #recordLearning(task: TaskCapsule, result: ActionResult, outcome: 'verified' | 'failed'): Promise<void> {
+  async #recordLearning(task: TaskCapsule, result: ActionResult, outcome: 'verified' | 'failed', learningContext: string): Promise<void> {
     try {
-      const recorded = await this.#runtime.router.recordOutcome(result.capability, result.provider, outcome);
+      const recorded = await this.#runtime.router.recordOutcome(result.capability, result.provider, outcome, { context: learningContext, durationMs: result.durationMs });
       if (recorded) {
         task.evidence.push(evidence('adaptive_learning', 'info', 'Recorded a bounded provider outcome for future routing.', {
           capability: result.capability,
@@ -698,6 +699,15 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     }
     return { child, proxy, atomicStep: expected };
   }
+}
+
+function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): string {
+  if (goal.kind !== 'semantic-workflow') return goal.kind;
+  const state = task.execution?.plannerState;
+  if (!state) return 'semantic-workflow';
+  const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
+  return goal.steps[index]?.kind ?? 'semantic-workflow';
 }
 
 function workflowIndex(state: Record<string, unknown>, length: number): number {
