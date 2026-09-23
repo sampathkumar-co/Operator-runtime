@@ -13,6 +13,7 @@ import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
 import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.ts';
+import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 
@@ -110,6 +111,7 @@ export function createLocalAgentServer(options: {
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
+  sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
   onEmergencyClear?: () => Promise<void> | void;
@@ -361,7 +363,7 @@ export function createLocalAgentServer(options: {
         approvalRequestId: record.approvalRequestId,
         approvalExpiresAt: record.approvalExpiresAt
       }));
-      send(res, 200, { ok: true, approvals, configured: true });
+      send(res, 200, { ok: true, approvals, session: options.sessionApprovals?.summary() ?? { active: false }, configured: true });
       return;
     }
 
@@ -380,13 +382,16 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { decision?: unknown; approvalRequestId?: unknown };
         const decision = String(body.decision ?? '');
         const approvalRequestId = boundedString(body.approvalRequestId, 'approvalRequestId', 128);
-        const record = decision === 'approve'
+        const record = decision === 'approve' || decision === 'session'
           ? await options.approvals.approve(actionId, approvalRequestId)
           : decision === 'deny'
             ? await options.approvals.deny(actionId, approvalRequestId)
             : null;
+        const session = decision === 'session'
+          ? options.sessionApprovals?.grant(record!, options.permissions)
+          : undefined;
         if (!record) {
-          send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve or deny.' } });
+          send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve, session, or deny.' } });
           return;
         }
         send(res, 200, {
@@ -399,7 +404,8 @@ export function createLocalAgentServer(options: {
             status: record.status,
             approvalRequestId: record.approvalRequestId,
             approvalExpiresAt: record.approvalExpiresAt
-          }
+          },
+          ...(session ? { session: { active: true, id: session.id, expiresAt: session.expiresAt, idleExpiresAt: session.idleExpiresAt } } : {})
         });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: 'APPROVAL_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -487,12 +493,15 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
+        const sessionPermissions = options.sessionApprovals
+          ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
+          : options.permissions;
         const permissions = oneTimeApproved
           ? {
-              ...options.permissions,
-              approvedActionIds: [...new Set([...(options.permissions.approvedActionIds ?? []), action.id])]
+              ...sessionPermissions,
+              approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
             }
-          : options.permissions;
+          : sessionPermissions;
         if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
         const result = await options.runtime.execute(action, permissions);
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
@@ -509,7 +518,8 @@ export function createLocalAgentServer(options: {
             provenanceKind: action.provenance.kind,
             provider: result.provider,
             durationMs: result.durationMs,
-            errorCode: result.error?.code
+            errorCode: result.error?.code,
+            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions))
           }
         });
         send(res, result.ok ? 200 : 409, result);
