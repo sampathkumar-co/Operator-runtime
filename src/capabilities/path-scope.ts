@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from '../core/errors.ts';
+import { normalizeScopedPathSyntax } from '../core/scoped-path-syntax.ts';
 import { withWindowsPathLease } from '../core/windows-path-lease.ts';
 
 function lexicalInside(candidate: string, root: string): boolean {
@@ -65,11 +66,15 @@ export class PathScope {
   }
 
   #absolute(inputPath: string): string {
-    if (path.isAbsolute(inputPath)) return path.resolve(inputPath);
+    const syntax = normalizeScopedPathSyntax(inputPath);
+    if (syntax.kind === 'native-absolute') return syntax.value;
+    if (syntax.kind === 'foreign-windows-absolute') {
+      throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Foreign absolute paths are outside the authorized roots.');
+    }
     if (this.roots.length !== 1) {
       throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative paths require exactly one authorized root.');
     }
-    return path.resolve(this.roots[0]!, inputPath);
+    return path.resolve(this.roots[0]!, syntax.value);
   }
 
   #lexicalRoot(absolute: string): string {

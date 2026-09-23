@@ -54,9 +54,7 @@ test('equivalent project-relative path forms stay canonical and create-list-read
   const created = await provider.execute(action('file.create', { path: 'src/fresh.txt', content: 'fresh-now' }));
   assert.equal(created.ok, true, created.error?.message);
 
-  const directoryForms = process.platform === 'win32'
-    ? ['src', './src', '.\\src']
-    : ['src', './src'];
+  const directoryForms = ['src', './src', '.\\src'];
   for (const form of directoryForms) {
     const listed = await provider.execute(action('file.list', { path: form }));
     assert.equal(listed.ok, true, `${form}: ${listed.error?.code ?? 'ok'}`);
@@ -64,9 +62,7 @@ test('equivalent project-relative path forms stay canonical and create-list-read
   }
 
   const expectedFile = await fs.realpath(path.join(root, 'src', 'fresh.txt'));
-  const fileForms = process.platform === 'win32'
-    ? ['src/fresh.txt', './src/fresh.txt', '.\\src\\fresh.txt']
-    : ['src/fresh.txt', './src/fresh.txt'];
+  const fileForms = ['src/fresh.txt', './src/fresh.txt', '.\\src\\fresh.txt'];
   for (const form of fileForms) {
     const read = await provider.execute(action('file.read', { path: form }));
     assert.equal(read.ok, true, `${form}: ${read.error?.code ?? 'ok'}`);
@@ -77,6 +73,12 @@ test('equivalent project-relative path forms stay canonical and create-list-read
   const escaped = await provider.execute(action('file.read', { path: '..\\outside.txt' }));
   assert.equal(escaped.ok, false);
   assert.equal(escaped.error?.code, 'PATH_OUTSIDE_SCOPE');
+
+  if (process.platform !== 'win32') {
+    const foreignAbsolute = await provider.execute(action('file.read', { path: 'C:\\outside.txt' }));
+    assert.equal(foreignAbsolute.ok, false);
+    assert.equal(foreignAbsolute.error?.code, 'PATH_OUTSIDE_SCOPE');
+  }
 });
 
 test('Windows absolute path aliases resolve to the same authorized directory and file', async (t) => {

@@ -3,6 +3,7 @@ import type { ActionRequest, PermissionProfile } from './types.ts';
 import { PolicyError } from './errors.ts';
 import { assertInstructionAuthority } from './provenance.ts';
 import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
+import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
 
 function capabilityAllowed(capability: string, allowed: string[]): boolean {
   return allowed.some((rule) => rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1))));
@@ -14,9 +15,10 @@ function pathWithin(child: string, root: string): boolean {
 }
 
 function policyPath(inputPath: string, roots: string[]): string | undefined {
-  if (path.isAbsolute(inputPath)) return path.resolve(inputPath);
-  if (roots.length !== 1) return undefined;
-  return path.resolve(roots[0]!, inputPath);
+  const syntax = normalizeScopedPathSyntax(inputPath);
+  if (syntax.kind === 'native-absolute') return syntax.value;
+  if (syntax.kind === 'foreign-windows-absolute' || roots.length !== 1) return undefined;
+  return path.resolve(roots[0]!, syntax.value);
 }
 
 export class PolicyEngine {
