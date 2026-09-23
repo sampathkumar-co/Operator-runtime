@@ -855,8 +855,9 @@ test('pause during a stale pre-dispatch runner write prevents provider execution
 
   const running = orchestrator.run(task.id);
   await store.blockedPromise;
-  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  const pausing = orchestrator.pause(task.id);
   store.release();
+  assert.equal((await pausing).state, 'PAUSED');
 
   const paused = await running;
   assert.equal(paused.state, 'PAUSED');
@@ -889,8 +890,9 @@ test('cancel survives a stale runner write that started before the control reque
 
   const running = orchestrator.run(task.id);
   await store.blockedPromise;
-  assert.equal((await orchestrator.cancel(task.id)).state, 'CANCELLED');
+  const cancelling = orchestrator.cancel(task.id);
   store.release();
+  assert.equal((await cancelling).state, 'CANCELLED');
 
   const cancelled = await running;
   const persisted = await store.get(task.id);
