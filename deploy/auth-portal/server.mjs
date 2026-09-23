@@ -240,6 +240,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     offline_access:'Keep the connection available until you disconnect it',
     'operator:read':'Inspect authorized projects and device status',
     'operator:write':'Perform changes you explicitly request and approve',
+    'operator:developer':'Use advanced Mecord developer automation on explicitly entitled devices',
     profile:'Share your basic Mecord profile'
   };
   async function loadOAuthConsent(silent){
