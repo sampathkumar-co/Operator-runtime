@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-The production HTTPS origin and OAuth provider are live on frozen OCC-3M. PR #30 merged the release-aligned Mecord Connect source baseline at `7e43c14bafcd207d208a0744bd6d8910fafedd6e`; the exact current `main` head and all required workflow results must be read live from GitHub immediately before deployment or submission. Source legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Production still serves the pre-final OCC-3M pages, so submission remains blocked on the external/account categories: OpenAI identity verification and app-management access, reviewer credential/pairing, portal challenge if issued, real OAuth/Scan/E2E/demo, and explicit publication/deployment/submission authorization. npm account setup is already resolved for user mecord with auth-and-writes 2FA.
+Production is live on Mecord Connect source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`, and `mecord-connect@1.0.0` is public under `latest`. The fresh ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked only on the unresolved OpenAI/reviewer/device evidence: publisher verification, reviewer/device pairing, portal challenge if issued, Scan Tools, device-backed read/write + revoke/reconnect proof, demo recording, and final Submit for Review authorization.
 
 ## What the public plugin does
 
@@ -113,7 +113,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- `mecord-connect@1.0.0` is publicly published and clean-machine `doctor` / reviewer-root startup have passed. (The proprietary license and DUAL_USE source decisions themselves are already resolved and certified.)
+- reviewer-root/device startup and full device-backed E2E have passed. (`mecord-connect@1.0.0` publication and clean registry `doctor` are already complete.)
 - the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
@@ -125,7 +125,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
 - if the OpenAI portal issues a challenge token, that exact token is served only at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return **separately reviewed production content** over HTTPS. OCC-3M currently consumes live bind-mounted `production-notices/{privacy,terms,support}.md`; integrated PR #27 contains the source-controlled notice set, the Mecord Connect product-name alignment, and the bind-mount regression contract. The final descendant already contains the approved publisher/contact/jurisdiction source wording; before submission it must be deployed so all four live pages visibly match the Mecord Connect listing and the verified identity; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
+- website, privacy, terms and support URLs return the deployed Mecord Connect production content over HTTPS and match the source-controlled notice set from deployed source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - Scan Tools imports exactly the intended nine-tool public surface and current annotations;
 - all nine annotation justifications match the scanned server values;
