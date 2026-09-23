@@ -45,8 +45,8 @@ Usage:
 
 remote starts the local policy/runtime agent and its secure relay connection only.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.
-When a destructive action needs approval, keep this terminal open and type "approve" or "deny".
-Approval stays local, exact-action-bound, and is never exposed to ChatGPT.
+When an action needs approval, Mecord opens a local Windows card with Deny, Approve Once, and Allow Session.
+Approval stays local and is never exposed to ChatGPT; terminal approval commands remain available as a fallback.
 --no-browser disables automatic managed-Chromium launch for private browser tasks;
 first-time account/device pairing still opens the secure authenticated pairing page when required.`;
 }
