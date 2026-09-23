@@ -19,9 +19,12 @@ test('public tool count is derived from the canonical allowlist', async () => {
   assert.match(readme, new RegExp(`\\*\\*${PUBLIC_PLUGIN_TOOL_NAMES.length} review-bounded tools\\*\\*`));
 });
 
-test('MCP server no longer exposes legacy Operator product identity', async () => {
-  const source = await fs.readFile(path.join(process.cwd(), 'apps', 'mcp-server', 'src', 'server.ts'), 'utf8');
-  assert.doesNotMatch(source, /name:\s*'Operator'/);
-  assert.doesNotMatch(source, /title:\s*'Operator'/);
-  assert.doesNotMatch(source, /version:\s*'0\.1\.0'/);
+test('runtime health surfaces no longer expose legacy product version or Operator MCP identity', async () => {
+  const mcp = await fs.readFile(path.join(process.cwd(), 'apps', 'mcp-server', 'src', 'server.ts'), 'utf8');
+  const agent = await fs.readFile(path.join(process.cwd(), 'apps', 'local-agent', 'src', 'server.ts'), 'utf8');
+  assert.doesNotMatch(mcp, /name:\s*'Operator'/);
+  assert.doesNotMatch(mcp, /title:\s*'Operator'/);
+  assert.doesNotMatch(mcp, /version:\s*'0\.1\.0'/);
+  assert.doesNotMatch(agent, /version:\s*'0\.1\.0'/);
+  assert.match(agent, /version:\s*PRODUCT_VERSION/);
 });
