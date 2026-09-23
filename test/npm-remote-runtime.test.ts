@@ -9,6 +9,10 @@ import {
   safeRuntimeEnvironment,
   validateRuntimeManifest
 } from '../packages/mecord-connect/src/cli.mjs';
+import {
+  parseApprovalConsoleCommand,
+  validateLocalAgentReadyMessage
+} from '../packages/mecord-connect/src/approval-console.mjs';
 
 function manifest(overrides: Record<string, unknown> = {}) {
   const required = [
@@ -37,6 +41,13 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['remote', '--help']), { command: 'help' });
   assert.deepEqual(parseArgs(['remote', '-h']), { command: 'help' });
   assert.deepEqual(parseArgs(['doctor']), { command: 'doctor' });
+  assert.deepEqual(parseApprovalConsoleCommand('approvals'), { kind: 'list' });
+  assert.deepEqual(parseApprovalConsoleCommand('approve'), { kind: 'decision', decision: 'approve', selector: undefined });
+  assert.deepEqual(parseApprovalConsoleCommand('deny abc123'), { kind: 'decision', decision: 'deny', selector: 'abc123' });
+  assert.deepEqual(parseApprovalConsoleCommand('approve one two'), { kind: 'invalid' });
+  assert.deepEqual(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 49152 }), { baseUrl: 'http://127.0.0.1:49152' });
+  assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '0.0.0.0', port: 49152 }), null);
+  assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 70000 }), null);
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
   assert.equal(assertSerializableAuthorizedRoot('C:\\work\\repo'), 'C:\\work\\repo');
@@ -51,6 +62,9 @@ test('remote launcher binds its local agent to an ephemeral loopback port', asyn
   assert.match(source, /env\.OPERATOR_AGENT_HOST = '127\.0\.0\.1'/);
   assert.match(source, /env\.OPERATOR_AGENT_PORT = '0'/);
   assert.match(source, /remoteEntrypoint[\s\S]*remote\.js/);
+  assert.match(source, /stdio: \['ignore', 'inherit', 'inherit', 'ipc'\]/);
+  assert.match(source, /startLocalApprovalConsole/);
+  assert.doesNotMatch(source, /writeFile[\s\S]{0,200}OPERATOR_RECOVERY_TOKEN/);
   assert.doesNotMatch(source, /--experimental-strip-types/);
   assert.doesNotMatch(source, /env\.OPERATOR_AGENT_PORT = '47100'/);
 });
@@ -134,6 +148,14 @@ test('relay-only entrypoint derives executable roots independently of npm enviro
   assert.match(source, /https:\/\/operator\.splcart\.in\/v1\/device-result/);
   assert.doesNotMatch(source, /process\.env\.(?:SYSTEMROOT|WINDIR|PROGRAMFILES)\s*\|\|/);
   assert.doesNotMatch(source, /process\.env\.OPERATOR_RELAY_URL\s*\?\?/);
+});
+
+test('relay-only main reports loopback readiness only to the trusted Mecord launcher IPC channel', async () => {
+  const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  assert.match(source, /process\.env\.OPERATOR_REMOTE_PACKAGE === 'mecord-connect'/);
+  assert.match(source, /typeof process\.send === 'function'/);
+  assert.match(source, /type: 'mecord-local-agent-ready'/);
+  assert.match(source, /host: bound\.host, port: bound\.port/);
 });
 
 test('relay-only main treats terminal relay loss and emergency stop as fatal', async () => {
