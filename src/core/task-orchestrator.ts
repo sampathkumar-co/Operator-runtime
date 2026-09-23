@@ -336,7 +336,6 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      await this.#recordLearning(task, result, 'failed', learningContext);
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
         const remainingMs = Math.max(0, Date.parse(latestExecution.deadlineAt!) - Date.now());
         const approvalOutcome = await authorization.onApprovalRequired?.(action, remainingMs);
@@ -360,6 +359,7 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
+      await this.#recordLearning(task, result, 'failed', learningContext);
       if (planner.fallback?.({ task, goal }, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
