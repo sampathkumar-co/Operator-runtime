@@ -11,6 +11,22 @@ test('Windows UIA provider is platform-gated', () => {
   provider.close();
 });
 
+test('aborted UIA execution fails before sidecar launch', async () => {
+  const provider = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
+  const controller = new AbortController();
+  controller.abort();
+  const result = await provider.execute({
+    id: 'aborted-uia',
+    capability: 'app.inspect',
+    risk: 'read',
+    provenance,
+    input: {}
+  }, { signal: controller.signal });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+  provider.close();
+});
+
 test('invalid UIA operation fails before sidecar launch', async () => {
   const provider = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
   const result = await provider.execute({
