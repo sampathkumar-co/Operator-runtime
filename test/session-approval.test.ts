@@ -74,8 +74,8 @@ test('session approval absolute lifetime remains bounded even with use', () => {
   const store = new SessionApprovalStore({ clock: () => now });
   store.grant(record(), permissions);
 
-  for (let hour = 1; hour <= 7; hour += 1) {
-    now = new Date(Date.parse('2026-09-23T10:00:00.000Z') + hour * 60 * 60_000 - 1);
+  for (let minute = 50; minute < 8 * 60; minute += 50) {
+    now = new Date(Date.parse('2026-09-23T10:00:00.000Z') + minute * 60_000);
     assert.equal(store.allows(action, authorityA, permissions), true);
   }
   now = new Date('2026-09-23T18:00:00.000Z');
