@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
+import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 
@@ -90,6 +91,91 @@ test('one-time approval binds exact action, resumes once, and cannot be replayed
   assert.equal(third.status, 409);
   assert.equal((await third.json() as any).error.code, 'APPROVAL_REQUIRED');
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
+});
+
+test('session approval allows subsequent destructive actions only inside the same runtime scope', async (t) => {
+  const root = await temp(t, 'operator-session-approval-root-');
+  const state = await temp(t, 'operator-session-approval-state-');
+  const filePath = path.join(root, 'session-approved.txt');
+  await fs.writeFile(filePath, 'v1');
+  const token = 's'.repeat(64);
+  const recoveryToken = 'q'.repeat(64);
+  const runtime = createRuntime({
+    allowedRoots: [root],
+    allowedExecutables: ['node'],
+    windowsPathLeasePath: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const permissions = {
+    allowedCapabilities: ['file.*'],
+    allowedRoots: [root],
+    allowDestructive: false
+  };
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, sessionApprovals, permissions
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+  const firstContent = 'v2';
+  const first = {
+    id: 'session-first-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: firstContent,
+      expectedSha256: crypto.createHash('sha256').update('v1').digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+  const blocked = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action: first })
+  });
+  assert.equal(blocked.status, 409);
+  assert.equal((await blocked.json() as any).error.code, 'APPROVAL_REQUIRED');
+
+  const pending = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
+  const pendingBody = await pending.json() as any;
+  const approvalRequestId = pendingBody.approvals[0].approvalRequestId;
+  const session = await fetch(`${base}/v1/approvals/${encodeURIComponent(first.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'session', approvalRequestId })
+  });
+  const sessionBody = await session.json() as any;
+  assert.equal(session.status, 200, JSON.stringify(sessionBody));
+  assert.equal(sessionBody.session.active, true);
+
+  const firstRetry = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action: first })
+  });
+  assert.equal(firstRetry.status, 200, JSON.stringify(await firstRetry.clone().json()));
+  assert.equal(await fs.readFile(filePath, 'utf8'), firstContent);
+
+  const second = {
+    id: 'session-second-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: 'v3',
+      expectedSha256: crypto.createHash('sha256').update(firstContent).digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+  const secondResponse = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action: second })
+  });
+  const secondBody = await secondResponse.json() as any;
+  assert.equal(secondResponse.status, 200, JSON.stringify(secondBody));
+  assert.equal(secondBody.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v3');
 });
 
 test('pending approval expires hard and is physically pruned', async (t) => {
