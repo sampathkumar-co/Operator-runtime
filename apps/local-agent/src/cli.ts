@@ -5,6 +5,7 @@ import path from 'node:path';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { safeChildEnvironment } from '../../../src/core/child-environment.ts';
+import { PRODUCT_NAME } from '../../../src/core/product-identity.ts';
 import {
   BootstrapConfigStore,
   applyBootstrapEnvironment,
@@ -137,7 +138,7 @@ async function runtimeHealthy(config: Awaited<ReturnType<BootstrapConfigStore['l
     if (agent.status !== 200 || (agent.body as { ok?: unknown }).ok !== true) return false;
     const mcp = await readHealthJson(`${mcpBase}/health`);
     const body = mcp.body as { ok?: unknown; service?: unknown };
-    return mcp.status === 200 && body.ok === true && body.service === 'operator-mcp-server';
+    return mcp.status === 200 && body.ok === true && body.service === PRODUCT_NAME;
   } catch {
     return false;
   }
