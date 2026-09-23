@@ -307,6 +307,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         rejectDone(new OperatorError('BROWSER_DOWNLOAD_TIMEOUT', `No completed download event arrived within ${timeoutMs}ms.`, { retryable: true }));
       }
     }, timeoutMs);
+    if (signal?.aborted) onAbort();
     const offBegin = browser.on('Browser.downloadWillBegin', (params) => {
       if (activeGuid) return;
       activeGuid = typeof params.guid === 'string' ? params.guid : undefined;
