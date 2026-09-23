@@ -9,7 +9,7 @@ This runbook contains only work that cannot be completed autonomously without th
 The npm account setup gate is now independently verified from the owner machine:
 
 - npm user: **mecrod**
-- authenticated `npm whoami`: **PASS**
+- npm account/2FA setup was previously verified: **PASS**; a fresh publication CLI login is still required immediately before irreversible publish
 - npm 2FA mode: **auth-and-writes**
 - release package: **mecord-connect**
 - npm organization/scope: **not required** for the unscoped package
