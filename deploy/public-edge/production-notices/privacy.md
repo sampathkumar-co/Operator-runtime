@@ -12,7 +12,7 @@ The paired local runtime remains the execution boundary. Local policy, authorize
 
 ## Hosted infrastructure
 
-The production service at operator.splcart.in and auth.splcart.in currently runs on Hostinger infrastructure; the production IP is announced by AS47583 and is geolocated to Cyprus. Authentication is provided by a self-hosted Authelia instance on the same Operator infrastructure. Authentication notification email transport may use ImprovMX infrastructure.
+The production service at operator.splcart.in and auth.splcart.in currently runs on Hostinger infrastructure; the production IP is announced by AS47583 and is geolocated to Cyprus. Authentication is provided by a self-hosted Authelia instance on the same Mecord Connect infrastructure. Authentication notification email transport may use ImprovMX infrastructure.
 
 ## Retention
 

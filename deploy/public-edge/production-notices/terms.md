@@ -24,7 +24,7 @@ To the extent permitted by applicable law, the service is provided without a pro
 
 ## Suspension, termination, and applicable law
 
-Access may be suspended or terminated for security risk, abuse, unlawful use, material violation of these terms, or operational necessity. You may stop using Operator at any time and may reset or release paired devices.
+Access may be suspended or terminated for security risk, abuse, unlawful use, material violation of these terms, or operational necessity. You may stop using Mecord Connect at any time and may reset or release paired devices.
 
 These terms are governed by the laws of India. Subject to mandatory consumer-protection and jurisdiction rules that cannot be waived, disputes relating to these terms are subject to the competent courts at Visakhapatnam, Andhra Pradesh, India.
 

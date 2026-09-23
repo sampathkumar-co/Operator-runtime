@@ -149,7 +149,10 @@ test('shared-VPS profile preserves the trusted ingress and Caddy exec capability
   assert.match(privacy, /^# Mecord Connect Privacy Notice$/m);
   assert.match(terms, /^# Mecord Connect Terms of Service$/m);
   assert.match(support, /^# Mecord Connect Support$/m);
-  for (const notice of [privacy, terms, support]) assert.match(notice, /support@splcart\.in/);
+  for (const notice of [privacy, terms, support]) {
+    assert.match(notice, /support@splcart\.in/);
+    assert.doesNotMatch(notice, /\bOperator\b/);
+  }
   assert.doesNotMatch(compose, /ports:/);
   assert.doesNotMatch(compose, /network_mode:\s*host|privileged:\s*true/);
   assert.match(caddy, /auto_https off/);
