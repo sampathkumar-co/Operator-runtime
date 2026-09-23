@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startLocalApprovalConsole, validateLocalAgentReadyMessage } from './approval-console.mjs';
 
 const PACKAGE_NAME = 'mecord-connect';
 const RELAY_URL = 'wss://operator.splcart.in/device';
@@ -44,6 +45,8 @@ Usage:
 
 remote starts the local policy/runtime agent and its secure relay connection only.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.
+When a destructive action needs approval, keep this terminal open and type "approve" or "deny".
+Approval stays local, exact-action-bound, and is never exposed to ChatGPT.
 --no-browser disables automatic managed-Chromium launch for private browser tasks;
 the secure authenticated pairing URL is still printed when pairing is required.`;
 }
@@ -230,6 +233,37 @@ function runChild(executable, args, options = {}) {
   });
 }
 
+function runRemoteChild(executable, args, { cwd, env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd, env, shell: false, windowsHide: false,
+      stdio: ['ignore', 'inherit', 'inherit', 'ipc']
+    });
+    let stopApprovals = null;
+    let settled = false;
+    const cleanup = () => { try { stopApprovals?.(); } catch { /* noop */ } stopApprovals = null; };
+    child.on('message', (message) => {
+      if (stopApprovals) return;
+      const ready = validateLocalAgentReadyMessage(message);
+      if (!ready) return;
+      stopApprovals = startLocalApprovalConsole({
+        baseUrl: ready.baseUrl,
+        agentToken: env.OPERATOR_AGENT_TOKEN,
+        recoveryToken: env.OPERATOR_RECOVERY_TOKEN
+      });
+    });
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true; cleanup(); reject(error);
+    });
+    child.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true; cleanup();
+      if (signal) reject(new Error(`Process terminated by signal ${signal}.`));
+      else resolve(code ?? 1);
+    });
+  });
+}
 async function selfTestHelper(name) {
   const file = helperPath(name);
   const code = await runChild(file, ['--self-test'], {
@@ -322,11 +356,9 @@ export async function runRemote({ root = process.cwd(), browser = true } = {}) {
   console.log('[mecord-connect] ChatGPT uses the hosted MCP edge; no local MCP server is started.');
   console.log('[mecord-connect] if this device is not paired yet, open the secure pairing link shown below and confirm the device in your Mecord account.');
 
-  const code = await runChild(process.execPath, [remoteEntrypoint], {
+  const code = await runRemoteChild(process.execPath, [remoteEntrypoint], {
     cwd: authorizedRoot,
-    env,
-    stdio: 'inherit',
-    windowsHide: false
+    env
   });
   if (code !== 0) throw new Error(`Mecord Connect remote runtime exited with code ${code}.`);
 }

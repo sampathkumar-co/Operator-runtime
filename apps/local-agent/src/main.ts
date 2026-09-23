@@ -266,6 +266,9 @@ const port = Number(process.env.OPERATOR_AGENT_PORT ?? 47100);
 const bound = await agent.listen(host, port);
 localAgentBaseUrl = relayUrl ? `http://${loopbackAddressForBoundHost(bound.host)}:${bound.port}` : '';
 console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
+if (process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function') {
+  process.send({ type: 'mecord-local-agent-ready', host: bound.host, port: bound.port });
+}
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
 console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);

@@ -10,7 +10,7 @@ Requires Windows x64 with a supported Node.js line: 22.14+, 24.x, or 26.x. Git f
 
 The command does **not** install an MSIX and does **not** start a local MCP server. It verifies the package's runtime manifest, starts the existing hardened local policy/runtime agent, and connects that agent to the pinned production relay at `wss://operator.splcart.in/device`. ChatGPT talks to the hosted MCP edge.
 
-On first use the runtime prints a one-time device pairing code. Claim that code from Mecord Connect in the authenticated ChatGPT connection. The resulting short-lived relay credential is protected for the current Windows user with DPAPI and is rotated by the existing relay-session authority.
+On first use the runtime prints the secure Mecord pairing link and opens the authenticated web pairing flow when possible. Confirm the device in your Mecord account; ChatGPT does not receive a public device-claim tool. The resulting short-lived relay credential is protected for the current Windows user with DPAPI and is rotated by the existing relay-session authority.
 
 By default the current directory is the authorized filesystem/project root. To authorize another folder explicitly:
 
@@ -19,6 +19,8 @@ npx mecord-connect@latest remote --root C:\path\to\project
 ```
 
 Use `--no-browser` to disable automatic launch of Mecord Connect's managed-browser capability. Generic terminal execution remains disabled by default; project commands continue to use the existing policy/approval boundary.
+
+When ChatGPT requests an exact destructive action such as `file.replace`, it can return `APPROVAL_REQUIRED`. Keep the `mecord-connect remote` terminal open: it lists the pending local action and accepts `approve` or `deny` (or an ID prefix if several actions are pending). Approval is local-only, exact-action-bound, one-time, and expires after 10 minutes. ChatGPT never receives the recovery authority and cannot approve its own request. After approving, retry the same ChatGPT action.
 
 Before starting a session you can verify the package payload and all three Windows-native security helpers:
 
