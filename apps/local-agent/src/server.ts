@@ -128,6 +128,72 @@ export function createLocalAgentServer(options: {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
 
+  type InlineApprovalDecision = 'approve' | 'session' | 'deny';
+  type InlineApprovalWaiter = {
+    approvalRequestId: string;
+    resolve: (decision: InlineApprovalDecision | null) => void;
+    timer: NodeJS.Timeout;
+  };
+  const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
+
+  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision) => {
+    const waiters = approvalWaiters.get(actionId);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (waiter.approvalRequestId !== approvalRequestId) continue;
+      clearTimeout(waiter.timer);
+      waiters.delete(waiter);
+      waiter.resolve(decision);
+    }
+    if (waiters.size === 0) approvalWaiters.delete(actionId);
+  };
+
+  const waitForApprovalDecision = (actionId: string, approvalRequestId: string): Promise<InlineApprovalDecision | null> => {
+    return new Promise((resolve) => {
+      const waiters = approvalWaiters.get(actionId) ?? new Set<InlineApprovalWaiter>();
+      const waiter: InlineApprovalWaiter = {
+        approvalRequestId,
+        resolve,
+        timer: setTimeout(() => {
+          waiters.delete(waiter);
+          if (waiters.size === 0) approvalWaiters.delete(actionId);
+          resolve(null);
+        }, INLINE_APPROVAL_WAIT_MS)
+      };
+      waiter.timer.unref?.();
+      waiters.add(waiter);
+      approvalWaiters.set(actionId, waiters);
+    });
+  };
+
+  const clearApprovalWaiters = () => {
+    for (const waiters of approvalWaiters.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(null);
+      }
+    }
+    approvalWaiters.clear();
+  };
+
+  const executeActionWithCurrentApproval = async (
+    action: ActionRequest,
+    approvalAuthority: ApprovalAuthorityContext | undefined
+  ): Promise<ActionResult> => {
+    const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
+    const sessionPermissions = options.sessionApprovals
+      ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
+      : options.permissions;
+    const permissions = oneTimeApproved
+      ? {
+          ...sessionPermissions,
+          approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+        }
+      : sessionPermissions;
+    if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
+    return await options.runtime.execute(action, permissions);
+  };
+
   const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
     permissionProvider: () => options.sessionApprovals
       ? options.sessionApprovals.permissionsFor(authority, options.permissions)
