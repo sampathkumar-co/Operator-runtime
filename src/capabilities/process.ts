@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
@@ -61,7 +61,7 @@ export class ProcessProvider implements CapabilityProvider {
   supports(action: ActionRequest): boolean { return action.capability === 'terminal.execute'; }
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     const executable = String(action.input.executable ?? '').trim();
     const args = Array.isArray(action.input.args) ? action.input.args.map(String) : [];
@@ -82,7 +82,7 @@ export class ProcessProvider implements CapabilityProvider {
 
     try {
       const cwd = await this.#scope.resolveExisting(String(action.input.cwd ?? ''));
-      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes, this.#environmentOverrides);
+      const output = await runProcess(executable, args, cwd, timeoutMs, this.#maxOutputBytes, this.#environmentOverrides, context.signal);
       const ok = output.exitCode === 0;
       return {
         ok,
@@ -157,7 +157,7 @@ function validateEnvironmentOverrides(value: Readonly<Record<string, string>> | 
   return Object.freeze(output);
 }
 
-async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number, environmentOverrides: Readonly<Record<string, string>>): Promise<{
+async function runProcess(executable: string, args: string[], cwd: string, timeoutMs: number, maxOutputBytes: number, environmentOverrides: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<{
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -165,6 +165,10 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
   truncated: boolean;
 }> {
   return await new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new OperatorError('EXECUTION_ABORTED', 'Process execution was cancelled.', { retryable: false }));
+      return;
+    }
     const childEnvironment = safeChildEnvironment(process.env, environmentOverrides);
     const trustedExecutable = resolveTrustedExecutable(executable, childEnvironment);
     const child = spawn(trustedExecutable, args, {
@@ -180,12 +184,14 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     let bytes = 0;
     let truncated = false;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     let forceKillTimer: NodeJS.Timeout | undefined;
 
     const clearTimers = () => {
       clearTimeout(timer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener('abort', onAbort);
     };
     const rejectOnce = (error: unknown) => {
       if (settled) return;
@@ -206,27 +212,43 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     child.stderr.on('data', capture(stderr));
     child.once('error', rejectOnce);
 
+    const terminateChild = () => {
+      try { child.kill('SIGTERM'); } catch { /* close/error path reports the outcome */ }
+      if (!forceKillTimer) {
+        forceKillTimer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* process may already be gone */ }
+        }, 1000);
+        forceKillTimer.unref();
+      }
+    };
+    const onAbort = () => {
+      aborted = true;
+      terminateChild();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill('SIGTERM'); } catch { /* close/error path reports the outcome */ }
-      forceKillTimer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* process may already be gone */ }
-      }, 1000);
-      forceKillTimer.unref();
+      terminateChild();
     }, timeoutMs);
     timer.unref();
 
-    child.once('close', (exitCode, signal) => {
+    child.once('close', (exitCode, closeSignal) => {
       if (settled) return;
       settled = true;
       clearTimers();
+      if (aborted) {
+        reject(new OperatorError('EXECUTION_ABORTED', 'Process execution was cancelled.', { retryable: false }));
+        return;
+      }
       if (timedOut) {
         reject(new OperatorError('PROCESS_TIMEOUT', `Process exceeded ${timeoutMs}ms timeout.`, { retryable: true }));
         return;
       }
       resolve({
         exitCode,
-        signal,
+        signal: closeSignal,
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         truncated
