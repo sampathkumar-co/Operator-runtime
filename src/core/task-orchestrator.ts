@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -80,21 +80,22 @@ export class TaskOrchestrator {
   #permissions: PermissionProfile;
   #planners: Map<string, TaskPlanner>;
   #active = new Map<string, Promise<TaskCapsule>>();
-  #executeAction: (action: ActionRequest, permissions: PermissionProfile) => Promise<ActionResult>;
+  #controllers = new Map<string, AbortController>();
+  #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
 
   constructor(options: {
     runtime: OperatorRuntime;
     store: TaskStore;
     permissions: PermissionProfile;
     planners?: TaskPlanner[];
-    executeAction?: (action: ActionRequest, permissions: PermissionProfile) => Promise<ActionResult>;
+    executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
     const planners = options.planners ?? [new SemanticTaskPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
-    this.#executeAction = options.executeAction ?? ((action, permissions) => this.#runtime.execute(action, permissions));
+    this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -164,18 +165,23 @@ export class TaskOrchestrator {
   async run(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) return await active;
-    const promise = this.#runWithLease(taskId, approvedActionIds).finally(() => this.#active.delete(taskId));
+    const controller = new AbortController();
+    this.#controllers.set(taskId, controller);
+    const promise = this.#runWithLease(taskId, approvedActionIds, controller.signal).finally(() => {
+      this.#active.delete(taskId);
+      this.#controllers.delete(taskId);
+    });
     this.#active.set(taskId, promise);
     return await promise;
   }
 
-  async #runWithLease(taskId: string, approvedActionIds: string[]): Promise<TaskCapsule> {
+  async #runWithLease(taskId: string, approvedActionIds: string[], signal: AbortSignal): Promise<TaskCapsule> {
     const lease = await this.#store.acquireExecutionLease(taskId);
-    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned); }
+    try { return await this.#run(taskId, approvedActionIds, lease.assertOwned, signal); }
     finally { await lease.release(); }
   }
 
-  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>): Promise<TaskCapsule> {
+  async #run(taskId: string, approvedActionIds: string[], assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
@@ -247,7 +253,7 @@ export class TaskOrchestrator {
         approvedActionIds: [...new Set([...(this.#permissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       let result: ActionResult;
-      try { result = await this.#executeAction(action, permissions); }
+      try { result = await this.#executeAction(action, permissions, { signal }); }
       catch (error) {
         result = {
           ok: false, capability: action.capability, provider: 'task-executor', evidence: [], durationMs: 0,
@@ -291,6 +297,15 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
+      if (controlState === 'CANCELLED' && latestRecord.errorCode === 'EXECUTION_ABORTED') {
+        latestRecord.state = 'INTERRUPTED';
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('task_cancel', 'info', 'In-flight task execution was aborted after cancellation.'));
+        task.state = 'CANCELLED';
+        await assertLease();
+        await this.#store.put(task);
+        return task;
+      }
       await this.#recordLearning(task, result, 'failed');
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
         latestRecord.state = 'BLOCKED';
@@ -323,7 +338,11 @@ export class TaskOrchestrator {
   }
 
   async pause(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'PAUSED'); }
-  async cancel(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'CANCELLED'); }
+  async cancel(taskId: string): Promise<TaskCapsule> {
+    const task = await this.#setControlState(taskId, 'CANCELLED');
+    this.#controllers.get(taskId)?.abort();
+    return task;
+  }
   async resume(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
     const task = await this.#store.get(taskId);
     if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
