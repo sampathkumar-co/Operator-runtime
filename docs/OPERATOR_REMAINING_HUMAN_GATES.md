@@ -1,31 +1,35 @@
 # Mecord Connect Remaining Human / External Gates
 
-Status date: 2026-09-18
+Status date: 2026-09-23
 
 This runbook contains only work that cannot be completed autonomously without the owner's account/credential entry, a platform-issued secret, or explicit irreversible authorization.
 
 ## Resolved external setup
 
-The npm account setup gate is now independently verified from the owner machine:
+The npm publication gate is resolved:
 
 - npm user: **mecrod**
-- npm account/2FA setup was previously verified: **PASS**; a fresh publication CLI login is still required immediately before irreversible publish
 - npm 2FA mode: **auth-and-writes**
-- release package: **mecord-connect**
+- release package: **mecord-connect@1.0.0**
 - npm organization/scope: **not required** for the unscoped package
-- current registry state: **unpublished** before first release
+- registry state: **public under latest**
+- clean registry install, installed doctor and remote --help: **PASS**
+- reported vulnerabilities: **0**
 
 Do not ask for an `@mecrod` organization again.
 
-## Frozen production baseline
+## Current production baseline
 
-Production remains intentionally frozen on OCC-3M:
+Production is live on Mecord Connect v1:
 
-- main source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
-- production edge image digest: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
+- source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public MCP surface: exactly 9 tools
+- legacy `device.claim`: absent
+- fresh ChatGPT OAuth/tool refresh: **PASS**
+
+OCC-3M remains the rollback baseline only.
 
 ## Owner decisions already resolved — do not ask again
 
@@ -45,7 +49,7 @@ Production remains intentionally frozen on OCC-3M:
 - availability intent: global wherever supported and legally/operationally supportable
 - MSIX / Microsoft Store: **not a Mecord Connect v1 release requirement**
 
-# The only five remaining owner/external gates
+# Remaining owner/external gates
 
 ## 1. OpenAI publisher/developer login and individual identity verification
 
@@ -119,34 +123,9 @@ Run the canonical five positive + three negative reviewer cases.
 
 Capture the required reviewer-accessible production demo recording without exposing passwords, tokens, keys, private filesystem identity or real user data.
 
-## 5. Explicit irreversible publication / deployment / submission authorization
+## 5. Final submission authorization
 
-This is the final owner-controlled release gate.
-
-### npm first publication
-
-The npm account prerequisite is already satisfied:
-- user = `mecrod`
-- 2FA = `auth-and-writes`
-
-After the final exact source SHA is green:
-1. build the immutable `mecord-connect@1.0.0` tarball;
-2. verify its SHA-256;
-3. publish **that exact tarball** interactively with owner 2FA;
-4. verify public registry metadata;
-5. from a clean Windows x64 environment run:
-   - `npx mecord-connect@latest doctor`
-   - `npx mecord-connect@latest remote --root C:\Users\Public\OperatorReviewerFixture\demo-project`
-
-### final deployment
-
-After publication/clean-machine verification and before real OpenAI review proof:
-1. deploy the exact final Mecord Connect successor transactionally;
-2. verify `/`, `/privacy`, `/terms`, `/support`;
-3. verify OAuth discovery/protected-resource metadata;
-4. verify MCP unauthenticated/authenticated behavior;
-5. rerun hostile public-edge checks;
-6. keep rollback to OCC-3M.
+npm publication and final production deployment are complete. The remaining owner-controlled irreversible action is OpenAI submission.
 
 ### OpenAI Submit for Review
 
@@ -171,7 +150,7 @@ These are engineering/release tasks and must not be presented as extra owner dec
 - CI/platform/npm-runtime/signing certification;
 - package/tarball inspection;
 - release notes/reviewer packet preparation;
-- final deployment scripting and rollback preparation;
+- rollback maintenance and production health verification;
 - public-page/source branding consistency;
 - security/red-team tests;
 - production preflight/health checks;
