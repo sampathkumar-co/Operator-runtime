@@ -15,7 +15,7 @@ export type UiaTaskSelector = { name?: string; automationId?: string; className?
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 
-export type SemanticTaskGoal =
+export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
   | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
   | { kind: 'browser-navigation'; url: string; targetId?: string }
@@ -30,6 +30,10 @@ export type SemanticTaskGoal =
       value?: string; horizontalAmount?: string; verticalAmount?: string;
       verifySelector?: UiaTaskSelector; waitMs?: number;
     };
+
+export type SemanticTaskGoal =
+  | AtomicSemanticTaskGoal
+  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
@@ -92,7 +96,7 @@ export class TaskOrchestrator {
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new SemanticTaskPlanner()];
+    const planners = options.planners ?? [new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
@@ -409,7 +413,17 @@ export class SemanticTaskPlanner implements TaskPlanner {
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
-    if (goal.kind === 'controlled-file-change') {
+    if (goal.kind === 'semantic-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Semantic workflow requires 1-20 typed child goals.');
+    }
+    goal.steps = goal.steps.map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Workflow step ${index} is invalid.`);
+      const kind = String((step as { kind?: unknown }).kind ?? '');
+      if (kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Nested semantic workflows are not permitted.');
+      return parseGoal(step, kind) as AtomicSemanticTaskGoal;
+    });
+  } else if (goal.kind === 'controlled-file-change') {
       if (phase === 'start') return { type: 'step', key: 'list-parent', title: 'Observe target directory', capability: 'file.list', input: { path: path.dirname(goal.path) || '.' } };
       if (phase === 'create') return { type: 'step', key: 'create-file', title: 'Create requested file', capability: 'file.create', input: { path: goal.path, content: goal.content } };
       if (phase === 'read') return { type: 'step', key: 'verify-file', title: 'Verify exact file content', capability: 'file.read', input: { path: goal.path, encoding: 'utf8' } };
@@ -619,6 +633,99 @@ export class SemanticTaskPlanner implements TaskPlanner {
     }
     return false;
   }
+}
+
+
+export class SemanticWorkflowPlanner implements TaskPlanner {
+  readonly id = 'operator.semantic-workflow.v1';
+  #atomic = new SemanticTaskPlanner();
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
+    const state = task.execution!.plannerState;
+    let index = workflowIndex(state, goal.steps.length);
+    while (index < goal.steps.length) {
+      const child = goal.steps[index]!;
+      const childState = workflowChildState(state);
+      const proxy = taskWithPlannerState(task, childState);
+      const decision = this.#atomic.next({ task: proxy, goal: child });
+      state.workflowChildState = proxy.execution!.plannerState;
+      if (decision.type === 'complete') {
+        task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
+        index += 1;
+        state.workflowIndex = index;
+        state.workflowChildState = { phase: 'start' };
+        continue;
+      }
+      return {
+        ...decision,
+        key: `workflow:${index}:${decision.key}`,
+        title: `[${index + 1}/${goal.steps.length}] ${decision.title}`
+      };
+    }
+    return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step);
+    this.#atomic.accept({ task: current.proxy, goal: current.child }, current.atomicStep, observation);
+    task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
+  }
+
+  fallback({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child }, current.atomicStep, observation) ?? false;
+    task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
+    return handled;
+  }
+
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>): {
+    child: AtomicSemanticTaskGoal;
+    proxy: TaskCapsule;
+    atomicStep: Extract<PlannerDecision, { type: 'step' }>;
+  } {
+    if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
+    const state = task.execution!.plannerState;
+    const index = workflowIndex(state, goal.steps.length);
+    const child = goal.steps[index];
+    if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
+    const proxy = taskWithPlannerState(task, workflowChildState(state));
+    const expected = this.#atomic.next({ task: proxy, goal: child });
+    if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
+      throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
+    }
+    return { child, proxy, atomicStep: expected };
+  }
+}
+
+function workflowIndex(state: Record<string, unknown>, length: number): number {
+  const value = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
+  if (!Number.isSafeInteger(value) || value < 0 || value > length) {
+    throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow child index is invalid.');
+  }
+  return value;
+}
+
+function workflowChildState(state: Record<string, unknown>): Record<string, unknown> {
+  const value = state.workflowChildState;
+  if (value === undefined) return { phase: 'start' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow child planner state is invalid.');
+  }
+  return structuredClone(value as Record<string, unknown>);
+}
+
+function taskWithPlannerState(task: TaskCapsule, plannerState: Record<string, unknown>): TaskCapsule {
+  if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
+  return {
+    ...task,
+    execution: { ...task.execution, plannerState },
+    evidence: task.evidence,
+    nodes: task.nodes,
+    failures: task.failures
+  };
 }
 
 function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
