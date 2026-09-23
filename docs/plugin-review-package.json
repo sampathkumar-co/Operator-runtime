@@ -125,9 +125,9 @@
     "npmRuntimeLicense": "RESOLVED_SOURCE: owner selected PROPRIETARY. mecord-connect declares SEE LICENSE IN LICENSE, ships an owner-specific proprietary LICENSE and documents it in the package README. Final registry verification follows first publication.",
     "evidenceBranchCi": "DYNAMIC_EXTERNAL_EVIDENCE: GitHub exact-head CI, Platform Matrix, NPM Remote Runtime and Windows Signing Smoke status for the active release-candidate branch is authoritative immediately before merge/submission. Do not copy stale run numbers into this static review package; every required run must be terminal success on the then-current exact head.",
     "npmDualUseClassification": "RESOLVED_SOURCE: owner selected DUAL_USE. mecord-connect requires contentPolicy.class=dual-use, ships root DISCLOSURE and fails closed if the declaration is missing. npm account/2FA setup is resolved; final policy closure follows exact publication/registry verification.",
-    "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into certified main and retained by the active PR #28 successor. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
+    "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into the merged PR #28 hardening baseline and retained by current main. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
     "occ3oPublicNoticeReproducibility": "PASS_ENGINEERING_DRAFT: PR #24 head 6edd3ee8eca2f5b8096424bac8750f0c945cec94 source-controls the exact live Privacy/Terms/Support notice bytes previously hidden by an ignore rule; CI #710, Platform Matrix #480 and Windows Signing Smoke #481 pass. A disposable merge preview with PR #22 is conflict-free, passes 24/24 focused tests and the full Windows-aware suite at 367 tests / 351 pass / 16 expected skips / 0 fail. FG-017 legal identity wording remains intentionally unresolved.",
-    "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that are now integrated into certified main 2e6cff8b56044ad78de7942d799b1e0191070ed9 and retained by active PR #28. It is provenance, not the current release candidate.",
+    "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that are now integrated into the merged PR #28 hardening baseline and current main d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
     "publicBrandingDeployment": "BLOCKED_FINAL_DEPLOYMENT: production remains OCC-3M and still serves the pre-rebrand/pre-final pages. After the five external/account gates permit release sequencing, deploy the final Mecord Connect successor and verify /, /privacy, /terms and /support show Mecord Connect with the approved individual publisher identity."
   },
   "releaseCandidate": {
@@ -137,22 +137,23 @@
     "certifiedAtUtc": "2026-09-17T21:10:40Z"
   },
   "sourceSuccessor": {
-    "name": "Mecord Connect post-merge hardening successor",
-    "pullRequest": 28,
-    "branch": "hardening/post-merge-completion",
-    "sourceCommit": "DYNAMIC_CURRENT_PR_HEAD",
+    "name": "Mecord Connect current source candidate",
+    "pullRequest": null,
+    "branch": "main",
+    "sourceCommit": "d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf",
+    "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",
     "workflowRuns": {
-      "ci": "DYNAMIC_EXACT_HEAD",
-      "platformMatrix": "DYNAMIC_EXACT_HEAD",
-      "npmRemoteRuntime": "DYNAMIC_EXACT_HEAD",
-      "windowsSigningSmoke": "DYNAMIC_EXACT_HEAD"
+      "ci": "PR28 #911 PASS; PR29 #914 PASS",
+      "platformMatrix": "PR28 #681 PASS; PR29 #684 PASS",
+      "npmRemoteRuntime": "PR28 #311 PASS; payload unchanged by PR29",
+      "windowsSigningSmoke": "PR28 #682 PASS; PR29 #685 PASS"
     },
-    "status": "REQUIRES_EXACT_HEAD_GREEN_BEFORE_MERGE",
+    "status": "SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES",
     "workflowConclusions": {
-      "ci": "must_be_success",
-      "platformMatrix": "must_be_success",
-      "npmRemoteRuntime": "must_be_success",
-      "windowsSigningSmoke": "must_be_success"
+      "ci": "success",
+      "platformMatrix": "success",
+      "npmRemoteRuntime": "success_on_engineering_baseline",
+      "windowsSigningSmoke": "success"
     }
   }
 }

@@ -1,4 +1,4 @@
-# Operator — Universal Agent Runtime for ChatGPT
+# Mecord Connect — Universal Agent Runtime for ChatGPT
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
@@ -53,8 +53,8 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 These are deliberately not represented as complete until their real external dependencies exist:
 
 - Microsoft Store lane: submit the exact Partner Center-identity MSIX and complete Partner Center certification; Store submission does not depend on the separate direct-distribution PFX lane
-- optional direct/npx lane: select a trusted Windows signer compatible with that package identity, pin its SHA-256 fingerprint in `operator-runtime-cli`, and produce an RFC 3161 timestamped direct release
-- optional direct/npx lane: publish the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location, then publish `operator-runtime-cli` to npm
+- optional direct/npx lane: select a trusted Windows signer compatible with that package identity, pin its SHA-256 fingerprint in the applicable direct-distribution bootstrap, and produce an RFC 3161 timestamped direct release
+- optional direct/npx lane: publish the signed MSIX, `release-metadata.json` and `.appinstaller` to the intended HTTPS/GitHub Release location, then publish the applicable direct-distribution bootstrap if that optional lane is retained
 - supported private/live ChatGPT-to-MCP certification through Secure MCP Tunnel (or the then-current supported private transport)
 - deployment and live certification of the implemented OAuth-authenticated public HTTPS MCP edge if public plugin distribution is targeted
 - real ChatGPT workflow against an explicitly paired physical device
@@ -100,17 +100,21 @@ The standard `npm run check` performs the root import/surface check and the full
 
 ## Windows one-command setup
 
-For the public release, the primary onboarding command is:
+For the Mecord Connect public runtime, the primary onboarding command is:
 
 ```powershell
-npx operator-runtime-cli setup
+npx mecord-connect@latest remote --root "C:\path\to\project"
 ```
 
-The npm bootstrap verifies bounded HTTPS release metadata, exact package size and SHA-256, a timestamped Windows signature, the package identity, and a production certificate fingerprint pinned inside the npm package before Windows installation. It refuses downgrades below its locally pinned minimum version. It then installs Operator and invokes the packaged setup, which DPAPI-protects local secrets/device identity, authorizes the invocation folder, starts the bundled local agent and MCP server, and waits for readiness.
+The runtime authorizes only the requested root, starts the secure local agent, connects to the hosted relay, and opens the normal authenticated Mecord web-pairing flow when the device is not already paired. ChatGPT uses the hosted MCP edge; users do not need to expose a local MCP server.
 
-If Operator is already installed, the equivalent local command is `operator setup`; `npx operator-runtime-cli verify` (or `operator verify`) is available for troubleshooting. Until a real production signer is pinned and the signed release plus npm package are published, the npm bootstrap intentionally fails closed instead of accepting test/unsigned builds.
+Before connecting, the packaged runtime can be integrity-checked with:
 
-To uninstall the Windows package, run `npx operator-runtime-cli uninstall`. Uninstall removes the registered MSIX but preserves local Operator state/device identity; security identity reset and revocation stay separate explicit operations rather than being hidden inside package removal.
+```powershell
+npx mecord-connect@latest doctor
+```
+
+`doctor` verifies the packaged runtime payload and Windows-native security helpers without starting a relay session. The legacy `operator-runtime-cli setup/verify/uninstall` flow is not the current Mecord Connect v1 onboarding path.
 
 For development from source, the lower-level environment-variable flow remains available below.
 

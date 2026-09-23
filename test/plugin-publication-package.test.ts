@@ -15,6 +15,8 @@ test('public plugin manifest satisfies final directory field limits', async () =
   const ui = manifest.interface;
   assert.match(manifest.name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
   assert.match(manifest.version, /^\d+\.\d+\.\d+/);
+  const runtimePackage = await json('packages/mecord-connect/package.json');
+  assert.equal(manifest.version, runtimePackage.version, 'plugin manifest version must match mecord-connect runtime package version');
   assert.ok(ui.displayName.length <= 30);
   assert.ok(ui.shortDescription.length <= 30);
   assert.ok(ui.longDescription.length <= 4000);
@@ -126,8 +128,8 @@ test('reviewer-facing evidence distinguishes frozen ten-tool production from the
   assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*final deployed Mecord Connect 9-tool surface[\s\S]*older 10-tool baseline/);
 
   const review = await json('docs/plugin-review-package.json');
-  assert.equal(review.sourceSuccessor.pullRequest, 28);
-  assert.equal(review.sourceSuccessor.branch, 'hardening/post-merge-completion');
-  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_PR_HEAD');
-  assert.equal(review.sourceSuccessor.status, 'REQUIRES_EXACT_HEAD_GREEN_BEFORE_MERGE');
+  assert.equal(review.sourceSuccessor.pullRequest, null);
+  assert.equal(review.sourceSuccessor.branch, 'main');
+  assert.equal(review.sourceSuccessor.sourceCommit, 'd51a3b2ee4746e1a29f9cf2ec87cef603ac76edf');
+  assert.equal(review.sourceSuccessor.status, 'SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES');
 });

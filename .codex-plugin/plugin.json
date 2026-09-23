@@ -1,6 +1,6 @@
 {
   "name": "mecord-connect",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Securely inspect and modify user-authorized development projects on a paired computer through a restricted public MCP surface.",
   "author": {
     "name": "Kinthala Samuel Sampath Kumar",

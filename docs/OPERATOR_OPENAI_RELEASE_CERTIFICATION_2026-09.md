@@ -22,11 +22,11 @@ OCC-3M production is healthy and remains the rollback/safety baseline until the 
 
 ## Current Mecord Connect successor
 
-Certified source baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`.
+Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the merge of exact-head green PR #28.
 
-Active hardening successor: PR #28 / branch `hardening/post-merge-completion`.
+Current source baseline: `main` merge `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`, which adds only the independently green PR #29 production-notice branding cleanup.
 
-The exact PR head is intentionally not hard-coded in this static certification packet; GitHub's current PR head is authoritative immediately before merge/submission.
+There is no active engineering successor at this checkpoint. Any future release-candidate branch must establish fresh exact-head evidence before deployment/submission.
 
 This candidate includes:
 
@@ -50,13 +50,13 @@ This candidate includes:
 - Windows-native DPAPI/UIA/path-authority boundary;
 - Git fixture cleanup retry hardening for transient recursive-removal races.
 
-Certified `main` exact-head result:
-- CI #806: **PASS**
-- Platform Matrix #576: **PASS**
-- NPM Runtime #206: **PASS**
-- Windows Signing Smoke #577: **PASS**
+PR #28 exact-head hardening result before merge:
+- CI #911: **PASS**
+- Platform Matrix #681: **PASS**
+- NPM Remote Runtime #311: **PASS**
+- Windows Signing Smoke #682: **PASS**
 
-For active PR #28, exact-head run IDs and conclusions are dynamic external evidence. All four workflow families must be terminal success on the then-current PR head before merge; superseded run numbers must not be reused as certification.
+PR #29 notice-only cleanup then passed CI #914, Platform Matrix #684 and Windows Signing Smoke #685 before merge. The npm runtime payload was unchanged by PR #29. Current `main` is `d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf`.
 
 ## Owner decisions already resolved in source
 
@@ -175,7 +175,7 @@ Earlier PRs remain useful provenance but are no longer the current candidate:
 - PR #24 made public legal notices reproducible from source;
 - earlier PR #27 heads introduced the Mecord Connect rebrand and exact public MCP identity.
 
-Their decisions and functionality are integrated into current `main` and carried forward by PR #28. They must not be treated as alternate release candidates.
+Their decisions and functionality are integrated into current `main` through the merged PR #28 hardening baseline. They must not be treated as alternate release candidates.
 
 ## MSIX / Microsoft Store
 
