@@ -1,6 +1,6 @@
 # Operator Canonical Master Gate Status — G0–G36
 
-Status date: 2026-09-18
+Status date: 2026-09-23
 Canonical plan: `OPERATOR_MASTER_REVERIFICATION_AND_RELEASE_PLAN.md`
 Certified production baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7`
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
@@ -11,10 +11,10 @@ Current canonical count: **27 PASS / 10 BLOCKED / 0 NOT APPLICABLE**.
 
 | Gate | Status | Current evidence / blocker |
 |---|---|---|
-| G0 Candidate Identity | PASS | Frozen production remains exact OCC-3M while draft PR #27 current successor is exact `11abc578488f5deb4df83299554b6a4eae3bbe2e`; source worktree is clean and exact-head CI #765, Platform Matrix #535, NPM Runtime #174 and Signing #536 all PASS. |
+| G0 Candidate Identity | PASS | Frozen production remains exact OCC-3M. Certified `main` is merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; active engineering successor is PR #28 / `hardening/post-merge-completion`. The exact PR head and workflow run IDs are intentionally treated as live GitHub evidence and must all be terminal success before merge/release. |
 | G1 Architecture Truth | PASS | Hosted edge/auth/relay/local-runtime topology and the public-vs-internal capability boundary are documented and production-checked. |
 | G2 Requirements Traceability | PASS | Current OpenAI auth/review/submission requirements are linked in certification evidence and were rechecked on 2026-09-18. Successive requirement rechecks directly found FG-016 (stable OAuth redirect), FG-017/FG-018 (publisher identity and notice reproducibility), and FG-019/FG-020 (required branding assets and required demo recording). |
-| G3 MCP Truthfulness & Safety | PASS | Public surface is exactly 10 allowlisted tools; review-package annotations cover all 10; no raw terminal/browser/UIA tool is exposed. |
+| G3 MCP Truthfulness & Safety | PASS | Public surface is exactly 9 allowlisted tools; review-package annotations cover all 9; no raw terminal/browser/UIA tool is exposed. |
 | G4 Filesystem Safety | PASS | Authorized-root, canonicalization/restricted-data and real Windows junction/path-authority coverage are green in the certified suite. |
 | G5 Command Execution Safety | PASS | Command/process red-team coverage is green; raw terminal execution is intentionally absent from the public OpenAI surface. |
 | G6 Git Safety & Integrity | PASS | Public Git is bounded to `git.status`/`git.diff`; Git/version/error paths are regression tested. |
@@ -39,7 +39,7 @@ Current canonical count: **27 PASS / 10 BLOCKED / 0 NOT APPLICABLE**.
 | G25 Supply Chain Integrity | BLOCKED | The source requires unscoped `mecord-connect`, proprietary LICENSE, mandatory dual-use DISCLOSURE, exact publisher metadata, immutable first-release handling and staged future controls. npm account `mecrod` and 2FA `auth-and-writes` are verified. Remaining blocker: explicit exact-tarball first publication plus post-publish registry/clean-machine verification. |
 | G26 Production Infrastructure | PASS | TLS/SNI/Host/origin/body/header/port hardening is live; production edge remains exact OCC-3M and healthy. |
 | G27 Resource Safety | PASS | Performance regression and bounded hostile input probes are green; live edge remained healthy under the certified probes. |
-| G28 CI Reliability | PASS | Current successor exact-head CI #765, Platform Matrix #535, NPM Runtime #174 and Signing #536 all PASS. Core/security/MCP/public-edge/native/package jobs are green, including the hardened Git fixture cleanup and the unscoped `mecord-connect` artifact/install path. |
+| G28 CI Reliability | PASS | Certified `main` exact-head CI #806, Platform Matrix #576, NPM Runtime #206 and Signing #577 all PASS. The active PR #28 successor must independently finish its exact-head four-workflow set green before merge; run IDs are dynamic external evidence rather than copied into this static gate sheet. |
 | G29 Public Truthfulness | BLOCKED | Source package/listing/legal claims consistently use Mecord Connect, proprietary licensing, dual-use disclosure and the selected individual publisher identity. Production still serves OCC-3M/pre-final pages and OpenAI verification of the exact legal-name spelling/order is incomplete; final deployment + verified-identity reconciliation are required. |
 | G30 Reviewer Usability | BLOCKED | A dedicated production reviewer account and reviewer-only one-factor authorization policy are provisioned and Authelia is healthy; normal users retain the two-factor default. The credential was not exposed to Git/chat. Owner retrieval/login verification, canonical fixture-only device pairing and the real end-to-end reviewer journey are still missing. |
 | G31 Positive Reviewer Cases | PASS | All submitted five positive cases pass through the certified public boundary on the deterministic fixture; positive #5 is bounded `git.diff`. |

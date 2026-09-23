@@ -55,9 +55,9 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
 Current engineering source candidate:
-- PR #27 branch: `release/occ3r-integrated-successor`
-- current head: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
-- exact-head workflows: **CI #765 PASS / Platform Matrix #535 PASS / NPM Remote Runtime #174 PASS / Windows Signing Smoke #536 PASS**
+- certified baseline: `main` merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`
+- active successor: PR #28 branch `hardening/post-merge-completion`
+- exact PR head and workflow run IDs: **read live from GitHub immediately before merge/submission; all four required workflows must be terminal success**
 
 ## 3. npm runtime distribution
 

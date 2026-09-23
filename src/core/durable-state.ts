@@ -167,8 +167,7 @@ export async function writeDurableStateBytes(file: string, content: Uint8Array, 
     assertStableRegular(staged, options);
     if (staged.size !== byteLength) throw invalid(options, 'Staged state size did not match the serialized state.');
 
-    await assertReplaceTarget(file, options);
-    await fs.rename(temp, file);
+    await publishDurableReplacement(temp, file, options);
     renamed = true;
 
     const committed = await fs.lstat(file);
@@ -247,6 +246,25 @@ async function assertReplaceTarget(file: string, options: DurableStateOptions): 
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
+  }
+}
+
+async function publishDurableReplacement(temp: string, file: string, options: DurableStateOptions): Promise<void> {
+  const retryDelaysMs = [5, 10, 25, 50, 100];
+  for (let attempt = 0; ; attempt += 1) {
+    const staged = await fs.lstat(temp);
+    assertStableRegular(staged, options);
+    await assertReplaceTarget(file, options);
+    try {
+      await fs.rename(temp, file);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transientWindowsRename =
+        process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EBUSY');
+      if (!transientWindowsRename || attempt >= retryDelaysMs.length) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+    }
   }
 }
 

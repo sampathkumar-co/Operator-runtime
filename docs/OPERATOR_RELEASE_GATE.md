@@ -1,11 +1,11 @@
 # Operator OpenAI Release Gate — OCC-3M
 
 Frozen production source: `405be7a03270c6c7ced78cd0d0d58314048a1af7`
-Current release successor: `11abc578488f5deb4df83299554b6a4eae3bbe2e`
+Current release successor: PR #28 / `hardening/post-merge-completion` (exact head is live GitHub evidence)
 Current exact-main certification: merge `2e6cff8b56044ad78de7942d799b1e0191070ed9`; CI #806 / Platform Matrix #576 / NPM Runtime #206 / Signing #577 — all PASS. Production remains on the older OCC-3M deployment until the transactional final deployment gate is executed.
 Production image: `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
-Evidence date: 2026-09-18
+Evidence date: 2026-09-23
 
 Status is deliberately binary: **PASS** means the OCC-3M release has direct evidence for the gate; **BLOCKED** means a required external/human step is still missing. Capabilities intentionally absent from the public MCP surface are treated as PASS only for public-release exposure and are called out explicitly. The canonical master-plan G0–G36 mapping is maintained separately in `OPERATOR_MASTER_GATE_STATUS.md`; neither numbering scheme overrides a blocker in the other.
 

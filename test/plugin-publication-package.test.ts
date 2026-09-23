@@ -103,9 +103,12 @@ test('review package has exact cases and complete public-tool annotation justifi
 
 test('current reviewer-facing docs match the canonical nine-tool public surface', async () => {
   const currentDocs = [
+    'docs/OPERATOR_DEMO_RECORDING_RUNBOOK.md',
+    'docs/OPERATOR_MASTER_GATE_STATUS.md',
     'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
     'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
     'docs/OPERATOR_OWNER_RELEASE_DECISION_PACKET.md',
+    'docs/OPERATOR_RELEASE_GATE.md',
     'docs/SUBMISSION_PACKAGE.md'
   ];
   for (const relative of currentDocs) {
@@ -113,4 +116,10 @@ test('current reviewer-facing docs match the canonical nine-tool public surface'
     assert.equal(content.includes('`device.claim`'), false, `${relative} still advertises removed public device.claim`);
     assert.doesNotMatch(content, /\b(?:10[- ]tool|ten tools|ten-tool)\b/i, `${relative} still advertises the obsolete ten-tool surface`);
   }
+
+  const review = await json('docs/plugin-review-package.json');
+  assert.equal(review.sourceSuccessor.pullRequest, 28);
+  assert.equal(review.sourceSuccessor.branch, 'hardening/post-merge-completion');
+  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_PR_HEAD');
+  assert.equal(review.sourceSuccessor.status, 'REQUIRES_EXACT_HEAD_GREEN_BEFORE_MERGE');
 });
