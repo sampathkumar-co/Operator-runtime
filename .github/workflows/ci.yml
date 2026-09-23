@@ -361,6 +361,38 @@ jobs:
           status="$(curl -sS -o /tmp/operator-mcp-body -D /tmp/operator-mcp-headers -w '%{http_code}' -H 'Host: edge.operator-runtime.dev' -H 'Content-Type: application/json' -X POST --data '{}' http://127.0.0.1:47200/mcp)"
           test "$status" = '401'
           grep -qi '^www-authenticate: Bearer' /tmp/operator-mcp-headers
+      - name: Smoke shared-VPS capability-free gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create --subnet 172.16.3.0/24 operator_ingress
+          shared='docker compose -f deploy/public-edge/compose.shared-vps.example.yml'
+          $shared config --quiet
+          $shared up -d --build --wait
+          edge_cid="$($shared ps -q operator-edge)"
+          gateway_cid="$($shared ps -q operator-gateway)"
+          test -n "$edge_cid"
+          test -n "$gateway_cid"
+          test "$(docker inspect "$gateway_cid" --format '{{.Config.User}}')" = '1000:1000'
+          cap_drop="$(docker inspect "$gateway_cid" --format '{{json .HostConfig.CapDrop}}')"
+          cap_add="$(docker inspect "$gateway_cid" --format '{{json .HostConfig.CapAdd}}')"
+          security_opt="$(docker inspect "$gateway_cid" --format '{{json .HostConfig.SecurityOpt}}')"
+          printf '%s\n' "$cap_drop" | grep -q '"ALL"'
+          test "$cap_add" = 'null' || test "$cap_add" = '[]'
+          printf '%s\n' "$security_opt" | grep -q 'no-new-privileges'
+          test -z "$(docker exec "$gateway_cid" sh -c 'getcap /usr/bin/caddy 2>/dev/null || true')"
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://172.16.3.20:8080/ | grep -q 'Mecord Connect'
+          curl -fsS -H 'Host: edge.operator-runtime.dev' http://172.16.3.20:8080/privacy | grep -q 'CI Production Privacy'
+      - name: Shared-VPS gateway diagnostics
+        if: failure()
+        shell: bash
+        run: docker compose -f deploy/public-edge/compose.shared-vps.example.yml logs --no-color || true
+      - name: Stop shared-VPS gateway
+        if: always()
+        shell: bash
+        run: |
+          docker compose -f deploy/public-edge/compose.shared-vps.example.yml down -v --remove-orphans || true
+          docker network rm operator_ingress 2>/dev/null || true
       - name: Public edge diagnostics
         if: failure()
         shell: bash
