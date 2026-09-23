@@ -85,6 +85,7 @@ export class TaskOrchestrator {
   #planners: Map<string, TaskPlanner>;
   #active = new Map<string, Promise<TaskCapsule>>();
   #controllers = new Map<string, AbortController>();
+  #controlRequests = new Map<string, 'PAUSED' | 'CANCELLED'>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
 
   constructor(options: {
@@ -174,6 +175,7 @@ export class TaskOrchestrator {
     const promise = this.#runWithLease(taskId, approvedActionIds, controller.signal).finally(() => {
       this.#active.delete(taskId);
       this.#controllers.delete(taskId);
+      this.#controlRequests.delete(taskId);
     });
     this.#active.set(taskId, promise);
     return await promise;
@@ -199,8 +201,7 @@ export class TaskOrchestrator {
       execution.deadlineAt = new Date(Date.now() + execution.timeoutMs).toISOString();
     }
     task.state = 'RUNNING';
-    await assertLease();
-    await this.#store.put(task);
+    await this.#persistRunState(task, assertLease);
 
     while (true) {
       task = await this.#store.get(task.id);
@@ -216,8 +217,7 @@ export class TaskOrchestrator {
       if (decision.type === 'complete') {
         task.evidence.push(evidence('task_completion', 'pass', decision.message));
         finalizeTask(task);
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
       if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
@@ -244,8 +244,7 @@ export class TaskOrchestrator {
       if (!blockedReplay) current.records.push(record);
       else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
       current.stepCount += 1;
-      await assertLease();
-      await this.#store.put(task);
+      await this.#persistRunState(task, assertLease);
 
       const action: ActionRequest = {
         id: actionId, taskId: task.id, capability: decision.capability, risk,
@@ -295,8 +294,7 @@ export class TaskOrchestrator {
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
         if (controlState) task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         if (controlState) return task;
         continue;
       }
@@ -307,8 +305,7 @@ export class TaskOrchestrator {
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('task_cancel', 'info', 'In-flight task execution was aborted after cancellation.'));
         task.state = 'CANCELLED';
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
@@ -316,16 +313,14 @@ export class TaskOrchestrator {
         latestRecord.state = 'BLOCKED';
         task.state = 'BLOCKED';
         setNodeState(task, latestNode.id, 'BLOCKED');
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
       if (planner.fallback?.({ task, goal }, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
         if (controlState) task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         if (controlState) return task;
         continue;
       }
@@ -333,11 +328,10 @@ export class TaskOrchestrator {
       setNodeState(task, latestNode.id, 'FAILED');
       if (controlState) {
         task.state = controlState;
-        await assertLease();
-        await this.#store.put(task);
+        await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (result.error?.retryable === true && risk === 'read') { await assertLease(); await this.#store.put(task); continue; }
+      if (result.error?.retryable === true && risk === 'read') { await this.#persistRunState(task, assertLease); continue; }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
   }
@@ -349,8 +343,11 @@ export class TaskOrchestrator {
     return task;
   }
   async resume(taskId: string, approvedActionIds: string[] = []): Promise<TaskCapsule> {
+    const active = this.#active.get(taskId);
+    if (active) await active;
     const task = await this.#store.get(taskId);
     if (!['PAUSED', 'BLOCKED'].includes(task.state)) throw new OperatorError('TASK_NOT_RESUMABLE', 'Only paused or blocked tasks can resume.');
+    this.#controlRequests.delete(taskId);
     task.state = 'PENDING';
     for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
     await this.#store.put(task);
@@ -358,12 +355,43 @@ export class TaskOrchestrator {
   }
 
   async #setControlState(taskId: string, state: 'PAUSED' | 'CANCELLED'): Promise<TaskCapsule> {
-    const task = await this.#store.get(taskId);
-    if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
-    task.state = state;
-    task.updatedAt = new Date().toISOString();
+    const previous = this.#controlRequests.get(taskId);
+    this.#controlRequests.set(taskId, state);
+    try {
+      const task = await this.#store.get(taskId);
+      if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) throw new OperatorError('TASK_TERMINAL', 'Terminal task state cannot change.');
+      task.state = state;
+      task.updatedAt = new Date().toISOString();
+      await this.#store.put(task);
+      if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
+      return task;
+    } catch (error) {
+      if (previous) this.#controlRequests.set(taskId, previous);
+      else this.#controlRequests.delete(taskId);
+      throw error;
+    }
+  }
+
+  async #persistRunState(task: TaskCapsule, assertLease: () => Promise<void>): Promise<void> {
+    const applyControl = (): void => {
+      const requested = this.#controlRequests.get(task.id);
+      if (requested === 'CANCELLED') task.state = 'CANCELLED';
+      else if (requested === 'PAUSED' && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(task.state)) task.state = 'PAUSED';
+    };
+
+    applyControl();
+    await assertLease();
     await this.#store.put(task);
-    return task;
+
+    // A control request can arrive after the first check but before the write.
+    // Re-check after the write and repair the durable state if that race occurred.
+    const beforeRepair = task.state;
+    applyControl();
+    if (task.state !== beforeRepair) {
+      task.updatedAt = new Date().toISOString();
+      await assertLease();
+      await this.#store.put(task);
+    }
   }
 
   async #canonicalRisk(capability: string, input: Record<string, unknown>): Promise<ActionRisk> {
@@ -401,8 +429,8 @@ export class TaskOrchestrator {
     task.failures.push({ at: new Date().toISOString(), code, message });
     task.evidence.push(evidence('task_failure', 'fail', message, { code }));
     task.updatedAt = new Date().toISOString();
-    await assertLease?.();
-    await this.#store.put(task);
+    if (assertLease) await this.#persistRunState(task, assertLease);
+    else await this.#store.put(task);
     return task;
   }
 }
