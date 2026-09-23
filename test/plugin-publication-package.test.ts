@@ -128,8 +128,8 @@ test('reviewer-facing evidence distinguishes frozen ten-tool production from the
   assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*final deployed Mecord Connect 9-tool surface[\s\S]*older 10-tool baseline/);
 
   const review = await json('docs/plugin-review-package.json');
-  assert.equal(review.sourceSuccessor.pullRequest, 28);
-  assert.equal(review.sourceSuccessor.branch, 'hardening/post-merge-completion');
-  assert.equal(review.sourceSuccessor.sourceCommit, 'DYNAMIC_CURRENT_PR_HEAD');
-  assert.equal(review.sourceSuccessor.status, 'REQUIRES_EXACT_HEAD_GREEN_BEFORE_MERGE');
+  assert.equal(review.sourceSuccessor.pullRequest, null);
+  assert.equal(review.sourceSuccessor.branch, 'main');
+  assert.equal(review.sourceSuccessor.sourceCommit, 'd51a3b2ee4746e1a29f9cf2ec87cef603ac76edf');
+  assert.equal(review.sourceSuccessor.status, 'SOURCE_READY_AWAITING_EXTERNAL_RELEASE_GATES');
 });
