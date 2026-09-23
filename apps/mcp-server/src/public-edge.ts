@@ -39,9 +39,12 @@ export function readPublicMcpEdgeConfig(
   env: NodeJS.ProcessEnv = process.env,
   options: { fetchFn?: typeof fetch } = {}
 ): PublicMcpEdgeConfig | null {
-  const enabled = env.OPERATOR_MCP_PUBLIC_EDGE?.trim();
-  if (enabled === undefined || enabled === '' || enabled === '0') return null;
-  if (enabled !== '1') throw new Error('OPERATOR_MCP_PUBLIC_EDGE must be 0 or 1.');
+  const publicEnabled = env.OPERATOR_MCP_PUBLIC_EDGE?.trim() || '0';
+  const developerEnabled = env.OPERATOR_MCP_DEVELOPER_EDGE?.trim() || '0';
+  if (!['0', '1'].includes(publicEnabled)) throw new Error('OPERATOR_MCP_PUBLIC_EDGE must be 0 or 1.');
+  if (!['0', '1'].includes(developerEnabled)) throw new Error('OPERATOR_MCP_DEVELOPER_EDGE must be 0 or 1.');
+  if (publicEnabled === '0' && developerEnabled === '0') return null;
+  if (publicEnabled === '1' && developerEnabled === '1') throw new Error('One MCP server instance cannot be both public and developer edge.');
   if ((env.OPERATOR_EXECUTION_MODE ?? '').trim().toLowerCase() !== 'relay') {
     throw new Error('Public MCP edge requires OPERATOR_EXECUTION_MODE=relay.');
   }
