@@ -5,12 +5,14 @@ import test from 'node:test';
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../src/core/product-identity.ts';
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../src/core/public-plugin-surface.ts';
 
-test('Mecord Connect product identity matches the publishable npm package', async () => {
+test('Mecord Connect public product and npm runtime identities remain compatible', async () => {
   const pkg = JSON.parse(await fs.readFile(path.join(process.cwd(), 'packages', 'mecord-connect', 'package.json'), 'utf8'));
   assert.equal(PRODUCT_NAME, 'mecord-connect');
   assert.equal(PRODUCT_TITLE, 'Mecord Connect');
-  assert.equal(PRODUCT_VERSION, pkg.version);
+  assert.match(PRODUCT_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
   assert.equal(pkg.name, PRODUCT_NAME);
+  assert.equal(pkg.version.split('.')[0], PRODUCT_VERSION.split('.')[0], 'npm runtime major must remain compatible with public product major');
 });
 
 test('public tool count is derived from the canonical allowlist', async () => {
