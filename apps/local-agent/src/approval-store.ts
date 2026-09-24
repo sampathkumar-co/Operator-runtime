@@ -49,7 +49,7 @@ export class ApprovalStore {
 
   async register(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<ApprovalRecord> {
     const hash = actionHash(action);
-    const boundAuthority = approvalAuthorityHash(authority);
+    const boundAuthority = approvalAuthorityFingerprint(authority);
     return await this.#mutate((state) => {
       const now = this.#clock();
       prune(state, now.getTime());
@@ -152,7 +152,7 @@ export class ApprovalStore {
 
   async isApproved(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<boolean> {
     const expectedHash = actionHash(action);
-    const expectedAuthority = approvalAuthorityHash(authority);
+    const expectedAuthority = approvalAuthorityFingerprint(authority);
     return await this.#mutate((state) => {
       prune(state, this.#clock().getTime());
       const record = state.records.find((entry) => entry.actionId === action.id);
@@ -165,7 +165,7 @@ export class ApprovalStore {
 
   async consume(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<void> {
     const expectedHash = actionHash(action);
-    const expectedAuthority = approvalAuthorityHash(authority);
+    const expectedAuthority = approvalAuthorityFingerprint(authority);
     const outcome = await this.#mutate((state) => {
       const record = requireRecord(state, action.id);
       if (record.status !== 'approved' || record.actionHash !== expectedHash || record.authorityHash !== expectedAuthority) {
@@ -222,7 +222,7 @@ export class ApprovalStore {
   }
 }
 
-function approvalAuthorityHash(authority?: ApprovalAuthorityContext): string {
+export function approvalAuthorityFingerprint(authority?: ApprovalAuthorityContext): string {
   const normalized = authority === undefined
     ? { kind: 'local' as const }
     : {

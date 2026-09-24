@@ -122,8 +122,9 @@ export class LocalAgentRelayRunner {
 
   async #executeTaskPayload(payload: JsonObject): Promise<JsonObject> {
     const task = validateRelayTaskRequest(payload.task);
+    const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
     if (task.operation === 'submit') {
-      return await this.#callTaskApi('/v1/tasks', 'POST', task.request);
+      return await this.#callTaskApi('/v1/tasks', 'POST', { ...task.request, approvalAuthority });
     }
 
     const path = `/v1/tasks/${task.taskId}`;
@@ -134,7 +135,7 @@ export class LocalAgentRelayRunner {
     if (task.operation === 'cancel' && state === 'CANCELLED') return current;
     if (task.operation === 'run' && ['VERIFIED', 'FAILED', 'CANCELLED'].includes(state)) return current;
     if (task.operation === 'resume' && ['VERIFIED', 'FAILED'].includes(state)) return current;
-    return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', {});
+    return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', { approvalAuthority });
   }
 
   async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {

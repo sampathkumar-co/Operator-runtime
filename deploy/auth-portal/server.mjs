@@ -194,7 +194,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 <div class="switch">Already have an account? <button id="signinInstead" class="secondary" type="button">Sign in</button></div>
 </div>
 <div id="oauthConsentPane" class="pane">
-<h2>Connect to ChatGPT</h2><p class="help">Review the access requested for this Mecord Connect session.</p>
+<h2 id="oauthConsentTitle">Connect to ChatGPT</h2><p id="oauthConsentHelp" class="help">Review the access requested for this Mecord Connect session.</p>
 <ul id="oauthConsentScopes" class="consent-list"></ul>
 <div id="oauthConsentTarget" class="consent-target"></div>
 <button id="oauthConsentButton" class="primary" type="button">Allow and continue</button>
@@ -240,6 +240,7 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     offline_access:'Keep the connection available until you disconnect it',
     'operator:read':'Inspect authorized projects and device status',
     'operator:write':'Perform changes you explicitly request and approve',
+    'operator:developer':'Use advanced Mecord developer automation on explicitly entitled devices',
     profile:'Share your basic Mecord profile'
   };
   async function loadOAuthConsent(silent){
@@ -253,6 +254,12 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     const data=responseData(j);
     if(!data||!data.client_id)return false;
     oauthConsent=data;
+    const pairingClient=data.client_id==='mecord-device-pairing-v1';
+    byId('oauthConsentTitle').textContent=pairingClient?'Approve this computer':'Connect to ChatGPT';
+    byId('oauthConsentHelp').textContent=pairingClient
+      ?'Confirm this one-time request to attach the computer that opened this secure pairing flow to your Mecord account.'
+      :'Review the access requested for this Mecord Connect session.';
+    byId('oauthConsentButton').textContent=pairingClient?'Approve device':'Allow and continue';
     const list=byId('oauthConsentScopes');list.textContent='';
     for(const scope of (data.scopes||[])){
       const item=document.createElement('li');item.textContent=scopeLabels[scope]||('Grant '+scope+' access');list.appendChild(item);
@@ -353,15 +360,19 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
   const q=new URLSearchParams(location.search),prefill=q.get('code');
   if(prefill)input.value=prefill;
   input.addEventListener('input',()=>{let v=input.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);input.value=v.length>4?v.slice(0,4)+'-'+v.slice(4):v;});
-  form.addEventListener('submit',async(ev)=>{
-    ev.preventDefault();button.disabled=true;msg.className='msg';msg.textContent='Starting secure pairing...';
+  let starting=false;
+  async function startPairing(){
+    if(starting)return;
+    starting=true;button.disabled=true;msg.className='msg';msg.textContent='Opening secure sign-in...';
     try{
       const r=await fetch('/pair/start',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({userCode:input.value})});
       const j=await r.json().catch(()=>({}));
       if(!r.ok||!j.ok||!j.authorizationUrl)throw new Error(j.error||'Pairing could not start.');
       location.assign(j.authorizationUrl);
-    }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Pairing could not start.';button.disabled=false;}
-  });
+    }catch(err){starting=false;msg.className='msg bad';msg.textContent=(err&&err.message)||'Pairing could not start.';button.disabled=false;}
+  }
+  form.addEventListener('submit',async(ev)=>{ev.preventDefault();await startPairing();});
+  if(prefill){button.disabled=true;msg.className='msg';msg.textContent='Opening secure sign-in...';setTimeout(()=>{void startPairing();},0);}
 })();
 </script></body></html>`;
 

@@ -6,6 +6,7 @@ import {
   assertSupportedRuntime,
   assertSerializableAuthorizedRoot,
   parseArgs,
+  validatePairingRequestMessage,
   safeRuntimeEnvironment,
   validateRuntimeManifest
 } from '../packages/mecord-connect/src/cli.mjs';
@@ -33,6 +34,26 @@ function manifest(overrides: Record<string, unknown> = {}) {
   };
 }
 
+test('native approval card exposes only local action metadata and three bounded choices', async () => {
+  const script = await fs.readFile(path.resolve('packages/mecord-connect/src/approval-window.ps1'), 'utf8');
+  const consoleSource = await fs.readFile(path.resolve('packages/mecord-connect/src/approval-console.mjs'), 'utf8');
+
+  assert.match(script, /Approve Once/);
+  assert.match(script, /Allow Session/);
+  assert.match(script, /Deny/);
+  assert.match(script, /\[Console\]::Out\.Write\("session"\)/);
+  assert.match(script, /\[Console\]::Out\.Write\("approve"\)/);
+  assert.match(script, /\[Console\]::Out\.Write\("deny"\)/);
+  assert.doesNotMatch(script, /OPERATOR_AGENT_TOKEN|OPERATOR_RECOVERY_TOKEN|authorization|x-operator-recovery-token/i);
+
+  assert.match(consoleSource, /approval-window\.ps1/);
+  assert.match(consoleSource, /capability:\s*String\(record\.capability/);
+  assert.match(consoleSource, /risk:\s*String\(record\.risk/);
+  assert.match(consoleSource, /target:\s*displayTarget\(record\.target\)/);
+  assert.doesNotMatch(consoleSource, /JSON\.stringify\(\{[\s\S]{0,300}(?:agentToken|recoveryToken)/);
+  assert.match(consoleSource, /MECORD_DISABLE_APPROVAL_UI/);
+});
+
 test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['remote']), { command: 'remote', root: process.cwd(), browser: true });
   assert.deepEqual(parseArgs(['remote', '--root', 'C:\\work', '--no-browser']), {
@@ -44,10 +65,39 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseApprovalConsoleCommand('approvals'), { kind: 'list' });
   assert.deepEqual(parseApprovalConsoleCommand('approve'), { kind: 'decision', decision: 'approve', selector: undefined });
   assert.deepEqual(parseApprovalConsoleCommand('deny abc123'), { kind: 'decision', decision: 'deny', selector: 'abc123' });
+  assert.deepEqual(parseApprovalConsoleCommand('session'), { kind: 'decision', decision: 'session', selector: undefined });
+  assert.deepEqual(parseApprovalConsoleCommand('allow-session abc123'), { kind: 'decision', decision: 'session', selector: 'abc123' });
+  assert.deepEqual(parseApprovalConsoleCommand('session-status'), { kind: 'session-status' });
+  assert.deepEqual(parseApprovalConsoleCommand('revoke-session'), { kind: 'revoke-session' });
+  assert.deepEqual(parseApprovalConsoleCommand('require-approval'), { kind: 'revoke-session' });
   assert.deepEqual(parseApprovalConsoleCommand('approve one two'), { kind: 'invalid' });
   assert.deepEqual(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 49152 }), { baseUrl: 'http://127.0.0.1:49152' });
   assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '0.0.0.0', port: 49152 }), null);
   assert.equal(validateLocalAgentReadyMessage({ type: 'mecord-local-agent-ready', host: '127.0.0.1', port: 70000 }), null);
+  const pairingExpiry = new Date(Date.now() + 10 * 60_000).toISOString();
+  assert.deepEqual(
+    validatePairingRequestMessage({
+      type: 'mecord-pairing-required',
+      url: 'https://auth.splcart.in/pair?code=ABCD-2345',
+      expiresAt: pairingExpiry
+    }),
+    { url: 'https://auth.splcart.in/pair?code=ABCD-2345', expiresAt: pairingExpiry }
+  );
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://evil.example/pair?code=ABCD-2345',
+    expiresAt: pairingExpiry
+  }), null);
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://auth.splcart.in/pair?code=ABCD-2345&next=https://evil.example',
+    expiresAt: pairingExpiry
+  }), null);
+  assert.equal(validatePairingRequestMessage({
+    type: 'mecord-pairing-required',
+    url: 'https://auth.splcart.in/pair?code=ABCD-2345',
+    expiresAt: new Date(Date.now() - 60_000).toISOString()
+  }), null);
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
   assert.equal(assertSerializableAuthorizedRoot('C:\\work\\repo'), 'C:\\work\\repo');
@@ -64,6 +114,10 @@ test('remote launcher binds its local agent to an ephemeral loopback port', asyn
   assert.match(source, /remoteEntrypoint[\s\S]*remote\.js/);
   assert.match(source, /stdio: \['ignore', 'inherit', 'inherit', 'ipc'\]/);
   assert.match(source, /startLocalApprovalConsole/);
+  assert.match(source, /validatePairingRequestMessage/);
+  assert.match(source, /explorer\.exe/);
+  assert.match(source, /shell:\s*false/);
+  assert.match(source, /openedPairingUrls/);
   assert.doesNotMatch(source, /writeFile[\s\S]{0,200}OPERATOR_RECOVERY_TOKEN/);
   assert.doesNotMatch(source, /--experimental-strip-types/);
   assert.doesNotMatch(source, /env\.OPERATOR_AGENT_PORT = '47100'/);
@@ -155,6 +209,8 @@ test('relay-only main reports loopback readiness only to the trusted Mecord laun
   assert.match(source, /process\.env\.OPERATOR_REMOTE_PACKAGE === 'mecord-connect'/);
   assert.match(source, /typeof process\.send === 'function'/);
   assert.match(source, /type: 'mecord-local-agent-ready'/);
+  assert.match(source, /type: 'mecord-pairing-required'/);
+  assert.match(source, /url: url\.toString\(\), expiresAt/);
   assert.match(source, /host: bound\.host, port: bound\.port/);
 });
 
@@ -164,7 +220,7 @@ test('relay-only main treats terminal relay loss and emergency stop as fatal', a
   assert.match(source, /RELAY_REQUIRED_STOPPED/);
   assert.match(source, /RELAY_REQUIRED_EMERGENCY_STOP/);
   assert.match(source, /await failRequiredRelay\(error\)/);
-  assert.match(source, /getSupportedCapabilities:\s*\(\) => runtime\.supportedCapabilities\(PUBLIC_PLUGIN_CAPABILITIES\)/);
+  assert.match(source, /getSupportedCapabilities:\s*\(\) => runtime\.supportedCapabilities\(DEVELOPER_RELAY_CAPABILITIES\)/);
   assert.doesNotMatch(source, /const relaySupportedCapabilities = await runtime\.supportedCapabilities/);
 });
 

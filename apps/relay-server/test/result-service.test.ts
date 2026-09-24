@@ -10,6 +10,7 @@ import { DeviceResetStore } from '../../../src/core/device-reset.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
+import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
 import { RelayResultService } from '../src/result-service.ts';
 
 const tempDirs = new WeakMap<test.TestContext, string[]>();
@@ -135,7 +136,10 @@ test('device session rotation revokes the old JTI and stops after ownership remo
   assert.equal(rotatedResponse.status, 200);
   const rotatedBody = await rotatedResponse.json() as any;
   assert.notEqual(rotatedBody.session.token, original.token);
-  assert.deepEqual(rotatedBody.session.scopes, ['relay:connect', 'relay:result']);
+  assert.deepEqual(
+    [...rotatedBody.session.scopes].sort(),
+    ['relay:connect', 'relay:result', ...PUBLIC_PLUGIN_CAPABILITIES.map((capability) => `cap:${capability}`)].sort()
+  );
   const retryResponse = await fetch(rotateUrl, { method: 'POST', headers: { authorization: `Bearer ${original.token}` } });
   assert.equal(retryResponse.status, 200);
   assert.equal((await retryResponse.json() as any).session.token, rotatedBody.session.token);

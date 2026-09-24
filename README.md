@@ -35,7 +35,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - account-scoped multi-device registry, deterministic routing and project-to-device binding
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
-- full/private MCP runtime with **22 semantic tools**
+- full/private MCP runtime with **24 semantic tools**
 - curated public Mecord Connect MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
@@ -144,6 +144,8 @@ npm run dev
 ```
 
 Local mode talks directly to the authenticated local agent. Relay mode preserves the same 24-tool private MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
+
+For private owner/developer automation, the same 24-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
 The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The latest live `computer.inspect` reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline; device-backed E2E therefore remains pending. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md).
 
