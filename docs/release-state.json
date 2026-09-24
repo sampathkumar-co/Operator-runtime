@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "statusDate": "2026-09-24",
+  "production": {
+    "sourceCommit": "10914835e5ce4d8b1d2bf9952e8789efc8feb306",
+    "publicMcp": "https://operator.splcart.in/mcp",
+    "developerMcp": "https://developer.operator.splcart.in/mcp",
+    "publicToolCount": 9,
+    "developerToolCount": 24,
+    "developerPairingRouteStatus": 404
+  },
+  "versions": {
+    "publicProduct": "1.0.0",
+    "runtimePackage": "1.0.1",
+    "runtimeTag": "latest",
+    "policy": "public-schema-stable-runtime-patch-independent"
+  },  "openAI": {
+    "developerVerification": "blocked",
+    "appDirectorySubmission": "not-submitted",
+    "developerChatGptConnection": "blocked-by-developer-verification"
+  },
+  "notes": [
+    "The public product/plugin version tracks the stable public MCP review/schema snapshot.",
+    "The Windows npm runtime may advance patch versions independently while public major/minor compatibility is preserved.",
+    "The public ChatGPT surface remains exactly 9 tools; the separate Developer MCP endpoint exposes exactly 24 tools.",
+    "OpenAI-side verification/submission status does not change the production/runtime release status."
+  ]
+}

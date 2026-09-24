@@ -155,6 +155,28 @@ test('public Git diff rejects sensitive nested path entries before agent executi
   assert.equal(structured.error.code, 'RESTRICTED_DATA_PATH_DENIED');
 });
 
+test('public git.diff rejects traversal, drive-relative, UNC, and glob filters before dispatch', async (t) => {
+  let executions = 0;
+  const server = new McpServer({ name: 'git-filter-boundary-test', version: '0.1.0' }, { capabilities: { tools: {} } });
+  registerPublicTools(server, async () => {
+    executions += 1;
+    throw new Error('invalid filters must not dispatch');
+  }, { readScope: 'operator:read', writeScope: 'operator:write' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'git-filter-boundary-client', version: '0.1.0' });
+  t.after(async () => { await client.close().catch(() => {}); await server.close().catch(() => {}); });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+
+  for (const filter of ['../outside.txt', 'src/../outside.txt', '..\\outside.txt', 'C:outside.txt', '\\\\server\\share\\outside.txt', '*.ts']) {
+    const result = await client.callTool({ name: 'git.diff', arguments: { cwd: 'C:\\repo', paths: [filter] } });
+    assert.equal(result.isError, true, filter);
+    const structured = result.structuredContent as Record<string, any>;
+    assert.equal(structured.error.code, 'PUBLIC_PATH_FILTER_INVALID', filter);
+  }
+  assert.equal(executions, 0);
+});
+
 
 test('public result sanitizer redacts nested absolute paths and internal identifiers by value', async () => {
   const fakeResult: ActionResult = {
@@ -273,7 +295,9 @@ test('public project commands expose semantic metadata without executable author
     }, evidence: [], durationMs: 1
   }) } as unknown as LocalAgentClient;
   const response = await invokePublicWithAgent(agent, 'project.command.inspect', 'read', { path: 'C:\\repo' });
-  const command = (response.structuredContent as any).output.commands[0];
+  const output = (response.structuredContent as any).output;
+  assert.equal(output.setupRequired, false);
+  const command = output.commands[0];
   assert.deepEqual(command, {
     id: 'build', title: 'Build app', kind: 'build', risk: 'write',
     expectedOutput: { artifactCount: 1, kinds: ['json'], requiresChange: true }
@@ -282,6 +306,21 @@ test('public project commands expose semantic metadata without executable author
   for (const forbidden of ['node.exe', '--token', 'super-secret-value', 'dist/private.json', 'Alice']) {
     assert.equal(json.includes(forbidden), false, forbidden);
   }
+});
+
+test('public project commands explain safe local setup when the trusted registry is absent', async () => {
+  const agent = { execute: async () => ({
+    ok: true, capability: 'project.command.inspect', provider: 'project.command.trusted',
+    output: { projectRoot: 'C:\\repo', registryConfigured: false, registryLocation: 'operator-local-config', commands: [] },
+    evidence: [], durationMs: 1
+  }) } as unknown as LocalAgentClient;
+  const response = await invokePublicWithAgent(agent, 'project.command.inspect', 'read', { path: 'C:\\repo' });
+  const output = (response.structuredContent as any).output;
+  assert.equal(output.registryConfigured, false);
+  assert.equal(output.setupRequired, true);
+  assert.match(output.setupHint, /Configure trusted commands locally/);
+  assert.deepEqual(output.commands, []);
+  assert.equal(JSON.stringify(output).includes('registryLocation'), false);
 });
 
 test('public file list filters sensitive entry names instead of failing the whole directory', async () => {

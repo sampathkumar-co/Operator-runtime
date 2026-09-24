@@ -155,8 +155,13 @@ function minimizeProjectInspect(raw: Record<string, unknown>) {
 
 function minimizeProjectCommands(raw: Record<string, unknown>) {
   const commands = Array.isArray(raw.commands) ? raw.commands : [];
+  const registryConfigured = raw.registryConfigured === true;
   return {
-    registryConfigured: raw.registryConfigured === true,
+    registryConfigured,
+    setupRequired: !registryConfigured,
+    ...(!registryConfigured ? {
+      setupHint: 'No trusted project-command registry is configured on this device. Configure trusted commands locally before expecting project.commands to list workflows.'
+    } : {}),
     commands: commands.slice(0, 100).filter(isRecord).map((command) => ({
       id: safeOptionalString(command.id, 64),
       title: safeOptionalString(command.title, 160),

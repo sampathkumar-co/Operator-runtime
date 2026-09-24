@@ -17,7 +17,7 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 - **Software license:** PROPRIETARY
 - **npm Dual-Use classification:** DUAL_USE
 - **npm package:** mecord-connect
-- **npm account:** **mecrod** — published `mecord-connect@1.0.0`
+- **npm account:** **mecrod** — published `mecord-connect@1.0.1`
 - **Availability:** global wherever supported and legally/service-operationally supportable
 - **v1 public domain:** operator.splcart.in
 - **Auth issuer:** auth.splcart.in
@@ -27,7 +27,7 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Current production source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66` on `main`.
+Current production source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306` on `main`.
 
 Production deployment and first npm publication are complete; remaining owner actions are OpenAI/reviewer/device/submission gates.
 
@@ -89,14 +89,14 @@ npm release is complete:
 
 - publisher -> **mecrod**
 - npm 2FA mode -> **auth-and-writes**
-- package -> **mecord-connect@1.0.0** (unscoped)
+- package -> **mecord-connect@1.0.1** (unscoped)
 - registry -> **public under latest**
 - clean registry installation -> **PASS**
 - installed `doctor` -> **PASS**
 - `remote --help` -> **PASS**
 - vulnerability scan -> **0 reported vulnerabilities**
 
-Reviewer-root startup remains a device/reviewer E2E gate because the latest live ChatGPT probe returned `ROUTE_NO_DEVICE` while the paired runtime was offline.
+The released runtime/device path is proven. Any remaining reviewer-account fixture journey is an OpenAI submission/review task and must not be described as a runtime-release blocker.
 
 ## OpenAI account actions still required
 

@@ -13,14 +13,21 @@ async function json(relative: string): Promise<any> {
 
 test('public plugin manifest satisfies final directory field limits', async () => {
   const manifest = await json('.codex-plugin/plugin.json');
+  const releaseState = await json('docs/release-state.json');
   const ui = manifest.interface;
   assert.match(manifest.name, /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
   assert.match(manifest.version, /^\d+\.\d+\.\d+/);
   assert.equal(manifest.version, PRODUCT_VERSION, 'plugin manifest version must match the public MCP product version');
+  assert.equal(manifest.version, releaseState.versions.publicProduct);
   const runtimePackage = await json('packages/mecord-connect/package.json');
   assert.match(runtimePackage.version, /^\d+\.\d+\.\d+$/);
   assert.equal(runtimePackage.name, 'mecord-connect');
-  assert.equal(runtimePackage.version.split('.')[0], manifest.version.split('.')[0], 'npm runtime major must remain compatible with the public plugin major');
+  assert.equal(runtimePackage.version, releaseState.versions.runtimePackage);
+  const publicParts = manifest.version.split('.').map(Number);
+  const runtimeParts = runtimePackage.version.split('.').map(Number);
+  assert.equal(runtimeParts[0], publicParts[0], 'npm runtime major must remain compatible with the public plugin major');
+  assert.equal(runtimeParts[1], publicParts[1], 'runtime patch releases must stay within the public plugin major/minor line');
+  assert.ok(runtimeParts[2] >= publicParts[2], 'runtime patch must not be older than the public plugin patch');
   assert.ok(ui.displayName.length <= 30);
   assert.ok(ui.shortDescription.length <= 30);
   assert.ok(ui.longDescription.length <= 4000);
@@ -120,21 +127,84 @@ test('reviewer-facing evidence reflects the deployed canonical nine-tool product
     assert.doesNotMatch(content, /\b(?:10[- ]tool|ten tools|ten-tool)\b/i, `${relative} still advertises the obsolete ten-tool final surface`);
   }
 
+  const releaseState = await json('docs/release-state.json');
   const certification = await fs.readFile(path.join(root, 'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md'), 'utf8');
-  assert.match(certification, /Current production baseline[\s\S]*source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`[\s\S]*public surface: exactly 9 MCP tools/);
+  assert.equal(certification.includes(`source: \`${releaseState.production.sourceCommit}\``), true);
+  assert.equal(certification.includes('public surface: exactly 9 MCP tools'), true);
   assert.match(certification, /legacy public `device\.claim`: absent/);
 
   const releaseGate = await fs.readFile(path.join(root, 'docs/OPERATOR_RELEASE_GATE.md'), 'utf8');
-  assert.match(releaseGate, /Current production source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`[\s\S]*exactly 9 tools with no `device\.claim`/);
+  assert.equal(releaseGate.includes(`Current production source: \`${releaseState.production.sourceCommit}\``), true);
+  assert.match(releaseGate, /public surface[\s\S]*exactly 9|exactly 9 tools with no `device\.claim`/i);
 
   const masterGate = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
   assert.match(masterGate, /G3 MCP Truthfulness & Safety[\s\S]*exactly 9 allowlisted tools/);
-  assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*fresh ChatGPT conversation now exposes exactly the deployed 9-tool Mecord Connect surface/);
+  assert.match(masterGate, /G34 OpenAI Metadata Match[\s\S]*exactly the deployed 9-tool Mecord Connect surface/);
 
   const review = await json('docs/plugin-review-package.json');
   assert.equal(review.sourceSuccessor.pullRequest, null);
   assert.equal(review.sourceSuccessor.branch, 'main');
-  assert.equal(review.sourceSuccessor.sourceCommit, '3b3b1bff35f8e78519f114b603f98e8acc56cd66');
-  assert.equal(review.sourceSuccessor.status, 'PRODUCTION_DEPLOYED_NPM_PUBLISHED_AWAITING_FINAL_OPENAI_REVIEW_GATES');
-  assert.equal(review.releaseCandidate.npmPackage, 'mecord-connect@1.0.0');
+  assert.equal(review.sourceSuccessor.productionBaseCommit, releaseState.production.sourceCommit);
+  assert.equal(review.sourceSuccessor.sourceCommit, null);
+  assert.equal(review.sourceSuccessor.sourceCommitPolicy, 'dynamic-main-head-not-a-production-claim');
+  assert.equal(review.releaseCandidate.sourceCommit, releaseState.production.sourceCommit);
+  assert.equal(review.releaseCandidate.npmPackage, `mecord-connect@${releaseState.versions.runtimePackage}`);
 });
+test('current release evidence cannot regress to superseded production facts', async () => {
+  const releaseState = await json('docs/release-state.json');
+  const currentDocs = [
+    'README.md',
+    'docs/CURRENT_RELEASE_STATE.md',
+    'docs/OPERATOR_DEMO_RECORDING_RUNBOOK.md',
+    'docs/OPERATOR_FEATURE_GAPS.md',
+    'docs/OPERATOR_MASTER_GATE_STATUS.md',
+    'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
+    'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
+    'docs/OPERATOR_OWNER_RELEASE_DECISION_PACKET.md',
+    'docs/OPERATOR_REAL_OAUTH_PROOF.md',
+    'docs/OPERATOR_RELEASE_GATE.md',
+    'docs/OPERATOR_REMAINING_HUMAN_GATES.md',
+    'docs/SUBMISSION_PACKAGE.md',
+    'docs/plugin-review-package.json'
+  ];
+  const superseded = [
+    '3b3b1bff35f8e78519f114b603f98e8acc56cd66',
+    'mecord-connect@1.0.0',
+    'ROUTE_NO_DEVICE',
+    'paired local runtime was offline',
+    'device-backed E2E remains pending'
+  ];
+  for (const relative of currentDocs) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    for (const marker of superseded) {
+      assert.equal(content.includes(marker), false, `${relative} contains superseded current-state marker: ${marker}`);
+    }
+  }
+  for (const relative of [
+    'README.md',
+    'docs/CURRENT_RELEASE_STATE.md',
+    'docs/OPERATOR_MASTER_GATE_STATUS.md',
+    'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
+    'docs/OPERATOR_RELEASE_GATE.md',
+    'docs/plugin-review-package.json'
+  ]) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.equal(content.includes(releaseState.production.sourceCommit), true, `${relative} must identify the current production source`);
+  }
+
+  const historicalBootstrap = await fs.readFile(path.join(root, 'docs/OPERATOR_NPM_NAMESPACE_BOOTSTRAP.md'), 'utf8');
+  assert.match(historicalBootstrap, /HISTORICAL \/ SUPERSEDED/);
+  assert.match(historicalBootstrap, /mecord-connect@1\.0\.0/);
+});
+
+test('master gate headline count matches its actual table statuses', async () => {
+  const master = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
+  const declared = master.match(/Current canonical count: \*\*(\d+) PASS \/ (\d+) BLOCKED \/ (\d+) NOT APPLICABLE\*\*/);
+  assert.ok(declared, 'master gate document must declare its canonical count');
+  const rows = [...master.matchAll(/^\| G\d+[^|]*\| (PASS|BLOCKED|NOT APPLICABLE) \|/gm)].map((match) => match[1]);
+  assert.equal(rows.length, 37, 'G0-G36 must all be present exactly once');
+  assert.equal(rows.filter((status) => status === 'PASS').length, Number(declared[1]));
+  assert.equal(rows.filter((status) => status === 'BLOCKED').length, Number(declared[2]));
+  assert.equal(rows.filter((status) => status === 'NOT APPLICABLE').length, Number(declared[3]));
+});
+
