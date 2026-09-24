@@ -237,7 +237,7 @@ All must be true:
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
 - Scan Tools imports exactly 9 tools;
-- real OAuth read/write/revoke/reconnect proof passes;
+- any reviewer-specific OAuth/revoke/reconnect evidence requested by the OpenAI portal is captured after developer verification becomes available;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible production demo recording exists;
 - global availability is selected only where supported;
@@ -246,7 +246,7 @@ All must be true:
 
 Only then select **Submit for Review**.
 
-## 14. Fields intentionally left for the five remaining external gates
+## 14. Fields intentionally deferred to the OpenAI submission flow
 
 - OpenAI verified-identity result / account verification record
 - reviewer password and pairing result
