@@ -144,7 +144,10 @@ test('reviewer-facing evidence reflects the deployed canonical nine-tool product
   const review = await json('docs/plugin-review-package.json');
   assert.equal(review.sourceSuccessor.pullRequest, null);
   assert.equal(review.sourceSuccessor.branch, 'main');
-  assert.equal(review.sourceSuccessor.sourceCommit, releaseState.production.sourceCommit);
+  assert.equal(review.sourceSuccessor.productionBaseCommit, releaseState.production.sourceCommit);
+  assert.equal(review.sourceSuccessor.sourceCommit, null);
+  assert.equal(review.sourceSuccessor.sourceCommitPolicy, 'dynamic-main-head-not-a-production-claim');
+  assert.equal(review.releaseCandidate.sourceCommit, releaseState.production.sourceCommit);
   assert.equal(review.releaseCandidate.npmPackage, `mecord-connect@${releaseState.versions.runtimePackage}`);
 });
 test('current release evidence cannot regress to superseded production facts', async () => {
