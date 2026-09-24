@@ -110,6 +110,68 @@ test('one-time approval binds exact action, resumes once, and cannot be replayed
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
 });
 
+test('late approval after inline wait never mutates until an explicit retry', async (t) => {
+  const root = await temp(t, 'operator-approval-timeout-root-');
+  const state = await temp(t, 'operator-approval-timeout-state-');
+  const filePath = path.join(root, 'timeout.txt');
+  await fs.writeFile(filePath, 'before');
+  const token = 't'.repeat(64);
+  const recoveryToken = 'u'.repeat(64);
+  const runtime = createRuntime({
+    allowedRoots: [root],
+    allowedExecutables: ['node'],
+    windowsPathLeasePath: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+  const approvals = new ApprovalStore(state);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, inlineApprovalWaitMs: 50,
+    permissions: { allowedCapabilities: ['file.*'], allowedRoots: [root], allowDestructive: false }
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  const action = {
+    id: 'approval-timeout-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: 'after',
+      expectedSha256: crypto.createHash('sha256').update('before').digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+
+  const first = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action })
+  });
+  const firstBody = await first.json() as any;
+  assert.equal(first.status, 409);
+  assert.equal(firstBody.error.code, 'APPROVAL_REQUIRED');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'before');
+
+  const pending = await waitForPendingApproval(base, token, action.id);
+  const approval = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'approve', approvalRequestId: pending.approvalRequestId })
+  });
+  assert.equal(approval.status, 200);
+  await delay(100);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'before');
+
+  const retry = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action })
+  });
+  const retryBody = await retry.json() as any;
+  assert.equal(retry.status, 200, JSON.stringify(retryBody));
+  assert.equal(retryBody.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'after');
+});
+
 test('session approval allows subsequent destructive actions only inside the same runtime scope', async (t) => {
   const root = await temp(t, 'operator-session-approval-root-');
   const state = await temp(t, 'operator-session-approval-state-');
