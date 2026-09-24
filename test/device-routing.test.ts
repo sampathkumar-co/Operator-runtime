@@ -74,6 +74,62 @@ test('explicit device cannot contradict an existing project binding', async (t) 
   );
 });
 
+test('account default routes unqualified work while project binding keeps higher precedence', async (t) => {
+  const { stateDir, registry, routing, a, b, now, clock } = await fixture(t);
+  await routing.setDefaultDevice(a.deviceId);
+  await routing.bindProject('project-on-b', b.deviceId);
+
+  const reloaded = new DeviceRoutingStore(stateDir, registry, { clock });
+  assert.equal(await reloaded.defaultDevice(), a.deviceId);
+  const onlineDevices = [
+    online(a.deviceId, 'sa', now, ['computer.inspect', 'file.read']),
+    online(b.deviceId, 'sb', now, ['computer.inspect', 'file.read'])
+  ];
+  const unqualified = await reloaded.resolve({ requiredCapabilities: ['computer.inspect'] }, onlineDevices);
+  assert.equal(unqualified.deviceId, a.deviceId);
+  assert.equal(unqualified.reason, 'account-default');
+
+  const project = await reloaded.resolve({ projectKey: 'project-on-b', requiredCapabilities: ['file.read'] }, onlineDevices);
+  assert.equal(project.deviceId, b.deviceId);
+  assert.equal(project.reason, 'project-binding');
+});
+
+test('account default fails closed when unavailable and device cleanup clears it', async (t) => {
+  const { routing, a, b, now } = await fixture(t);
+  await routing.setDefaultDevice(a.deviceId);
+  await assert.rejects(
+    routing.resolve({ requiredCapabilities: ['computer.inspect'] }, [online(b.deviceId, 'sb', now, ['computer.inspect'])]),
+    (error: any) => error?.code === 'ROUTE_DEVICE_OFFLINE'
+  );
+  await assert.rejects(
+    routing.resolve({ requiredCapabilities: ['git.status'] }, [
+      online(a.deviceId, 'sa', now, ['computer.inspect']),
+      online(b.deviceId, 'sb', now, ['git.status'])
+    ]),
+    (error: any) => error?.code === 'ROUTE_CAPABILITY_MISMATCH'
+  );
+
+  await routing.unbindDevice(a.deviceId);
+  assert.equal(await routing.defaultDevice(), undefined);
+  const decision = await routing.resolve({ requiredCapabilities: ['computer.inspect'] }, [online(b.deviceId, 'sb', now, ['computer.inspect'])]);
+  assert.equal(decision.deviceId, b.deviceId);
+  assert.equal(decision.reason, 'unique-candidate');
+});
+
+test('legacy routing state migrates without inventing a default device', async (t) => {
+  const { stateDir, registry, a, b, now, clock } = await fixture(t);
+  await fs.writeFile(path.join(stateDir, 'device-routing.json'), JSON.stringify({ version: 1, bindings: [] }));
+  const routing = new DeviceRoutingStore(stateDir, registry, { clock });
+  assert.equal(await routing.defaultDevice(), undefined);
+  await assert.rejects(
+    routing.resolve({ requiredCapabilities: ['computer.inspect'] }, [
+      online(a.deviceId, 'sa', now, ['computer.inspect']),
+      online(b.deviceId, 'sb', now, ['computer.inspect'])
+    ]),
+    (error: any) => error?.code === 'ROUTE_AMBIGUOUS'
+  );
+});
+
 test('bound project fails closed when its device is offline or lacks capability instead of failing over', async (t) => {
   const { routing, a, b, now } = await fixture(t);
   await routing.bindProject('project-2', a.deviceId);

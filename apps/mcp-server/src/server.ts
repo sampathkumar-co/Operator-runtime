@@ -136,7 +136,7 @@ if (publicEdge) {
     const principalDecision = publicPrincipalLimiter!.hit(principalRateKey(principal.issuer, principal.subject));
     if (!principalDecision.allowed) return sendRateLimit(reply, principalDecision);
 
-    const body = request.body as { userCode?: unknown } | undefined;
+    const body = request.body as { userCode?: unknown; makeDefault?: unknown } | undefined;
     const compact = typeof body?.userCode === 'string'
       ? body.userCode.toUpperCase().replace(/[^A-Z0-9]/g, '')
       : '';
@@ -150,7 +150,7 @@ if (publicEdge) {
 
     try {
       const agent = new LocalAgentClient(agentUrl, agentToken, principal);
-      const result = await agent.claimDevice(userCode);
+      const result = await agent.claimDevice(userCode, body?.makeDefault === true);
       return reply.header('cache-control', 'no-store').code(200).send({ ok: true, status: result.status });
     } catch (error) {
       const code = typeof (error as { code?: unknown })?.code === 'string'

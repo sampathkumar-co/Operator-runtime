@@ -24,7 +24,7 @@ type Executor = {
   execute(action: ActionRequest): Promise<ActionResult>;
   submitTask(input: TaskSubmitInput): Promise<TaskTransportResult>;
   controlTask(taskId: string, operation: TaskControlOperation): Promise<TaskTransportResult>;
-  claimDevice?(userCode: string): Promise<{ status: 'claimed' }>;
+  claimDevice?(userCode: string, makeDefault?: boolean): Promise<{ status: 'claimed' }>;
 };
 
 export class LocalAgentClient {
@@ -65,9 +65,9 @@ export class LocalAgentClient {
     return await this.#executor.controlTask(taskId, operation);
   }
 
-  async claimDevice(userCode: string): Promise<{ status: 'claimed' }> {
+  async claimDevice(userCode: string, makeDefault = false): Promise<{ status: 'claimed' }> {
     if (!this.#executor.claimDevice) throw new Error('Device enrollment claim requires relay execution mode.');
-    return await this.#executor.claimDevice(userCode);
+    return await this.#executor.claimDevice(userCode, makeDefault);
   }
 }
 

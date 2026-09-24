@@ -98,6 +98,35 @@ test('relay control rejects ambiguous account authority', async (t) => {
   assert.equal(body.error.code, 'RELAY_CONTROL_INPUT_INVALID');
 });
 
+test('relay control selects an owned account default without returning device identity', async (t) => {
+  const selected: Array<{ accountId: string; deviceId: string }> = [];
+  const service = new RelayControlService({
+    hub: {
+      setDefaultDevice: async (accountId: string, deviceId: string) => { selected.push({ accountId, deviceId }); }
+    } as any,
+    results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A })
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/account/default-device`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' },
+      deviceId: DEVICE_ID
+    })
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json() as any;
+  assert.deepEqual(body, { ok: true, defaultDevice: { status: 'selected' } });
+  assert.equal(JSON.stringify(body).includes(DEVICE_ID), false);
+  assert.deepEqual(selected, [{ accountId: ACCOUNT_A, deviceId: DEVICE_ID }]);
+});
+
 test('relay control reports route ambiguity with code-only diagnostics', async (t) => {
   const diagnostics: unknown[] = [];
   const service = new RelayControlService({
@@ -354,6 +383,44 @@ test('new device registration rolls back when serialized account binding fails',
   assert.equal(response.status, 409);
   assert.equal((await response.json() as any).error.code, 'ACCOUNT_DEVICE_QUOTA');
   assert.equal(rollbacks, 1);
+});
+
+test('device enrollment can explicitly select the newly paired device as account default', async (t) => {
+  const selected: Array<{ accountId: string; deviceId: string }> = [];
+  const peer = { deviceId: DEVICE_ID, fingerprint: 'x'.repeat(43) };
+  const service = new RelayControlService({
+    hub: {
+      setDefaultDevice: async (accountId: string, deviceId: string) => { selected.push({ accountId, deviceId }); }
+    } as any,
+    results: {} as any,
+    accounts: {
+      resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }),
+      assertCanBindDevice: async () => undefined,
+      bindDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, status: 'active', addedAt: new Date(0).toISOString(), authorityGeneration: 1 })
+    } as any,
+    enrollments: {
+      reserve: async () => ({ enrollmentId: '55555555-5555-4555-8555-555555555555', deviceId: DEVICE_ID }),
+      peerForClaim: async () => peer,
+      markBound: async () => ({ status: 'claimed' })
+    } as any,
+    devices: {
+      registerVerifiedPeerTracked: async () => ({ device: peer, created: false }),
+      unregisterActiveDevice: async () => false
+    } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-enrollment/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'default-user' },
+      userCode: 'ABC123',
+      makeDefault: true
+    })
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.deepEqual(selected, [{ accountId: ACCOUNT_A, deviceId: DEVICE_ID }]);
 });
 
 

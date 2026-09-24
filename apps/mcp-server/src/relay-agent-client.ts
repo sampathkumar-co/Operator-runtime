@@ -46,12 +46,12 @@ export class RelayAgentClient {
     if (this.#publicBoundary && this.#developerBoundary) throw new Error('Relay client cannot be both public and developer boundary.');
   }
 
-  async claimDevice(userCodeInput: string): Promise<{ status: 'claimed' }> {
+  async claimDevice(userCodeInput: string, makeDefault = false): Promise<{ status: 'claimed' }> {
     const userCode = validUserCode(userCodeInput);
     const response = await fetch(new URL('/v1/device-enrollment/claim', this.#url), {
       redirect: 'error', method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
-      body: JSON.stringify({ ...(this.#accountId ? { accountId: this.#accountId } : {}), ...(this.#principal ? { principal: this.#principal } : {}), userCode }),
+      body: JSON.stringify({ ...(this.#accountId ? { accountId: this.#accountId } : {}), ...(this.#principal ? { principal: this.#principal } : {}), userCode, ...(makeDefault ? { makeDefault: true } : {}) }),
       signal: AbortSignal.timeout(15_000)
     });
     const body = await response.json() as any;

@@ -40,7 +40,7 @@ test('pairing service uses PKCE, hides device code from authorization URL, and c
     }
   });
 
-  const started = service.start('ABCD-2345');
+  const started = service.start('ABCD-2345', true);
   assert.equal(service.pendingCount(), 1);
   const authorization = new URL(started.authorizationUrl);
   assert.equal(authorization.origin, 'https://auth.splcart.in');
@@ -57,7 +57,7 @@ test('pairing service uses PKCE, hides device code from authorization URL, and c
     code: 'authorization-code',
     state: authorization.searchParams.get('state')
   });
-  assert.deepEqual(result, { status: 'claimed', userCode: 'ABCD-2345' });
+  assert.deepEqual(result, { status: 'claimed', userCode: 'ABCD-2345', makeDefault: true });
   assert.equal(service.pendingCount(), 0);
   assert.equal(calls.length, 2);
 
@@ -69,7 +69,7 @@ test('pairing service uses PKCE, hides device code from authorization URL, and c
 
   assert.equal(calls[1].init.method, 'POST');
   assert.equal((calls[1].init.headers as Record<string, string>).authorization, 'Bearer test-access-token-value');
-  assert.deepEqual(JSON.parse(String(calls[1].init.body)), { userCode: 'ABCD-2345' });
+  assert.deepEqual(JSON.parse(String(calls[1].init.body)), { userCode: 'ABCD-2345', makeDefault: true });
 
   await assert.rejects(
     service.complete({ code: 'authorization-code-2', state: authorization.searchParams.get('state') }),
@@ -106,7 +106,7 @@ test('auth portal exposes only bounded Mecord pairing routes', () => {
   assert.match(source, /requestURL\.pathname === '\/pair\/start'/);
   assert.match(source, /requestURL\.pathname === '\/pair\/callback'/);
   assert.match(source, /pairRateAllowed\(ip\)/);
-  assert.match(source, /pairing\.start\(payload\?\.userCode\)/);
+  assert.match(source, /pairing\.start\(payload\?\.userCode, payload\?\.makeDefault === true\)/);
   assert.match(source, /pairing\.complete\(\{ code, state \}\)/);
   assert.match(source, /if\(prefill\)\{button\.disabled=true;msg\.className='msg';msg\.textContent='Opening secure sign-in\.\.\.';setTimeout\(\(\)=>\{void startPairing\(\);\},0\);\}/);
   assert.match(source, /pairingClient=data\.client_id==='mecord-device-pairing-v1'/);
@@ -123,7 +123,7 @@ test('public edge pairing endpoint requires write scope and derives account from
   assert.match(source, /requiredScopes: \[publicEdge\.writeScope\]/);
   assert.match(source, /principalFromAuthInfo\(authInfo, publicEdge\.publicUrl\)/);
   assert.match(source, /new LocalAgentClient\(agentUrl, agentToken, principal\)/);
-  assert.match(source, /agent\.claimDevice\(userCode\)/);
+  assert.match(source, /agent\.claimDevice\(userCode, body\?\.makeDefault === true\)/);
   assert.doesNotMatch(source, /body\?\.accountId/);
 });
 
