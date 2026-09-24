@@ -372,7 +372,6 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
     }catch(err){starting=false;msg.className='msg bad';msg.textContent=(err&&err.message)||'Pairing could not start.';button.disabled=false;}
   }
   form.addEventListener('submit',async(ev)=>{ev.preventDefault();await startPairing();});
-  if(prefill){button.disabled=true;msg.className='msg';msg.textContent='Opening secure sign-in...';setTimeout(()=>{void startPairing();},0);}
 })();
 </script></body></html>`;
 

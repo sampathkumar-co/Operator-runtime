@@ -108,7 +108,7 @@ test('auth portal exposes only bounded Mecord pairing routes', () => {
   assert.match(source, /pairRateAllowed\(ip\)/);
   assert.match(source, /pairing\.start\(payload\?\.userCode, payload\?\.makeDefault === true\)/);
   assert.match(source, /pairing\.complete\(\{ code, state \}\)/);
-  assert.match(source, /if\(prefill\)\{button\.disabled=true;msg\.className='msg';msg\.textContent='Opening secure sign-in\.\.\.';setTimeout\(\(\)=>\{void startPairing\(\);\},0\);\}/);
+  assert.doesNotMatch(source, /if\(prefill\).*startPairing/);
   assert.match(source, /pairingClient=data\.client_id==='mecord-device-pairing-v1'/);
   assert.match(source, /Approve this computer/);
   assert.match(source, /Approve device/);
