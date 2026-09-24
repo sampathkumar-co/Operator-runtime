@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-Production is live on Mecord Connect source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`, and `mecord-connect@1.0.1` is public under `latest`. The fresh ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked on OpenAI developer verification and the portal/reviewer evidence that cannot proceed until that external account gate is resolved. The npm/runtime/production release itself is complete.
+Production is live on Mecord Connect source `a7fd8c960a82c9565b944ffb50535eeed6989c52`, and `mecord-connect@1.0.1` is public under `latest`. The previously refreshed ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`; the successor deployment preserves that public boundary and passed post-deploy health, routing and exact tool-count verification. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked on OpenAI developer verification and the portal/reviewer evidence that cannot proceed until that external account gate is resolved. The npm/runtime/production release itself is complete.
 
 ## What the public plugin does
 
@@ -125,7 +125,7 @@ Before pressing Submit for Review, verify all of these against the real deployme
 - `https://operator.splcart.in/mcp` is the permanent production HTTPS MCP origin;
 - if the OpenAI portal issues a challenge token, that exact token is served only at the required well-known path;
 - OAuth metadata, authorization flow, PKCE/resource binding and reviewer credentials work from outside the publisher network;
-- website, privacy, terms and support URLs return the deployed Mecord Connect production content over HTTPS and match the source-controlled notice set from deployed source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
+- website, privacy, terms and support URLs return the deployed Mecord Connect production content over HTTPS and match the source-controlled notice set from deployed source `a7fd8c960a82c9565b944ffb50535eeed6989c52`; hosting/region, actual retention, subprocessors and the private security-reporting path must remain real deployment values;
 - hosted provider/region/subprocessor disclosures match the actual deployment;
 - Scan Tools imports exactly the intended nine-tool public surface and current annotations;
 - all nine annotation justifications match the scanned server values;

@@ -6,7 +6,7 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 
 ## Production
 
-- production source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
+- production source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
@@ -14,7 +14,9 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 - Developer pairing route: **404** by design
 - npm: **`mecord-connect@1.0.1`** under `latest`
 
-Live verification on 2026-09-24 confirmed both health endpoints report the same production source commit, with public toolCount 9 and Developer toolCount 24.## Version policy
+Live verification on 2026-09-24 confirmed both health endpoints report the same production source commit, with public toolCount 9 and Developer toolCount 24. The deployed image also rejects traversal, drive-relative, UNC and glob `git.diff` path filters before agent dispatch.
+
+## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
 

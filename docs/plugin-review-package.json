@@ -107,7 +107,7 @@
     }
   },
   "externalGates": {
-    "productionMcpUrl": "PASS_LIVE: https://operator.splcart.in/mcp is deployed from source 10914835e5ce4d8b1d2bf9952e8789efc8feb306; the refreshed ChatGPT connection exposes exactly the canonical 9 tools.",
+    "productionMcpUrl": "PASS_LIVE: https://operator.splcart.in/mcp is deployed from source a7fd8c960a82c9565b944ffb50535eeed6989c52; post-deploy health reports exactly the canonical 9-tool public surface.",
     "website": "PASS_LIVE: final Mecord Connect production pages are deployed and post-deploy health/routing/security verification passed.",
     "privacy": "PASS_LIVE: final Mecord Connect Privacy notice is deployed from the current source-controlled notice set.",
     "terms": "PASS_LIVE: final Mecord Connect Terms notice is deployed from the current source-controlled notice set.",
@@ -129,12 +129,12 @@
     "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into the merged PR #28 hardening baseline and retained by current main. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
     "occ3oPublicNoticeReproducibility": "PASS_ENGINEERING_DRAFT: PR #24 head 6edd3ee8eca2f5b8096424bac8750f0c945cec94 source-controls the exact live Privacy/Terms/Support notice bytes previously hidden by an ignore rule; CI #710, Platform Matrix #480 and Windows Signing Smoke #481 pass. A disposable merge preview with PR #22 is conflict-free, passes 24/24 focused tests and the full Windows-aware suite at 367 tests / 351 pass / 16 expected skips / 0 fail. FG-017 legal identity wording remains intentionally unresolved.",
     "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that were integrated into the merged PR #28 hardening baseline and retained through the PR #29 baseline d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
-    "publicBrandingDeployment": "PASS_LIVE: final Mecord Connect production source 10914835e5ce4d8b1d2bf9952e8789efc8feb306 is deployed; public pages and the canonical 9-tool surface are live.",
-    "developerMcpEndpoint": "PASS_LIVE: https://developer.operator.splcart.in/mcp reports exactly 24 tools from source 10914835e5ce4d8b1d2bf9952e8789efc8feb306; operator:developer plus explicit account entitlement are required and the Developer pairing route returns 404."
+    "publicBrandingDeployment": "PASS_LIVE: final Mecord Connect production source a7fd8c960a82c9565b944ffb50535eeed6989c52 is deployed; public pages and the canonical 9-tool surface are live.",
+    "developerMcpEndpoint": "PASS_LIVE: https://developer.operator.splcart.in/mcp reports exactly 24 tools from source a7fd8c960a82c9565b944ffb50535eeed6989c52; operator:developer plus explicit account entitlement are required and the Developer pairing route returns 404."
   },
   "releaseCandidate": {
     "name": "Mecord Connect 1.0.0",
-    "sourceCommit": "10914835e5ce4d8b1d2bf9952e8789efc8feb306",
+    "sourceCommit": "a7fd8c960a82c9565b944ffb50535eeed6989c52",
     "productionMcp": "https://operator.splcart.in/mcp",
     "npmPackage": "mecord-connect@1.0.1",
     "status": "PRODUCTION_LIVE_OPENAI_DIRECTORY_NOT_SUBMITTED"
@@ -143,7 +143,7 @@
     "name": "Mecord Connect post-release source line",
     "pullRequest": null,
     "branch": "main",
-    "productionBaseCommit": "10914835e5ce4d8b1d2bf9952e8789efc8feb306",
+    "productionBaseCommit": "a7fd8c960a82c9565b944ffb50535eeed6989c52",
     "sourceCommit": null,
     "sourceCommitPolicy": "dynamic-main-head-not-a-production-claim",
     "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",

@@ -24,7 +24,7 @@ Do not ask for an `@mecrod` organization again.
 
 Production is live on Mecord Connect v1:
 
-- source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
+- source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public MCP surface: exactly 9 tools
