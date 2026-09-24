@@ -65,7 +65,8 @@ Current production release:
 - npm account status: **RESOLVED ? user `mecrod`, authenticated, 2FA `auth-and-writes`**
 - npm organization/scope: **not required** for the unscoped package
 - package: **`mecord-connect`**
-- public version: **1.0.0** (`latest`)
+- public npm runtime: **1.0.1** (`latest`)
+- public MCP/product snapshot version: **1.0.0** (stable 9-tool review/schema snapshot)
 - executable shim: **`mecord-connect`**
 - license: **proprietary**
 - package metadata: `SEE LICENSE IN LICENSE`
@@ -252,7 +253,7 @@ Only then select **Submit for Review**.
 - reviewer password and pairing result
 - portal-issued domain challenge token, if any
 - real OpenAI draft/plugin ID + authoritative redirect + OAuth/Scan/E2E results
-- final npm publication authorization and OpenAI Submit-for-Review authorization
+- OpenAI Submit-for-Review authorization (npm publication is already complete)
 - demo recording URL, because it depends on the real E2E gate
 
 No other product, licensing, npm-policy, domain, availability, support, jurisdiction or MSIX decision is outstanding.
