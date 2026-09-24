@@ -53,6 +53,11 @@ export interface RelayExpiredRecoveryContext {
 
 export type RelayExpiredRecoveryDecision = 'ack' | 'stop';
 
+export type RelayClientStatus =
+  | { state: 'socket-connected' }
+  | { state: 'authenticated-ready'; capabilityCount: number }
+  | { state: 'reconnect-wait'; code: string; delayMs: number };
+
 interface RelayState {
   version: 1;
   lastAckedServerSeq: number;
@@ -98,6 +103,7 @@ export interface RelayClientOptions {
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
+  onStatus?: (status: RelayClientStatus) => void;
   allowLoopbackInsecureWs?: boolean;
   random?: () => number;
   clock?: () => Date;
@@ -117,6 +123,7 @@ export class RelayClient {
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   #onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
+  #onStatus?: (status: RelayClientStatus) => void;
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
@@ -146,6 +153,7 @@ export class RelayClient {
     this.#onRecovery = options.onRecovery;
     this.#onExpiredRecovery = options.onExpiredRecovery;
     this.#onAcknowledged = options.onAcknowledged;
+    this.#onStatus = options.onStatus;
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -162,6 +170,11 @@ export class RelayClient {
         if (this.#stopped) break;
         if (error instanceof OperatorError && !error.retryable) throw error;
         const delay = reconnectDelay(this.#attempt++, this.#random());
+        this.#emitStatus({
+          state: 'reconnect-wait',
+          code: error instanceof OperatorError ? error.code : 'RELAY_CONNECTION_FAILED',
+          delayMs: delay
+        });
         await this.#sleep(delay);
       }
     }
@@ -204,6 +217,7 @@ export class RelayClient {
       throw new OperatorError('RELAY_SOCKET_DESTINATION_CHANGED', 'Opened relay WebSocket destination differs from the authorized endpoint.', { retryable: false });
     }
     if (this.#stopped) return;
+    this.#emitStatus({ state: 'socket-connected' });
 
     const identity = await this.#identity.loadOrCreate();
     const helloPayload = {
@@ -256,11 +270,12 @@ export class RelayClient {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          await this.#validateWelcome(frame, state, supportedCapabilities);
+          const effectiveCapabilities = await this.#validateWelcome(frame, state, supportedCapabilities);
           welcomed = true;
           this.#attempt = 0;
           this.#lastPongAt = Date.now();
           this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
+          this.#emitStatus({ state: 'authenticated-ready', capabilityCount: effectiveCapabilities.length });
           return;
         }
         if (frame.type === 'pong') {
@@ -286,8 +301,9 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<void> {
+  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<string[]> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
+    let effectiveCapabilities = [...supportedCapabilities];
     if (this.#requireCapabilityBinding) {
       const legacyRelay = frame.capabilityBinding === undefined && frame.capabilities === undefined;
       if (!legacyRelay) {
@@ -299,6 +315,7 @@ export class RelayClient {
         if (effective.some((capability) => !advertised.has(capability))) {
           throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
         }
+        effectiveCapabilities = effective;
       }
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
@@ -309,7 +326,7 @@ export class RelayClient {
     }
     if (frame.resumeFromSeq === state.lastAckedServerSeq) {
       if (expiredThroughSeq !== undefined) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay supplied an unnecessary expired-history reconciliation proof.');
-      return;
+      return effectiveCapabilities;
     }
     if (frame.resumeFromSeq < state.lastAckedServerSeq || expiredThroughSeq !== frame.resumeFromSeq) {
       throw new OperatorError('RELAY_RESUME_MISMATCH', 'Relay resume cursor does not match the durable local acknowledgement cursor.', { retryable: true });
@@ -327,6 +344,11 @@ export class RelayClient {
     if (state.processing && state.processing.seq <= frame.resumeFromSeq) {
       await this.#notifyAcknowledged(state.processing);
     }
+    return effectiveCapabilities;
+  }
+
+  #emitStatus(status: RelayClientStatus): void {
+    try { this.#onStatus?.(status); } catch { /* diagnostics must not affect relay authority */ }
   }
 
   async #handleDelivery(socket: RelaySocketLike, frame: DeliveryFrame): Promise<void> {

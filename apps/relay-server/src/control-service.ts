@@ -16,6 +16,12 @@ const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
 
+export interface RelayControlDiagnostic {
+  service: 'operator-relay-control';
+  status: 'request-failed';
+  code: string;
+}
+
 export class RelayControlService {
   #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
@@ -24,9 +30,10 @@ export class RelayControlService {
   #devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>;
   #token: string;
   #developerAccounts: Set<string>;
+  #onDiagnostic?: (event: RelayControlDiagnostic) => void;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -35,6 +42,7 @@ export class RelayControlService {
     this.#devices = options.devices;
     this.#token = options.token;
     this.#developerAccounts = developerAccountIds(options.developerAccountIds ?? process.env.OPERATOR_DEVELOPER_ACCOUNT_IDS);
+    this.#onDiagnostic = options.onDiagnostic;
   }
 
   async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
@@ -187,6 +195,9 @@ export class RelayControlService {
         ));
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('RELAY_CONTROL_FAILED', error instanceof Error ? error.message : String(error));
+        try {
+          this.#onDiagnostic?.({ service: 'operator-relay-control', status: 'request-failed', code: safeDiagnosticCode(op.code) });
+        } catch { /* diagnostics must never affect the control response */ }
         const status = op.code === 'REQUEST_TOO_LARGE' ? 413 : op.code === 'UNAUTHORIZED' ? 401 : 409;
         send(response, status, relayFailure('relay.execute', startedAt, op.code, op.message, undefined, undefined, op.retryable));
       }
@@ -277,6 +288,10 @@ export class RelayControlService {
     if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+function safeDiagnosticCode(code: string): string {
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : 'RELAY_CONTROL_FAILED';
 }
 
 function relayFailure(capability: string, startedAt: number, code: string, message: string, deviceId?: string, seq?: number, retryable = false): ActionResult {

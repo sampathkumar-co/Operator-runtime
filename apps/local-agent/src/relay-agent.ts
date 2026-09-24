@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { RelayClient, type RelayDelivery, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
+import { RelayClient, type RelayClientStatus, type RelayDelivery, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
@@ -25,6 +25,7 @@ export interface LocalAgentRelayRunnerOptions {
   getSupportedCapabilities?: () => Promise<readonly string[]>;
   allowLoopbackInsecure?: boolean;
   socketFactory?: RelaySocketFactory;
+  onStatus?: (status: RelayClientStatus) => void;
 }
 
 export class LocalAgentRelayRunner {
@@ -59,6 +60,7 @@ export class LocalAgentRelayRunner {
       getSessionToken: () => this.#sessionCredentials.forConnection(),
       supportedCapabilities: options.supportedCapabilities,
       getSupportedCapabilities: options.getSupportedCapabilities,
+      onStatus: options.onStatus,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id, context.delivery),
       onExpiredRecovery: (context) => this.#recoverStoredResult(context.processing.seq, context.processing.id),

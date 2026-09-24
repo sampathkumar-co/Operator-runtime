@@ -98,6 +98,34 @@ test('relay control rejects ambiguous account authority', async (t) => {
   assert.equal(body.error.code, 'RELAY_CONTROL_INPUT_INVALID');
 });
 
+test('relay control reports route ambiguity with code-only diagnostics', async (t) => {
+  const diagnostics: unknown[] = [];
+  const service = new RelayControlService({
+    hub: {
+      recoverIdempotent: async () => null,
+      dispatch: async () => {
+        throw new OperatorError('ROUTE_AMBIGUOUS', `multiple devices include ${DEVICE_ID}`, { retryable: true });
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: { resolveOrCreateAccount: async () => ({ accountId: ACCOUNT_A }) } as any,
+    token: TOKEN,
+    onDiagnostic: (event) => diagnostics.push(event)
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await post(port, {
+    principal: { issuer: 'https://issuer.operator-runtime.dev', subject: 'user-a' },
+    publicBoundary: true,
+    action: action(),
+    waitMs: 1000
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'ROUTE_AMBIGUOUS');
+  assert.deepEqual(diagnostics, [{ service: 'operator-relay-control', status: 'request-failed', code: 'ROUTE_AMBIGUOUS' }]);
+  assert.equal(JSON.stringify(diagnostics).includes(DEVICE_ID), false);
+});
+
 test('relay control exposes authenticated principal erasure without creating an account', async (t) => {
   const erased: Array<{ issuer: string; subject: string }> = [];
   const service = new RelayControlService({
