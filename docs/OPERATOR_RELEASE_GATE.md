@@ -20,7 +20,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 | G7 Policy enforcement | PASS | Cross-layer security coverage remains green. Production now exposes exactly the canonical 9-tool public surface with web pairing; `device.claim` is absent. Local policy remains authoritative. |
 | G8 Approval integrity | PASS | Core runtime suite includes approval lifecycle, authority-generation, replay/expiry and recovery coverage; OCC-3M CI passed. |
 | G9 Prompt-injection resistance | PASS | Public surface has no open-world browser tool; restricted paths/data are blocked and cross-layer adversarial boundary tests passed. |
-| G10 Authentication | PASS | Real ChatGPT OAuth sign-in/reconnect completed against production and real paired-device requests succeeded. Historical `ROUTE_NO_DEVICE` evidence is superseded. Reviewer-specific revoke/reconnect capture may still be collected for submission evidence. |
+| G10 Authentication | PASS | Real ChatGPT OAuth sign-in/reconnect completed against production and real paired-device requests succeeded. Earlier offline-device evidence is superseded. Reviewer-specific revoke/reconnect capture may still be collected for submission evidence. |
 | G11 Authorization / scopes | PASS | Public read/write scope enforcement is production-proven. The Developer endpoint additionally requires `operator:developer` plus explicit account entitlement and fails closed for non-entitled accounts. |
 | G12 Device isolation | PASS | Account/device authority, A-B-A generation, release/rebind, disabled-account and quota tests passed; real paired-device relay E2E passed. |
 | G13 Relay integrity | PASS | Relay WebSocket E2E passed; direct relay/result/control ports 8788/8789/8790 are unreachable from the Internet. |
@@ -36,7 +36,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 | G23 Real ChatGPT E2E | PASS | Real ChatGPT OAuth and the deployed 9-tool surface pass paired-Windows inspect/read/Git/create/read-back checks. Duplicate create and local approval boundaries fail closed as designed; session approval/continuation is release-certified. Reviewer-only exercises remain submission work. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
 | G25 Reviewer simulation | BLOCKED | Public device routing and real write semantics are now proven on a paired Windows x64 runtime. The dedicated reviewer credential/fixture journey itself remains pending, along with final reset/reproducibility of the submitted five positive + three negative reviewer cases under reviewer authority. |
-| G26 Submission package | BLOCKED | Final deployment and npm publication are complete. Remaining items are OpenAI individual verification, reviewer credential/device pairing, domain challenge if issued, Scan Tools, device-backed authenticated E2E, revoke/reconnect proof, required demo recording, final region selection and Submit for Review. |
+| G26 Submission package | BLOCKED | Final deployment, npm publication, public 9-tool operation and Developer 24-tool hosting are complete. Remaining work is OpenAI verification plus whatever portal/reviewer/Scan Tools/demo steps become available after that external gate is resolved. |
 
 ## Remaining blocking actions
 
