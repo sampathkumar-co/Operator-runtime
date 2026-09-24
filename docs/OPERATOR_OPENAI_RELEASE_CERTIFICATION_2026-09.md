@@ -214,6 +214,6 @@ See:
 - `OPERATOR_MASTER_GATE_STATUS.md` — canonical G0–G36 verdict
 - `OPERATOR_RELEASE_GATE.md` — compact binary release sheet
 - `OPERATOR_FEATURE_GAPS.md` — discovered/resolved/open gaps
-- `OPERATOR_REMAINING_HUMAN_GATES.md` — exact five human/external gates
+- `OPERATOR_REMAINING_HUMAN_GATES.md` — OpenAI-side deferred actions / historical submission checklist
 - `OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md` — portal-entry source
 - `docs/plugin-review-package.json` — reviewer/tool package
