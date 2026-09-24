@@ -127,6 +127,9 @@ function startRelay(): void {
         const url = new URL(pairUrl);
         url.searchParams.set('code', userCode);
         console.error(`[operator] pair this device: ${url.toString()}`);
+        if (process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function') {
+          process.send({ type: 'mecord-pairing-required', url: url.toString(), expiresAt });
+        }
       }
     }
   });
