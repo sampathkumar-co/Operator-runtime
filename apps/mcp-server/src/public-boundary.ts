@@ -38,6 +38,7 @@ const PUBLIC_ERROR_MESSAGES = new Map<string, string>([
   ['RELAY_DELIVERY_CAPABILITY_RETIRED', 'The routed action was retired because the active device no longer advertised the required capability.'],
   ['ROUTE_DEVICE_OFFLINE', 'The paired device is currently offline or stale.'],
   ['ROUTE_NO_DEVICE', 'No active online device is currently available for this action.'],
+  ['ROUTE_AMBIGUOUS', 'More than one paired device is online. Stop the unintended runtime or select a device before retrying.'],
   ['ROUTE_CAPABILITY_MISMATCH', 'The paired device does not currently advertise the capability required for this action.'],
   ['RELAY_AUTHORITY_CHANGED', 'The device connection changed while this action was being routed.'],
   ['RELAY_RESULT_PENDING', 'The routed action has not produced a durable result yet.'],

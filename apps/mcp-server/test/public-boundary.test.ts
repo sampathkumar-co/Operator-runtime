@@ -377,6 +377,7 @@ test('public relay liveness errors keep only safe code, message, and retryabilit
 
 test('public boundary preserves safe operational error codes without leaking internal messages', async () => {
   const cases = [
+    ['ROUTE_AMBIGUOUS', 'More than one paired device is online. Stop the unintended runtime or select a device before retrying.'],
     ['WINDOWS_PATH_LEASE_HELPER_REQUIRED', 'The Windows path authority helper is unavailable.'],
     ['WINDOWS_PATH_LEASE_TIMEOUT', 'Windows path authority validation timed out.'],
     ['CAPABILITY_UNAVAILABLE', 'The requested capability is not currently available on the paired device.'],

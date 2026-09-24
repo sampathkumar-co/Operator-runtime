@@ -343,7 +343,7 @@ body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;back
 .card{width:min(520px,100%);background:#fff;border:1px solid rgba(15,23,42,.08);border-radius:24px;padding:34px;box-shadow:0 24px 70px rgba(30,41,59,.14)}
 .brand{display:flex;align-items:center;gap:11px;font-weight:850;font-size:18px;margin-bottom:30px}.mark{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(145deg,#172554,#2563eb);color:white;font-size:13px}
 h1{margin:0 0 10px;font-size:30px;letter-spacing:-.035em}.help{color:var(--muted);line-height:1.55;font-size:14px;margin:0 0 24px}.notice{padding:13px 14px;border-radius:12px;background:#eff6ff;color:#1e3a8a;font-size:13px;line-height:1.5;margin-bottom:18px}
-label{display:block;font-size:13px;font-weight:750;margin:0 0 7px}input{width:100%;height:50px;border:1px solid var(--line);border-radius:11px;padding:0 14px;font:inherit;text-transform:uppercase;letter-spacing:.08em;outline:none}input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.1)}
+label{display:block;font-size:13px;font-weight:750;margin:0 0 7px}input{width:100%;height:50px;border:1px solid var(--line);border-radius:11px;padding:0 14px;font:inherit;text-transform:uppercase;letter-spacing:.08em;outline:none}input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.1)}.choice{display:flex;align-items:flex-start;gap:10px;margin-top:15px;color:#334155;font-size:13px;line-height:1.4}.choice input{width:18px;height:18px;flex:none;margin:1px 0 0;text-transform:none;letter-spacing:normal}.choice label{margin:0;font-weight:600}
 button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand);color:white;font-weight:800;font-size:15px;margin-top:18px;cursor:pointer}button:disabled{opacity:.65;cursor:wait}.msg{min-height:22px;margin-top:12px;font-size:13px;line-height:1.45}.bad{color:var(--bad)}.ok{color:var(--good)}
 .foot{margin-top:24px;color:#94a3b8;font-size:11px;text-align:center}
 </style></head><body><main class="card">
@@ -351,12 +351,12 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
 <h1>Pair this computer</h1>
 <p class="help">Enter the one-time code shown by <strong>mecord-connect remote</strong>. You will authenticate with Mecord before the device is attached to your account.</p>
 <div class="notice">Pairing is single-use and short-lived. The browser never receives the relay control credential or your internal Mecord account ID.</div>
-<form id="pairForm"><label for="code">Pairing code</label><input id="code" name="code" required maxlength="9" placeholder="ABCD-2345" autocomplete="one-time-code"><button id="pairButton" type="submit">Continue securely</button><div id="pairMsg" class="msg"></div></form>
+<form id="pairForm"><label for="code">Pairing code</label><input id="code" name="code" required maxlength="9" placeholder="ABCD-2345" autocomplete="one-time-code"><div class="choice"><input id="makeDefault" type="checkbox" checked><label for="makeDefault">Use this computer as the default for requests that do not already have a project or device selection.</label></div><button id="pairButton" type="submit">Continue securely</button><div id="pairMsg" class="msg"></div></form>
 <div class="foot">Mecord Connect · Secure device enrollment</div>
 </main>
 <script>
 (function(){
-  const input=document.getElementById('code'),form=document.getElementById('pairForm'),button=document.getElementById('pairButton'),msg=document.getElementById('pairMsg');
+  const input=document.getElementById('code'),makeDefault=document.getElementById('makeDefault'),form=document.getElementById('pairForm'),button=document.getElementById('pairButton'),msg=document.getElementById('pairMsg');
   const q=new URLSearchParams(location.search),prefill=q.get('code');
   if(prefill)input.value=prefill;
   input.addEventListener('input',()=>{let v=input.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);input.value=v.length>4?v.slice(0,4)+'-'+v.slice(4):v;});
@@ -365,14 +365,13 @@ button{width:100%;height:48px;border:0;border-radius:10px;background:var(--brand
     if(starting)return;
     starting=true;button.disabled=true;msg.className='msg';msg.textContent='Opening secure sign-in...';
     try{
-      const r=await fetch('/pair/start',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({userCode:input.value})});
+      const r=await fetch('/pair/start',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({userCode:input.value,makeDefault:makeDefault.checked})});
       const j=await r.json().catch(()=>({}));
       if(!r.ok||!j.ok||!j.authorizationUrl)throw new Error(j.error||'Pairing could not start.');
       location.assign(j.authorizationUrl);
     }catch(err){starting=false;msg.className='msg bad';msg.textContent=(err&&err.message)||'Pairing could not start.';button.disabled=false;}
   }
   form.addEventListener('submit',async(ev)=>{ev.preventDefault();await startPairing();});
-  if(prefill){button.disabled=true;msg.className='msg';msg.textContent='Opening secure sign-in...';setTimeout(()=>{void startPairing();},0);}
 })();
 </script></body></html>`;
 
@@ -404,7 +403,7 @@ const server = createServer(async (req, res) => {
       if (!pairRateAllowed(ip)) return send(res, 429, { ok: false, error: 'Too many pairing attempts. Try again later.' });
       const payload = await readJson(req);
       try {
-        const started = pairing.start(payload?.userCode);
+        const started = pairing.start(payload?.userCode, payload?.makeDefault === true);
         return send(res, 200, { ok: true, authorizationUrl: started.authorizationUrl, expiresAt: started.expiresAt });
       } catch {
         return send(res, 400, { ok: false, error: 'Enter a valid pairing code.' });

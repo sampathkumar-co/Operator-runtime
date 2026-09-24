@@ -18,9 +18,11 @@ export interface ProjectDeviceBinding {
 }
 
 interface RoutingState {
-  version: 1;
+  version: 2;
+  defaultDeviceId?: string;
   bindings: ProjectDeviceBinding[];
 }
+type LegacyRoutingState = { version: 1; bindings: ProjectDeviceBinding[] };
 
 export interface OnlineDeviceDescriptor {
   deviceId: string;
@@ -42,7 +44,7 @@ export interface DeviceRouteDecision {
   sessionId: string;
   projectKey?: string;
   matchedCapabilities: string[];
-  reason: 'explicit' | 'project-binding' | 'unique-candidate';
+  reason: 'explicit' | 'project-binding' | 'account-default' | 'unique-candidate';
 }
 
 export class DeviceRoutingStore {
@@ -60,6 +62,19 @@ export class DeviceRoutingStore {
   async listBindings(): Promise<ProjectDeviceBinding[]> {
     const state = await this.#read();
     return state.bindings.map((binding) => ({ ...binding }));
+  }
+
+  async defaultDevice(): Promise<string | undefined> {
+    return (await this.#read()).defaultDeviceId;
+  }
+
+  async setDefaultDevice(deviceIdInput: string): Promise<string> {
+    const deviceId = validUuid(deviceIdInput, 'deviceId');
+    await this.#requireActiveDevice(deviceId);
+    return await this.#mutate((state) => {
+      state.defaultDeviceId = deviceId;
+      return deviceId;
+    });
   }
 
   async bindProject(projectKeyInput: string, deviceIdInput: string): Promise<ProjectDeviceBinding> {
@@ -96,6 +111,7 @@ export class DeviceRoutingStore {
     return await this.#mutate((state) => {
       const before = state.bindings.length;
       state.bindings = state.bindings.filter((binding) => binding.deviceId !== deviceId);
+      if (state.defaultDeviceId === deviceId) state.defaultDeviceId = undefined;
       return before - state.bindings.length;
     });
   }
@@ -105,7 +121,8 @@ export class DeviceRoutingStore {
     const online = validateOnlineDevices(onlineInput, this.#clock(), request.livenessMs);
     const registered = await this.#registry.listDevices();
     const active = new Map(registered.filter((device) => device.status === 'active').map((device) => [device.deviceId, device]));
-    const bindings = (await this.#read()).bindings;
+    const state = await this.#read();
+    const bindings = state.bindings;
     const binding = request.projectKey ? bindings.find((candidate) => candidate.projectKey === request.projectKey) : undefined;
 
     if (request.explicitDeviceId && binding && request.explicitDeviceId !== binding.deviceId) {
@@ -122,6 +139,11 @@ export class DeviceRoutingStore {
     if (binding) {
       const candidate = requireRoutable(binding.deviceId, online, active, request.requiredCapabilities, 'project binding');
       return decision(candidate, request, 'project-binding');
+    }
+
+    if (state.defaultDeviceId) {
+      const candidate = requireRoutable(state.defaultDeviceId, online, active, request.requiredCapabilities, 'account default');
+      return decision(candidate, request, 'account-default');
     }
 
     const candidates = online.filter((candidate) => active.has(candidate.deviceId) && hasCapabilities(candidate, request.requiredCapabilities));
@@ -155,9 +177,11 @@ export class DeviceRoutingStore {
         errorCode: 'ROUTE_STATE_CORRUPT',
         invalidMessage: 'Device routing state is invalid.'
       });
-      return validateState(JSON.parse(text));
+      const parsed = JSON.parse(text) as RoutingState | LegacyRoutingState;
+      if (parsed?.version === 1) return validateState({ version: 2, bindings: parsed.bindings });
+      return validateState(parsed as RoutingState);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, bindings: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, bindings: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('ROUTE_STATE_CORRUPT', 'Device routing state could not be read.');
     }
@@ -256,7 +280,7 @@ function hasCapabilities(device: OnlineDeviceDescriptor, required: string[]): bo
 }
 
 function validateState(input: RoutingState): RoutingState {
-  if (!input || typeof input !== 'object' || input.version !== 1 || !Array.isArray(input.bindings) || input.bindings.length > MAX_BINDINGS) {
+  if (!input || typeof input !== 'object' || input.version !== 2 || !Array.isArray(input.bindings) || input.bindings.length > MAX_BINDINGS) {
     throw new OperatorError('ROUTE_STATE_CORRUPT', 'Device routing state structure is invalid.');
   }
   const projects = new Set<string>();
@@ -266,7 +290,8 @@ function validateState(input: RoutingState): RoutingState {
     projects.add(projectKey);
     return { projectKey, deviceId: validUuid(raw.deviceId, 'deviceId'), updatedAt: validIso(raw.updatedAt, 'updatedAt') };
   });
-  return { version: 1, bindings };
+  const defaultDeviceId = input.defaultDeviceId === undefined ? undefined : validUuid(input.defaultDeviceId, 'defaultDeviceId');
+  return { version: 2, defaultDeviceId, bindings };
 }
 
 function validCapabilities(input: unknown): string[] {

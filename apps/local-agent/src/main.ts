@@ -153,6 +153,15 @@ function startRelay(): void {
     localAgentBaseUrl,
     agentToken: token,
     getSupportedCapabilities: () => runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES),
+    onStatus: (status) => {
+      if (status.state === 'socket-connected') {
+        console.error('[operator] relay socket connected; authenticating');
+      } else if (status.state === 'authenticated-ready') {
+        console.error(`[operator] relay authenticated and ready (${status.capabilityCount} capabilities)`);
+      } else {
+        console.error(`[operator] relay reconnect scheduled (${status.code}, ${status.delayMs}ms)`);
+      }
+    },
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
   const runner = relayRunner;

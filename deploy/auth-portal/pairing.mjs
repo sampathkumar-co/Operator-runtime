@@ -62,13 +62,14 @@ export function createPairingService(options = {}) {
     for (const [state] of entries.slice(0, pending.size - MAX_PENDING)) pending.delete(state);
   }
 
-  function start(userCodeInput) {
+  function start(userCodeInput, makeDefaultInput = false) {
     prune();
     const userCode = normalizePairingCode(userCodeInput);
+    if (typeof makeDefaultInput !== 'boolean') throw new Error('PAIR_DEFAULT_INVALID');
     const state = randomToken(32);
     const verifier = randomToken(48);
     const createdAt = clock();
-    pending.set(state, { userCode, verifier, createdAt, expiresAt: createdAt + ttlMs });
+    pending.set(state, { userCode, makeDefault: makeDefaultInput, verifier, createdAt, expiresAt: createdAt + ttlMs });
 
     const url = new URL(authorizationUrl);
     url.searchParams.set('response_type', 'code');
@@ -121,7 +122,7 @@ export function createPairingService(options = {}) {
         'content-type': 'application/json',
         accept: 'application/json'
       },
-      body: JSON.stringify({ userCode: entry.userCode }),
+      body: JSON.stringify({ userCode: entry.userCode, ...(entry.makeDefault ? { makeDefault: true } : {}) }),
       signal: AbortSignal.timeout(15_000)
     });
     const claimJson = await claimResponse.json().catch(() => ({}));
@@ -129,7 +130,7 @@ export function createPairingService(options = {}) {
       const code = typeof claimJson?.error?.code === 'string' ? claimJson.error.code : 'PAIR_CLAIM_FAILED';
       throw new Error(code);
     }
-    return { status: 'claimed', userCode: entry.userCode };
+    return { status: 'claimed', userCode: entry.userCode, makeDefault: entry.makeDefault };
   }
 
   return { start, complete, pendingCount: () => pending.size };

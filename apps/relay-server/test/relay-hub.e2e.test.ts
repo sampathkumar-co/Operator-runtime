@@ -8,6 +8,7 @@ import { WebSocket } from 'ws';
 import { AccountDeviceRegistry } from '../../../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore, answerPairingChallenge } from '../../../src/core/device-registry.ts';
+import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayClient, type RelaySocketLike } from '../../../src/core/relay-client.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -52,6 +53,72 @@ async function pairDevice(authorityIdentity: DeviceIdentityStore, devices: Devic
   await devices.completePairing(await answerPairingChallenge(challenge, deviceIdentity));
   return device;
 }
+
+test('account default selection runs under the active device authority lease', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-default-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-default-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'default-lease-user' });
+  const membership = await accounts.bindDevice(account.accountId, device.deviceId);
+  const originalLease = accounts.withActiveAuthorityLease.bind(accounts);
+  let leasedAuthority: unknown;
+  (accounts as any).withActiveAuthorityLease = async (authority: unknown, work: () => Promise<unknown>) => {
+    leasedAuthority = authority;
+    return await originalLease(authority as any, work);
+  };
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, accounts });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+
+  await hub.setDefaultDevice(account.accountId, device.deviceId);
+
+  assert.deepEqual(leasedAuthority, {
+    accountId: account.accountId,
+    deviceId: device.deviceId,
+    generation: membership.authorityGeneration
+  });
+  const routing = new DeviceRoutingStore(path.join(authorityState, 'accounts', account.accountId), devices);
+  assert.equal(await routing.defaultDevice(), device.deviceId);
+});
+
+test('device removal between default lookup and lease acquisition prevents a stale default write', async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-default-release-race-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-default-release-race-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  let routing: DeviceRoutingStore;
+  const accounts = new AccountDeviceRegistry(authorityState, devices, {
+    onReleaseDevice: async (deviceId, accountId) => { await routing.unbindDevice(deviceId); }
+  });
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'default-release-race-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  routing = new DeviceRoutingStore(path.join(authorityState, 'accounts', account.accountId), devices);
+  const originalMembership = accounts.activeMembershipForDevice.bind(accounts);
+  let injectedRemoval = false;
+  (accounts as any).activeMembershipForDevice = async (deviceId: string) => {
+    const membership = await originalMembership(deviceId);
+    if (!injectedRemoval) {
+      injectedRemoval = true;
+      await accounts.removeDevice(account.accountId, device.deviceId, 'default selection race');
+    }
+    return membership;
+  };
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, accounts });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+
+  await assert.rejects(
+    hub.setDefaultDevice(account.accountId, device.deviceId),
+    (error: any) => error?.code === 'ACCOUNT_AUTHORITY_REVOKED'
+  );
+  assert.equal(await routing.defaultDevice(), undefined);
+});
 
 test('real relay routes paired device delivery, durably ACKs it, and reconnects without replay', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-e2e-authority-');

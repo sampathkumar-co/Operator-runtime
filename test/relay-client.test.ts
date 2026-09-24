@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
-import { RelayClient, reconnectDelay, validateRelayUrl, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelaySocketLike } from '../src/core/relay-client.ts';
 
 class FakeSocket implements RelaySocketLike {
   readyState = 0;
@@ -62,6 +62,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   const sockets: FakeSocket[] = [];
   const delivered: any[] = [];
   const acknowledged: any[] = [];
+  const statuses: RelayClientStatus[] = [];
   let client!: RelayClient;
 
   const factory = () => {
@@ -102,6 +103,8 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     supportedCapabilities: ['git.status', 'file.read'],
     onDelivery: async (delivery) => { delivered.push(delivery); },
     onAcknowledged: async (delivery) => { acknowledged.push({ delivery, state: await client.state() }); },
+    onStatus: (status) => statuses.push(status),
+    random: () => 0,
     sleep: async () => {}
   });
 
@@ -115,6 +118,13 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   assert.equal(acknowledged[0].state.lastAckedServerSeq, 1);
   assert.equal(sockets.length, 2);
   assert.equal(sockets[0].sent.some((frame) => frame.type === 'ack' && frame.seq === 1), true);
+  assert.deepEqual(statuses, [
+    { state: 'socket-connected' },
+    { state: 'authenticated-ready', capabilityCount: 2 },
+    { state: 'reconnect-wait', code: 'RELAY_SOCKET_CLOSED', delayMs: 250 },
+    { state: 'socket-connected' },
+    { state: 'authenticated-ready', capabilityCount: 2 }
+  ]);
 });
 
 

@@ -184,6 +184,20 @@ export class RelayHub {
     await this.#routingFor(accountId).bindProject(projectKey, deviceId);
   }
 
+  async setDefaultDevice(accountId: string, deviceId: string): Promise<void> {
+    const membership = await this.#accounts.activeMembershipForDevice(deviceId);
+    if (!membership || membership.accountId !== accountId) {
+      throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Default routing can only select an active device owned by the account.');
+    }
+    await this.#accounts.withActiveAuthorityLease({
+      accountId,
+      deviceId,
+      generation: membership.authorityGeneration
+    }, async () => {
+      await this.#routingFor(accountId).setDefaultDevice(deviceId);
+    });
+  }
+
   async boundProjectDevice(accountId: string, projectKey: string): Promise<string> {
     const binding = (await this.#routingFor(accountId).listBindings()).find((candidate) => candidate.projectKey === projectKey);
     if (!binding) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Required task-to-device binding is missing.');
