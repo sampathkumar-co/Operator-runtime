@@ -33,13 +33,13 @@ The software/runtime release is complete. The remaining external limitation is O
 
 Do not reinterpret those OpenAI-side blockers as a failure of the live public or Developer MCP servers.## Audit checkout rule
 
-A directory name such as `Mecord-Current-Main` is not proof of revision identity. For a release audit, run:
+A directory name such as `Mecord-Current-Main` is not proof of revision identity. For a release audit, run the verifier from the current source and optionally point it at a separate frozen checkout:
 
 ```powershell
-npm run verify:release-checkout
+npm run verify:release-checkout -- "C:\\path\\to\\frozen-production-checkout"
 ```
 
-That command verifies that the checkout is clean and that HEAD equals the production source commit recorded in `docs/release-state.json`. A detached HEAD is acceptable for an immutable audit snapshot when those checks pass.
+If no path is supplied, it checks the current repository. The verifier compares the target checkout with the production source commit recorded in `docs/release-state.json` and requires a clean working tree. A detached HEAD is acceptable for an immutable audit snapshot when those checks pass. A newer source-successor checkout is expected to fail this production-snapshot check until that successor is actually deployed and the release-state record is updated.
 
 ## Trusted project commands
 
