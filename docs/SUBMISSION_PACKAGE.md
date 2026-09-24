@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-Production is live on Mecord Connect source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`, and `mecord-connect@1.0.1` is public under `latest`. The fresh ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked only on the unresolved OpenAI/reviewer/device evidence: publisher verification, reviewer/device pairing, portal challenge if issued, Scan Tools, device-backed read/write + revoke/reconnect proof, demo recording, and final Submit for Review authorization.
+Production is live on Mecord Connect source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`, and `mecord-connect@1.0.1` is public under `latest`. The fresh ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked on OpenAI developer verification and the portal/reviewer evidence that cannot proceed until that external account gate is resolved. The npm/runtime/production release itself is complete.
 
 ## What the public plugin does
 
@@ -113,7 +113,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- reviewer-root/device startup and full device-backed E2E have passed. (`mecord-connect@1.0.1` publication and clean registry `doctor` are already complete.)
+- OpenAI reviewer-specific execution has completed; this is separate from the already-proven runtime/device path and from `mecord-connect@1.0.1` publication.
 - the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.
