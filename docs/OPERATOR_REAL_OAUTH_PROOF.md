@@ -157,7 +157,7 @@ Never retain:
 
 ## G10 closure rule
 
-The production Mecord Connect OAuth flow has completed against the live public edge and real paired-device requests have succeeded. Authentication/runtime release evidence is therefore no longer blocked by the historical `ROUTE_NO_DEVICE` event. Any additional revoke/reconnect capture or reviewer-specific proof belongs to the later OpenAI submission evidence set.
+The production Mecord Connect OAuth flow has completed against the live public edge and real paired-device requests have succeeded. Authentication/runtime release evidence is no longer blocked by the earlier offline-device probe. Any additional revoke/reconnect capture or reviewer-specific proof belongs to the later OpenAI submission evidence set.
 
 ## G11 closure rule
 
