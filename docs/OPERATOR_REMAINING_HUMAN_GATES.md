@@ -134,7 +134,7 @@ Submit only after:
 - reviewer login/pairing passes;
 - domain challenge is complete if issued;
 - Scan Tools matches the 9-tool snapshot;
-- real OAuth read/write/refusal/revoke/reconnect proof passes;
+- any reviewer-specific OAuth/refusal/revoke/reconnect evidence requested by OpenAI is captured after developer verification becomes available;
 - five positive + three negative reviewer cases reproduce;
 - reviewer-accessible demo recording exists;
 - final region availability is set appropriately.
