@@ -2,7 +2,7 @@
 
 Current production source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
 Current public package: `mecord-connect@1.0.1` (`latest`)
-Deployment evidence: 19/19 CI checks green; runtime suite 437 passed / 17 expected skips / 0 failures; production health/OAuth/routing/security checks passed; fresh ChatGPT connection imported exactly 9 tools with no `device.claim`.
+Deployment evidence: exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health/OAuth/routing/security checks passed; fresh ChatGPT connection imported exactly 9 tools with no `device.claim`.
 Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 Production MCP: `https://operator.splcart.in/mcp`
 Evidence date: 2026-09-24
@@ -12,7 +12,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 | Gate | Status | Evidence / reason |
 |---|---|---|
 | G1 Source integrity | PASS | Production is deployed from exact source `a7fd8c960a82c9565b944ffb50535eeed6989c52`; the production health/provenance endpoint and post-deploy verification bind the live edge to the final v1 source candidate. |
-| G2 Runtime functionality | PASS | Final deployment evidence reports 19/19 CI checks green and 437 passed / 17 expected skips / 0 failures; production health and routing checks passed after deployment. |
+| G2 Runtime functionality | PASS | Exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health and routing checks passed after deployment. |
 | G3 Filesystem safety | PASS | Windows junction path-authority job passed; full Windows-aware suite passed 361 tests with 0 failures; public file tools enforce authorized roots and restricted-data guards. |
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
 | G5 Browser safety | PASS | Browser control is not in `PUBLIC_PLUGIN_TOOL_NAMES`; no public OpenAI tool can invoke it. Internal runtime remains outside this public plugin surface. |
