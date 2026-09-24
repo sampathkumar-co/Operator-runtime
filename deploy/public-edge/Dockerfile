@@ -24,7 +24,7 @@ RUN mkdir -p /var/lib/operator-relay \
  && chown -R node:node /var/lib/operator-relay /opt/operator
 
 USER node
-EXPOSE 47200 8788 8789
+EXPOSE 47200 47201 8788 8789
 VOLUME ["/var/lib/operator-relay"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["node", "deploy/public-edge/healthcheck.mjs"]
 ENTRYPOINT ["node", "deploy/public-edge/supervisor.mjs"]

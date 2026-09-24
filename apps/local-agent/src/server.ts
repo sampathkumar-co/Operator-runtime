@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '../../../src/core/network-authority.ts';
 import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
-import type { ActionRequest, PermissionProfile } from '../../../src/core/types.ts';
+import type { ActionRequest, ActionResult, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
@@ -13,10 +13,13 @@ import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
 import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.ts';
+import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+// Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
+const MAX_INLINE_APPROVAL_WAIT_MS = 45_000;
 
 type CompanionSettings = Record<string, boolean | number | string | string[]>;
 
@@ -110,6 +113,7 @@ export function createLocalAgentServer(options: {
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
+  sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
   onEmergencyClear?: () => Promise<void> | void;
@@ -121,9 +125,110 @@ export function createLocalAgentServer(options: {
   settings?: CompanionSettings;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
+  inlineApprovalWaitMs?: number;
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
+  const inlineApprovalWaitMs = options.inlineApprovalWaitMs ?? MAX_INLINE_APPROVAL_WAIT_MS;
+  if (!Number.isInteger(inlineApprovalWaitMs) || inlineApprovalWaitMs < 10 || inlineApprovalWaitMs > MAX_INLINE_APPROVAL_WAIT_MS) {
+    throw new Error(`inlineApprovalWaitMs must be an integer between 10 and ${MAX_INLINE_APPROVAL_WAIT_MS}.`);
+  }
+
+  type InlineApprovalDecision = 'approve' | 'session' | 'deny';
+  type InlineApprovalWaiter = {
+    approvalRequestId: string;
+    resolve: (decision: InlineApprovalDecision | null) => void;
+    timer: NodeJS.Timeout;
+  };
+  const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
+
+  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision) => {
+    const waiters = approvalWaiters.get(actionId);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (waiter.approvalRequestId !== approvalRequestId) continue;
+      clearTimeout(waiter.timer);
+      waiters.delete(waiter);
+      waiter.resolve(decision);
+    }
+    if (waiters.size === 0) approvalWaiters.delete(actionId);
+  };
+
+  const waitForApprovalDecision = (
+    actionId: string,
+    approvalRequestId: string,
+    maxWaitMs = inlineApprovalWaitMs
+  ): Promise<InlineApprovalDecision | null> => {
+    const waitMs = Math.min(inlineApprovalWaitMs, Math.max(0, Math.floor(maxWaitMs)));
+    if (waitMs <= 0) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const waiters = approvalWaiters.get(actionId) ?? new Set<InlineApprovalWaiter>();
+      const waiter: InlineApprovalWaiter = {
+        approvalRequestId,
+        resolve,
+        timer: setTimeout(() => {
+          waiters.delete(waiter);
+          if (waiters.size === 0) approvalWaiters.delete(actionId);
+          resolve(null);
+        }, waitMs)
+      };
+      waiter.timer.unref?.();
+      waiters.add(waiter);
+      approvalWaiters.set(actionId, waiters);
+    });
+  };
+
+  const clearApprovalWaiters = () => {
+    for (const waiters of approvalWaiters.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(null);
+      }
+    }
+    approvalWaiters.clear();
+  };
+
+  const executeActionWithCurrentApproval = async (
+    action: ActionRequest,
+    approvalAuthority: ApprovalAuthorityContext | undefined
+  ): Promise<ActionResult> => {
+    const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
+    const sessionPermissions = options.sessionApprovals
+      ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
+      : options.permissions;
+    const permissions = oneTimeApproved
+      ? {
+          ...sessionPermissions,
+          approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+        }
+      : sessionPermissions;
+    if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
+    return await options.runtime.execute(action, permissions);
+  };
+
+  const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
+    permissionProvider: async (action: ActionRequest) => {
+      const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
+      const sessionPermissions = options.sessionApprovals
+        ? options.sessionApprovals.permissionsFor(authority, options.permissions)
+        : options.permissions;
+      if (!oneTimeApproved) return sessionPermissions;
+      await options.approvals!.consume(action, authority);
+      return {
+        ...sessionPermissions,
+        approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+      };
+    },
+    onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
+      if (!options.approvals) return undefined;
+      const pending = await options.approvals.register(action, authority);
+      if (!options.recoveryToken) return undefined;
+      const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
+      if (decision === 'approve' || decision === 'session') return 'retry' as const;
+      if (decision === 'deny') return 'deny' as const;
+      return undefined;
+    }
+  });
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? '/', 'http://operator.local');
@@ -161,6 +266,7 @@ export function createLocalAgentServer(options: {
       }
       try {
         const body = await readJson(req) as Record<string, unknown>;
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         const goal = body.goal as SemanticTaskGoal;
         const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
         if (!authorizedScope) {
@@ -182,7 +288,7 @@ export function createLocalAgentServer(options: {
           maxAttemptsPerStep: body.maxAttemptsPerStep,
           timeoutMs: body.timeoutMs
         } as SubmitTaskOptions);
-        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id) : submitted;
+        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority)) : submitted;
         send(res, body.run === true ? 200 : 202, { ok: true, task });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_SUBMISSION_INVALID';
@@ -213,16 +319,17 @@ export function createLocalAgentServer(options: {
       try {
         const taskId = taskRoute[1]!;
         const operation = taskRoute[2]!;
+        const body = await readJson(req) as { approvedActionId?: unknown; approvalAuthority?: unknown };
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         if ((operation === 'run' || operation === 'resume') && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
           return;
         }
         let task;
-        if (operation === 'run') task = await options.taskOrchestrator.run(taskId);
+        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority));
         else if (operation === 'pause') task = await options.taskOrchestrator.pause(taskId);
         else if (operation === 'cancel') task = await options.taskOrchestrator.cancel(taskId);
         else {
-          const body = await readJson(req) as { approvedActionId?: unknown };
           const approvedActionId = body.approvedActionId === undefined ? undefined : boundedString(body.approvedActionId, 'approvedActionId', 256);
           if (approvedActionId) {
             if (!options.recoveryToken) {
@@ -241,7 +348,7 @@ export function createLocalAgentServer(options: {
               return;
             }
           }
-          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : []);
+          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority));
         }
         send(res, 200, { ok: true, task });
       } catch (error) {
@@ -321,6 +428,7 @@ export function createLocalAgentServer(options: {
       }
       try {
         const reset = await options.deviceReset();
+        options.sessionApprovals?.clear();
         send(res, 200, { ok: true, reset });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESET_FAILED';
@@ -345,6 +453,26 @@ export function createLocalAgentServer(options: {
     }
 
 
+    if (pathname === '/v1/session-approval' && req.method === 'GET') {
+      send(res, 200, { ok: true, session: options.sessionApprovals?.summary() ?? { active: false }, configured: Boolean(options.sessionApprovals) });
+      return;
+    }
+
+    if (pathname === '/v1/session-approval' && req.method === 'DELETE') {
+      if (!options.sessionApprovals || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'SESSION_APPROVAL_NOT_CONFIGURED', message: 'Session approval revocation requires local recovery authority.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      options.sessionApprovals.clear();
+      send(res, 200, { ok: true, session: { active: false } });
+      return;
+    }
+
     if (pathname === '/v1/approvals' && req.method === 'GET') {
       if (!options.approvals) {
         send(res, 200, { ok: true, approvals: [], configured: false });
@@ -361,7 +489,7 @@ export function createLocalAgentServer(options: {
         approvalRequestId: record.approvalRequestId,
         approvalExpiresAt: record.approvalExpiresAt
       }));
-      send(res, 200, { ok: true, approvals, configured: true });
+      send(res, 200, { ok: true, approvals, session: options.sessionApprovals?.summary() ?? { active: false }, configured: true });
       return;
     }
 
@@ -380,15 +508,23 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { decision?: unknown; approvalRequestId?: unknown };
         const decision = String(body.decision ?? '');
         const approvalRequestId = boundedString(body.approvalRequestId, 'approvalRequestId', 128);
-        const record = decision === 'approve'
+        if (decision === 'session' && !options.sessionApprovals) {
+          send(res, 503, { ok: false, error: { code: 'SESSION_APPROVAL_NOT_CONFIGURED', message: 'Session approvals are not configured.' } });
+          return;
+        }
+        const record = decision === 'approve' || decision === 'session'
           ? await options.approvals.approve(actionId, approvalRequestId)
           : decision === 'deny'
             ? await options.approvals.deny(actionId, approvalRequestId)
             : null;
+        const session = decision === 'session'
+          ? options.sessionApprovals?.grant(record!, options.permissions)
+          : undefined;
         if (!record) {
-          send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve or deny.' } });
+          send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve, session, or deny.' } });
           return;
         }
+        notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
         send(res, 200, {
           ok: true,
           approval: {
@@ -399,7 +535,8 @@ export function createLocalAgentServer(options: {
             status: record.status,
             approvalRequestId: record.approvalRequestId,
             approvalExpiresAt: record.approvalExpiresAt
-          }
+          },
+          ...(session ? { session: { active: true, id: session.id, expiresAt: session.expiresAt, idleExpiresAt: session.idleExpiresAt } } : {})
         });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: 'APPROVAL_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -425,6 +562,7 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { reason?: unknown };
         const reason = body.reason === undefined ? undefined : String(body.reason);
         const state = await options.emergencyStop.engage(reason);
+        options.sessionApprovals?.clear();
         await options.onEmergencyStop?.();
         await options.audit?.append({
           capability: 'agent.emergency-stop',
@@ -486,17 +624,35 @@ export function createLocalAgentServer(options: {
         }
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
-        const permissions = oneTimeApproved
-          ? {
-              ...options.permissions,
-              approvedActionIds: [...new Set([...(options.permissions.approvedActionIds ?? []), action.id])]
-            }
-          : options.permissions;
-        if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-        const result = await options.runtime.execute(action, permissions);
-        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
-          await options.approvals?.register(action, approvalAuthority);
+        let result = await executeActionWithCurrentApproval(action, approvalAuthority);
+        let autoResumedAfterApproval = false;
+        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
+          const pending = await options.approvals.register(action, approvalAuthority);
+          const decision = options.recoveryToken
+            ? await waitForApprovalDecision(action.id, pending.approvalRequestId)
+            : null;
+          if (decision === 'deny') {
+            result = {
+              ok: false,
+              capability: action.capability,
+              provider: 'policy',
+              evidence: [{
+                kind: 'approval',
+                status: 'fail',
+                message: 'The local user denied this action.',
+                timestamp: new Date().toISOString()
+              }],
+              error: {
+                code: 'APPROVAL_DENIED',
+                message: 'The local user denied this action.',
+                retryable: false
+              },
+              durationMs: result.durationMs
+            };
+          } else if (decision === 'approve' || decision === 'session') {
+            result = await executeActionWithCurrentApproval(action, approvalAuthority);
+            autoResumedAfterApproval = true;
+          }
         }
         await options.audit?.append({
           taskId: action.taskId,
@@ -509,7 +665,9 @@ export function createLocalAgentServer(options: {
             provenanceKind: action.provenance.kind,
             provider: result.provider,
             durationMs: result.durationMs,
-            errorCode: result.error?.code
+            errorCode: result.error?.code,
+            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
+            autoResumedAfterApproval
           }
         });
         send(res, result.ok ? 200 : 409, result);
@@ -539,6 +697,7 @@ export function createLocalAgentServer(options: {
       return { host: bindHost, port: address.port };
     },
     async close(): Promise<void> {
+      clearApprovalWaiters();
       if (!server.listening) return;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

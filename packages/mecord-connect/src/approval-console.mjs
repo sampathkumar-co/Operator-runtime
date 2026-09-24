@@ -1,4 +1,9 @@
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
+
+const approvalWindowPath = fileURLToPath(new URL('./approval-window.ps1', import.meta.url));
 
 export function parseApprovalConsoleCommand(input) {
   const parts = String(input ?? '').trim().split(/\s+/).filter(Boolean);
@@ -6,8 +11,11 @@ export function parseApprovalConsoleCommand(input) {
   const verb = parts[0].toLowerCase();
   if (verb === 'approvals' && parts.length === 1) return { kind: 'list' };
   if (verb === 'help' && parts.length === 1) return { kind: 'help' };
-  if ((verb === 'approve' || verb === 'deny') && parts.length <= 2) {
-    return { kind: 'decision', decision: verb, selector: parts[1]?.toLowerCase() };
+  if (verb === 'session-status' && parts.length === 1) return { kind: 'session-status' };
+  if ((verb === 'revoke-session' || verb === 'require-approval') && parts.length === 1) return { kind: 'revoke-session' };
+  const sessionVerb = verb === 'session' || verb === 'allow-session' || verb === 'approve-session';
+  if ((verb === 'approve' || verb === 'deny' || sessionVerb) && parts.length <= 2) {
+    return { kind: 'decision', decision: sessionVerb ? 'session' : verb, selector: parts[1]?.toLowerCase() };
   }
   return { kind: 'invalid' };
 }
@@ -45,8 +53,8 @@ function writeApprovalList(output, pending) {
     output.write(`  ${String(record.actionId).slice(0, 12)}  ${record.capability}  ${record.risk}  ${displayTarget(record.target)}\n`);
   }
   output.write(pending.length === 1
-    ? '[mecord-connect] type "approve" or "deny" and press Enter.\n'
-    : '[mecord-connect] type "approve <id-prefix>" or "deny <id-prefix>" and press Enter.\n');
+    ? '[mecord-connect] choose: "approve" (once), "session" (allow this runtime session), or "deny".\n'
+    : '[mecord-connect] choose "approve <id-prefix>", "session <id-prefix>", or "deny <id-prefix>".\n');
 }
 
 async function localAgentJson(baseUrl, agentToken, { pathName, method = 'GET', recoveryToken, body } = {}) {
@@ -72,6 +80,60 @@ async function localAgentJson(baseUrl, agentToken, { pathName, method = 'GET', r
   return payload;
 }
 
+async function showNativeApprovalCard(record) {
+  if (process.platform !== 'win32' || process.env.MECORD_DISABLE_APPROVAL_UI === '1') return null;
+  const systemRoot = String(process.env.SystemRoot ?? '').trim();
+  if (!/^[A-Za-z]:\\/.test(systemRoot)) return null;
+  const powershell = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    const child = spawn(powershell, [
+      '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', approvalWindowPath
+    ], {
+      shell: false,
+      windowsHide: false,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const finish = (decision = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(decision);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* noop */ }
+      finish(null);
+    }, 10 * 60_000);
+    timer.unref?.();
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 64) {
+        try { child.kill(); } catch { /* noop */ }
+        finish(null);
+      }
+    });
+    child.once('error', () => finish(null));
+    child.once('close', () => {
+      const decision = stdout.trim().toLowerCase();
+      finish(['approve', 'session', 'deny'].includes(decision) ? decision : null);
+    });
+    try {
+      child.stdin.end(JSON.stringify({
+        capability: String(record.capability ?? ''),
+        risk: String(record.risk ?? ''),
+        target: displayTarget(record.target),
+        actionId: String(record.actionId ?? '')
+      }));
+    } catch {
+      try { child.kill(); } catch { /* noop */ }
+      finish(null);
+    }
+  });
+}
+
 export function startLocalApprovalConsole({
   baseUrl,
   agentToken,
@@ -84,6 +146,44 @@ export function startLocalApprovalConsole({
   let busy = false;
   const announced = new Set();
   const interactive = Boolean(input?.isTTY);
+  let nativePromptActive = false;
+
+  const submitDecision = async (record, decision) => {
+    const payload = await localAgentJson(baseUrl, agentToken, {
+      pathName: `/v1/approvals/${encodeURIComponent(record.actionId)}`,
+      method: 'POST',
+      recoveryToken,
+      body: {
+        decision,
+        approvalRequestId: record.approvalRequestId
+      }
+    });
+    const status = payload?.approval?.status ?? decision;
+    output.write(`[mecord-connect] ${status}: ${record.capability} ${displayTarget(record.target)}\n`);
+    if (decision === 'approve') {
+      output.write('[mecord-connect] approved once for this exact action.\n');
+    } else if (decision === 'session') {
+      const expiresAt = payload?.session?.expiresAt;
+      const idleExpiresAt = payload?.session?.idleExpiresAt;
+      output.write(`[mecord-connect] session access enabled${expiresAt ? ` until ${expiresAt}` : ''}${idleExpiresAt ? ` (idle expiry ${idleExpiresAt})` : ''}.\n`);
+    }
+    announced.delete(record.approvalRequestId);
+    return payload;
+  };
+
+  const maybePromptNative = async (record) => {
+    if (nativePromptActive) return;
+    nativePromptActive = true;
+    try {
+      const decision = await showNativeApprovalCard(record);
+      if (!decision) return;
+      await submitDecision(record, decision);
+    } catch (error) {
+      output.write(`[mecord-connect] native approval UI failed: ${error instanceof Error ? error.message : 'unknown error'}; terminal fallback remains available.\n`);
+    } finally {
+      nativePromptActive = false;
+    }
+  };
 
   const refresh = async (announce = false) => {
     if (stopped || busy) return pending;
@@ -99,8 +199,9 @@ export function startLocalApprovalConsole({
           announced.add(record.approvalRequestId);
           output.write(`\n[mecord-connect] approval required: ${record.capability} (${record.risk}) ${displayTarget(record.target)}\n`);
           output.write(pending.length === 1
-            ? '[mecord-connect] type "approve" or "deny" in this terminal.\n'
-            : `[mecord-connect] type "approve ${String(record.actionId).slice(0, 12)}" or "deny ${String(record.actionId).slice(0, 12)}".\n`);
+            ? '[mecord-connect] review the local Mecord approval window, or use "approve", "session", or "deny" here.\n'
+            : `[mecord-connect] review the local Mecord approval window, or use the ${String(record.actionId).slice(0, 12)} id prefix here.\n`);
+          void maybePromptNative(record);
         }
       }
       return pending;
@@ -123,11 +224,28 @@ export function startLocalApprovalConsole({
         const command = parseApprovalConsoleCommand(line);
         if (!command) return;
         if (command.kind === 'help') {
-          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | deny [id-prefix]\n');
+          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
           return;
         }
         if (command.kind === 'invalid') {
           output.write('[mecord-connect] unknown approval command. Type "help".\n');
+          return;
+        }
+        if (command.kind === 'session-status') {
+          const payload = await localAgentJson(baseUrl, agentToken, { pathName: '/v1/session-approval' });
+          const session = payload?.session;
+          output.write(session?.active
+            ? `[mecord-connect] session access active until ${session.expiresAt} (idle expiry ${session.idleExpiresAt}).\n`
+            : '[mecord-connect] session access is not active.\n');
+          return;
+        }
+        if (command.kind === 'revoke-session') {
+          await localAgentJson(baseUrl, agentToken, {
+            pathName: '/v1/session-approval',
+            method: 'DELETE',
+            recoveryToken
+          });
+          output.write('[mecord-connect] session access revoked; risky actions require approval again.\n');
           return;
         }
         const current = await refresh(false);
@@ -142,21 +260,7 @@ export function startLocalApprovalConsole({
           return;
         }
         try {
-          const payload = await localAgentJson(baseUrl, agentToken, {
-            pathName: `/v1/approvals/${encodeURIComponent(record.actionId)}`,
-            method: 'POST',
-            recoveryToken,
-            body: {
-              decision: command.decision,
-              approvalRequestId: record.approvalRequestId
-            }
-          });
-          const status = payload?.approval?.status ?? command.decision;
-          output.write(`[mecord-connect] ${status}: ${record.capability} ${displayTarget(record.target)}\n`);
-          if (command.decision === 'approve') {
-            output.write('[mecord-connect] approval is one-time and exact-action-bound. Retry the same ChatGPT request within 10 minutes.\n');
-          }
-          announced.delete(record.approvalRequestId);
+          await submitDecision(record, command.decision);
           await refresh(false);
         } catch (error) {
           output.write(`[mecord-connect] approval update failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);

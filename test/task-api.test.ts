@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
+import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
@@ -15,6 +18,19 @@ async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   return dir;
+}
+
+async function waitForPendingApproval(base: string, token: string): Promise<any> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    const pending = body.approvals.find((entry: any) => entry.status === 'pending');
+    if (pending) return pending;
+    await delay(20);
+  }
+  throw new Error('Timed out waiting for task approval.');
 }
 
 const BROWSER_SCORE: CapabilityScore = {
@@ -183,6 +199,80 @@ test('task API requires separate recovery authority for the exact blocked action
   const completed = await approved.json() as any;
   assert.equal(completed.task.state, 'VERIFIED');
   assert.equal(await fs.readFile(marker, 'utf8'), 'approved');
+});
+
+test('allow-session resumes the same blocked task request and suppresses the next task prompt', async (t) => {
+  const root = await tempDir(t, 'operator-task-session-root-');
+  const state = await tempDir(t, 'operator-task-session-state-');
+  const authority = await tempDir(t, 'operator-task-session-authority-');
+  const marker = path.join(root, 'session.marker');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'session-approval-fixture' }));
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{ root, commands: [{
+      id: 'session-build', kind: 'build', executable: 'node',
+      args: ['-e', `require('fs').appendFileSync(${JSON.stringify(marker)},'x')`],
+      cwd: '.', risk: 'external', artifacts: [{ path: 'session.marker', kind: 'file', minBytes: 1, mustChange: true }]
+    }] }]
+  }));
+
+  const runtime = createRuntime({
+    allowedRoots: [root], allowedExecutables: ['node'], terminalAllowedExecutables: [],
+    projectCommandRegistryPath: registryPath
+  });
+  const tasks = new TaskStore(state);
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const permissions = {
+    allowedCapabilities: ['project.inspect', 'project.command.inspect', 'project.command.run'],
+    allowedRoots: [root], allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 's'.repeat(64);
+  const recoveryToken = 'q'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, permissions, tasks, taskOrchestrator, approvals, sessionApprovals
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+  const submitTask = () => fetch(`${base}/v1/tasks`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      objective: 'Run build with session approval.', successConditions: ['artifact changed'], run: true,
+      goal: { kind: 'trusted-project-command', root, commandKind: 'build' }
+    })
+  });
+
+  const firstPromise = submitTask();
+  const pending = await waitForPendingApproval(base, token);
+  const sessionResponse = await fetch(`${base}/v1/approvals/${encodeURIComponent(pending.actionId)}`, {
+    method: 'POST',
+    headers: { ...headers, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'session', approvalRequestId: pending.approvalRequestId })
+  });
+  const sessionBody = await sessionResponse.json() as any;
+  assert.equal(sessionResponse.status, 200, JSON.stringify(sessionBody));
+  assert.equal(sessionBody.session.active, true);
+
+  const firstResponse = await firstPromise;
+  const firstBody = await firstResponse.json() as any;
+  assert.equal(firstResponse.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.task.state, 'VERIFIED');
+  assert.equal(await fs.readFile(marker, 'utf8'), 'x');
+
+  const secondResponse = await submitTask();
+  const secondBody = await secondResponse.json() as any;
+  assert.equal(secondResponse.status, 200, JSON.stringify(secondBody));
+  assert.equal(secondBody.task.state, 'VERIFIED');
+  assert.equal(await fs.readFile(marker, 'utf8'), 'xx');
+
+  const approvalList = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
+  const approvalBody = await approvalList.json() as any;
+  assert.equal(approvalBody.approvals.some((entry: any) => entry.status === 'pending'), false);
 });
 
 test('task API accepts a browser-scoped semantic goal without a filesystem root', async (t) => {

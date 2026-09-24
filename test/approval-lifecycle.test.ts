@@ -3,8 +3,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
+import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 
@@ -12,6 +14,19 @@ async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   return dir;
+}
+
+async function waitForPendingApproval(base: string, token: string, actionId: string): Promise<any> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    const pending = body.approvals.find((entry: any) => entry.actionId === actionId && entry.status === 'pending');
+    if (pending) return pending;
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for pending approval ${actionId}.`);
 }
 
 test('one-time approval binds exact action, resumes once, and cannot be replayed', async (t) => {
@@ -53,43 +68,188 @@ test('one-time approval binds exact action, resumes once, and cannot be replayed
     provenance: { kind: 'chatgpt' }
   };
 
-  const first = await fetch(`${base}/v1/execute`, {
+  const firstPromise = fetch(`${base}/v1/execute`, {
     method: 'POST', headers: auth, body: JSON.stringify({ action })
   });
-  assert.equal(first.status, 409);
-  assert.equal((await first.json() as any).error.code, 'APPROVAL_REQUIRED');
+  const pending = await waitForPendingApproval(base, token, action.id);
+  assert.match(pending.approvalRequestId, /^[0-9a-f-]{36}$/i);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v1');
-
-  const pending = await fetch(`${base}/v1/approvals`, { headers: { authorization: `Bearer ${token}` } });
-  assert.equal(pending.status, 200);
-  const pendingBody = await pending.json() as any;
-  assert.equal(pendingBody.approvals[0].actionId, action.id);
-  assert.equal(pendingBody.approvals[0].status, 'pending');
-  assert.match(pendingBody.approvals[0].approvalRequestId, /^[0-9a-f-]{36}$/i);
-  const approvalRequestId = pendingBody.approvals[0].approvalRequestId;
 
   const approved = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
     method: 'POST',
     headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
-    body: JSON.stringify({ decision: 'approve', approvalRequestId })
+    body: JSON.stringify({ decision: 'approve', approvalRequestId: pending.approvalRequestId })
   });
   assert.equal(approved.status, 200);
   assert.equal((await approved.json() as any).approval.status, 'approved');
 
-  const second = await fetch(`${base}/v1/execute`, {
-    method: 'POST', headers: auth, body: JSON.stringify({ action })
-  });
-  const secondBody = await second.json() as any;
-  assert.equal(second.status, 200, JSON.stringify(secondBody));
-  assert.equal(secondBody.ok, true);
+  const first = await firstPromise;
+  const firstBody = await first.json() as any;
+  assert.equal(first.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.ok, true);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
 
-  const third = await fetch(`${base}/v1/execute`, {
+  const replayPromise = fetch(`${base}/v1/execute`, {
     method: 'POST', headers: auth, body: JSON.stringify({ action })
   });
-  assert.equal(third.status, 409);
-  assert.equal((await third.json() as any).error.code, 'APPROVAL_REQUIRED');
+  const replayPending = await waitForPendingApproval(base, token, action.id);
+  assert.notEqual(replayPending.approvalRequestId, pending.approvalRequestId);
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
+
+  const denied = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'deny', approvalRequestId: replayPending.approvalRequestId })
+  });
+  assert.equal(denied.status, 200);
+
+  const replay = await replayPromise;
+  const replayBody = await replay.json() as any;
+  assert.equal(replay.status, 409);
+  assert.equal(replayBody.error.code, 'APPROVAL_DENIED');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v2');
+});
+
+test('late approval after inline wait never mutates until an explicit retry', async (t) => {
+  const root = await temp(t, 'operator-approval-timeout-root-');
+  const state = await temp(t, 'operator-approval-timeout-state-');
+  const filePath = path.join(root, 'timeout.txt');
+  await fs.writeFile(filePath, 'before');
+  const token = 't'.repeat(64);
+  const recoveryToken = 'u'.repeat(64);
+  const runtime = createRuntime({
+    allowedRoots: [root],
+    allowedExecutables: ['node'],
+    windowsPathLeasePath: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+  const approvals = new ApprovalStore(state);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, inlineApprovalWaitMs: 50,
+    permissions: { allowedCapabilities: ['file.*'], allowedRoots: [root], allowDestructive: false }
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  const action = {
+    id: 'approval-timeout-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: 'after',
+      expectedSha256: crypto.createHash('sha256').update('before').digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+
+  const first = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action })
+  });
+  const firstBody = await first.json() as any;
+  assert.equal(first.status, 409);
+  assert.equal(firstBody.error.code, 'APPROVAL_REQUIRED');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'before');
+
+  const pending = await waitForPendingApproval(base, token, action.id);
+  const approval = await fetch(`${base}/v1/approvals/${encodeURIComponent(action.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'approve', approvalRequestId: pending.approvalRequestId })
+  });
+  assert.equal(approval.status, 200);
+  await delay(100);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'before');
+
+  const retry = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action })
+  });
+  const retryBody = await retry.json() as any;
+  assert.equal(retry.status, 200, JSON.stringify(retryBody));
+  assert.equal(retryBody.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'after');
+});
+
+test('session approval allows subsequent destructive actions only inside the same runtime scope', async (t) => {
+  const root = await temp(t, 'operator-session-approval-root-');
+  const state = await temp(t, 'operator-session-approval-state-');
+  const filePath = path.join(root, 'session-approved.txt');
+  await fs.writeFile(filePath, 'v1');
+  const token = 's'.repeat(64);
+  const recoveryToken = 'q'.repeat(64);
+  const runtime = createRuntime({
+    allowedRoots: [root],
+    allowedExecutables: ['node'],
+    windowsPathLeasePath: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const permissions = {
+    allowedCapabilities: ['file.*'],
+    allowedRoots: [root],
+    allowDestructive: false
+  };
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, approvals, sessionApprovals, permissions
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const bound = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${bound.port}`;
+  const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+  const firstContent = 'v2';
+  const first = {
+    id: 'session-first-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: firstContent,
+      expectedSha256: crypto.createHash('sha256').update('v1').digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+  const firstPromise = fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action: first })
+  });
+  const pending = await waitForPendingApproval(base, token, first.id);
+  const session = await fetch(`${base}/v1/approvals/${encodeURIComponent(first.id)}`, {
+    method: 'POST',
+    headers: { ...auth, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'session', approvalRequestId: pending.approvalRequestId })
+  });
+  const sessionBody = await session.json() as any;
+  assert.equal(session.status, 200, JSON.stringify(sessionBody));
+  assert.equal(sessionBody.session.active, true);
+
+  const firstResponse = await firstPromise;
+  const firstBody = await firstResponse.json() as any;
+  assert.equal(firstResponse.status, 200, JSON.stringify(firstBody));
+  assert.equal(firstBody.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), firstContent);
+
+  const second = {
+    id: 'session-second-replace',
+    capability: 'file.replace',
+    risk: 'destructive',
+    input: {
+      path: filePath,
+      content: 'v3',
+      expectedSha256: crypto.createHash('sha256').update(firstContent).digest('hex')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+  const secondResponse = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers: auth, body: JSON.stringify({ action: second })
+  });
+  const secondBody = await secondResponse.json() as any;
+  assert.equal(secondResponse.status, 200, JSON.stringify(secondBody));
+  assert.equal(secondBody.ok, true);
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'v3');
 });
 
 test('pending approval expires hard and is physically pruned', async (t) => {

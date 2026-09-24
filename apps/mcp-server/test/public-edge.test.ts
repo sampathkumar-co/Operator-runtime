@@ -57,6 +57,30 @@ test('public edge builds OAuth metadata and permits only explicit literal public
   assert.equal(resolveMcpBindHost(env, config), '0.0.0.0');
   assert.throws(() => resolveMcpBindHost({ ...env, OPERATOR_MCP_HOST: 'edge.internal' }, config), /literal wildcard or loopback/);
 });
+test('developer edge is standalone, OAuth-scoped, and cannot be combined with public mode', () => {
+  const env = publicEnv();
+  env.OPERATOR_MCP_PUBLIC_EDGE = '0';
+  env.OPERATOR_MCP_DEVELOPER_EDGE = '1';
+  env.OPERATOR_MCP_PUBLIC_URL = 'https://developer.operator-runtime.dev/mcp';
+  env.OPERATOR_OAUTH_AUDIENCE = env.OPERATOR_MCP_PUBLIC_URL;
+  env.OPERATOR_OAUTH_DEVELOPER_SCOPE = 'operator:developer';
+
+  const config = readPublicMcpEdgeConfig(env);
+  assert.ok(config);
+  assert.equal(config.publicUrl.toString(), 'https://developer.operator-runtime.dev/mcp');
+  assert.equal(config.developerScope, 'operator:developer');
+  assert.deepEqual(config.authMetadata.oauthMetadata.scopes_supported, ['operator:read', 'operator:write', 'operator:developer']);
+
+  assert.throws(
+    () => readPublicMcpEdgeConfig({ ...env, OPERATOR_MCP_PUBLIC_EDGE: '1' }),
+    /cannot be both public and developer edge/i
+  );
+  assert.throws(
+    () => readPublicMcpEdgeConfig({ ...env, OPERATOR_OAUTH_DEVELOPER_SCOPE: 'operator:read' }),
+    /developer scope must be distinct/i
+  );
+});
+
 test('public edge supports JWKS verification without introspection credentials', () => {
   const env = publicEnv();
   delete env.OPERATOR_OAUTH_INTROSPECTION_URL;

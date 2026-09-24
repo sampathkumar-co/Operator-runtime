@@ -48,7 +48,8 @@ export class LocalAgentClient {
       deviceId: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_DEVICE_ID?.trim() || undefined,
       projectKey: verifiedPrincipal ? undefined : process.env.OPERATOR_RELAY_PROJECT_KEY?.trim() || undefined,
       waitMs: parseWait(process.env.OPERATOR_RELAY_WAIT_MS),
-      publicBoundary: process.env.OPERATOR_MCP_PUBLIC_EDGE === '1'
+      publicBoundary: process.env.OPERATOR_MCP_PUBLIC_EDGE === '1' && process.env.OPERATOR_MCP_DEVELOPER_EDGE !== '1',
+      developerBoundary: process.env.OPERATOR_MCP_DEVELOPER_EDGE === '1'
     });
   }
 

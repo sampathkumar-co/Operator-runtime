@@ -177,6 +177,48 @@ test('rotation atomically revokes the old jti and activates exactly one replacem
   assert.equal(/PRIVATE KEY/.test(persisted), false);
 });
 
+test('rotation can atomically refresh signed capability scopes for entitlement changes', async (t) => {
+  const a = await device('operator-session-scope-rotate-a-', 'A');
+  const b = await device('operator-session-scope-rotate-b-', 'B');
+  t.after(() => Promise.all([fs.rm(a.state, { recursive: true, force: true }), fs.rm(b.state, { recursive: true, force: true })]));
+  await pairBoth(a, b);
+
+  const bPublic = await b.identity.loadOrCreate();
+  const sessions = new DeviceSessionTokenStore(a.state, a.identity, a.registry);
+  const first = await sessions.issue({
+    subjectDeviceId: bPublic.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 60_000
+  });
+
+  const upgraded = await sessions.rotate(first.payload.jti, {
+    ttlMs: 60_000,
+    scopes: ['relay:connect', 'relay:result', 'relay:developer', 'cap:file.read', 'cap:docker.manage']
+  });
+  assert.equal(upgraded.payload.scopes.includes('relay:developer'), true);
+  assert.equal(upgraded.payload.scopes.includes('cap:docker.manage'), true);
+  await assert.rejects(
+    sessions.verify(first.token, { audience: 'operator-relay' }),
+    (error: any) => error?.code === 'SESSION_REVOKED'
+  );
+  assert.equal(
+    (await sessions.verify(upgraded.token, { audience: 'operator-relay', requiredScopes: ['relay:developer', 'cap:docker.manage'] })).jti,
+    upgraded.payload.jti
+  );
+
+  const downgraded = await sessions.rotate(upgraded.payload.jti, {
+    ttlMs: 60_000,
+    scopes: ['relay:connect', 'relay:result', 'cap:file.read']
+  });
+  assert.equal(downgraded.payload.scopes.includes('relay:developer'), false);
+  assert.equal(downgraded.payload.scopes.includes('cap:docker.manage'), false);
+  await assert.rejects(
+    sessions.verify(downgraded.token, { audience: 'operator-relay', requiredScopes: ['relay:developer'] }),
+    (error: any) => error?.code === 'SESSION_SCOPE_DENIED'
+  );
+});
+
 test('issuer-side revocation is immediate and revoked devices cannot receive or verify new local sessions', async (t) => {
   const a = await device('operator-session-revoke-a-', 'A');
   const b = await device('operator-session-revoke-b-', 'B');

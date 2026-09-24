@@ -151,6 +151,59 @@ test('public relay control preserves trusted public-boundary marker in delivery 
   assert.equal(payload.action.capability, 'computer.inspect');
 });
 
+test('developer relay boundary requires explicit account entitlement before dispatch', async (t) => {
+  let dispatchCalls = 0;
+  const hub = {
+    recoverIdempotent: async () => null,
+    dispatch: async (input: any) => {
+      dispatchCalls += 1;
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'delivery-developer', seq: 1 }, input };
+    }
+  };
+  const results = {
+    findByIdempotencyKey: async () => null,
+    get: async () => ({
+      deliveryId: 'delivery-developer',
+      result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+      replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+    })
+  };
+  const accounts = {
+    activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 })
+  };
+
+  const denied = new RelayControlService({
+    hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN,
+    developerAccountIds: ACCOUNT_B
+  });
+  const deniedBound = await denied.listen('127.0.0.1', 0);
+  t.after(() => denied.close());
+  const deniedResponse = await post(deniedBound.port, {
+    accountId: ACCOUNT_A,
+    developerBoundary: true,
+    action: action(),
+    waitMs: 1000
+  });
+  assert.equal(deniedResponse.status, 409);
+  assert.equal((await deniedResponse.json() as any).error.code, 'DEVELOPER_ACCOUNT_REQUIRED');
+  assert.equal(dispatchCalls, 0);
+
+  const allowed = new RelayControlService({
+    hub: hub as any, results: results as any, accounts: accounts as any, token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const allowedBound = await allowed.listen('127.0.0.1', 0);
+  t.after(() => allowed.close());
+  const allowedResponse = await post(allowedBound.port, {
+    accountId: ACCOUNT_A,
+    developerBoundary: true,
+    action: action(),
+    waitMs: 1000
+  });
+  assert.equal(allowedResponse.status, 200, await allowedResponse.text());
+  assert.equal(dispatchCalls, 1);
+});
+
 test('completed non-read result is recovered before routing even when the device is offline', async (t) => {
   const deliveryId = '44444444-4444-4444-8444-444444444444';
   let recoverCalls = 0;

@@ -15,6 +15,7 @@ export interface RelayAgentClientOptions {
   projectKey?: string;
   waitMs?: number;
   publicBoundary?: boolean;
+  developerBoundary?: boolean;
 }
 
 export class RelayAgentClient {
@@ -26,6 +27,7 @@ export class RelayAgentClient {
   #projectKey?: string;
   #waitMs: number;
   #publicBoundary: boolean;
+  #developerBoundary: boolean;
 
   constructor(options: RelayAgentClientOptions) {
     this.#url = validateLoopbackControlUrl(options.baseUrl);
@@ -40,6 +42,8 @@ export class RelayAgentClient {
     if (!Number.isInteger(waitMs) || waitMs < 1_000 || waitMs > MAX_TIMEOUT_MS) throw new Error(`Relay wait must be between 1000 and ${MAX_TIMEOUT_MS} ms.`);
     this.#waitMs = waitMs;
     this.#publicBoundary = options.publicBoundary === true;
+    this.#developerBoundary = options.developerBoundary === true;
+    if (this.#publicBoundary && this.#developerBoundary) throw new Error('Relay client cannot be both public and developer boundary.');
   }
 
   async claimDevice(userCodeInput: string): Promise<{ status: 'claimed' }> {
@@ -73,6 +77,7 @@ export class RelayAgentClient {
         ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
         ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
         ...(this.#publicBoundary ? { publicBoundary: true } : {}),
+        ...(this.#developerBoundary ? { developerBoundary: true } : {}),
         action: outboundAction,
         waitMs: this.#waitMs
       }),
@@ -102,6 +107,7 @@ export class RelayAgentClient {
         ...(this.#principal ? { principal: this.#principal } : {}),
         ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
         ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
+        ...(this.#developerBoundary ? { developerBoundary: true } : {}),
         task,
         waitMs: this.#waitMs
       }),

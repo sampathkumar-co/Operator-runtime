@@ -56,3 +56,22 @@ account after that account authenticates.
 The runtime currently permits up to 32 active devices per account and retains
 up to 128 historical device identities per account. A device cannot be active
 under two accounts at the same time.
+
+
+## Private Developer MCP connection
+
+The optional Full/Developer MCP edge is a separate OAuth resource from the public
+nine-tool connection. Its OAuth request must include the dedicated
+`operator:developer` scope and use the Developer MCP resource audience. The
+account must also be present in the relay-side `OPERATOR_DEVELOPER_ACCOUNT_IDS`
+allowlist; OAuth scope alone never grants the 24-tool relay surface.
+
+Device pairing intentionally continues to request only
+`openid operator:read operator:write`. Pairing a computer does not grant
+Developer access, and the browser pairing flow never requests
+`operator:developer`.
+
+When configuring the production OIDC client used for the private Developer
+connection, allow `operator:developer` only for that trusted connection and
+preserve PKCE S256. The relay independently enforces the resolved Mecord account
+entitlement on every Developer action/task dispatch.
