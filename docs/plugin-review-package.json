@@ -140,18 +140,20 @@
     "status": "PRODUCTION_LIVE_OPENAI_DIRECTORY_NOT_SUBMITTED"
   },
   "sourceSuccessor": {
-    "name": "Mecord Connect current production source",
+    "name": "Mecord Connect post-release source line",
     "pullRequest": null,
     "branch": "main",
-    "sourceCommit": "10914835e5ce4d8b1d2bf9952e8789efc8feb306",
+    "productionBaseCommit": "10914835e5ce4d8b1d2bf9952e8789efc8feb306",
+    "sourceCommit": null,
+    "sourceCommitPolicy": "dynamic-main-head-not-a-production-claim",
     "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",
     "workflowRuns": {
-      "mainRelease": "required release workflows green on production commit",
-      "productionVerification": "public health=9 tools; developer health=24 tools; developer pairing route=404; npm latest=1.0.1"
+      "sourceSuccessor": "re-run required workflows on each exact successor head before merge/deployment",
+      "productionVerification": "production remains bound to releaseCandidate.sourceCommit until a later deployment is explicitly recorded"
     },
-    "status": "PRODUCTION_DEPLOYED_NPM_1_0_1_DEVELOPER_ENDPOINT_LIVE_OPENAI_VERIFICATION_BLOCKED",
+    "status": "POST_RELEASE_SOURCE_SUCCESSOR_NOT_DEPLOYED_BY_THIS_RECORD",
     "workflowConclusions": {
-      "mainRelease": "success",
+      "sourceSuccessor": "dynamic",
       "productionVerification": "success"
     }
   }
