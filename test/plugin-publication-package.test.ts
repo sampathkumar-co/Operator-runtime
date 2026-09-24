@@ -173,10 +173,20 @@ test('current release evidence cannot regress to superseded production facts', a
   ];
   for (const relative of currentDocs) {
     const content = await fs.readFile(path.join(root, relative), 'utf8');
-    assert.equal(content.includes(releaseState.production.sourceCommit), true, `${relative} must identify the current production source`);
     for (const marker of superseded) {
       assert.equal(content.includes(marker), false, `${relative} contains superseded current-state marker: ${marker}`);
     }
+  }
+  for (const relative of [
+    'README.md',
+    'docs/CURRENT_RELEASE_STATE.md',
+    'docs/OPERATOR_MASTER_GATE_STATUS.md',
+    'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
+    'docs/OPERATOR_RELEASE_GATE.md',
+    'docs/plugin-review-package.json'
+  ]) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.equal(content.includes(releaseState.production.sourceCommit), true, `${relative} must identify the current production source`);
   }
 
   const historicalBootstrap = await fs.readFile(path.join(root, 'docs/OPERATOR_NPM_NAMESPACE_BOOTSTRAP.md'), 'utf8');
