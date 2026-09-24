@@ -51,7 +51,7 @@ On 2026-09-18, the existing callback-ID URI entered the Authelia login flow whil
 
 ## Current live OAuth checkpoint — 2026-09-23
 
-A real ChatGPT OAuth sign-in/reconnect completed against production source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`. Production has since advanced to `a7fd8c960a82c9565b944ffb50535eeed6989c52`; that deployment preserves the same public OAuth/tool boundary and passed post-deploy health, routing and tool-count verification, while this paragraph remains the historical interactive OAuth proof.
+A real ChatGPT OAuth sign-in/reconnect completed against production source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`. Production has since advanced to `94becbf734817121fbea1a017b9e1b10c144d125`; that deployment preserves the same public OAuth/tool boundary and passed post-deploy health, routing and tool-count verification, while this paragraph remains the historical interactive OAuth proof.
 
 After the local runtime reconnected, the same current 9-tool deployment completed real device-backed inspection/read/Git/write certification on Windows x64. `file.create` succeeded, the created file was immediately visible and read back with its SHA-256, Git observed the real new file, duplicate create returned `TARGET_EXISTS`, and `file.replace` reached local policy but returned `APPROVAL_REQUIRED` with no mutation. Evidence file: `test/mecord-public-v1-write-cert-20260923.txt`, SHA-256 `4761fc381cb93c7c04e04d3907ce4b14455c6b35b5b0f5a13397c0d79717da37`.
 

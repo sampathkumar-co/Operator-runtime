@@ -12,7 +12,7 @@ This document is an engineering certification record, not a claim of OpenAI appr
 
 Production is live on Mecord Connect v1:
 
-- source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
+- source: `94becbf734817121fbea1a017b9e1b10c144d125`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public surface: exactly 9 MCP tools
@@ -27,7 +27,7 @@ Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the me
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The deployed v1 source is exact commit `a7fd8c960a82c9565b944ffb50535eeed6989c52`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
+The deployed v1 source is exact commit `94becbf734817121fbea1a017b9e1b10c144d125`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
 
 This candidate includes:
 
@@ -199,7 +199,7 @@ No npm publication, production deployment, public 9-tool runtime, Developer 24-t
 
 ## Production deployment state
 
-Production deployment is complete at `a7fd8c960a82c9565b944ffb50535eeed6989c52`. Live verification on 2026-09-24 confirmed:
+Production deployment is complete at `94becbf734817121fbea1a017b9e1b10c144d125`. Live verification on 2026-09-24 confirmed:
 
 - public health: tool surface `public`, tool count **9**;
 - Developer health: tool surface `developer`, tool count **24**;
