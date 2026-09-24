@@ -147,3 +147,51 @@ test('reviewer-facing evidence reflects the deployed canonical nine-tool product
   assert.equal(review.sourceSuccessor.sourceCommit, releaseState.production.sourceCommit);
   assert.equal(review.releaseCandidate.npmPackage, `mecord-connect@${releaseState.versions.runtimePackage}`);
 });
+test('current release evidence cannot regress to superseded production facts', async () => {
+  const releaseState = await json('docs/release-state.json');
+  const currentDocs = [
+    'README.md',
+    'docs/CURRENT_RELEASE_STATE.md',
+    'docs/OPERATOR_DEMO_RECORDING_RUNBOOK.md',
+    'docs/OPERATOR_FEATURE_GAPS.md',
+    'docs/OPERATOR_MASTER_GATE_STATUS.md',
+    'docs/OPERATOR_OPENAI_PORTAL_ENTRY_PACKET.md',
+    'docs/OPERATOR_OPENAI_RELEASE_CERTIFICATION_2026-09.md',
+    'docs/OPERATOR_OWNER_RELEASE_DECISION_PACKET.md',
+    'docs/OPERATOR_REAL_OAUTH_PROOF.md',
+    'docs/OPERATOR_RELEASE_GATE.md',
+    'docs/OPERATOR_REMAINING_HUMAN_GATES.md',
+    'docs/SUBMISSION_PACKAGE.md',
+    'docs/plugin-review-package.json'
+  ];
+  const superseded = [
+    '3b3b1bff35f8e78519f114b603f98e8acc56cd66',
+    'mecord-connect@1.0.0',
+    'ROUTE_NO_DEVICE',
+    'paired local runtime was offline',
+    'device-backed E2E remains pending'
+  ];
+  for (const relative of currentDocs) {
+    const content = await fs.readFile(path.join(root, relative), 'utf8');
+    assert.equal(content.includes(releaseState.production.sourceCommit), true, `${relative} must identify the current production source`);
+    for (const marker of superseded) {
+      assert.equal(content.includes(marker), false, `${relative} contains superseded current-state marker: ${marker}`);
+    }
+  }
+
+  const historicalBootstrap = await fs.readFile(path.join(root, 'docs/OPERATOR_NPM_NAMESPACE_BOOTSTRAP.md'), 'utf8');
+  assert.match(historicalBootstrap, /HISTORICAL \/ SUPERSEDED/);
+  assert.match(historicalBootstrap, /mecord-connect@1\.0\.0/);
+});
+
+test('master gate headline count matches its actual table statuses', async () => {
+  const master = await fs.readFile(path.join(root, 'docs/OPERATOR_MASTER_GATE_STATUS.md'), 'utf8');
+  const declared = master.match(/Current canonical count: \*\*(\d+) PASS \/ (\d+) BLOCKED \/ (\d+) NOT APPLICABLE\*\*/);
+  assert.ok(declared, 'master gate document must declare its canonical count');
+  const rows = [...master.matchAll(/^\| G\d+[^|]*\| (PASS|BLOCKED|NOT APPLICABLE) \|/gm)].map((match) => match[1]);
+  assert.equal(rows.length, 37, 'G0-G36 must all be present exactly once');
+  assert.equal(rows.filter((status) => status === 'PASS').length, Number(declared[1]));
+  assert.equal(rows.filter((status) => status === 'BLOCKED').length, Number(declared[2]));
+  assert.equal(rows.filter((status) => status === 'NOT APPLICABLE').length, Number(declared[3]));
+});
+
