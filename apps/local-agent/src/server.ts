@@ -129,6 +129,10 @@ export function createLocalAgentServer(options: {
 }) {
   if (options.token.length < 32) throw new Error('Agent token must be at least 32 characters.');
   if (options.recoveryToken !== undefined && options.recoveryToken.length < 32) throw new Error('Recovery token must be at least 32 characters.');
+  const inlineApprovalWaitMs = options.inlineApprovalWaitMs ?? MAX_INLINE_APPROVAL_WAIT_MS;
+  if (!Number.isInteger(inlineApprovalWaitMs) || inlineApprovalWaitMs < 10 || inlineApprovalWaitMs > MAX_INLINE_APPROVAL_WAIT_MS) {
+    throw new Error(`inlineApprovalWaitMs must be an integer between 10 and ${MAX_INLINE_APPROVAL_WAIT_MS}.`);
+  }
 
   type InlineApprovalDecision = 'approve' | 'session' | 'deny';
   type InlineApprovalWaiter = {
