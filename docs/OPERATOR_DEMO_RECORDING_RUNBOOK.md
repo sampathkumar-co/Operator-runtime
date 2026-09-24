@@ -16,7 +16,7 @@ All must be true before recording:
 1. final successor SHA is frozen and green;
 2. exact owner-approved software license and npm policy classification are applied;
 3. public legal identity is reconciled and matches the verified OpenAI publisher identity;
-4. `mecord-connect@1.0.0` is published; **PASS**
+4. `mecord-connect@1.0.1` is published; **PASS**
 5. a clean-machine `npx mecord-connect@latest doctor` passes; **PASS**
 6. the reviewer account works without MFA, SMS, email confirmation or private-network access;
 7. the canonical reviewer fixture is reset to baseline;

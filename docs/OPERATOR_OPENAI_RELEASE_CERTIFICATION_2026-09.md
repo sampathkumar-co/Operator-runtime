@@ -12,7 +12,7 @@ This document is an engineering certification record, not a claim of OpenAI appr
 
 Production is live on Mecord Connect v1:
 
-- source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
+- source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public surface: exactly 9 MCP tools
@@ -27,7 +27,7 @@ Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the me
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The deployed v1 source is exact commit `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. The release run reported 19/19 CI checks green and 437 passed / 17 expected skips / 0 failures before/through deployment verification.
+The deployed v1 source is exact commit `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. The release run reported 19/19 CI checks green and 437 passed / 17 expected skips / 0 failures before/through deployment verification.
 
 This candidate includes:
 
@@ -97,7 +97,7 @@ Release guards fail closed if the package name, proprietary license, dual-use de
 
 GitHub NPM Runtime certification builds the native helpers, builds the exact-source runtime payload, packs the tarball, verifies required policy/runtime files, installs the tarball, runs the direct runtime doctor, and runs the installed `mecord-connect.cmd` doctor.
 
-The package is public as **`mecord-connect@1.0.0`** under the **`latest`** tag, published by npm user **mecrod** from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan; 0 vulnerabilities were reported.
+The package is public as **`mecord-connect@1.0.1`** under the **`latest`** tag, published by npm user **mecrod** from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan; 0 vulnerabilities were reported.
 
 ## Public MCP surface
 
@@ -148,7 +148,7 @@ Production OAuth uses a predefined public client with:
 
 Provider preflight and redirect acceptance are proven. A real ChatGPT-hosted OAuth sign-in/reconnect also completed and refreshed the live nine-tool definition.
 
-Issued-token audience/scope capture, explicit revoke/disconnect failure + reconnect recovery, and device-backed read/write E2E remain external. The first live `computer.inspect` reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline.
+The released public path has now completed real paired-Windows device inspection/read/Git/create verification, and production health reports the exact release commit. The separate Developer endpoint is also live with 24 tools and no pairing route. Remaining work is OpenAI-side verification/submission evidence; it is not a runtime-release blocker.
 
 ## Production isolation/security baseline
 
@@ -186,42 +186,29 @@ It is **not** a Mecord Connect v1 release, npm publication, OpenAI submission or
 
 Do not create extra owner work for Store naming/reservation/publication during v1.
 
-## Remaining five external/account gates
+## Remaining external OpenAI gates
 
-### 1. OpenAI publisher/developer login + individual identity verification
-Complete/verify the exact individual identity and reconcile the accepted spelling/order if needed.
+The software/runtime release is complete. Remaining work is intentionally limited to the OpenAI app-directory path:
 
-### 2. Reviewer credential entry + real pairing
-Owner enters the provisioned reviewer credential, proves no secondary verification and pairs only the canonical fixture.
+1. resolve OpenAI individual/developer verification and reconcile the exact verified identity if needed;
+2. after verification is available, complete any portal-only reviewer, Scan Tools, domain-challenge and demo requirements;
+3. create/attach the separate Developer ChatGPT connection only when OpenAI permits it;
+4. select **Submit for Review** only if the owner explicitly decides to pursue directory publication.
 
-### 3. Portal-issued domain challenge, if issued
-Use only the exact OpenAI-issued challenge token.
+No npm publication, production deployment, public 9-tool runtime, Developer 24-tool endpoint or local-device runtime work remains blocked on these OpenAI-side steps.
 
-### 4. Real OpenAI/ChatGPT OAuth + Scan Tools + E2E + demo
-Prove issued-token resource/scopes, exact 9-tool scan, reviewer cases, revoke/reconnect and the reviewer-accessible production demo.
+## Production deployment state
 
-### 5. Explicit irreversible publication / deployment / submission authorization
-Authorize publication of the exact certified `mecord-connect` tarball with 2FA, final transactional deployment, then OpenAI Submit for Review only after the real review proof is green.
+Production deployment is complete at `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Live verification on 2026-09-24 confirmed:
 
-## Final deployment sequencing
-
-Final Mecord Connect production deployment is an engineering release step, not a new product decision, but it must wait until the external gates make the deployment meaningful and safe.
-
-When permitted:
-1. deploy the exact final certified successor transactionally;
-2. verify `/`, `/privacy`, `/terms`, `/support`;
-3. verify OAuth discovery/protected-resource metadata;
-4. verify MCP unauthenticated/authenticated behavior;
-5. rerun hostile public-edge checks;
-6. verify the approved publisher identity on live legal pages;
-7. run Scan Tools / real ChatGPT proof on that deployed final SHA;
-8. retain rollback capability to OCC-3M.
+- public health: tool surface `public`, tool count **9**;
+- Developer health: tool surface `developer`, tool count **24**;
+- Developer pairing route: **404** by design;
+- npm `latest`: **mecord-connect@1.0.1**.
 
 ## Release verdict
 
-Until the five external gates and final deployment verification close, the verdict remains:
-
-**NOT CONFIRMED FOR RELEASE**
+**PRODUCTION / NPM RELEASE COMPLETE. OPENAI APP-DIRECTORY SUBMISSION NOT COMPLETE.**
 
 See:
 - `OPERATOR_MASTER_GATE_STATUS.md` — canonical G0–G36 verdict

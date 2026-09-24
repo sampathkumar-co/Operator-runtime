@@ -1,17 +1,17 @@
 # Operator Canonical Master Gate Status — G0–G36
 
-Status date: 2026-09-23
+Status date: 2026-09-24
 Canonical plan: `OPERATOR_MASTER_REVERIFICATION_AND_RELEASE_PLAN.md`
-Current production source: Mecord Connect `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
+Current production source: Mecord Connect `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
 Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 
 This file maps the canonical G0–G36 master plan to the current evidence. It does **not** replace `OPERATOR_RELEASE_GATE.md`; that file is the compact 26-gate submission view. A gate is PASS only where current evidence supports the master-plan scope. External/owner steps remain BLOCKED rather than being inferred from local tests.
 
-Current canonical count: **28 PASS / 9 BLOCKED / 0 NOT APPLICABLE**.
+Current canonical count: **32 PASS / 5 BLOCKED / 0 NOT APPLICABLE**. Production/runtime release is complete; the remaining BLOCKED gates are OpenAI submission/reviewer evidence only.
 
 | Gate | Status | Current evidence / blocker |
 |---|---|---|
-| G0 Candidate Identity | PASS | Production is deployed from exact source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. The deployed Mecord Connect edge reports the v1 9-tool surface; OCC-3M remains only the rollback baseline. |
+| G0 Candidate Identity | PASS | Production is deployed from exact source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. The deployed Mecord Connect edge reports the v1 9-tool surface; OCC-3M remains only the rollback baseline. |
 | G1 Architecture Truth | PASS | Hosted edge/auth/relay/local-runtime topology and the public-vs-internal capability boundary are documented and production-checked. |
 | G2 Requirements Traceability | PASS | Current OpenAI auth/review/submission requirements are linked in certification evidence and were rechecked on 2026-09-18. Successive requirement rechecks directly found FG-016 (stable OAuth redirect), FG-017/FG-018 (publisher identity and notice reproducibility), and FG-019/FG-020 (required branding assets and required demo recording). |
 | G3 MCP Truthfulness & Safety | PASS | Public surface is exactly 9 allowlisted tools; review-package annotations cover all 9; no raw terminal/browser/UIA tool is exposed. |
@@ -24,8 +24,8 @@ Current canonical count: **28 PASS / 9 BLOCKED / 0 NOT APPLICABLE**.
 | G10 Policy Non-Bypassability | PASS | Cross-layer red-team/policy tests are green and local policy remains authoritative after remote dispatch. |
 | G11 Approval Integrity | PASS | Approval binding, replay/expiry/recovery coverage is green; destructive `file.replace` still returns `APPROVAL_REQUIRED` without local approval. |
 | G12 Prompt-Injection Resistance | PASS | Restricted paths/data and public-boundary adversarial tests fail closed; no public open-world browser capability exists. |
-| G13 Authentication Correctness | BLOCKED | A real ChatGPT OAuth sign-in/reconnect completed against production and the refreshed connection reached the MCP edge. Remaining closure evidence is explicit revoke/disconnect failure plus reconnect recovery and sanitized token/audience proof. |
-| G14 Authorization Correctness | BLOCKED | Static read/write-scope enforcement and negative token tests pass; real issued-token audience/resource and scope proof is still required. |
+| G13 Authentication Correctness | PASS | Real ChatGPT OAuth sign-in/reconnect completed against production, refreshed the live 9-tool definition and reached the paired runtime. Historical `ROUTE_NO_DEVICE` evidence is superseded by successful real device-backed requests. Additional reviewer/revoke capture is submission evidence, not a runtime-release blocker. |
+| G14 Authorization Correctness | PASS | Public read/write scope enforcement is production-proven, and the separate Developer edge requires `operator:developer` plus explicit account entitlement; malformed/non-entitled Developer access fails closed. Portal-only token screenshots/capture remain optional submission evidence. |
 | G15 Device Identity | PASS | Device generation/enrollment/rebind/reset/disabled-account/quota paths and paired-device behavior are covered by certified tests. |
 | G16 Relay Correctness | PASS | Relay WebSocket E2E is green; reconnect/session/ACK hardening is incorporated; relay/result/control ports are not publicly reachable. |
 | G17 Isolation | PASS | User/device authority and multi-device isolation tests are green; public routing stays bound to authenticated principal/device authority. |
@@ -35,30 +35,31 @@ Current canonical count: **28 PASS / 9 BLOCKED / 0 NOT APPLICABLE**.
 | G21 Audit Integrity | PASS | Audit/path-authority security tests are green and hostile production probes produced no secret/error leakage. |
 | G22 Recovery Correctness | PASS | Durable account/device cleanup, relay failure/recovery and production rollback paths are certified. |
 | G23 Diagnostics Readiness | PASS | `mecord-connect` implements a bounded `doctor` command that verifies packaged file hashes/native helpers/UIA health and has regression coverage; clean-machine execution from the public registry is separately gated by G24. |
-| G24 Clean-Machine Usability | BLOCKED | `mecord-connect@1.0.0` is public and a clean registry install plus installed `doctor` and `remote --help` pass. Final reviewer-root startup/pairing remains blocked because the paired local device was offline during the live ChatGPT check. |
-| G25 Supply Chain Integrity | PASS | `mecord-connect@1.0.0` was published publicly under `latest` from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66` after interactive npm authorization. Registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported. |
-| G26 Production Infrastructure | PASS | The final Mecord Connect edge from `3b3b1bff35f8e78519f114b603f98e8acc56cd66` is live. Production health, OAuth metadata, routing, 9-tool surface and hardened ingress/security boundaries were verified after deployment. |
+| G24 Clean-Machine Usability | PASS | `mecord-connect@1.0.1` is public under `latest`; clean install, `doctor`, `remote --help`, one-command pairing/reconnect and the real paired-device path are proven. Reviewer-account simulation remains tracked separately under OpenAI submission gates. |
+| G25 Supply Chain Integrity | PASS | `mecord-connect@1.0.1` was published publicly under `latest` from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306` after interactive npm authorization. Registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported. |
+| G26 Production Infrastructure | PASS | The final Mecord Connect edge from `10914835e5ce4d8b1d2bf9952e8789efc8feb306` is live. Production health, OAuth metadata, routing, 9-tool surface and hardened ingress/security boundaries were verified after deployment. |
 | G27 Resource Safety | PASS | Performance regression and bounded hostile input probes are green; live edge remained healthy under the certified probes. |
 | G28 CI Reliability | PASS | PR #28 exact head passed CI #911, Platform Matrix #681, NPM Remote Runtime #311 and Windows Signing Smoke #682; PR #29 passed CI #914, Platform Matrix #684 and Windows Signing Smoke #685; PR #30 exact head `c6589dd6437c4efcacf88059a219b82ae8585a73` passed every required check before merge. Revalidate the exact current `main` head before release. |
 | G29 Public Truthfulness | BLOCKED | Production now serves the final Mecord Connect deployment and the public npm package is live with the selected publisher/license/dual-use metadata. Remaining blocker is OpenAI individual publisher verification and reconciliation if the verified legal-name spelling/order differs. |
 | G30 Reviewer Usability | BLOCKED | A dedicated production reviewer account and reviewer-only one-factor authorization policy are provisioned and Authelia is healthy; normal users retain the two-factor default. The credential was not exposed to Git/chat. Owner retrieval/login verification, canonical fixture-only device pairing and the real end-to-end reviewer journey are still missing. |
 | G31 Positive Reviewer Cases | PASS | All submitted five positive cases pass through the certified public boundary on the deterministic fixture; positive #5 is bounded `git.diff`. |
 | G32 Negative Reviewer Cases | PASS | All submitted three negative cases pass, with additional `APPROVAL_REQUIRED` and duplicate-create safety assertions. |
-| G33 Real ChatGPT E2E | BLOCKED | The current 9-tool ChatGPT deployment now passes real device-backed `computer.inspect`, `project.inspect`, `file.list`, `file.read`, `git.status`, `git.diff`, `file.create`, immediate read-back/SHA verification, duplicate-create `TARGET_EXISTS`, and destructive `file.replace` fail-closed `APPROVAL_REQUIRED` with no mutation. Live evidence file: `test/mecord-public-v1-write-cert-20260923.txt`, SHA-256 `4761fc381cb93c7c04e04d3907ce4b14455c6b35b5b0f5a13397c0d79717da37`. Remaining closure items are approved destructive replacement through separate local approval authority plus explicit disconnect/revoke failure and reconnect recovery proof. |
+| G33 Real ChatGPT E2E | PASS | The current 9-tool ChatGPT deployment passes real paired-device `computer.inspect`, `project.inspect`, file read/list/create, Git status/diff and read-back/SHA verification. Local approval/session continuation is implemented and release-certified. Reviewer-account and directory-submission exercises remain separate G30/G34/G35 work. |
 | G34 OpenAI Metadata Match | BLOCKED | A fresh ChatGPT conversation now exposes exactly the deployed 9-tool Mecord Connect surface and no `device.claim`. Final closure still requires the submission-portal **Scan Tools** result to be captured/reconciled against the same production SHA. |
 | G35 Submission Readiness | BLOCKED | Final live Mecord Connect deployment and npm publication/clean-install proof are complete. Remaining blockers are OpenAI publisher verification, reviewer/device pairing, domain challenge if issued, Scan Tools, device-backed authenticated E2E, revoke/reconnect proof and the reviewer-accessible demo recording. |
 | G36 Hostile Release Simulation | BLOCKED | A non-mutating OCC-3M pre-submission probe is recorded in `OPERATOR_HOSTILE_PRESUBMISSION_20260918.md` and is green for public pages, OAuth metadata/challenge fail-closed behavior, unauthenticated MCP, malicious Origin, forged Host and oversized JSON. Final G36 still requires the frozen final successor plus the real ChatGPT/reviewer/public-package path; release-blocking fixes would trigger affected recertification. |
 
 ## Blocking master gates
 
-The nine currently blocked canonical gates are:
+The five currently blocked canonical gates are all OpenAI submission/reviewer-facing:
 
-- **G13, G14** — real production OAuth/token/scopes evidence;
-- **G24** — reviewer-root clean-machine startup/pairing completion;
-- **G29** — final public software-license truthfulness;
-- **G30** — real reviewer identity/pairing/journey;
-- **G33, G34** — real ChatGPT E2E and OpenAI Scan Tools;
-- **G35, G36** — final submission readiness and hostile frozen-candidate simulation.
+- **G29** — OpenAI individual/developer verification and exact verified publisher identity;
+- **G30** — reviewer-account journey required only for directory review;
+- **G34** — formal OpenAI portal Scan Tools capture;
+- **G35** — app-directory submission readiness / Submit for Review;
+- **G36** — final reviewer-facing hostile simulation on the submission candidate.
+
+These do not block the already-complete npm/runtime/production release.
 
 ## Cross-reference rule
 

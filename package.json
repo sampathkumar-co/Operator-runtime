@@ -10,6 +10,7 @@
     "test": "node --experimental-strip-types scripts/run-test-suite.ts test",
     "test:red-team": "node --experimental-strip-types scripts/run-test-suite.ts security",
     "test:performance": "node --experimental-strip-types scripts/run-test-suite.ts performance",
+    "verify:release-checkout": "node scripts/verify-release-checkout.mjs",
     "check": "node --experimental-strip-types scripts/check.ts && npm test",
     "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts"
   },

@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: Mecord Connect v1 live — OpenAI submission hardening
+## Status: Mecord Connect v1 production release complete — OpenAI directory verification blocked
 
-The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. The public Mecord Connect edge is deployed from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`, and `mecord-connect@1.0.0` is public on npm under `latest`. OpenAI reviewer/submission hardening remains in progress.
+The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. Production is deployed from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`; the public MCP surface exposes exactly 9 tools, the separate Developer MCP surface exposes exactly 24 tools, and `mecord-connect@1.0.1` is public on npm under `latest`. OpenAI developer verification/app-directory submission remains external and intentionally incomplete. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
 ### Implemented and CI-certified
 
@@ -48,17 +48,14 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 
 The full root runtime/import suite is CI-gated alongside independent MCP transport, relay WebSocket, native Windows, MSIX packaging/sign-install, red-team, performance and cross-platform matrix checks. Exact test counts are intentionally not frozen in documentation because the suite grows with each hardened boundary.
 
-## Remaining release gates
+## Remaining external gates
 
-Production deployment and npm publication are complete. The remaining v1 gates are external/reviewer-facing:
+Production deployment, npm publication, the public 9-tool runtime path, and the separate 24-tool Developer endpoint are complete. Remaining work is OpenAI-side only:
 
-- OpenAI individual publisher verification and exact legal-name reconciliation;
-- reconnect the paired local runtime and complete real device-backed read/write + approval-path E2E;
-- explicit disconnect/revoke failure and reconnect recovery proof;
-- OpenAI **Scan Tools** reconciliation against the deployed nine-tool surface;
-- reviewer credential + canonical fixture pairing and reviewer simulation;
-- domain challenge only if the OpenAI portal issues one;
-- reviewer-accessible demo recording and final Submit for Review action.
+- resolve OpenAI individual/developer verification;
+- create/attach the separate Developer ChatGPT connection after verification becomes available;
+- perform any portal-only Scan Tools/reviewer/demo steps required for app-directory submission;
+- submit to the OpenAI app directory only after verification succeeds and the owner explicitly chooses to do so.
 
 Microsoft Store/MSIX remains optional and outside Mecord Connect v1 release requirements.
 
@@ -147,7 +144,7 @@ Local mode talks directly to the authenticated local agent. Relay mode preserves
 
 For private owner/developer automation, the same 24-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
-The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The latest live `computer.inspect` reached Mecord but returned `ROUTE_NO_DEVICE` because the paired local runtime was offline; device-backed E2E therefore remains pending. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md).
+The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. Real paired-Windows device inspection/read/Git/create paths have been proven, and the separate Developer endpoint reports exactly 24 tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
 ## Windows package model
 

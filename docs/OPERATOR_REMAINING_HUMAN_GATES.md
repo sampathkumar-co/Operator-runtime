@@ -10,7 +10,7 @@ The npm publication gate is resolved:
 
 - npm user: **mecrod**
 - npm 2FA mode: **auth-and-writes**
-- release package: **mecord-connect@1.0.0**
+- release package: **mecord-connect@1.0.1**
 - npm organization/scope: **not required** for the unscoped package
 - registry state: **public under latest**
 - clean registry install, installed doctor and remote --help: **PASS**
@@ -22,7 +22,7 @@ Do not ask for an `@mecrod` organization again.
 
 Production is live on Mecord Connect v1:
 
-- source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
+- source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public MCP surface: exactly 9 tools

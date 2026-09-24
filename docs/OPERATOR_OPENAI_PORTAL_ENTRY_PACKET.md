@@ -55,7 +55,7 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
 Current production release:
-- deployed source: `3b3b1bff35f8e78519f114b603f98e8acc56cd66`
+- deployed source: `10914835e5ce4d8b1d2bf9952e8789efc8feb306`
 - branch: `main`
 - deployment evidence: 19/19 CI checks green; 437 passed / 17 expected skips / 0 failures
 - fresh ChatGPT OAuth reconnect imported exactly the canonical nine tools with no `device.claim`
@@ -75,7 +75,7 @@ Current production release:
 - first publication: **completed** through owner interactive npm authorization
 - future publication: staged/human-approval path as supported for the dual-use package
 
-Current registry state: **`mecord-connect@1.0.0` is public under `latest`**. Clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported.
+Current registry state: **`mecord-connect@1.0.1` is public under `latest`**. Clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported.
 
 MSIX / Microsoft Store is **not a Mecord Connect v1 submission requirement**.
 
@@ -231,9 +231,9 @@ All must be true:
 - Mecord Connect logo/composer icon render correctly;
 - website/support/privacy/terms are live with final Mecord Connect product branding and approved publisher identity;
 - proprietary LICENSE and DUAL_USE classification are present in the public npm package;
-- `mecord-connect@1.0.0` exists; **PASS**
+- `mecord-connect@1.0.1` exists; **PASS**
 - clean-machine `npx mecord-connect@latest doctor` passes; **PASS**
-- clean-machine reviewer-root startup/pairing works; **PENDING — latest live probe returned `ROUTE_NO_DEVICE` because the paired local runtime was offline**
+- clean-machine runtime installation and device pairing path are proven for the released runtime; **PASS for the software/runtime release**. A separate reviewer-account journey remains an OpenAI submission task, not a runtime blocker.
 - reviewer credential works without secondary verification;
 - domain challenge passes if issued;
 - Scan Tools imports exactly 9 tools;

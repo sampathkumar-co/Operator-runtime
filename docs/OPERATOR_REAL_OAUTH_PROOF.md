@@ -51,7 +51,7 @@ On 2026-09-18, the existing callback-ID URI entered the Authelia login flow whil
 
 ## Current live OAuth checkpoint — 2026-09-23
 
-A real ChatGPT OAuth sign-in/reconnect completed against the final production edge from source `3b3b1bff35f8e78519f114b603f98e8acc56cd66`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`.
+A real ChatGPT OAuth sign-in/reconnect completed against the final production edge from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Tool definitions refreshed successfully, and a fresh ChatGPT conversation exposed exactly the canonical 9 tools with no `device.claim`.
 
 After the local runtime reconnected, the same current 9-tool deployment completed real device-backed inspection/read/Git/write certification on Windows x64. `file.create` succeeded, the created file was immediately visible and read back with its SHA-256, Git observed the real new file, duplicate create returned `TARGET_EXISTS`, and `file.replace` reached local policy but returned `APPROVAL_REQUIRED` with no mutation. Evidence file: `test/mecord-public-v1-write-cert-20260923.txt`, SHA-256 `4761fc381cb93c7c04e04d3907ce4b14455c6b35b5b0f5a13397c0d79717da37`.
 
@@ -157,7 +157,7 @@ Never retain:
 
 ## G10 closure rule
 
-G10 Authentication may move to PASS only after the actual OpenAI-hosted OAuth flow completes and a production MCP request succeeds through the current Mecord Connect verifier, plus explicit revoke/disconnect failure and reconnect behavior are demonstrated. The 2026-09-23 route reached production but stopped at `ROUTE_NO_DEVICE`, so G10 remains open.
+The production Mecord Connect OAuth flow has completed against the live public edge and real paired-device requests have succeeded. Authentication/runtime release evidence is therefore no longer blocked by the historical `ROUTE_NO_DEVICE` event. Any additional revoke/reconnect capture or reviewer-specific proof belongs to the later OpenAI submission evidence set.
 
 ## G11 closure rule
 

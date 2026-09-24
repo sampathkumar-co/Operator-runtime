@@ -97,7 +97,8 @@ export function registerPublicTools(
   }, async ({ cwd, paths }) => {
     for (const item of paths) {
       const normalized = item.replace(/\\/g, '/');
-      if (item.startsWith('/') || /^[A-Za-z]:[\\/]/.test(item) || normalized === '.' || normalized === '..' || normalized.startsWith(':') || /[*?\[\]{}]/.test(normalized)) {
+      const segments = normalized.split('/').filter(Boolean);
+      if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized === '.' || segments.includes('..') || normalized.startsWith(':') || /[*?\[\]{}]/.test(normalized)) {
         return {
           isError: true,
           content: [{ type: 'text' as const, text: 'git.diff: path filters must be project-relative.' }],
