@@ -1,6 +1,8 @@
 # Mecord Connect Remaining Human / External Gates
 
-Status date: 2026-09-23
+Status date: 2026-09-24
+
+> **OpenAI submission-only checklist.** The npm/runtime/production release is already complete. These items do not block normal Mecord production use; they apply only if/when OpenAI developer verification permits directory submission.
 
 This runbook contains only work that cannot be completed autonomously without the owner's account/credential entry, a platform-issued secret, or explicit irreversible authorization.
 
