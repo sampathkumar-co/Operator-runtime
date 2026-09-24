@@ -4,7 +4,7 @@
 
 **MECORD CONNECT v1 IS LIVE; OPENAI SUBMISSION/APPROVAL IS NOT YET COMPLETE.**
 
-The production edge and npm runtime are released. Remaining work is limited to OpenAI/reviewer/device evidence and final submission actions that are intentionally not inferred from source-only tests.
+The production edge, npm runtime and real device path are released and proven. Remaining work is limited to OpenAI verification/reviewer evidence and final app-directory submission actions.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -166,7 +166,7 @@ Production OCC-3M previously passed:
 
 Shared ingress uses strict SNI host enforcement. The internal public-edge/gateway containers retain hardened filesystem/capability boundaries.
 
-The final successor must receive a fresh hostile/public-page check after deployment; historical OCC-3M evidence does not substitute for final deployment proof.
+The current production successor completed post-deploy verification. Any future deployment successor must receive a fresh hostile/public-page check; historical evidence must never substitute for verification of a newly deployed SHA.
 
 ## Historical engineering provenance
 
