@@ -1,6 +1,8 @@
 # Operator npm Namespace / First-Publish Bootstrap
 
-Status: owner-run checklist. No npm credentials are stored here.
+> **HISTORICAL / SUPERSEDED — 2026-09-24.** This file records the pre-publication first-publish procedure and intentionally preserves its original `1.0.0` / E404 evidence. It is not current release guidance. The live runtime is `mecord-connect@1.0.1` under `latest`; use `CURRENT_RELEASE_STATE.md` for current truth.
+
+Status: historical owner-run checklist. No npm credentials are stored here.
 Review date: 2026-09-18.
 Target package: `mecord-connect@1.0.0`.
 
