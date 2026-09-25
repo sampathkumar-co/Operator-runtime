@@ -55,7 +55,7 @@ Before final submission, compare the exact spelling/order accepted by OpenAI ind
 If OpenAI verifies a materially different spelling/order, reconcile those source/public values before submission.
 
 Current production release:
-- deployed source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
+- deployed source: `94becbf734817121fbea1a017b9e1b10c144d125`
 - branch: `main`
 - deployment evidence: exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke succeeded; post-deploy 9/24 tool counts, Developer pairing-route isolation and live-image `git.diff` traversal rejection passed
 - fresh ChatGPT OAuth reconnect imported exactly the canonical nine tools with no `device.claim`

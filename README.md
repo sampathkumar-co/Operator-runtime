@@ -4,7 +4,7 @@ Operator is a semantic execution substrate for normal ChatGPT conversations to o
 
 ## Status: Mecord Connect v1 production release complete — OpenAI directory verification blocked
 
-The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. Production is deployed from source `a7fd8c960a82c9565b944ffb50535eeed6989c52`; the public MCP surface exposes exactly 9 tools, the separate Developer MCP surface exposes exactly 24 tools, and `mecord-connect@1.0.1` is public on npm under `latest`. OpenAI developer verification/app-directory submission remains external and intentionally incomplete. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
+The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. Production is deployed from source `94becbf734817121fbea1a017b9e1b10c144d125`; the public MCP surface exposes exactly 9 tools, the separate Developer MCP surface exposes exactly 24 tools, and `mecord-connect@1.0.1` is public on npm under `latest`. OpenAI developer verification/app-directory submission remains external and intentionally incomplete. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
 ### Implemented and CI-certified
 

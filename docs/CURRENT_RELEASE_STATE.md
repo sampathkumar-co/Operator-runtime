@@ -6,7 +6,7 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 
 ## Production
 
-- production source: `a7fd8c960a82c9565b944ffb50535eeed6989c52`
+- production source: `94becbf734817121fbea1a017b9e1b10c144d125`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`

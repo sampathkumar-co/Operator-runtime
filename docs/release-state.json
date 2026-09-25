@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "statusDate": "2026-09-24",
   "production": {
-    "sourceCommit": "a7fd8c960a82c9565b944ffb50535eeed6989c52",
+    "sourceCommit": "94becbf734817121fbea1a017b9e1b10c144d125",
     "publicMcp": "https://operator.splcart.in/mcp",
     "developerMcp": "https://developer.operator.splcart.in/mcp",
     "publicToolCount": 9,

@@ -2,7 +2,7 @@
 
 Status date: 2026-09-24
 Canonical plan: `OPERATOR_MASTER_REVERIFICATION_AND_RELEASE_PLAN.md`
-Current production source: Mecord Connect `a7fd8c960a82c9565b944ffb50535eeed6989c52`
+Current production source: Mecord Connect `94becbf734817121fbea1a017b9e1b10c144d125`
 Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
 
 This file maps the canonical G0–G36 master plan to the current evidence. It does **not** replace `OPERATOR_RELEASE_GATE.md`; that file is the compact 26-gate submission view. A gate is PASS only where current evidence supports the master-plan scope. External/owner steps remain BLOCKED rather than being inferred from local tests.
@@ -11,7 +11,7 @@ Current canonical count: **32 PASS / 5 BLOCKED / 0 NOT APPLICABLE**. Production/
 
 | Gate | Status | Current evidence / blocker |
 |---|---|---|
-| G0 Candidate Identity | PASS | Production is deployed from exact source `a7fd8c960a82c9565b944ffb50535eeed6989c52`. The deployed Mecord Connect edge reports the v1 9-tool surface; OCC-3M remains only the rollback baseline. |
+| G0 Candidate Identity | PASS | Production is deployed from exact source `94becbf734817121fbea1a017b9e1b10c144d125`. The deployed Mecord Connect edge reports the v1 9-tool surface; OCC-3M remains only the rollback baseline. |
 | G1 Architecture Truth | PASS | Hosted edge/auth/relay/local-runtime topology and the public-vs-internal capability boundary are documented and production-checked. |
 | G2 Requirements Traceability | PASS | Current OpenAI auth/review/submission requirements are linked in certification evidence and were rechecked on 2026-09-18. Successive requirement rechecks directly found FG-016 (stable OAuth redirect), FG-017/FG-018 (publisher identity and notice reproducibility), and FG-019/FG-020 (required branding assets and required demo recording). |
 | G3 MCP Truthfulness & Safety | PASS | Public surface is exactly 9 allowlisted tools; review-package annotations cover all 9; no raw terminal/browser/UIA tool is exposed. |
@@ -37,9 +37,9 @@ Current canonical count: **32 PASS / 5 BLOCKED / 0 NOT APPLICABLE**. Production/
 | G23 Diagnostics Readiness | PASS | `mecord-connect` implements a bounded `doctor` command that verifies packaged file hashes/native helpers/UIA health and has regression coverage; clean-machine execution from the public registry is separately gated by G24. |
 | G24 Clean-Machine Usability | PASS | `mecord-connect@1.0.1` is public under `latest`; clean install, `doctor`, `remote --help`, one-command pairing/reconnect and the real paired-device path are proven. Reviewer-account simulation remains tracked separately under OpenAI submission gates. |
 | G25 Supply Chain Integrity | PASS | `mecord-connect@1.0.1` was published publicly under `latest` from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306` after interactive npm authorization. Registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan passed; 0 vulnerabilities were reported. |
-| G26 Production Infrastructure | PASS | The final Mecord Connect edge from `a7fd8c960a82c9565b944ffb50535eeed6989c52` is live. Production health, OAuth metadata, routing, exact 9/24 tool counts, Developer pairing-route isolation and hardened `git.diff` filtering were verified after deployment. |
+| G26 Production Infrastructure | PASS | The final Mecord Connect edge from `94becbf734817121fbea1a017b9e1b10c144d125` is live. Production health, OAuth metadata, routing, exact 9/24 tool counts, Developer pairing-route isolation and hardened `git.diff` filtering were verified after deployment. |
 | G27 Resource Safety | PASS | Performance regression and bounded hostile input probes are green; live edge remained healthy under the certified probes. |
-| G28 CI Reliability | PASS | Historical release PRs passed their required suites, and production commit `a7fd8c960a82c9565b944ffb50535eeed6989c52` completed CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke successfully before deployment. Future source successors must revalidate their own exact head before deployment. |
+| G28 CI Reliability | PASS | Historical release PRs passed their required suites, and production commit `94becbf734817121fbea1a017b9e1b10c144d125` completed CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke successfully before deployment. Future source successors must revalidate their own exact head before deployment. |
 | G29 Public Truthfulness | BLOCKED | Production now serves the final Mecord Connect deployment and the public npm package is live with the selected publisher/license/dual-use metadata. Remaining blocker is OpenAI individual publisher verification and reconciliation if the verified legal-name spelling/order differs. |
 | G30 Reviewer Usability | BLOCKED | A dedicated production reviewer account and reviewer-only one-factor authorization policy are provisioned and Authelia is healthy; normal users retain the two-factor default. The credential was not exposed to Git/chat. Owner retrieval/login verification, canonical fixture-only device pairing and the real end-to-end reviewer journey are still missing. |
 | G31 Positive Reviewer Cases | PASS | All submitted five positive cases pass through the certified public boundary on the deterministic fixture; positive #5 is bounded `git.diff`. |
