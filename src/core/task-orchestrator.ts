@@ -233,12 +233,12 @@ export class TaskOrchestrator {
       try { decision = planner.next(context); }
       catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       if (decision.type === 'complete') {
-        task.evidence.push(evidence('task_completion', 'pass', decision.message));
         const verification = verifyTaskCompletion(task);
         task.evidence.push(verification.evidence);
         if (!verification.ok) {
           return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
         }
+        task.evidence.push(evidence('task_completion', 'pass', decision.message, { verificationDigest: verification.bundle.digest }));
         finalizeTask(task);
         await this.#persistRunState(task, assertLease);
         return task;
