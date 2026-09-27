@@ -33,6 +33,7 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'terminal.execute': 'destructive',
   'terminal.session': 'dynamic',
   'process.inspect': 'read',
+  'process.manage': 'destructive',
   'browser.inspect': 'read',
   'browser.navigate': 'write',
   'browser.interact': 'external',
