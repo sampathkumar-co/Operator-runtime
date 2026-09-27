@@ -276,3 +276,98 @@ test('stage10 world postcondition follows the resolved value rather than any sta
   assert.equal(checked.state, 'BLOCKED');
   assert.match(checked.lastBlockReason ?? '', /resolved value does not match/);
 });
+
+
+test('stage10 compensates a newly created team mission when start fails before operation persistence', async (t) => {
+  const state = await tempDir(t);
+  const cancelled: string[] = [];
+  const missionId = crypto.randomUUID();
+  const fakeTeams = {
+    async submit() { return { id: missionId }; },
+    async start() { throw new Error('simulated start failure'); },
+    async cancel(id: string) { cancelled.push(id); return { id, state: 'CANCELLED' }; }
+  };
+  const registry = new DeviceRegistryStore(state);
+  const routing = new DeviceRoutingStore(state, registry);
+  const procedures = new ProcedureMemoryStore(state);
+  const world = new WorldModelStore(state);
+  const optimizer = new ExecutionOptimizerStore(state);
+  const fakeOrganizations = {
+    async create() { throw new Error('not expected'); },
+    async cancel() { return undefined; }
+  };
+  const ops = new DigitalOperationsLayer(state, {
+    procedures,
+    world,
+    devices: new DevicePoolScheduler(state, registry, routing),
+    optimizer,
+    teams: fakeTeams as any,
+    organizations: fakeOrganizations as any,
+    availableCapabilities: ['file.read']
+  });
+
+  await assert.rejects(
+    ops.submit({
+      objective: 'Fail during start',
+      scopeKey: 'project:cleanup',
+      successConditions: ['must not orphan execution'],
+      execution: { kind: 'team', workItems: work() },
+      run: true
+    }),
+    /simulated start failure/
+  );
+  assert.deepEqual(cancelled, [missionId]);
+  assert.deepEqual(await ops.list(), []);
+});
+
+test('stage10 organization procedure capture hashes every target Stage4 verifier result', async (t) => {
+  const { ops, organizations, teams, procedures } = await setup(t);
+  const operation = await ops.submit({
+    objective: 'Verify organization rollout evidence',
+    scopeKey: 'org:proof',
+    successConditions: ['target verifier passes'],
+    execution: {
+      kind: 'organization',
+      targets: [{ key: 'service-a', scopeKey: 'org:proof:service-a', workItems: work() }],
+      policy: { canarySize: 1, waveSize: 1, maxParallel: 1, allowedScopePrefixes: ['org:proof'] }
+    },
+    captureProcedure: {
+      key: 'org-rollout-proof',
+      title: 'Organization rollout proof',
+      objectiveKind: 'org-rollout',
+      assumptions: [],
+      steps: [{ capability: 'file.read', risk: 'read', summary: 'Inspect and verify target.' }]
+    },
+    run: true
+  });
+  assert.ok(operation.organizationProgramId);
+  let program = await organizations.inspect(operation.organizationProgramId!);
+  const target = program.targets[0]!;
+  assert.ok(target.missionId);
+  await finishTeam(teams, target.missionId!);
+
+  let refreshed = await ops.refresh(operation.id);
+  assert.equal(refreshed.state, 'PAUSED');
+  refreshed = await ops.promoteOrganization(operation.id, 'a'.repeat(64));
+  assert.equal(refreshed.state, 'RUNNING');
+  refreshed = await ops.refresh(operation.id);
+  assert.equal(refreshed.state, 'VERIFIED');
+
+  program = await organizations.inspect(operation.organizationProgramId!);
+  const mission = await teams.inspect(target.missionId!);
+  const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.result?.verificationPassed === true)!;
+  const expectedEvidence = {
+    programId: program.id,
+    waves: program.waves.map((wave) => ({ index: wave.index, promotionDigest: wave.promotionDigest ?? null, state: wave.state })),
+    targetVerifications: [{
+      targetKey: target.key,
+      missionId: mission.id,
+      verifierWorkItemId: verifier.id,
+      result: verifier.result
+    }]
+  };
+  const expectedDigest = crypto.createHash('sha256').update(JSON.stringify(expectedEvidence)).digest('hex');
+  const captured = (await procedures.list()).find((item) => item.key === 'org-rollout-proof');
+  assert.ok(captured);
+  assert.equal(captured!.verifierEvidenceDigest, expectedDigest);
+});
