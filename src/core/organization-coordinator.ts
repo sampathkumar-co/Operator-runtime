@@ -56,6 +56,10 @@ interface OrganizationState {
   programs: OrganizationProgram[];
 }
 
+interface OrganizationMutationTransaction {
+  onRollback(callback: () => Promise<void> | void): void;
+}
+
 const STORE_OPTIONS = {
   maxBytes: MAX_STATE_BYTES,
   errorCode: 'ORGANIZATION_STATE_CORRUPT',
@@ -123,19 +127,24 @@ export class OrganizationCoordinator {
 
   async start(idInput: string): Promise<OrganizationProgram> {
     const id = validUuid(idInput, 'programId');
-    return await this.#mutate(id, async (program) => {
+    return await this.#mutate(id, async (program, transaction) => {
       if (program.state !== 'PENDING' && program.state !== 'PAUSED' && program.state !== 'BLOCKED') throw new OperatorError('ORGANIZATION_STATE_INVALID', 'Only pending/paused/blocked programs can start.');
       const wasPaused = program.state === 'PAUSED' || program.state === 'BLOCKED';
       program.state = 'RUNNING';
       if (wasPaused) {
         for (const target of program.targets.filter((item) => item.wave === program.activeWave && item.missionId && item.state === 'BLOCKED')) {
           const mission = await this.#teams.inspect(target.missionId!);
-          if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') await this.#teams.resume(mission.id);
+          if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') {
+            await this.#teams.resume(mission.id);
+            transaction.onRollback(async () => {
+              try { await this.#teams.pause(mission.id); } catch {}
+            });
+          }
           target.state = mission.state === 'VERIFIED' ? 'VERIFIED' : 'RUNNING';
           target.updatedAt = this.#clock().toISOString();
         }
       }
-      await this.#startWave(program, program.activeWave);
+      await this.#startWave(program, program.activeWave, transaction);
       program.updatedAt = this.#clock().toISOString();
     });
   }
@@ -172,7 +181,7 @@ export class OrganizationCoordinator {
   async promote(idInput: string, verificationDigestInput: string): Promise<OrganizationProgram> {
     const id = validUuid(idInput, 'programId');
     const verificationDigest = shaDigest(verificationDigestInput, 'verificationDigest');
-    return await this.#mutate(id, async (program) => {
+    return await this.#mutate(id, async (program, transaction) => {
       const wave = program.waves[program.activeWave];
       if (!wave || wave.state !== 'VERIFIED') throw new OperatorError('ORGANIZATION_PROMOTION_DENIED', 'Current rollout wave is not independently verified.');
       wave.promotedAt = this.#clock().toISOString();
@@ -184,7 +193,7 @@ export class OrganizationCoordinator {
       }
       program.activeWave += 1;
       program.state = 'RUNNING';
-      await this.#startWave(program, program.activeWave);
+      await this.#startWave(program, program.activeWave, transaction);
       program.updatedAt = this.#clock().toISOString();
     });
   }
@@ -231,7 +240,7 @@ export class OrganizationCoordinator {
     return state.programs.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map((item) => structuredClone(item));
   }
 
-  async #startWave(program: OrganizationProgram, waveIndex: number): Promise<void> {
+  async #startWave(program: OrganizationProgram, waveIndex: number, transaction: OrganizationMutationTransaction): Promise<void> {
     const wave = program.waves[waveIndex];
     if (!wave) throw new OperatorError('ORGANIZATION_WAVE_INVALID', 'Rollout wave was not found.');
     if (wave.targetKeys.length > program.policy.maxParallel) throw new OperatorError('ORGANIZATION_PARALLEL_LIMIT', 'Wave exceeds configured parallel blast-radius limit.');
@@ -242,6 +251,9 @@ export class OrganizationCoordinator {
         workItems: target.workItems,
         budget: program.policy.teamBudget
       });
+      transaction.onRollback(async () => {
+        try { await this.#teams.cancel(mission.id); } catch {}
+      });
       await this.#teams.start(mission.id);
       target.missionId = mission.id;
       target.state = 'RUNNING';
@@ -250,15 +262,29 @@ export class OrganizationCoordinator {
     wave.state = 'RUNNING';
   }
 
-  async #mutate(id: string, mutate: (program: OrganizationProgram) => Promise<void> | void): Promise<OrganizationProgram> {
+  async #mutate(
+    id: string,
+    mutate: (program: OrganizationProgram, transaction: OrganizationMutationTransaction) => Promise<void> | void
+  ): Promise<OrganizationProgram> {
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const program = state.programs.find((item) => item.id === id);
       if (!program) throw new OperatorError('ORGANIZATION_PROGRAM_NOT_FOUND', 'Organization program was not found.');
-      await mutate(program);
-      validateProgram(program);
-      await this.#write(state);
-      return structuredClone(program);
+      const rollbackCallbacks: Array<() => Promise<void> | void> = [];
+      const transaction: OrganizationMutationTransaction = {
+        onRollback(callback) { rollbackCallbacks.push(callback); }
+      };
+      try {
+        await mutate(program, transaction);
+        validateProgram(program);
+        await this.#write(state);
+        return structuredClone(program);
+      } catch (error) {
+        for (const rollback of rollbackCallbacks.reverse()) {
+          try { await rollback(); } catch {}
+        }
+        throw error;
+      }
     });
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
