@@ -1204,6 +1204,7 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
       throw new OperatorError('TASK_GOAL_INVALID', `${goal.operation} does not accept scroll amounts.`);
     }
     goal.waitMs = boundedInteger(goal.waitMs, 0, 10_000, 0);
+    if (goal.physicalFallback !== undefined) goal.physicalFallback = normalizeAppPhysicalFallback(goal.physicalFallback, 'app physicalFallback');
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
 }
@@ -1304,6 +1305,148 @@ function verifyDockerServicesState(operation: 'start' | 'stop' | 'restart', expe
 
 const UIA_TASK_OPERATIONS: readonly UiaTaskOperation[] = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'];
 const UIA_SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
+const PHYSICAL_INPUT_TASK_OPERATIONS: readonly PhysicalInputTaskOperation[] = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'];
+
+function requireAppPhysicalFallback(goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>): AppPhysicalFallback {
+  if (!goal.physicalFallback) throw new OperatorError('TASK_VISUAL_FALLBACK_NOT_AUTHORIZED', 'Application goal does not authorize physical fallback.');
+  return goal.physicalFallback;
+}
+
+function normalizeAppPhysicalFallback(input: unknown, label: string): AppPhysicalFallback {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const allowed = new Set(['source', 'selector', 'region', 'operation', 'x', 'y', 'toX', 'toY', 'deltaX', 'deltaY', 'text', 'key', 'keys', 'maxWidth', 'maxHeight']);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label} contains an unsupported field.`);
+
+  const source = String(raw.source ?? '') as AppPhysicalFallback['source'];
+  if (!['screen', 'window', 'region'].includes(source)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.source must be screen, window, or region.`);
+  const operation = String(raw.operation ?? '') as PhysicalInputTaskOperation;
+  if (!PHYSICAL_INPUT_TASK_OPERATIONS.includes(operation)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.operation is outside the closed physical input set.`);
+  const maxWidth = optionalTaskInteger(raw.maxWidth, 1, 1280, `${label}.maxWidth`) ?? 960;
+  const maxHeight = optionalTaskInteger(raw.maxHeight, 1, 720, `${label}.maxHeight`) ?? 540;
+
+  let selector: VisualTaskSelector | undefined;
+  let region: AppPhysicalFallback['region'];
+  if (source === 'window') {
+    selector = normalizeVisualTaskSelector(raw.selector, `${label}.selector`);
+    if (raw.region !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region is not accepted for window capture.`);
+  } else if (source === 'region') {
+    if (raw.selector !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.selector is not accepted for region capture.`);
+    if (!raw.region || typeof raw.region !== 'object' || Array.isArray(raw.region)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region is required for region capture.`);
+    const value = raw.region as Record<string, unknown>;
+    const regionAllowed = new Set(['x', 'y', 'width', 'height']);
+    if (Object.keys(value).some((key) => !regionAllowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region contains an unsupported field.`);
+    region = {
+      x: requiredTaskInteger(value.x, -100_000, 100_000, `${label}.region.x`),
+      y: requiredTaskInteger(value.y, -100_000, 100_000, `${label}.region.y`),
+      width: requiredTaskInteger(value.width, 1, 16_384, `${label}.region.width`),
+      height: requiredTaskInteger(value.height, 1, 16_384, `${label}.region.height`)
+    };
+  } else if (raw.selector !== undefined || raw.region !== undefined) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} screen capture does not accept selector or region.`);
+  }
+
+  const fallback: AppPhysicalFallback = { source, operation, maxWidth, maxHeight, ...(selector ? { selector } : {}), ...(region ? { region } : {}) };
+  const x = optionalTaskInteger(raw.x, 0, maxWidth - 1, `${label}.x`);
+  const y = optionalTaskInteger(raw.y, 0, maxHeight - 1, `${label}.y`);
+  const toX = optionalTaskInteger(raw.toX, 0, maxWidth - 1, `${label}.toX`);
+  const toY = optionalTaskInteger(raw.toY, 0, maxHeight - 1, `${label}.toY`);
+  const deltaX = optionalTaskInteger(raw.deltaX, -1200, 1200, `${label}.deltaX`);
+  const deltaY = optionalTaskInteger(raw.deltaY, -1200, 1200, `${label}.deltaY`);
+
+  if (['move', 'click', 'double_click', 'drag', 'scroll'].includes(operation)) {
+    if (x === undefined || y === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label} pointer operation requires x and y in capture coordinates.`);
+    fallback.x = x; fallback.y = y;
+  } else if ([x, y, toX, toY, deltaX, deltaY].some((value) => value !== undefined)) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} keyboard operation does not accept pointer fields.`);
+  }
+  if (operation === 'drag') {
+    if (toX === undefined || toY === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.drag requires toX and toY.`);
+    fallback.toX = toX; fallback.toY = toY;
+  } else if (toX !== undefined || toY !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.toX/toY are accepted only for drag.`);
+
+  if (operation === 'scroll') {
+    if ((deltaX ?? 0) === 0 && (deltaY ?? 0) === 0) throw new OperatorError('TASK_GOAL_INVALID', `${label}.scroll requires a non-zero deltaX or deltaY.`);
+    fallback.deltaX = deltaX ?? 0; fallback.deltaY = deltaY ?? 0;
+  } else if (deltaX !== undefined || deltaY !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.deltaX/deltaY are accepted only for scroll.`);
+
+  if (operation === 'type_text') fallback.text = boundedText(raw.text, 4096, `${label}.text`);
+  else if (raw.text !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.text is accepted only for type_text.`);
+  if (operation === 'key_press') fallback.key = boundedText(raw.key, 32, `${label}.key`);
+  else if (raw.key !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.key is accepted only for key_press.`);
+  if (operation === 'hotkey') {
+    const keys = boundedTextArray(raw.keys, 4, 32, `${label}.keys`);
+    if (keys.length < 1) throw new OperatorError('TASK_GOAL_INVALID', `${label}.keys requires 1-4 keys.`);
+    fallback.keys = keys;
+  } else if (raw.keys !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.keys is accepted only for hotkey.`);
+
+  if (['type_text', 'key_press', 'hotkey'].includes(operation) && source !== 'window') {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} keyboard fallback requires a window capture so foreground identity can be verified.`);
+  }
+  return fallback;
+}
+
+function normalizeVisualTaskSelector(input: unknown, label: string): VisualTaskSelector {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const allowed = new Set(['name', 'className', 'processId']);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label} supports only name, className, and processId.`);
+  const selector: VisualTaskSelector = {};
+  if (raw.name !== undefined) selector.name = boundedText(raw.name, 512, `${label}.name`);
+  if (raw.className !== undefined) selector.className = boundedText(raw.className, 512, `${label}.className`);
+  if (raw.processId !== undefined) selector.processId = requiredTaskInteger(raw.processId, 1, 0xffff_ffff, `${label}.processId`);
+  if (Object.keys(selector).length === 0) throw new OperatorError('TASK_GOAL_INVALID', `${label} must identify one top-level window.`);
+  return selector;
+}
+
+function requiredTaskInteger(value: unknown, min: number, max: number, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an integer from ${min} to ${max}.`);
+  return parsed;
+}
+
+function optionalTaskInteger(value: unknown, min: number, max: number, label: string): number | undefined {
+  return value === undefined ? undefined : requiredTaskInteger(value, min, max, label);
+}
+
+function verifyAppVisualCaptureResult(
+  goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>,
+  outputValue: unknown
+): { captureId: string; sha256: string } {
+  const fallback = requireAppPhysicalFallback(goal);
+  const output = asRecord(outputValue);
+  const captureId = boundedText(output.captureId, 128, 'visual captureId');
+  const sha256Value = boundedText(output.sha256, 64, 'visual capture SHA-256').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha256Value)) throw new OperatorError('TASK_VISUAL_CAPTURE_INVALID', 'Visual fallback capture did not return a valid SHA-256.');
+  const width = requiredTaskInteger(output.width, 1, 1280, 'visual capture width');
+  const height = requiredTaskInteger(output.height, 1, 720, 'visual capture height');
+  for (const [x, y, label] of [[fallback.x, fallback.y, 'target'], [fallback.toX, fallback.toY, 'drag target']] as const) {
+    if (x === undefined && y === undefined) continue;
+    if (x === undefined || y === undefined || x >= width || y >= height) throw new OperatorError('TASK_VISUAL_POINT_OUTSIDE_CAPTURE', `Physical fallback ${label} is outside the returned capture.`);
+  }
+  if (['type_text', 'key_press', 'hotkey'].includes(fallback.operation) && typeof output.windowId !== 'string') {
+    throw new OperatorError('TASK_VISUAL_WINDOW_IDENTITY_MISSING', 'Keyboard visual fallback requires a capture-bound window identity.');
+  }
+  return { captureId, sha256: sha256Value };
+}
+
+function verifyAppPhysicalFallbackResult(
+  goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>,
+  outputValue: unknown
+): void {
+  const fallback = requireAppPhysicalFallback(goal);
+  const output = asRecord(outputValue);
+  if (output.operation !== fallback.operation) throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback result did not identify the requested operation.');
+  const postcondition = asRecord(output.postcondition);
+  if (postcondition.dispatched !== true || postcondition.captureLeaseConsumed !== true || postcondition.afterCaptured !== true) {
+    throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback did not prove dispatch, one-shot lease consumption, and AFTER capture.');
+  }
+  const afterSha256 = String(postcondition.afterSha256 ?? '');
+  if (!/^[0-9a-f]{64}$/i.test(afterSha256)) throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback AFTER capture did not return a valid SHA-256.');
+  if (fallback.source === 'window' && postcondition.windowStable !== true) {
+    throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback AFTER capture did not preserve the capture-bound window identity.');
+  }
+}
 
 function normalizeUiaTaskSelector(input: unknown, label: string): UiaTaskSelector {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
