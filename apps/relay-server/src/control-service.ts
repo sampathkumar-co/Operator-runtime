@@ -680,12 +680,24 @@ function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequ
 function operationRequiredCapabilities(request: Record<string, unknown>): string[] {
   const execution = request.execution;
   if (execution === undefined) {
+    const requested = new Set<string>();
+    const authority = request.authority;
+    if (authority !== undefined) {
+      if (!authority || typeof authority !== 'object' || Array.isArray(authority)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority is invalid.');
+      const capabilities = (authority as Record<string, unknown>).capabilities;
+      if (!Array.isArray(capabilities) || capabilities.length < 1 || capabilities.length > 500) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority capabilities are invalid.');
+      for (const value of capabilities) requested.add(validName(String(value), 'operation authority capability'));
+    }
     const procedure = request.procedure;
-    if (!procedure || typeof procedure !== 'object' || Array.isArray(procedure)) return [];
-    const required = (procedure as Record<string, unknown>).requiredCapabilities;
-    if (required === undefined) return [];
-    if (!Array.isArray(required) || required.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'procedure requiredCapabilities are invalid.');
-    return [...new Set(required.map((value) => validName(String(value), 'procedure required capability')))].sort();
+    if (procedure !== undefined) {
+      if (!procedure || typeof procedure !== 'object' || Array.isArray(procedure)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation procedure is invalid.');
+      const required = (procedure as Record<string, unknown>).requiredCapabilities;
+      if (required !== undefined) {
+        if (!Array.isArray(required) || required.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'procedure requiredCapabilities are invalid.');
+        for (const value of required) requested.add(validName(String(value), 'procedure required capability'));
+      }
+    }
+    return [...requested].sort();
   }
   if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is invalid.');
   const raw = execution as Record<string, unknown>;
