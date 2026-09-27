@@ -71,6 +71,28 @@ test('stage4 local API coordinates claimed worker execution through the real run
   const coderClaim = await coderClaimResponse.json() as any;
   assert.equal(coderClaim.workItem.key, 'code');
 
+  const blackboardWrite = await fetch(base + '/v1/teams/' + missionId + '/blackboard', {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      workerId: coder.id, workItemId: coderClaim.workItem.id, leaseId: coderClaim.workItem.lease.id,
+      key: 'implementation', expectedRevision: 0, value: { file: 'shared.txt', status: 'writing' }
+    })
+  });
+  assert.equal(blackboardWrite.status, 200);
+  const blackboardRead = await fetch(base + '/v1/teams/' + missionId + '/blackboard', { headers: { authorization: 'Bearer ' + token } });
+  assert.equal(blackboardRead.status, 200);
+  assert.equal(((await blackboardRead.json() as any).blackboard[0].revision), 1);
+
+  const staleBlackboardWrite = await fetch(base + '/v1/teams/' + missionId + '/blackboard', {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      workerId: coder.id, workItemId: coderClaim.workItem.id, leaseId: coderClaim.workItem.lease.id,
+      key: 'implementation', expectedRevision: 0, value: { status: 'stale' }
+    })
+  });
+  assert.equal(staleBlackboardWrite.status, 409);
+  assert.equal((await staleBlackboardWrite.json() as any).error.code, 'TEAM_BLACKBOARD_CONFLICT');
+
   const writeResponse = await fetch(base + '/v1/teams/' + missionId + '/work/' + coderClaim.workItem.id + '/execute', {
     method: 'POST', headers,
     body: JSON.stringify({
