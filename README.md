@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: production v1 live; Stage 1–10 source successor certified
+## Status: Stage 1–10 production live
 
-The currently deployed production release remains source `94becbf734817121fbea1a017b9e1b10c144d125`, with exactly 9 public tools, 24 deployed Developer tools and `mecord-connect@1.0.1` under `latest`. The certified source successor on `feature/stage5-10-agent-os` is recorded at runtime head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`, keeps the public 9-tool review surface unchanged, and expands the private/Developer source surface to **32 grouped tools**. It includes the already-certified Windows RDC-parity and Stage-4 runtime plus Stages 5–10: verified procedural memory, an evidence-backed cross-application world model, trusted paired-device resource scheduling, canary-gated organization execution, bounded authority-neutral self-optimization, and the governed digital-operations layer. It is not production until merge/deployment/release-state promotion. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
+Production is live at source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, with the public 9-tool review surface unchanged and the private/Developer surface expanded to **32 grouped tools**. The deployed runtime includes Windows RDC parity plus Stages 3–10: bounded autonomous tasks, shared-state multi-agent execution, verified procedural memory, an evidence-backed cross-application world model, trusted paired-device resource scheduling, canary-gated organization execution, bounded authority-neutral self-optimization, and governed digital operations. The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated 2.0.0 publication is completed. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -35,7 +35,7 @@ The currently deployed production release remains source `94becbf734817121fbea1a
 - account-scoped multi-device registry, deterministic routing and project-to-device binding
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
-- source-successor full/private MCP runtime with **30 grouped semantic tools**; currently deployed production Developer endpoint remains 24 until successor deployment
+- production full/private MCP runtime with **32 grouped semantic tools**
 - curated public Mecord Connect MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
@@ -60,7 +60,7 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 ## Remaining external gates
 
-The existing production deployment, npm publication, public 9-tool path and deployed 24-tool Developer endpoint are complete. The certified **32-tool Stage-1–10 successor** still requires merge/deployment/promotion before it becomes the live production runtime. OpenAI directory work remains external:
+The Stage-1–10 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The remaining local release task is the separately authenticated npm patch publication; OpenAI directory work remains external:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
@@ -157,11 +157,11 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. On the certified successor branch, relay mode preserves the same **32-tool private MCP surface** while routing execution through the relay control authority to a paired device. The currently deployed Developer endpoint remains the older 24-tool production snapshot until successor deployment. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. In production, relay mode preserves the same **32-tool private MCP surface** while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-For private owner/developer automation, the successor's 32-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge** after deployment. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
+For private owner/developer automation, the 32-tool surface is served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
-The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. Real paired-Windows device inspection/read/Git/create paths have been proven, and the separate Developer endpoint reports exactly 24 tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
+The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The separate Developer endpoint reports exactly 32 grouped tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
 ## Windows package model
 

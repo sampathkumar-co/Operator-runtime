@@ -1,6 +1,6 @@
 # Mecord Connect OpenAI Submission Gate — public product v1.0.0 / runtime v1.0.1
 
-Current production source: `94becbf734817121fbea1a017b9e1b10c144d125`
+Current production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
 Current public package: `mecord-connect@1.0.1` (`latest`)
 Deployment evidence: exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health/OAuth/routing/security checks passed; fresh ChatGPT connection imported exactly 9 tools with no `device.claim`.
 Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
@@ -11,7 +11,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 
 | Gate | Status | Evidence / reason |
 |---|---|---|
-| G1 Source integrity | PASS | Production is deployed from exact source `94becbf734817121fbea1a017b9e1b10c144d125`; the production health/provenance endpoint and post-deploy verification bind the live edge to the final v1 source candidate. |
+| G1 Source integrity | PASS | Production is deployed from exact source `3361b2f77d2b04028d514b178bd4a246fc863e6c`; the production health/provenance endpoint and post-deploy verification bind the live edge to the final v1 source candidate. |
 | G2 Runtime functionality | PASS | Exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health and routing checks passed after deployment. |
 | G3 Filesystem safety | PASS | Windows junction path-authority job passed; full Windows-aware suite passed 361 tests with 0 failures; public file tools enforce authorized roots and restricted-data guards. |
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
@@ -36,7 +36,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 | G23 Real ChatGPT E2E | PASS | Real ChatGPT OAuth and the deployed 9-tool surface pass paired-Windows inspect/read/Git/create/read-back checks. Duplicate create and local approval boundaries fail closed as designed; session approval/continuation is release-certified. Reviewer-only exercises remain submission work. |
 | G24 OpenAI Scan Tools | BLOCKED | Must be run from the OpenAI submission portal against the exact production MCP endpoint. |
 | G25 Reviewer simulation | BLOCKED | Public device routing and real write semantics are now proven on a paired Windows x64 runtime. The dedicated reviewer credential/fixture journey itself remains pending, along with final reset/reproducibility of the submitted five positive + three negative reviewer cases under reviewer authority. |
-| G26 Submission package | BLOCKED | Final deployment, npm publication, public 9-tool operation and Developer 24-tool hosting are complete. Remaining work is OpenAI verification plus whatever portal/reviewer/Scan Tools/demo steps become available after that external gate is resolved. |
+| G26 Submission package | BLOCKED | Final deployment, npm publication, public 9-tool operation and Developer 32-tool hosting are complete. Remaining work is OpenAI verification plus whatever portal/reviewer/Scan Tools/demo steps become available after that external gate is resolved. |
 
 ## Remaining blocking actions
 
@@ -47,7 +47,7 @@ The software/runtime release is complete. Only OpenAI directory-submission work 
 3. **Serve a portal-issued challenge only if OpenAI actually issues one.**
 4. **Select Submit for Review only after the owner explicitly decides to pursue directory publication.**
 
-`mecord-connect@1.0.1` is public under `latest`; npm, production hosting, the public 9-tool surface and the separate 24-tool Developer endpoint are not release blockers.
+`mecord-connect@1.0.1` is public under `latest`; npm, production hosting, the public 9-tool surface and the separate 32-tool Developer endpoint are not release blockers.
 
 ## OCC-3M merge evidence
 

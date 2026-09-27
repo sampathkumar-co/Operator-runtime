@@ -1,28 +1,31 @@
 {
   "schemaVersion": 1,
-  "statusDate": "2026-09-24",
+  "statusDate": "2026-09-27",
   "production": {
-    "sourceCommit": "94becbf734817121fbea1a017b9e1b10c144d125",
+    "sourceCommit": "3361b2f77d2b04028d514b178bd4a246fc863e6c",
     "publicMcp": "https://operator.splcart.in/mcp",
     "developerMcp": "https://developer.operator.splcart.in/mcp",
     "publicToolCount": 9,
-    "developerToolCount": 24,
+    "developerToolCount": 32,
     "developerPairingRouteStatus": 404
   },
   "versions": {
     "publicProduct": "1.0.0",
     "runtimePackage": "1.0.1",
     "runtimeTag": "latest",
-    "policy": "public-schema-stable-runtime-patch-independent"
-  },  "openAI": {
+    "policy": "public-schema-stable-runtime-semver-independent"
+  },
+  "openAI": {
     "developerVerification": "blocked",
     "appDirectorySubmission": "not-submitted",
     "developerChatGptConnection": "blocked-by-developer-verification"
   },
   "notes": [
     "The public product/plugin version tracks the stable public MCP review/schema snapshot.",
-    "The Windows npm runtime may advance patch versions independently while public major/minor compatibility is preserved.",
-    "The public ChatGPT surface remains exactly 9 tools; the separate Developer MCP endpoint exposes exactly 24 tools.",
+    "The Windows npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged.",
+    "The next certified npm runtime candidate is 2.0.0; runtimePackage remains the actually published npm latest until registry publication succeeds.",
+    "The public ChatGPT surface remains exactly 9 tools; the separate Developer MCP endpoint exposes exactly 32 grouped tools.",
+    "Stage 1-10 is live in production at source 3361b2f77d2b04028d514b178bd4a246fc863e6c.",
     "OpenAI-side verification/submission status does not change the production/runtime release status."
   ]
 }

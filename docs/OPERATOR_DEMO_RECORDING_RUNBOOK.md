@@ -7,7 +7,7 @@ Authoritative references:
 - https://developers.openai.com/plugins/deploy/submission
 - https://developers.openai.com/plugins/deploy/submission-errors
 
-Production OAuth, the final nine-tool ChatGPT connection, the public npm package, and the separate 24-tool Developer endpoint are live. The recording is deferred because OpenAI developer verification/app-directory submission is currently blocked externally. Do not fabricate reviewer evidence while that platform gate is unavailable.
+Production OAuth, the final nine-tool ChatGPT connection, the public npm package, and the separate 32-tool Developer endpoint are live. The recording is deferred because OpenAI developer verification/app-directory submission is currently blocked externally. Do not fabricate reviewer evidence while that platform gate is unavailable.
 
 ## Preconditions
 

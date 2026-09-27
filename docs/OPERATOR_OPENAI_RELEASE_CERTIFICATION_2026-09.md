@@ -12,7 +12,7 @@ This document is an engineering certification record, not a claim of OpenAI appr
 
 Production is live on Mecord Connect v1:
 
-- source: `94becbf734817121fbea1a017b9e1b10c144d125`
+- source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public surface: exactly 9 MCP tools
@@ -27,7 +27,7 @@ Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the me
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The deployed v1 source is exact commit `94becbf734817121fbea1a017b9e1b10c144d125`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
+The deployed v1 source is exact commit `3361b2f77d2b04028d514b178bd4a246fc863e6c`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
 
 This candidate includes:
 
@@ -148,7 +148,7 @@ Production OAuth uses a predefined public client with:
 
 Provider preflight and redirect acceptance are proven. A real ChatGPT-hosted OAuth sign-in/reconnect also completed and refreshed the live nine-tool definition.
 
-The released public path has now completed real paired-Windows device inspection/read/Git/create verification, and production health reports the exact release commit. The separate Developer endpoint is also live with 24 tools and no pairing route. Remaining work is OpenAI-side verification/submission evidence; it is not a runtime-release blocker.
+The released public path has now completed real paired-Windows device inspection/read/Git/create verification, and production health reports the exact release commit. The separate Developer endpoint is also live with 32 grouped tools and no pairing route. Remaining work is OpenAI-side verification/submission evidence; it is not a runtime-release blocker.
 
 ## Production isolation/security baseline
 
@@ -195,14 +195,14 @@ The software/runtime release is complete. Remaining work is intentionally limite
 3. create/attach the separate Developer ChatGPT connection only when OpenAI permits it;
 4. select **Submit for Review** only if the owner explicitly decides to pursue directory publication.
 
-No npm publication, production deployment, public 9-tool runtime, Developer 24-tool endpoint or local-device runtime work remains blocked on these OpenAI-side steps.
+No npm publication, production deployment, public 9-tool runtime, Developer 32-tool endpoint or local-device runtime work remains blocked on these OpenAI-side steps.
 
 ## Production deployment state
 
-Production deployment is complete at `94becbf734817121fbea1a017b9e1b10c144d125`. Live verification on 2026-09-24 confirmed:
+Production deployment is complete at `3361b2f77d2b04028d514b178bd4a246fc863e6c`. Live verification on 2026-09-24 confirmed:
 
 - public health: tool surface `public`, tool count **9**;
-- Developer health: tool surface `developer`, tool count **24**;
+- Developer health: tool surface `developer`, tool count **32**;
 - Developer pairing route: **404** by design;
 - npm `latest`: **mecord-connect@1.0.1**.
 
