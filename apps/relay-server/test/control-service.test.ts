@@ -981,6 +981,10 @@ test('stage7 uses procedure capability requirements only as trusted routing filt
             assumptions: [],
             requiredCapabilities: ['browser.inspect']
           },
+          authority: {
+            capabilities: ['browser.inspect'],
+            resources: ['browser:global']
+          },
           maxRisk: 'read',
           run: false
         }
