@@ -103,7 +103,8 @@ export class RelayAgentClient {
   }
 
   async submitOperation(input: OperationSubmitInput): Promise<OperationTransportResult> {
-    return await this.#operationRequest({ operation: 'submit', request: input });
+    const { resourceRequirements, ...request } = input;
+    return await this.#operationRequest({ operation: 'submit', request }, resourceRequirements);
   }
 
   async controlOperation(operationId: string, operation: OperationControlOperation, verificationDigest?: string): Promise<OperationTransportResult> {
@@ -134,7 +135,7 @@ export class RelayAgentClient {
     return body;
   }
 
-  async #operationRequest(operation: Record<string, unknown>): Promise<OperationTransportResult> {
+  async #operationRequest(operation: Record<string, unknown>, resourceRequirements?: OperationSubmitInput['resourceRequirements']): Promise<OperationTransportResult> {
     const response = await fetch(new URL('/v1/operation', this.#url), {
       redirect: 'error', method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
@@ -144,6 +145,7 @@ export class RelayAgentClient {
         ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
         ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
         operation,
+        ...(resourceRequirements ? { resourceRequirements } : {}),
         waitMs: this.#waitMs
       }),
       signal: AbortSignal.timeout(this.#waitMs + 5_000)
