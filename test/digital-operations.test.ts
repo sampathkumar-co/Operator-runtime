@@ -31,7 +31,8 @@ async function setup(t: test.TestContext) {
     devices: new DevicePoolScheduler(state, registry, routing),
     optimizer: new ExecutionOptimizerStore(state),
     teams,
-    organizations: new OrganizationCoordinator(state, teams)
+    organizations: new OrganizationCoordinator(state, teams),
+    availableCapabilities: ['project.inspect', 'file.read', 'file.write', 'browser.interact', 'terminal.session']
   };
   return { state, teams, ...dependencies, ops: new DigitalOperationsLayer(state, dependencies) };
 }
@@ -194,6 +195,41 @@ test('stage10 requestId is idempotent for identical contract and rejects conflic
 
   await assert.rejects(
     ops.submit({ ...request, objective: 'Different contract' }),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_CONFLICT'
+  );
+});
+
+
+test('stage10 outcome-only submit decomposes into bounded team work without caller-supplied execution graph', async (t) => {
+  const { ops, teams } = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId,
+    objective: 'Repair one project state and verify it',
+    scopeKey: 'project:auto',
+    successConditions: ['the intended state is observable', 'independent verification passes'],
+    maxRisk: 'write' as const,
+    run: false
+  };
+
+  const first = await ops.submit(request);
+  assert.equal(first.mode, 'team');
+  assert.match(first.planDigest ?? '', /^[0-9a-f]{64}$/);
+  assert.ok(first.teamMissionId);
+
+  const mission = await teams.inspect(first.teamMissionId!);
+  assert.deepEqual(mission.workItems.map((item) => item.key), ['plan', 'execute-write', 'test', 'verify']);
+  assert.equal(mission.workItems.at(-1)?.role, 'verifier');
+  assert.ok(mission.workItems.every((item) => !(item.allowedCapabilities ?? []).includes('browser.interact')));
+  assert.ok(mission.workItems.every((item) => !(item.allowedCapabilities ?? []).includes('terminal.session')));
+
+  const replay = await ops.submit(structuredClone(request));
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.teamMissionId, first.teamMissionId);
+  assert.equal(replay.planDigest, first.planDigest);
+
+  await assert.rejects(
+    ops.submit({ ...request, maxRisk: 'read' as const }),
     (error: any) => error?.code === 'OPERATIONS_REQUEST_CONFLICT'
   );
 });
