@@ -14,6 +14,18 @@ import { verifyTaskCompletion } from './task-verifier.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
+export type PhysicalInputTaskOperation = 'move' | 'click' | 'double_click' | 'drag' | 'scroll' | 'type_text' | 'key_press' | 'hotkey';
+export type VisualTaskSelector = { name?: string; className?: string; processId?: number };
+export type AppPhysicalFallback = {
+  source: 'screen' | 'window' | 'region';
+  selector?: VisualTaskSelector;
+  region?: { x: number; y: number; width: number; height: number };
+  operation: PhysicalInputTaskOperation;
+  x?: number; y?: number; toX?: number; toY?: number;
+  deltaX?: number; deltaY?: number;
+  text?: string; key?: string; keys?: string[];
+  maxWidth?: number; maxHeight?: number;
+};
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 export type ProjectQualityCheck = 'lint' | 'test' | 'build';
@@ -32,6 +44,7 @@ export type AtomicSemanticTaskGoal =
       kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
       value?: string; horizontalAmount?: string; verticalAmount?: string;
       verifySelector?: UiaTaskSelector; waitMs?: number;
+      physicalFallback?: AppPhysicalFallback;
     };
 
 export type SemanticTaskGoal =
