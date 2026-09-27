@@ -160,6 +160,15 @@ export function createLocalAgentServer(options: {
     timer: NodeJS.Timeout;
   };
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
+  const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
+
+  const abortTeamActions = (predicate: (entry: { missionId: string; workItemId: string; workerId: string }) => boolean) => {
+    for (const [key, entry] of activeTeamActions) {
+      if (!predicate(entry)) continue;
+      entry.controller.abort();
+      activeTeamActions.delete(key);
+    }
+  };
 
   const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision) => {
     const waiters = approvalWaiters.get(actionId);
@@ -209,7 +218,8 @@ export function createLocalAgentServer(options: {
 
   const executeActionWithCurrentApproval = async (
     action: ActionRequest,
-    approvalAuthority: ApprovalAuthorityContext | undefined
+    approvalAuthority: ApprovalAuthorityContext | undefined,
+    signal?: AbortSignal
   ): Promise<ActionResult> => {
     const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
     const sessionPermissions = options.sessionApprovals
@@ -222,7 +232,7 @@ export function createLocalAgentServer(options: {
         }
       : sessionPermissions;
     if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-    return await options.runtime.execute(action, permissions);
+    return await options.runtime.execute(action, permissions, { signal });
   };
 
   const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
@@ -332,6 +342,7 @@ export function createLocalAgentServer(options: {
           : operation === 'pause' ? await options.teams.pause(id)
           : operation === 'resume' ? await options.teams.resume(id)
           : await options.teams.cancel(id);
+        if (operation === 'pause' || operation === 'cancel') abortTeamActions((entry) => entry.missionId === id);
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -365,6 +376,9 @@ export function createLocalAgentServer(options: {
         const mission = workerActionRoute[3] === 'heartbeat'
           ? await options.teams.heartbeat(workerActionRoute[1]!, { workerId: workerActionRoute[2]!, ...(body.leaseId === undefined ? {} : { leaseId: String(body.leaseId) }) })
           : await options.teams.revokeWorker(workerActionRoute[1]!, { workerId: workerActionRoute[2]! });
+        if (workerActionRoute[3] === 'revoke') {
+          abortTeamActions((entry) => entry.missionId === workerActionRoute[1]! && entry.workerId === workerActionRoute[2]!);
+        }
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORKER_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -386,7 +400,7 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         const resourceKeys = teamActionResourceKeys(action);
-        await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
+        const authorization = await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
           workerId,
           workItemId: teamExecuteRoute[2]!,
           leaseId,
@@ -394,9 +408,18 @@ export function createLocalAgentServer(options: {
           risk: action.risk,
           resourceKeys
         });
+        const ownedLease = authorization.workItem.lease;
+        if (!ownedLease) throw new Error('Authorized team work lost its lease before execution.');
+        const remainingLeaseMs = Math.max(1, Date.parse(ownedLease.expiresAt) - Date.now());
+        const controller = new AbortController();
+        const actionKey = [teamExecuteRoute[1]!, teamExecuteRoute[2]!, leaseId, action.id].join(':');
+        activeTeamActions.set(actionKey, { missionId: teamExecuteRoute[1]!, workItemId: teamExecuteRoute[2]!, workerId, controller });
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(remainingLeaseMs)]);
         const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
-        let result = await executeActionWithCurrentApproval(teamAction, approvalAuthority);
+        let result: ActionResult;
         let autoResumedAfterApproval = false;
+        try {
+          result = await executeActionWithCurrentApproval(teamAction, approvalAuthority, signal);
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(teamAction, approvalAuthority);
           const decision = options.recoveryToken ? await waitForApprovalDecision(teamAction.id, pending.approvalRequestId) : null;
@@ -409,7 +432,7 @@ export function createLocalAgentServer(options: {
               risk: teamAction.risk,
               resourceKeys
             });
-            result = await executeActionWithCurrentApproval(teamAction, approvalAuthority);
+            result = await executeActionWithCurrentApproval(teamAction, approvalAuthority, signal);
             autoResumedAfterApproval = true;
           } else if (decision === 'deny') {
             result = {
@@ -439,6 +462,9 @@ export function createLocalAgentServer(options: {
           }
         });
         send(res, result.ok ? 200 : 409, result);
+        } finally {
+          activeTeamActions.delete(actionKey);
+        }
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_EXECUTION_FAILED', message: error instanceof Error ? error.message : String(error) } });
       }
@@ -924,6 +950,7 @@ export function createLocalAgentServer(options: {
     },
     async close(): Promise<void> {
       clearApprovalWaiters();
+      abortTeamActions(() => true);
       if (!server.listening) return;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
