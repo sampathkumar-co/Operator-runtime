@@ -752,6 +752,17 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ name, pid, limit }) => invoke('process.inspect', 'read', { name, pid, limit }));
 
+  server.registerTool('process.manage', {
+    title: 'Manage fingerprinted Windows process',
+    description: 'Terminate one freshly inspected current-user Windows process tree. Requires the exact SHA-256 identity fingerprint from process.inspect, refuses Operator/system-critical/other-user processes, re-inspects the postcondition, and is destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.literal('terminate'),
+      pid: z.number().int().positive(),
+      expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, pid, expectedFingerprint }) => invoke('process.manage', 'destructive', { operation, pid, expectedFingerprint }, 'process:' + pid));
+
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
     description: 'Inspect compact Chromium tab state or a bounded semantic/accessibility snapshot of one target. Raw HTML and DevTools WebSocket URLs are not returned.',
