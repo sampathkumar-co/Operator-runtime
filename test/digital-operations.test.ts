@@ -97,7 +97,7 @@ test('stage10 binds preconditions, verified procedure memory, team verifier and 
 
   await world.observe({
     entity: { key: 'service:checkout', type: 'service', scopeKey: scope, label: 'Checkout service' },
-    source: 'browser.health', domain: 'browser', evidenceDigest: 'd'.repeat(64),
+    source: 'project.inspect', domain: 'project', evidenceDigest: 'd'.repeat(64),
     facts: { state: 'healthy' }, confidence: 0.98
   });
   const verified = await ops.refresh(operation.id);
