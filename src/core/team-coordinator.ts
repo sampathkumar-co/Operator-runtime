@@ -370,6 +370,55 @@ export class TeamCoordinator {
     return { mission, ...(claimed ? { workItem: claimed } : {}) };
   }
 
+  async authorizeExecution(missionId: string, input: {
+    workerId: string;
+    workItemId: string;
+    leaseId: string;
+    capability: string;
+    risk: ActionRisk;
+    resourceKeys?: string[];
+  }): Promise<{ mission: TeamMission; workItem: TeamWorkItem }> {
+    let authorized!: TeamWorkItem;
+    const mission = await this.#store.update(missionId, (current) => {
+      reapExpired(current);
+      assertMissionRunnable(current);
+      const worker = requireWorker(current, input.workerId);
+      const item = requireWorkItem(current, input.workItemId);
+      const lease = requireLease(item, worker.id, input.leaseId, current.epoch);
+      const capability = boundedText(input.capability, 256, 'capability');
+      if (!item.allowedCapabilities.includes(capability) || !worker.capabilities.includes(capability)) {
+        throw new OperatorError('TEAM_CAPABILITY_DENIED', `Capability ${capability} is not authorized for this worker/work item.`);
+      }
+      const risk = validRisk(input.risk);
+      if (risk !== 'read' && risk !== item.risk) {
+        throw new OperatorError('TEAM_RISK_DENIED', `Work item declared risk ${item.risk} and cannot execute ${risk} action.`);
+      }
+      const requestedResources = uniqueStrings(input.resourceKeys ?? [], MAX_RESOURCES, 1024, 'execution resourceKeys').map(normalizeResourceKey);
+      for (const key of requestedResources) {
+        if (!item.resources.includes(key)) throw new OperatorError('TEAM_RESOURCE_DENIED', `Resource ${key} is not assigned to this work item.`);
+        const resource = requireResource(current, key);
+        if (resource.uncertain || resource.lock?.leaseId !== lease.id) throw new OperatorError('TEAM_ARTIFACT_CONFLICT', `Resource ${key} is not safely owned by this lease.`);
+      }
+      if (risk !== 'read' && item.resources.length > 0 && requestedResources.length === 0) {
+        throw new OperatorError('TEAM_RESOURCE_REQUIRED', 'Mutating team actions with declared resources must bind at least one resource key.');
+      }
+      const now = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + current.budget.leaseMs).toISOString();
+      lease.heartbeatAt = now;
+      lease.expiresAt = expiresAt;
+      worker.heartbeatAt = now;
+      for (const resourceKey of item.resources) {
+        const resource = requireResource(current, resourceKey);
+        if (resource.lock?.leaseId === lease.id) resource.lock.expiresAt = expiresAt;
+      }
+      current.updatedAt = now;
+      appendEvent(current, 'work.action_authorized', worker.id, item.id, { capability, risk, resources: requestedResources.length });
+      authorized = structuredClone(item);
+      return current;
+    });
+    return { mission, workItem: authorized };
+  }
+
   async complete(missionId: string, input: {
     workerId: string;
     workItemId: string;
