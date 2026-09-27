@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 import { ProcessProvider } from '../src/capabilities/process.ts';
 import type { ActionRisk } from '../src/core/types.ts';
 
@@ -210,4 +211,42 @@ test('Windows process inspection returns bounded metadata without command lines'
     assert.equal('commandLine' in entry, false);
     assert.equal('environment' in entry, false);
   }
+});
+
+
+test('Windows process.manage requires fresh identity fingerprint and terminates only current-user target', async (ctx) => {
+  if (process.platform !== 'win32') return ctx.skip('Windows-only process management');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-manage-'));
+  ctx.after(() => fs.rm(root, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, windowsHide: true, stdio: 'ignore' });
+  assert.ok(child.pid);
+  ctx.after(() => { try { child.kill(); } catch {} });
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+
+  let inspected: any;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = await provider.execute({
+      id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+      input: { pid: child.pid, limit: 10 }, provenance: { kind: 'chatgpt' as const }
+    });
+    if (result.ok && (result.output as any).processes.length) { inspected = (result.output as any).processes[0]; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(inspected);
+  assert.match(inspected.fingerprint, /^[0-9a-f]{64}$/);
+
+  const stale = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.manage', risk: 'destructive',
+    input: { operation: 'terminate', pid: child.pid, expectedFingerprint: '0'.repeat(64) },
+    provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error?.code, 'PROCESS_PRECONDITION_FAILED');
+
+  const terminated = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.manage', risk: 'destructive',
+    input: { operation: 'terminate', pid: child.pid, expectedFingerprint: inspected.fingerprint },
+    provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(terminated.ok, true, terminated.error?.message);
 });
