@@ -124,8 +124,17 @@ export class OrganizationCoordinator {
   async start(idInput: string): Promise<OrganizationProgram> {
     const id = validUuid(idInput, 'programId');
     return await this.#mutate(id, async (program) => {
-      if (program.state !== 'PENDING' && program.state !== 'PAUSED') throw new OperatorError('ORGANIZATION_STATE_INVALID', 'Only pending/paused programs can start.');
+      if (program.state !== 'PENDING' && program.state !== 'PAUSED' && program.state !== 'BLOCKED') throw new OperatorError('ORGANIZATION_STATE_INVALID', 'Only pending/paused/blocked programs can start.');
+      const wasPaused = program.state === 'PAUSED' || program.state === 'BLOCKED';
       program.state = 'RUNNING';
+      if (wasPaused) {
+        for (const target of program.targets.filter((item) => item.wave === program.activeWave && item.missionId && item.state === 'BLOCKED')) {
+          const mission = await this.#teams.inspect(target.missionId!);
+          if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') await this.#teams.resume(mission.id);
+          target.state = mission.state === 'VERIFIED' ? 'VERIFIED' : 'RUNNING';
+          target.updatedAt = this.#clock().toISOString();
+        }
+      }
       await this.#startWave(program, program.activeWave);
       program.updatedAt = this.#clock().toISOString();
     });
