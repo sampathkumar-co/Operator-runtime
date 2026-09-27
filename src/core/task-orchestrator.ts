@@ -438,10 +438,12 @@ export class TaskOrchestrator {
         return task;
       }
       if (failureDecision.retryable && risk === 'read' && failureDecision.strategy === 'retry') {
-        task.evidence.push(evidence('strategy_retry', 'info', 'Retrying a bounded read-only task step under the same policy and attempt budget.', {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
           code: failureDecision.code,
           class: failureDecision.class,
-          strategy: failureDecision.strategy
+          strategy: failureDecision.strategy,
+          actionId: latestRecord.actionId
         }));
         await this.#persistRunState(task, assertLease);
         continue;
