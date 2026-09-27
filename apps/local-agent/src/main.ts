@@ -18,6 +18,7 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
@@ -56,6 +57,7 @@ const approvals = new ApprovalStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
+const teams = new TeamCoordinator(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
@@ -247,6 +249,7 @@ const agent = createLocalAgentServer({
   audit,
   tasks,
   taskOrchestrator,
+  teams,
   deviceIdentity,
   deviceRegistry,
   privacy,
