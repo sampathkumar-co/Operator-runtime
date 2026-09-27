@@ -27,7 +27,7 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 
 ## Final owner-decision source certification
 
-Current production source: `94becbf734817121fbea1a017b9e1b10c144d125` on `main`.
+Current production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c` on `main`.
 
 Production deployment and first npm publication are complete; remaining owner actions are OpenAI/reviewer/device/submission gates.
 
