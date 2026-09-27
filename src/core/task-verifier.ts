@@ -133,7 +133,7 @@ function builtinPlannerStateIsTerminal(task: TaskCapsule): boolean {
   const execution = task.execution;
   if (!execution) return false;
   const state = execution.plannerState;
-  if (execution.plannerId === 'operator.semantic.v1') return state.phase === 'complete';
+  if (execution.plannerId === 'operator.semantic.v1') return state.phase === 'complete' || state.phase === 'physical-complete';
   if (execution.plannerId === 'operator.project-quality-gate.v1') return state.phase === 'complete';
   if (execution.plannerId === 'operator.semantic-workflow.v1') {
     const goal = state.goal;
