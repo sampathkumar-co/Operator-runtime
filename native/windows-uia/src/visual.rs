@@ -1,6 +1,5 @@
 use std::io;
 use std::mem::size_of;
-use std::ptr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -525,13 +524,13 @@ fn capture_rgb(rect: Rect, width: u32, height: u32) -> Result<Vec<u8>, String> {
             screen_dc,
             rect.left,
             rect.top,
-            (rect.right - rect.left) as i32,
-            (rect.bottom - rect.top) as i32,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
             SRCCOPY,
         )
     };
 
-    let stride = ((usize::try_from(width).map_err(|_| "capture width overflow")? * 3 + 3) / 4) * 4;
+    let stride = (usize::try_from(width).map_err(|_| "capture width overflow")? * 3).div_ceil(4) * 4;
     let mut bgr = vec![0u8; stride * usize::try_from(height).map_err(|_| "capture height overflow")?];
     let mut info = BitmapInfo {
         header: BitmapInfoHeader {
@@ -585,10 +584,10 @@ fn capture_rgb(rect: Rect, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut rgb = Vec::with_capacity(pixel_count.checked_mul(3).ok_or("capture byte count overflow")?);
     let row_bytes = usize::try_from(width).map_err(|_| "capture width overflow")? * 3;
     for row in bgr.chunks_exact(stride) {
-        for pixel in row[..row_bytes].chunks_exact(3) {
-            rgb.push(pixel[2]);
-            rgb.push(pixel[1]);
-            rgb.push(pixel[0]);
+        for offset in (0..row_bytes).step_by(3) {
+            rgb.push(row[offset + 2]);
+            rgb.push(row[offset + 1]);
+            rgb.push(row[offset]);
         }
     }
     Ok(rgb)
