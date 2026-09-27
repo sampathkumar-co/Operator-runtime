@@ -372,6 +372,79 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    const teamExecuteRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/execute$/i.exec(pathname);
+    if (teamExecuteRoute && req.method === 'POST') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.' } });
+          return;
+        }
+        const body = await readJson(req) as Record<string, unknown>;
+        const workerId = String(body.workerId ?? '');
+        const leaseId = String(body.leaseId ?? '');
+        const action = validateActionEnvelope(body.action);
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        const resourceKeys = teamActionResourceKeys(action);
+        await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
+          workerId,
+          workItemId: teamExecuteRoute[2]!,
+          leaseId,
+          capability: action.capability,
+          risk: action.risk,
+          resourceKeys
+        });
+        const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
+        let result = await executeActionWithCurrentApproval(teamAction, approvalAuthority);
+        let autoResumedAfterApproval = false;
+        if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
+          const pending = await options.approvals.register(teamAction, approvalAuthority);
+          const decision = options.recoveryToken ? await waitForApprovalDecision(teamAction.id, pending.approvalRequestId) : null;
+          if (decision === 'approve' || decision === 'session') {
+            await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
+              workerId,
+              workItemId: teamExecuteRoute[2]!,
+              leaseId,
+              capability: teamAction.capability,
+              risk: teamAction.risk,
+              resourceKeys
+            });
+            result = await executeActionWithCurrentApproval(teamAction, approvalAuthority);
+            autoResumedAfterApproval = true;
+          } else if (decision === 'deny') {
+            result = {
+              ok: false, capability: teamAction.capability, provider: 'policy', evidence: [{
+                kind: 'approval', status: 'fail', message: 'The local user denied this Stage-4 worker action.', timestamp: new Date().toISOString()
+              }],
+              error: { code: 'APPROVAL_DENIED', message: 'The local user denied this Stage-4 worker action.', retryable: false },
+              durationMs: result.durationMs
+            };
+          }
+        }
+        await options.audit?.append({
+          taskId: teamExecuteRoute[1]!,
+          capability: teamAction.capability,
+          target: teamAction.target,
+          result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
+          risk: teamAction.risk,
+          details: {
+            actionId: teamAction.id,
+            provider: result.provider,
+            durationMs: result.durationMs,
+            errorCode: result.error?.code,
+            teamWorkItemId: teamExecuteRoute[2]!,
+            teamWorkerId: workerId,
+            teamLeaseId: leaseId,
+            autoResumedAfterApproval
+          }
+        });
+        send(res, result.ok ? 200 : 409, result);
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_EXECUTION_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     const workRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/(complete|fail|reconcile)$/i.exec(pathname);
     if (workRoute && req.method === 'POST') {
       if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
@@ -855,6 +928,40 @@ export function createLocalAgentServer(options: {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   };
+}
+
+function teamActionResourceKeys(action: ActionRequest): string[] {
+  const input = action.input;
+  const absolute = (value: unknown): string | undefined => {
+    if (typeof value !== 'string' || !value || value.includes('\0')) return undefined;
+    return path.resolve(value).replace(/\\/g, '/').toLowerCase();
+  };
+  const add = (prefix: string, value: unknown, target: Set<string>) => {
+    const resolved = absolute(value);
+    if (resolved) target.add(`${prefix}:${resolved}`);
+  };
+  const keys = new Set<string>();
+  if (action.capability.startsWith('file.')) {
+    if (action.capability === 'file.manage') {
+      add('file', input.path, keys); add('file', input.source, keys); add('file', input.destination, keys);
+    } else add('file', input.path, keys);
+  } else if (action.capability.startsWith('git.')) add('repo', input.cwd, keys);
+  else if (action.capability.startsWith('project.')) add('repo', input.path ?? input.cwd, keys);
+  else if (action.capability.startsWith('docker.')) add('docker', input.path, keys);
+  else if (action.capability.startsWith('postgres.')) {
+    const root = absolute(input.path);
+    if (root) keys.add(`database:${root}:${String(input.profileId ?? 'profiles').toLowerCase()}`);
+  } else if (action.capability.startsWith('vscode.')) {
+    add('file', input.path, keys); add('file', input.leftPath, keys); add('file', input.rightPath, keys);
+  } else if (action.capability === 'terminal.execute') add('workspace', input.cwd, keys);
+  else if (action.capability === 'terminal.session') {
+    if (input.operation === 'start') add('workspace', input.cwd, keys);
+    else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
+  } else if (action.capability === 'process.inspect') keys.add('process:windows');
+  else if (action.capability.startsWith('browser.')) keys.add(`browser:${String(input.targetId ?? 'global').toLowerCase()}`);
+  else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') keys.add('desktop:windows');
+  else keys.add(`cap:${action.capability.toLowerCase()}`);
+  return [...keys].sort();
 }
 
 function withinAuthorizedRoots(input: string, roots: string[]): boolean {
