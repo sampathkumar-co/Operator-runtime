@@ -26,6 +26,17 @@ Local Agent
    |       +--> Work leases + artifact/resource locks
    |       +--> Revision/CAS conflict detection
    |       +--> Reconciliation + verifier gate
+   +--> Verified Procedure Memory
+   +--> Evidence-backed World Model
+   +--> Device Resource Pool / Durable Placement
+   +--> Organization Rollout Coordinator
+   +--> Bounded Execution Optimizer
+   +--> Digital Operations Governor
+   |       +--> Outcome contract + authority envelope
+   |       +--> Procedure reuse/capture
+   |       +--> World pre/postconditions
+   |       +--> Stage-4 / Stage-8 execution
+   |       +--> Verification receipt
    +--> Computer Kernel
            +--> Filesystem search/info/manage
            +--> Process / Git
@@ -88,3 +99,51 @@ Production multi-device operation uses the relay/account layer implemented in th
 The private Windows runtime now includes bounded raw-control primitives needed when a structured application adapter is not sufficient: recursive filename search, metadata/SHA inspection, safe create/copy/move/remove operations, interactive shell-free terminal sessions, bounded process inspection and fingerprinted current-user process termination.
 
 These primitives intentionally do not copy unrestricted remote-shell semantics. Filesystem operations remain under authorized-root and Windows path-authority protection; destructive operations use canonical risk and approval; process termination requires a fresh identity fingerprint, refuses other-user and critical Windows processes, and verifies the process identity is gone afterward. Structured Git/browser/UIA/Docker/PostgreSQL/VS Code routes remain preferred when available.
+
+
+## Stage-5–10 Agent OS layers
+
+### Verified procedural memory
+
+Procedure memory stores only procedures backed by independent verification. Reuse is scoped by objective kind, scope key, bounded assumption fingerprints and required capabilities. Procedures expire, can be invalidated, and can be suspended after repeated failed reuse. Verification and outcome receipts are idempotent so a crash/retry cannot inflate confidence or success counts.
+
+Procedure memory is not an authority store. Remembered steps do not grant capabilities, approvals, roots or recovery authority.
+
+### Evidence-backed world model
+
+The world model represents entities and relations across browser, applications, files, Git, databases, processes, projects, devices and organizations. Each fact is a set of source/evidence claims with confidence and expiry rather than a mutable single truth slot. Conflicts remain explicit unless a clearly dominant multi-source result is resolved.
+
+Normal agent world writes are verifier-only. A passing Stage-4 verifier commits the exact world-observation payload digest into its durable result before publication. Re-publication must match that commitment. Nested secret-bearing structures and obvious credential strings are rejected.
+
+### Trusted device resource pool
+
+Devices advertise CPU/memory/GPU/tag/concurrency metadata inside the signed relay hello. The relay builds resource advertisements only from active paired/account-owned sessions. The scheduler then filters by authenticated capability support and bounded resource requirements.
+
+Long-running Stage-10 operations hold a durable device reservation for the operation lifetime. The operation UUID is bound to one device, reservation renewal survives retries/reconnects, and terminal VERIFIED/FAILED/CANCELLED results release capacity.
+
+### Organization execution
+
+The organization coordinator compiles many target scopes into Stage-4 missions. Rollout is canary/wave based with explicit scope prefixes, bounded parallelism and verified promotion between waves. Failures halt expansion. Startup/resume transitions have compensating rollback so partially created or resumed missions are not left running if the organization state cannot be committed.
+
+### Bounded execution optimization
+
+The optimizer ranks only caller-authorized strategies and can recommend bounded concurrency changes inside explicit caller policy floors/ceilings. Learned adjustments are intentionally small. The optimizer never modifies capability authority, canonical risk, scope, approval, recovery authority or verification requirements.
+
+### Digital operations governor
+
+Stage 10 composes the layers above under a durable outcome contract.
+
+A contract may provide an explicit Stage-4/Stage-8 execution graph, or request bounded outcome auto-planning. Auto-planning always requires an explicit **authority envelope** containing a requested capability subset and exact Stage-4 resource keys. The runtime intersects the requested capabilities with locally allowed capabilities, so the envelope can restrict but never grant authority. The default planning risk is read; dynamic-risk capabilities are excluded from auto-planning.
+
+The operation has a stable UUID and canonical submission digest. Duplicate submit of the same UUID+contract returns the existing operation; reuse of the UUID with a different contract fails closed.
+
+Final verification requires both the underlying Stage-4/Stage-8 verifier state and declared world postconditions. Procedure capture uses the operation verification receipt plus actual verifier evidence. Optimizer/procedure learning uses deterministic receipts so repeating finalization after a crash is idempotent.
+
+## Private MCP surface
+
+The Stage-1–10 successor keeps the public review-bounded 9-tool surface unchanged. The private/Developer source surface is **32 grouped tools**. Two grouped tools expose the new Agent-OS layer:
+
+- `operations`: submit/inspect/start/refresh/pause/cancel/promote durable Stage-10 operations;
+- `knowledge.inspect`: read-only verified procedure/world/optimizer inspection.
+
+Stage-5–10 internals are not exposed as a collection of raw authority-bearing tools. Device placement, organization rollout mechanics, learning and world publication remain governed by their internal trust boundaries.
