@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
-import { ProcedureMemoryStore, type ProcedureAssumption } from './procedure-memory.ts';
+import { ProcedureMemoryStore, type ProcedureAssumption, type ProcedureStep } from './procedure-memory.ts';
 import { WorldModelStore } from './world-model.ts';
 import { DevicePoolScheduler, type DevicePoolRequest, type DeviceResourceAdvertisement } from './device-pool.ts';
 import { ExecutionOptimizerStore } from './execution-optimizer.ts';
@@ -21,6 +21,16 @@ export interface WorldCondition {
   expectedValueDigest: string;
 }
 
+export interface ProcedureCaptureSpec {
+  key: string;
+  title: string;
+  objectiveKind: string;
+  assumptions: ProcedureAssumption[];
+  steps: ProcedureStep[];
+  resources?: string[];
+  ttlMs?: number;
+}
+
 export interface DigitalOperation {
   version: 1;
   id: string;
@@ -33,6 +43,7 @@ export interface DigitalOperation {
   postconditions: WorldCondition[];
   selectedStrategy: string;
   selectedProcedureId?: string;
+  procedureCapture?: ProcedureCaptureSpec;
   deviceReservationId?: string;
   teamMissionId?: string;
   organizationProgramId?: string;
@@ -68,6 +79,7 @@ export interface DigitalOperationSubmit {
     assumptions: ProcedureAssumption[];
     requiredCapabilities?: string[];
   };
+  captureProcedure?: ProcedureCaptureSpec;
   strategies?: Array<{ id: string; staticScore: number }>;
   device?: {
     request: DevicePoolRequest;
@@ -182,6 +194,7 @@ export class DigitalOperationsLayer {
       postconditions: normalized.postconditions,
       selectedStrategy,
       ...(selectedProcedureId ? { selectedProcedureId } : {}),
+      ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
       ...(deviceReservationId ? { deviceReservationId } : {}),
       ...(teamMissionId ? { teamMissionId } : {}),
       ...(organizationProgramId ? { organizationProgramId } : {}),
@@ -302,13 +315,53 @@ export class DigitalOperationsLayer {
     const verified = operation.state === 'VERIFIED';
     try {
       await this.#optimizer.record(strategyContextFor(operation.scopeKey, operation.mode), operation.selectedStrategy, { verified });
-      if (operation.selectedProcedureId) await this.#procedures.recordOutcome(operation.selectedProcedureId, verified ? 'verified' : 'failed');
+      let capturedProcedureId: string | undefined;
+      if (verified && operation.procedureCapture && operation.receiptDigest) {
+        const verifierEvidenceDigest = await this.#underlyingVerificationDigest(operation);
+        const captured = await this.#procedures.recordVerified({
+          key: operation.procedureCapture.key,
+          title: operation.procedureCapture.title,
+          objectiveKind: operation.procedureCapture.objectiveKind,
+          scopeKey: operation.scopeKey,
+          steps: operation.procedureCapture.steps,
+          assumptions: operation.procedureCapture.assumptions,
+          resources: operation.procedureCapture.resources,
+          verificationDigest: operation.receiptDigest,
+          verifierEvidenceDigest,
+          ttlMs: operation.procedureCapture.ttlMs
+        });
+        capturedProcedureId = captured.id;
+      }
+      if (operation.selectedProcedureId && operation.selectedProcedureId !== capturedProcedureId) {
+        await this.#procedures.recordOutcome(operation.selectedProcedureId, verified ? 'verified' : 'failed');
+      }
     } finally {
       if (operation.deviceReservationId) {
         try { await this.#devices.release(operation.deviceReservationId); } catch {}
       }
     }
     return await this.#update(operation.id, (current) => { current.outcomeRecorded = true; });
+  }
+
+  async #underlyingVerificationDigest(operation: DigitalOperation): Promise<string> {
+    let evidence: unknown;
+    if (operation.mode === 'team') {
+      if (!operation.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Verified team operation has no mission.');
+      const mission = await this.#teams.inspect(operation.teamMissionId);
+      const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.state === 'COMPLETED' && item.result?.verificationPassed === true);
+      if (!verifier?.result) throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Verified team operation has no accepted verifier result.');
+      evidence = { missionId: mission.id, verifierWorkItemId: verifier.id, result: verifier.result };
+    } else {
+      if (!operation.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Verified organization operation has no program.');
+      const program = await this.#organizations.inspect(operation.organizationProgramId);
+      if (program.state !== 'VERIFIED') throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Organization program is not verified.');
+      evidence = {
+        programId: program.id,
+        waves: program.waves.map((wave) => ({ index: wave.index, promotionDigest: wave.promotionDigest ?? null, state: wave.state })),
+        targets: program.targets.map((target) => ({ key: target.key, missionId: target.missionId ?? null, state: target.state }))
+      };
+    }
+    return crypto.createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
   }
 
   async #assertWorldConditions(conditions: WorldCondition[], label: string): Promise<void> {
@@ -380,9 +433,25 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
       assumptions: structuredClone(input.procedure.assumptions),
       requiredCapabilities: input.procedure.requiredCapabilities?.map((item, index) => boundedKey(item, `procedure.requiredCapabilities[${index}]`))
     } : undefined,
+    captureProcedure: input.captureProcedure ? normalizeProcedureCapture(input.captureProcedure) : undefined,
     strategies,
     device: input.device ? structuredClone(input.device) : undefined,
     run: input.run === true
+  };
+}
+
+function normalizeProcedureCapture(input: ProcedureCaptureSpec): ProcedureCaptureSpec {
+  if (!input || typeof input !== 'object') throw new OperatorError('OPERATIONS_INPUT_INVALID', 'captureProcedure is invalid.');
+  if (!Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 200) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'captureProcedure.steps are invalid.');
+  if (!Array.isArray(input.assumptions) || input.assumptions.length > 100) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'captureProcedure.assumptions are invalid.');
+  return {
+    key: boundedKey(input.key, 'captureProcedure.key'),
+    title: boundedText(input.title, 4096, 'captureProcedure.title'),
+    objectiveKind: boundedKey(input.objectiveKind, 'captureProcedure.objectiveKind'),
+    assumptions: structuredClone(input.assumptions),
+    steps: structuredClone(input.steps),
+    ...(input.resources ? { resources: uniqueStrings(input.resources, 200, 1024, 'captureProcedure.resources') } : {}),
+    ...(input.ttlMs === undefined ? {} : { ttlMs: boundedInteger(input.ttlMs, 60_000, 365 * 24 * 60 * 60_000, 'captureProcedure.ttlMs') })
   };
 }
 
@@ -451,6 +520,7 @@ function validateOperation(operation: DigitalOperation): void {
   normalizeConditions(operation.preconditions); normalizeConditions(operation.postconditions);
   boundedKey(operation.selectedStrategy, 'selectedStrategy');
   if (operation.selectedProcedureId !== undefined) validUuid(operation.selectedProcedureId, 'selectedProcedureId');
+  if (operation.procedureCapture !== undefined) normalizeProcedureCapture(operation.procedureCapture);
   if (operation.deviceReservationId !== undefined) validUuid(operation.deviceReservationId, 'deviceReservationId');
   if (operation.teamMissionId !== undefined) validUuid(operation.teamMissionId, 'teamMissionId');
   if (operation.organizationProgramId !== undefined) validUuid(operation.organizationProgramId, 'organizationProgramId');
