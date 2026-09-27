@@ -506,3 +506,93 @@ test('stage3 app goal falls back from failed semantic targeting to approved capt
   assert.equal(physicalRecord?.observation?.channel, 'visual');
   assert.equal((physicalRecord?.observation?.importantState.postcondition as any)?.afterCaptured, true);
 });
+
+
+class Stage3StaleVisualProvider implements CapabilityProvider {
+  readonly name = 'test.stage3-stale-visual';
+  visualCount = 0;
+  physicalCount = 0;
+  supports(action: ActionRequest): boolean {
+    return ['app.inspect', 'visual.capture', 'input.operate'].includes(action.capability);
+  }
+  score(): CapabilityScore { return STAGE3_SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    if (action.capability === 'app.inspect') {
+      return {
+        ok: false, capability: action.capability, provider: this.name, evidence: [],
+        error: { code: 'UIA_ELEMENT_NOT_FOUND', message: 'semantic target unavailable', retryable: true }, durationMs: 0
+      };
+    }
+    if (action.capability === 'visual.capture') {
+      this.visualCount += 1;
+      const digit = this.visualCount === 1 ? 'a' : 'c';
+      return {
+        ok: true, capability: action.capability, provider: this.name, evidence: [],
+        output: {
+          captureId: `capture-${this.visualCount}`, sha256: digit.repeat(64), source: 'screen',
+          originX: 0, originY: 0, sourceWidth: 80, sourceHeight: 80,
+          width: 80, height: 80, scaleX: 1, scaleY: 1, mimeType: 'image/png', imageBase64: 'iVBORw0KGgo='
+        }, durationMs: 0
+      };
+    }
+    this.physicalCount += 1;
+    if (this.physicalCount === 1) {
+      return {
+        ok: false, capability: action.capability, provider: this.name, evidence: [],
+        error: { code: 'INPUT_CAPTURE_STALE', message: 'pixels changed before dispatch', retryable: true }, durationMs: 0
+      };
+    }
+    return {
+      ok: true, capability: action.capability, provider: this.name, evidence: [],
+      output: {
+        operation: 'click',
+        postcondition: {
+          dispatched: true, captureLeaseConsumed: true, afterCaptured: true,
+          afterSha256: 'd'.repeat(64), changed: true, windowStable: true
+        }
+      }, durationMs: 0
+    };
+  }
+}
+
+test('stage3 stale visual state forces recapture and a new approval-bound physical action identity', async (t) => {
+  const state = await tempDir(t, 'operator-stage3-stale-visual-state-');
+  const provider = new Stage3StaleVisualProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: permissions(state, ['app.inspect', 'visual.capture', 'input.operate'])
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Use bounded visual fallback without clicking stale pixels.',
+    authorizedScope: [],
+    successConditions: ['stale pixels are never clicked', 'fresh capture creates a new approval identity'],
+    goal: {
+      kind: 'app-operation',
+      operation: 'focus',
+      selector: { automationId: 'missing-target' },
+      physicalFallback: { source: 'screen', operation: 'click', x: 12, y: 16, maxWidth: 80, maxHeight: 80 }
+    },
+    maxAttemptsPerStep: 3
+  });
+
+  const firstBlocked = await orchestrator.run(submitted.id);
+  const firstPhysical = firstBlocked.execution!.records.find((record) => record.stepKey === 'operate-app-physical-fallback' && record.state === 'BLOCKED');
+  assert.ok(firstPhysical);
+
+  const secondBlocked = await orchestrator.resume(submitted.id, [firstPhysical!.actionId]);
+  assert.equal(secondBlocked.state, 'BLOCKED');
+  assert.equal(provider.physicalCount, 1);
+  assert.equal(provider.visualCount, 2);
+  const physicalRecords = secondBlocked.execution!.records.filter((record) => record.stepKey === 'operate-app-physical-fallback');
+  assert.equal(physicalRecords.length, 2);
+  const secondPhysical = physicalRecords.find((record) => record.state === 'BLOCKED');
+  assert.ok(secondPhysical);
+  assert.notEqual(secondPhysical!.actionId, firstPhysical!.actionId);
+  assert.ok(secondBlocked.evidence.some((item) => item.kind === 'strategy_fallback' && /stale lease/i.test(item.message)));
+
+  const completed = await orchestrator.resume(submitted.id, [secondPhysical!.actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.physicalCount, 2);
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
+});
