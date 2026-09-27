@@ -132,7 +132,7 @@ export class WorldModelStore {
           fact = { key: factKey, claims: [] };
           entity.facts.push(fact);
         }
-        const valueDigest = digestJson(value);
+        const valueDigest = worldValueDigest(value);
         const sameSource = fact.claims.find((claim) => claim.source === normalized.source && claim.domain === normalized.domain);
         const claim: WorldClaim = {
           id: sameSource?.id ?? crypto.randomUUID(),
@@ -350,7 +350,7 @@ function validateState(input: unknown): WorldModelState {
       if (SECRET_KEY.test(fact.key) || !Array.isArray(fact.claims) || fact.claims.length > MAX_CLAIMS_PER_FACT) throw corrupt('Stored fact is invalid.');
       for (const claim of fact.claims) {
         validUuid(claim.id, 'claim id'); boundedContext(claim.source, 'claim source'); validDomain(claim.domain); shaDigest(claim.evidenceDigest, 'claim evidence'); shaDigest(claim.valueDigest, 'claim value digest');
-        if (digestJson(claim.value) !== claim.valueDigest) throw corrupt('Claim value digest mismatch.');
+        if (worldValueDigest(claim.value) !== claim.valueDigest) throw corrupt('Claim value digest mismatch.');
         boundedConfidence(claim.confidence, 'claim confidence'); validIso(claim.observedAt, 'claim observedAt'); validIso(claim.expiresAt, 'claim expiresAt');
       }
     }
@@ -369,7 +369,7 @@ function combinedConfidence(claims: WorldClaim[]): number {
   return Math.round((1 - failure) * 1000) / 1000;
 }
 function relationIdentity(item: Pick<WorldRelation, 'fromKey' | 'toKey' | 'type' | 'source' | 'domain'>): string { return [item.fromKey, item.toKey, item.type, item.source, item.domain].join('\0'); }
-function digestJson(value: unknown): string {
+export function worldValueDigest(value: unknown): string {
   const encoded = JSON.stringify(value);
   if (encoded === undefined || Buffer.byteLength(encoded, 'utf8') > MAX_FACT_BYTES) throw new OperatorError('WORLD_INPUT_INVALID', 'World fact value is not bounded JSON.');
   return crypto.createHash('sha256').update(encoded).digest('hex');
