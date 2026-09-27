@@ -193,3 +193,52 @@ test('stage4 role capability matching prevents unsuitable workers from claiming 
   assert.equal((await coordinator.claim(mission.id, { workerId: weak.id })).workItem, undefined);
   assert.equal((await coordinator.claim(mission.id, { workerId: strong.id })).workItem?.key, 'code');
 });
+
+
+test('stage4 shared blackboard uses lease-bound CAS revisions to prevent lost updates', async (t) => {
+  const coordinator = new TeamCoordinator(await stateDir(t));
+  const mission = await coordinator.submit({
+    objective: 'shared blackboard',
+    workItems: [
+      { key: 'plan', title: 'Plan', role: 'planner', risk: 'read' },
+      { key: 'verify', title: 'Verify', role: 'verifier', dependsOn: ['plan'] }
+    ]
+  });
+  await coordinator.start(mission.id);
+  const planner = (await coordinator.registerWorker(mission.id, { role: 'planner', label: 'planner' })).worker;
+  const supervisor = (await coordinator.registerWorker(mission.id, { role: 'supervisor', label: 'supervisor' })).worker;
+  const claim = await coordinator.claim(mission.id, { workerId: planner.id });
+  assert.equal(claim.workItem?.key, 'plan');
+
+  const first = await coordinator.putBlackboard(mission.id, {
+    workerId: planner.id,
+    workItemId: claim.workItem!.id,
+    leaseId: claim.workItem!.lease!.id,
+    key: 'architecture',
+    expectedRevision: 0,
+    value: { choice: 'A', owner: 'planner' }
+  });
+  assert.equal(first.blackboard[0]?.revision, 1);
+  assert.deepEqual(first.blackboard[0]?.value, { choice: 'A', owner: 'planner' });
+
+  await assert.rejects(
+    coordinator.putBlackboard(mission.id, {
+      workerId: planner.id,
+      workItemId: claim.workItem!.id,
+      leaseId: claim.workItem!.lease!.id,
+      key: 'architecture',
+      expectedRevision: 0,
+      value: { choice: 'stale' }
+    }),
+    (error: any) => error?.code === 'TEAM_BLACKBOARD_CONFLICT'
+  );
+
+  const second = await coordinator.putBlackboard(mission.id, {
+    workerId: supervisor.id,
+    key: 'architecture',
+    expectedRevision: 1,
+    value: { choice: 'A', approved: true }
+  });
+  assert.equal(second.blackboard[0]?.revision, 2);
+  assert.deepEqual(second.blackboard[0]?.value, { choice: 'A', approved: true });
+});
