@@ -244,7 +244,12 @@ export class TaskOrchestrator {
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
       const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
-      const node = task.nodes.find((candidate) => candidate.title === decision.title) ?? addTaskNode(task, decision.title);
+      const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
+      const node = task.nodes.find((candidate) => candidate.key === decision.key)
+        ?? addTaskNode(task, decision.title, {
+          key: decision.key,
+          dependsOn: priorNode ? [priorNode.id] : []
+        });
       setNodeState(task, node.id, 'RUNNING');
       const record: TaskActionRecord = blockedReplay ?? {
         stepKey: decision.key, actionId, capability: decision.capability, risk, inputHash, attempt,
@@ -299,7 +304,8 @@ export class TaskOrchestrator {
       const latestExecution = task.execution!;
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
       if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
-      const latestNode = task.nodes.find((candidate) => candidate.title === decision.title);
+      const latestNode = task.nodes.find((candidate) => candidate.key === decision.key)
+        ?? task.nodes.find((candidate) => candidate.title === decision.title);
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
