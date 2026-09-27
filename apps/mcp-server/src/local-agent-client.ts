@@ -20,10 +20,39 @@ export type TaskTransportResult = {
   error?: { code?: string; message?: string };
 };
 
+export type OperationControlAction = 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel' | 'promote';
+export type OperationSubmitInput = Record<string, unknown> & {
+  requestId: string;
+  objective: string;
+  scopeKey: string;
+  successConditions: string[];
+};
+export type OperationResourceRequirements = {
+  requiredTags?: string[];
+  minMemoryMb?: number;
+  requireGpu?: boolean;
+  slots?: number;
+};
+export type OperationTransportResult = {
+  ok: boolean;
+  operation?: Record<string, unknown>;
+  error?: { code?: string; message?: string };
+};
+export type KnowledgeQuery =
+  | { operation: 'procedures'; objectiveKind: string; scopeKey: string; assumptions?: Array<{ key: string; fingerprint: string }>; requiredCapabilities?: string[]; maxResults?: number }
+  | { operation: 'world_fact'; entityKey: string; factKey: string }
+  | { operation: 'world_entity'; entityKey: string }
+  | { operation: 'world_trace'; fromKey: string; toKey?: string; targetType?: string; maxDepth?: number; minConfidence?: number }
+  | { operation: 'optimizer'; limit?: number };
+export type KnowledgeTransportResult = { ok: boolean; [key: string]: unknown };
+
 type Executor = {
   execute(action: ActionRequest): Promise<ActionResult>;
   submitTask(input: TaskSubmitInput): Promise<TaskTransportResult>;
   controlTask(taskId: string, operation: TaskControlOperation): Promise<TaskTransportResult>;
+  submitOperation(input: OperationSubmitInput, resourceRequirements?: OperationResourceRequirements): Promise<OperationTransportResult>;
+  controlOperation(operationId: string, operation: OperationControlAction, verificationDigest?: string): Promise<OperationTransportResult>;
+  queryKnowledge(query: KnowledgeQuery): Promise<KnowledgeTransportResult>;
   claimDevice?(userCode: string, makeDefault?: boolean): Promise<{ status: 'claimed' }>;
 };
 
@@ -63,6 +92,18 @@ export class LocalAgentClient {
 
   async controlTask(taskId: string, operation: TaskControlOperation): Promise<TaskTransportResult> {
     return await this.#executor.controlTask(taskId, operation);
+  }
+
+  async submitOperation(input: OperationSubmitInput, resourceRequirements?: OperationResourceRequirements): Promise<OperationTransportResult> {
+    return await this.#executor.submitOperation(input, resourceRequirements);
+  }
+
+  async controlOperation(operationId: string, operation: OperationControlAction, verificationDigest?: string): Promise<OperationTransportResult> {
+    return await this.#executor.controlOperation(operationId, operation, verificationDigest);
+  }
+
+  async queryKnowledge(query: KnowledgeQuery): Promise<KnowledgeTransportResult> {
+    return await this.#executor.queryKnowledge(query);
   }
 
   async claimDevice(userCode: string, makeDefault = false): Promise<{ status: 'claimed' }> {
@@ -109,6 +150,65 @@ class DirectLocalAgentClient implements Executor {
     return await this.#taskRequest(new URL(`/v1/tasks/${id}${suffix}`, this.#baseUrl), operation === 'inspect' ? 'GET' : 'POST', operation === 'resume' ? {} : undefined);
   }
 
+  async submitOperation(input: OperationSubmitInput, _resourceRequirements?: OperationResourceRequirements): Promise<OperationTransportResult> {
+    return await this.#operationRequest(new URL('/v1/operations', this.#baseUrl), 'POST', input);
+  }
+
+  async controlOperation(operationId: string, operation: OperationControlAction, verificationDigest?: string): Promise<OperationTransportResult> {
+    const id = validTaskId(operationId);
+    const suffix = operation === 'inspect' ? '' : `/${operation}`;
+    const body = operation === 'promote' ? { verificationDigest } : {};
+    return await this.#operationRequest(new URL(`/v1/operations/${id}${suffix}`, this.#baseUrl), operation === 'inspect' ? 'GET' : 'POST', body);
+  }
+
+  async queryKnowledge(query: KnowledgeQuery): Promise<KnowledgeTransportResult> {
+    if (query.operation === 'procedures') {
+      const response = await fetch(new URL('/v1/procedures/query', this.#baseUrl), {
+        redirect: 'error', method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+        body: JSON.stringify(query),
+        signal: AbortSignal.timeout(60_000)
+      });
+      return await parseKnowledgeResponse(response);
+    }
+    if (query.operation === 'optimizer') {
+      const url = new URL('/v1/optimizer', this.#baseUrl);
+      if (query.limit !== undefined) url.searchParams.set('limit', String(query.limit));
+      return await this.#knowledgeGet(url);
+    }
+    const payload = query.operation === 'world_fact'
+      ? { operation: 'fact', entityKey: query.entityKey, factKey: query.factKey }
+      : query.operation === 'world_entity'
+        ? { operation: 'entity', entityKey: query.entityKey }
+        : { operation: 'trace', fromKey: query.fromKey, toKey: query.toKey, targetType: query.targetType, maxDepth: query.maxDepth, minConfidence: query.minConfidence };
+    const response = await fetch(new URL('/v1/world/query', this.#baseUrl), {
+      redirect: 'error', method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(60_000)
+    });
+    return await parseKnowledgeResponse(response);
+  }
+
+  async #knowledgeGet(url: URL): Promise<KnowledgeTransportResult> {
+    const response = await fetch(url, {
+      redirect: 'error', method: 'GET', headers: { authorization: `Bearer ${this.#token}` }, signal: AbortSignal.timeout(60_000)
+    });
+    return await parseKnowledgeResponse(response);
+  }
+
+  async #operationRequest(url: URL, method: 'GET' | 'POST', body?: unknown): Promise<OperationTransportResult> {
+    const response = await fetch(url, {
+      redirect: 'error', method,
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#token}` },
+      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {}),
+      signal: AbortSignal.timeout(10 * 60_000)
+    });
+    const result = await response.json() as OperationTransportResult;
+    if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error(`Local operation API returned malformed HTTP ${response.status} response.`);
+    return result;
+  }
+
   async #taskRequest(url: URL, method: 'GET' | 'POST', body?: unknown): Promise<TaskTransportResult> {
     const response = await fetch(url, {
       redirect: 'error', method,
@@ -120,6 +220,12 @@ class DirectLocalAgentClient implements Executor {
     if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error(`Local task API returned malformed HTTP ${response.status} response.`);
     return result;
   }
+}
+
+async function parseKnowledgeResponse(response: Response): Promise<KnowledgeTransportResult> {
+  const result = await response.json() as KnowledgeTransportResult;
+  if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error(`Knowledge API returned malformed HTTP ${response.status} response.`);
+  return result;
 }
 
 function validTaskId(input: string): string {
