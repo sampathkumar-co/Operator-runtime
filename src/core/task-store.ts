@@ -381,18 +381,22 @@ function validateObservation(input: unknown, index: number): TaskObservationSumm
 function validateNodes(input: unknown): TaskNode[] {
   if (!Array.isArray(input) || input.length > MAX_NODES) throw corrupt(`nodes must contain at most ${MAX_NODES} entries.`);
   const ids = new Set<string>();
+  const keys = new Set<string>();
   const nodes = input.map((entry, index): TaskNode => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw corrupt(`Node ${index} must be an object.`);
     const raw = entry as Record<string, unknown>;
     const id = validTaskId(String(raw.id ?? ''));
     if (ids.has(id)) throw corrupt(`Node ${index} duplicates node id ${id}.`);
     ids.add(id);
+    const key = raw.key === undefined ? undefined : boundedText(raw.key, 256, `node ${index} key`);
+    if (key && keys.has(key)) throw corrupt(`Node ${index} duplicates node key ${key}.`);
+    if (key) keys.add(key);
     const title = boundedText(raw.title, 16_384, `node ${index} title`);
     const state = validTaskState(raw.state, `node ${index} state`);
     if (typeof raw.required !== 'boolean') throw corrupt(`Node ${index} required must be boolean.`);
     const dependsOn = validateIdArray(raw.dependsOn, MAX_NODES, `node ${index} dependsOn`);
     const evidence = validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `node ${index} evidence`);
-    return { id, title, state, required: raw.required, dependsOn, evidence };
+    return { id, ...(key ? { key } : {}), title, state, required: raw.required, dependsOn, evidence };
   });
 
   for (const node of nodes) {
