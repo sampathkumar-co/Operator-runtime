@@ -16,6 +16,7 @@ import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.t
 import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
+import { renderControlCenter } from './control-center.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -103,6 +104,22 @@ function send(res: http.ServerResponse, status: number, payload: unknown): void 
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff'
+  });
+  res.end(body);
+}
+
+function sendControlCenter(res: http.ServerResponse): void {
+  const nonce = crypto.randomBytes(18).toString('base64url');
+  const body = renderControlCenter(nonce);
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'cross-origin-opener-policy': 'same-origin',
+    'content-security-policy': `default-src 'none'; connect-src 'self'; img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
   });
   res.end(body);
 }
@@ -242,6 +259,13 @@ export function createLocalAgentServer(options: {
     if (pathname === '/health' && req.method === 'GET') {
       const emergencyStopped = options.emergencyStop ? (await options.emergencyStop.status()).engaged : false;
       send(res, 200, { ok: true, service: 'operator-local-agent', version: PRODUCT_VERSION, emergencyStopped });
+      return;
+    }
+
+    // The Control Center shell contains no device data or credentials. All API
+    // requests it makes still pass through the bearer-token boundary below.
+    if (pathname === '/control-center' && req.method === 'GET') {
+      sendControlCenter(res);
       return;
     }
 
