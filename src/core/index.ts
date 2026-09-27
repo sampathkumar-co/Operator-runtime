@@ -22,3 +22,4 @@ export * from './device-pool.ts';
 export * from './organization-coordinator.ts';
 export * from './execution-optimizer.ts';
 export * from './digital-operations.ts';
+export * from './outcome-planner.ts';
