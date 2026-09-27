@@ -754,7 +754,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ mode, selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows, source, region, maxWidth, maxHeight }) => {
     if (mode === 'visual') {
-      return invoke('visual.capture', 'read', { source, selector, region, maxWidth, maxHeight, waitMs });
+      return attachActionImage(await invoke('visual.capture', 'read', { source, selector, region, maxWidth, maxHeight, waitMs }), ['output', 'imageBase64']);
     }
     return invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows });
   });
@@ -788,9 +788,9 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   }, async ({ operation, selector, value, horizontalAmount, verticalAmount, waitMs, captureId, expectedSha256, x, y, toX, toY, deltaX, deltaY, text, key, keys }) => {
     if (physicalAppOperations.has(operation)) {
       const physicalOperation = operation === 'physical_scroll' ? 'scroll' : operation;
-      return invoke('input.operate', 'external', {
+      return attachActionImage(await invoke('input.operate', 'external', {
         operation: physicalOperation, captureId, expectedSha256, x, y, toX, toY, deltaX, deltaY, text, key, keys
-      });
+      }), ['output', 'after', 'imageBase64']);
     }
     if (!semanticAppOperations.has(operation) || !selector) {
       return {
@@ -806,6 +806,29 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   });
 
   return server;
+}
+
+function attachActionImage<T extends { content: Array<Record<string, unknown>>; structuredContent?: unknown }>(
+  result: T,
+  path: string[]
+): T {
+  const root = result.structuredContent;
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return result;
+  let cursor: Record<string, unknown> = root as Record<string, unknown>;
+  for (const segment of path.slice(0, -1)) {
+    const next = cursor[segment];
+    if (!next || typeof next !== 'object' || Array.isArray(next)) return result;
+    cursor = next as Record<string, unknown>;
+  }
+  const key = path.at(-1);
+  if (!key) return result;
+  const data = cursor[key];
+  if (typeof data !== 'string' || data.length < 8 || data.length > 12 * 1024 * 1024) return result;
+  const mimeValue = cursor.mimeType;
+  const mimeType = typeof mimeValue === 'string' && /^image\/(?:png|jpeg|webp)$/.test(mimeValue) ? mimeValue : 'image/png';
+  delete cursor[key];
+  result.content.push({ type: 'image', data, mimeType });
+  return result;
 }
 
 function taskResultWithAgent(
