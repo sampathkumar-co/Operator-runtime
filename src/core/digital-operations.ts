@@ -80,6 +80,10 @@ export interface DigitalOperationSubmit {
   postconditions?: WorldCondition[];
   execution?: DigitalExecutionSpec;
   maxRisk?: ActionRisk;
+  authority?: {
+    capabilities: string[];
+    resources: string[];
+  };
   budget?: Partial<TeamBudget>;
   procedure?: {
     objectiveKind: string;
@@ -145,6 +149,10 @@ export class DigitalOperationsLayer {
       successConditions: normalized.successConditions,
       maxRisk: normalized.maxRisk,
       availableCapabilities: this.#availableCapabilities,
+      ...(normalized.authority ? {
+        requestedCapabilities: normalized.authority.capabilities,
+        resources: normalized.authority.resources
+      } : {}),
       ...(normalized.budget ? { budget: normalized.budget } : {})
     });
     const execution: DigitalExecutionSpec = normalized.execution ?? {
@@ -495,6 +503,7 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
   const successConditions = uniqueStrings(input.successConditions, 100, 4096, 'successConditions');
   if (successConditions.length < 1) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'At least one success condition is required.');
   if (input.execution && !['team', 'organization'].includes(input.execution.kind)) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'Execution specification is invalid.');
+  if (input.execution && input.authority) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'authority is only valid for outcome-planned operations without an explicit execution graph.');
   const strategies = (input.strategies ?? []).map((item, index) => ({
     id: boundedKey(item.id, `strategies[${index}].id`),
     staticScore: boundedNumber(item.staticScore, 0, 1, `strategies[${index}].staticScore`)
@@ -508,7 +517,11 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
     preconditions: normalizeConditions(input.preconditions ?? []),
     postconditions: normalizeConditions(input.postconditions ?? []),
     execution: input.execution ? structuredClone(input.execution) : undefined,
-    maxRisk: input.maxRisk === undefined ? 'write' as ActionRisk : validOperationRisk(input.maxRisk),
+    maxRisk: input.maxRisk === undefined ? 'read' as ActionRisk : validOperationRisk(input.maxRisk),
+    authority: input.authority ? {
+      capabilities: uniqueStrings(input.authority.capabilities, 500, 256, 'authority.capabilities'),
+      resources: uniqueStrings(input.authority.resources, 5000, 1024, 'authority.resources')
+    } : undefined,
     budget: input.budget ? structuredClone(input.budget) : undefined,
     procedure: input.procedure ? {
       objectiveKind: boundedKey(input.procedure.objectiveKind, 'procedure.objectiveKind'),
@@ -567,6 +580,7 @@ function operationSubmissionDigest(normalized: ReturnType<typeof normalizeSubmit
     execution: normalized.execution,
     planDigest: (normalized as any).planDigest ?? null,
     maxRisk: normalized.maxRisk,
+    authority: normalized.authority ?? null,
     budget: normalized.budget ?? null,
     procedure: normalized.procedure ?? null,
     captureProcedure: normalized.captureProcedure ?? null,
