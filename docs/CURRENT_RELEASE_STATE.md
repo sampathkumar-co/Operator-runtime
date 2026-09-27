@@ -6,40 +6,37 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 
 ## Production
 
-- production source: `94becbf734817121fbea1a017b9e1b10c144d125`
+- production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
-- Developer surface: exactly **24** tools
+- Developer surface: exactly **32** grouped tools
 - Developer pairing route: **404** by design
 - npm: **`mecord-connect@1.0.1`** under `latest`
 
-Live verification on 2026-09-24 confirmed both health endpoints report the same production source commit, with public toolCount 9 and Developer toolCount 24. The deployed image also rejects traversal, drive-relative, UNC and glob `git.diff` path filters before agent dispatch.
+Live verification on 2026-09-27 confirmed both health endpoints report source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
 
-## Certified source successor (not deployed yet)
+## Stage 1–10 production status
 
-The repository now has a certified Stage-1–10 successor on branch `feature/stage5-10-agent-os`, with runtime head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`.
+The certified Stage-1–10 successor is now **merged and deployed to production**.
 
-This successor is **not the production deployment yet**. Until merge/deployment/release-state promotion occurs, the production facts above remain authoritative.
+Production now includes:
 
-Successor changes include:
+- the unchanged public review-bounded **9-tool** MCP surface;
+- the **32-tool grouped private/Developer** MCP surface;
+- Windows RDC-parity primitives;
+- Stage 3 bounded autonomous execution;
+- Stage 4 durable shared-state multi-agent coordination;
+- Stage 5 verified procedural memory;
+- Stage 6 evidence-backed cross-application world state with verifier-committed publication;
+- Stage 7 signed paired-device resource scheduling and operation-lifetime reservations;
+- Stage 8 canary-gated organization-scale execution;
+- Stage 9 bounded authority-neutral execution optimization;
+- Stage 10 governed digital operations with explicit authority envelopes, world pre/postconditions and verifier-backed completion.
 
-- public review-bounded MCP surface remains exactly **9** tools;
-- private/Developer source surface expands from the deployed 24 tools to **32 grouped semantic tools**;
-- Windows RDC-parity primitives remain included;
-- Stage 4 durable shared-state multi-agent coordination remains included;
-- **Stage 5:** verified procedural memory with assumption fingerprints, expiry/invalidation, verifier-only promotion and receipt-idempotent reuse outcomes;
-- **Stage 6:** evidence-backed cross-application world model with freshness, multi-source conflicts, verifier-committed publication and nested-secret rejection;
-- **Stage 7:** signed paired-device resource advertisements, bounded device-capacity reservations, operation-to-device affinity and lifecycle-aware reservation renewal/release;
-- **Stage 8:** organization-scale canary/wave execution with bounded blast radius, explicit verified promotion, halt-on-failure and compensating cleanup;
-- **Stage 9:** bounded authority-neutral strategy/concurrency optimization that cannot grant capabilities, lower risk, widen scope, bypass approval or remove verification;
-- **Stage 10:** governed digital operations with durable/idempotent outcome contracts, explicit capability+resource authority envelopes for auto-planning, world pre/postconditions, verified procedure reuse/capture, Stage-4/8 execution and final verification receipts;
-- private grouped MCP `operations` and `knowledge.inspect` surfaces for Stage-10 control and read-only verified memory/world/optimizer inspection;
-- Linux/macOS runtime regression remains supported, while advanced desktop GUI parity remains Windows-first.
+The runtime-certified Stage-5–10 code head remains `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`; the deployed merged mainline source is `3361b2f77d2b04028d514b178bd4a246fc863e6c`.
 
-The Stage-5–10 branch is CI-gated together with all predecessor certification, including Stage 3 autonomous execution, Windows RDC parity, Stage 4 multi-agent, core runtime, MCP/Inspector, relay WebSocket, security red-team, performance regression, Windows UIA/path-authority/native packaging, and the Windows/macOS/Linux platform matrix.
-
-Deployment remains a separate state transition. Do not promote `docs/release-state.json` or the production source/tool counts until the successor is actually merged and deployed.
+The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm patch release is published.
 
 ## Version policy
 
@@ -52,7 +49,7 @@ The public version tracks the stable public MCP schema/review snapshot. The Wind
 
 ## OpenAI-side state
 
-The currently deployed software/runtime release is complete. The certified successor above still requires merge/deployment/promotion before its **32-tool Developer surface and Stage-1–10 runtime** are live. The remaining external limitation for directory publication is OpenAI-side:
+The currently deployed Stage-1–10 software/runtime release is complete. The remaining external limitation for directory publication is OpenAI-side:
 
 - developer verification: blocked/rejected externally;
 - app-directory submission: not submitted;
