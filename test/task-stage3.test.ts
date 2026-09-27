@@ -228,7 +228,10 @@ test('stage3 crash recovery refreshes active deadline without resetting step or 
     authorizedScope: [root],
     successConditions: ['do not duplicate mutation', 'fresh verification succeeds after restart'],
     goal: { kind: 'controlled-file-change', root, path: target, content },
-    timeoutMs: 500
+    // The persisted deadline below is intentionally expired. The active
+    // recovery budget must be long enough that this test measures crash
+    // recovery semantics rather than CI runner filesystem/Git latency.
+    timeoutMs: 30_000
   });
   task.state = 'RUNNING';
   task.execution!.plannerState.phase = 'create';
@@ -253,7 +256,7 @@ test('stage3 crash recovery refreshes active deadline without resetting step or 
   assert.equal(completed.state, 'VERIFIED');
   assert.equal(await fs.readFile(target, 'utf8'), content);
   assert.equal(completed.execution!.records[0]!.state, 'INTERRUPTED');
-  assert.ok(Date.parse(completed.execution!.deadlineAt!) > Date.now() - 5_000);
+  assert.ok(Date.parse(completed.execution!.deadlineAt!) > Date.now(), 'recovery must refresh the active deadline into the future');
   assert.ok(completed.evidence.some((item) => item.kind === 'task_recovery'));
   assert.equal(completed.execution!.stepCount >= 1, true);
 });
