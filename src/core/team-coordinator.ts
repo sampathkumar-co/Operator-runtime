@@ -321,7 +321,7 @@ export class TeamCoordinator {
     let claimed: TeamWorkItem | undefined;
     const mission = await this.#store.update(missionId, (current) => {
       reapExpired(current);
-      assertMissionRunnable(current);
+      if (!ensureMissionRunnable(current)) return current;
       const worker = requireWorker(current, input.workerId);
       if (worker.state !== 'ACTIVE') throw new OperatorError('TEAM_WORKER_OFFLINE', 'Worker is not active.');
       const liveLeases = current.workItems.filter((item) => item.state === 'LEASED' && item.lease && Date.parse(item.lease.expiresAt) > Date.now()).length;
@@ -378,10 +378,16 @@ export class TeamCoordinator {
     risk: ActionRisk;
     resourceKeys?: string[];
   }): Promise<{ mission: TeamMission; workItem: TeamWorkItem }> {
-    let authorized!: TeamWorkItem;
+    let authorized: TeamWorkItem | undefined;
+    let gateError: { code: string; message: string } | undefined;
     const mission = await this.#store.update(missionId, (current) => {
       reapExpired(current);
-      assertMissionRunnable(current);
+      if (!ensureMissionRunnable(current)) {
+        gateError = current.state === 'BLOCKED'
+          ? { code: 'TEAM_RECONCILIATION_REQUIRED', message: 'Mission has uncertain resources that require reconciliation.' }
+          : { code: 'TEAM_TIMEOUT', message: 'Mission exceeded its wall-clock budget.' };
+        return current;
+      }
       const worker = requireWorker(current, input.workerId);
       const item = requireWorkItem(current, input.workItemId);
       const lease = requireLease(item, worker.id, input.leaseId, current.epoch);
@@ -416,6 +422,8 @@ export class TeamCoordinator {
       authorized = structuredClone(item);
       return current;
     });
+    if (gateError) throw new OperatorError(gateError.code, gateError.message);
+    if (!authorized) throw new OperatorError('TEAM_EXECUTION_DENIED', 'Work execution authorization was not granted.');
     return { mission, workItem: authorized };
   }
 
@@ -482,6 +490,7 @@ export class TeamCoordinator {
       const now = new Date().toISOString();
       const code = boundedKey(input.code, 'failure code');
       const message = boundedText(input.message, 64 * 1024, 'failure message');
+      if (!['none', 'known', 'uncertain'].includes(input.sideEffectState)) throw new OperatorError('TEAM_INPUT_INVALID', 'sideEffectState must be none, known, or uncertain.');
       const uncertain = input.sideEffectState === 'uncertain';
       for (const resourceKey of item.resources) {
         const resource = requireResource(mission, resourceKey);
@@ -522,6 +531,7 @@ export class TeamCoordinator {
         delete resource.lock;
         resource.updatedAt = now;
       }
+      if (!['completed', 'retry', 'failed'].includes(input.resolution)) throw new OperatorError('TEAM_INPUT_INVALID', 'Reconciliation resolution is invalid.');
       const evidence = validateEvidence(input.evidence ?? []);
       if (input.resolution === 'completed') {
         item.state = 'COMPLETED';
@@ -677,17 +687,21 @@ function normalizeBudget(input: Partial<TeamBudget> | undefined): TeamBudget {
   };
 }
 
-function assertMissionRunnable(mission: TeamMission): void {
+function ensureMissionRunnable(mission: TeamMission): boolean {
   if (mission.state !== 'RUNNING') throw new OperatorError('TEAM_STATE_INVALID', 'Mission is not running.');
   if (mission.deadlineAt && Date.now() >= Date.parse(mission.deadlineAt)) {
     mission.state = 'FAILED';
+    mission.updatedAt = new Date().toISOString();
     appendEvent(mission, 'mission.deadline_exceeded');
-    throw new OperatorError('TEAM_TIMEOUT', 'Mission exceeded its wall-clock budget.');
+    return false;
   }
   if (mission.resources.some((resource) => resource.uncertain)) {
     mission.state = 'BLOCKED';
-    throw new OperatorError('TEAM_RECONCILIATION_REQUIRED', 'Mission has uncertain resources that require reconciliation.');
+    mission.updatedAt = new Date().toISOString();
+    appendEvent(mission, 'mission.reconciliation_required');
+    return false;
   }
+  return true;
 }
 
 function reapExpired(mission: TeamMission): void {
