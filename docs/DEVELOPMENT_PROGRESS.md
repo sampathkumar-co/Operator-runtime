@@ -14,29 +14,27 @@ This document answers "what is actually finished in source?" For deployed produc
 | Git / project / Docker / PostgreSQL / VS Code adapters | ✅ Complete + CI-certified | Existing private runtime |
 | Relay / pairing / multi-device identity + routing | ✅ Complete + CI-certified | Deployed architecture |
 | Public MCP surface | ✅ 9 tools | ✅ 9 tools deployed |
-| Deployed Developer MCP | Historical production snapshot | ✅ 24 tools |
-| Windows RDC parity | ✅ Complete + CI-certified | Not yet promoted from successor |
-| Stage 3 bounded autonomous loop | ✅ Complete + CI-certified | Successor promotion required for latest source |
-| Stage 4 shared-state multi-agent runtime | ✅ Complete + CI-certified | Not yet promoted from successor |
-| Stage 5 verified procedural memory | ✅ Complete + CI-certified | Not deployed |
-| Stage 6 cross-application world model | ✅ Complete + CI-certified | Not deployed |
-| Stage 7 trusted cross-device resource pool | ✅ Complete + CI-certified | Not deployed |
-| Stage 8 organization-scale execution | ✅ Complete + CI-certified | Not deployed |
-| Stage 9 bounded self-optimization | ✅ Complete + CI-certified | Not deployed |
-| Stage 10 autonomous digital operations layer | ✅ Complete + CI-certified | Not deployed |
-| Successor private/Developer surface | ✅ **32 grouped tools** | Not deployed |
+| Deployed Developer MCP | ✅ 32 grouped tools | ✅ 32 grouped tools live |
+| Windows RDC parity | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 3 bounded autonomous loop | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 4 shared-state multi-agent runtime | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 5 verified procedural memory | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 6 cross-application world model | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 7 trusted cross-device resource pool | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 8 organization-scale execution | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 9 bounded self-optimization | ✅ Complete + CI-certified | ✅ Deployed |
+| Stage 10 autonomous digital operations layer | ✅ Complete + CI-certified | ✅ Deployed |
+| Private/Developer surface | ✅ **32 grouped tools** | ✅ **32 grouped tools live** |
 | Linux/macOS runtime regression | ✅ Green | Runtime supported; advanced GUI parity not claimed |
 | OpenAI directory verification/submission | External | Not completed |
 
-## Certified successor
+## Certified and deployed Stage 1–10 runtime
 
-Branch: `feature/stage5-10-agent-os`
+Runtime-certified Stage-5–10 code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
-Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
+Merged/deployed production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
 
-Later commits that only update Markdown do not change the certified runtime implementation.
-
-The Stage-5–10 successor is gated together with the predecessor runtime: Stage 3 autonomous certification, Windows RDC parity, Stage 4 multi-agent, Stage 5–10 certification, core runtime, MCP/Inspector, relay WebSocket E2E, security red-team, performance regression, Windows UIA/path authority/native packaging, and the Windows/macOS/Linux platform matrix.
+The deployed runtime is gated together with the predecessor runtime: Stage 3 autonomous certification, Windows RDC parity, Stage 4 multi-agent, Stage 5–10 certification, core runtime, MCP/Inspector, relay WebSocket E2E, security red-team, performance regression, Windows UIA/path authority/native packaging, and the Windows/macOS/Linux platform matrix.
 
 ## Stage progress
 
@@ -116,26 +114,20 @@ The Stage-5–10 successor is gated together with the predecessor runtime: Stage
 ## Current source vs production
 
 ### Production now
-- production source: `94becbf734817121fbea1a017b9e1b10c144d125`;
+- production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
 - public tools: **9**;
-- Developer tools: **24**;
-- npm: `mecord-connect@1.0.1`.
+- Developer tools: **32 grouped tools**;
+- npm: `mecord-connect@1.0.1` until the separately authenticated patch publish.
 
-### Certified Stage-1–10 successor
-- runtime code: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;
-- public tools: **9** by design;
-- private/Developer source surface: **32 grouped tools**;
-- Windows RDC parity + Stages 3–10: complete and CI-certified.
-
-The successor does not become production merely because source/CI are complete.
+### Certified runtime lineage
+- Stage-5–10 runtime certification head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;
+- merged/deployed mainline source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
+- Windows RDC parity + Stages 3–10: complete, CI-certified and deployed.
 
 ## Remaining release work
 
-1. merge PR #43;
-2. deploy the successor runtime/private edge;
-3. verify live health/source identity and exact tool counts;
-4. run fresh real paired-Windows Stage-10 workflows through the live ChatGPT/Developer path when that external path is available;
-5. promote `docs/release-state.json` only after deployment facts are verified;
-6. continue the external OpenAI verification/app-directory process separately.
+1. publish the separately authenticated npm patch release so `npx mecord-connect@latest` installs the Stage-1–10 runtime;
+2. run fresh real paired-Windows Stage-10 workflows through the live ChatGPT/Developer path when the external OpenAI verification path is available;
+3. continue the external OpenAI verification/app-directory process separately.
 
-There is no known Stage-1–10 repository implementation blocker on the certified successor.
+There is no known Stage-1–10 repository or production-edge implementation blocker.
