@@ -54,7 +54,9 @@ test('stage10 outcome planner honors an explicit read-only ceiling', () => {
     objective: 'Inspect without changing anything',
     scopeKey: 'project:gamma',
     successConditions: ['state is understood'],
-    availableCapabilities: ['file.read', 'file.write', 'browser.interact', 'process.manage']
+    availableCapabilities: ['file.read', 'file.write', 'browser.interact', 'process.manage'],
+    requestedCapabilities: ['file.read'],
+    resources: ['file:/workspace/gamma/state.json']
   });
   assert.deepEqual(plan.workItems.map((item) => item.key), ['plan', 'test', 'verify']);
   assert.ok(plan.workItems.every((item) => item.risk === 'read'));
@@ -68,7 +70,9 @@ test('stage10 outcome planner fails closed when no authorized read observation c
       objective: 'Impossible blind operation',
       scopeKey: 'project:none',
       successConditions: ['verified'],
-      availableCapabilities: ['file.write', 'terminal.session']
+      availableCapabilities: ['file.write', 'terminal.session'],
+      requestedCapabilities: ['file.write'],
+      resources: ['file:/workspace/none/output.txt']
     }),
     (error: any) => error?.code === 'OUTCOME_PLAN_CAPABILITY_EMPTY'
   );
@@ -96,6 +100,21 @@ test('stage10 outcome planner refuses mutation without explicit capability and r
       availableCapabilities: ['file.read', 'file.write'],
       requestedCapabilities: ['file.read', 'file.write'],
       resources: []
+    }),
+    (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
+  );
+});
+
+
+test('stage10 read-only auto-planning also requires explicit resource authority', () => {
+  const planner = new OutcomePlanner();
+  assert.throws(
+    () => planner.plan({
+      objective: 'Inspect without implicit scope',
+      scopeKey: 'project:read-authority',
+      successConditions: ['verified'],
+      maxRisk: 'read',
+      availableCapabilities: ['file.read']
     }),
     (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
   );
