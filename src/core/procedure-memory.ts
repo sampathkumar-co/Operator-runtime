@@ -45,6 +45,7 @@ export interface VerifiedProcedure {
   expiresAt: string;
   invalidatedAt?: string;
   invalidationReason?: string;
+  outcomeReceipts?: string[];
 }
 
 interface ProcedureMemoryState {
@@ -93,6 +94,9 @@ export class ProcedureMemoryStore {
       const existing = state.procedures.find((item) => item.key === normalized.key && item.scopeKey === normalized.scopeKey);
       let procedure: VerifiedProcedure;
       if (existing) {
+        if (existing.verificationDigest === normalized.verificationDigest && existing.verifierEvidenceDigest === normalized.verifierEvidenceDigest) {
+          return structuredClone(existing);
+        }
         if (existing.status === 'INVALIDATED') {
           existing.version += 1;
           existing.status = 'ACTIVE';
@@ -135,7 +139,8 @@ export class ProcedureMemoryStore {
           failedRuns: 0,
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
-          expiresAt: new Date(now.getTime() + normalized.ttlMs).toISOString()
+          expiresAt: new Date(now.getTime() + normalized.ttlMs).toISOString(),
+          outcomeReceipts: []
         };
         state.procedures.push(procedure);
       }
@@ -179,16 +184,23 @@ export class ProcedureMemoryStore {
       .slice(0, maxResults);
   }
 
-  async recordOutcome(idInput: string, outcome: 'verified' | 'failed'): Promise<VerifiedProcedure> {
+  async recordOutcome(idInput: string, outcome: 'verified' | 'failed', receiptInput?: string): Promise<VerifiedProcedure> {
     const id = validUuid(idInput, 'procedureId');
+    const receipt = receiptInput === undefined ? undefined : shaDigest(receiptInput, 'outcome receipt');
     if (outcome !== 'verified' && outcome !== 'failed') throw new OperatorError('PROCEDURE_MEMORY_INPUT_INVALID', 'Procedure outcome is invalid.');
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const procedure = state.procedures.find((item) => item.id === id);
       if (!procedure) throw new OperatorError('PROCEDURE_NOT_FOUND', 'Verified procedure was not found.');
       if (procedure.status === 'INVALIDATED') throw new OperatorError('PROCEDURE_INVALIDATED', 'Invalidated procedure cannot record execution outcomes.');
+      procedure.outcomeReceipts ??= [];
+      if (receipt && procedure.outcomeReceipts.includes(receipt)) return structuredClone(procedure);
       if (outcome === 'verified') procedure.verifiedRuns += 1;
       else procedure.failedRuns += 1;
+      if (receipt) {
+        procedure.outcomeReceipts.push(receipt);
+        if (procedure.outcomeReceipts.length > 256) procedure.outcomeReceipts.splice(0, procedure.outcomeReceipts.length - 256);
+      }
       procedure.updatedAt = this.#clock().toISOString();
       if (procedure.failedRuns >= 3 && procedure.failedRuns * 2 >= procedure.verifiedRuns) procedure.status = 'SUSPENDED';
       await this.#write(state);
@@ -313,6 +325,11 @@ function validateState(input: unknown): ProcedureMemoryState {
     validIso(item.createdAt, 'createdAt'); validIso(item.updatedAt, 'updatedAt'); validIso(item.expiresAt, 'expiresAt');
     if (item.invalidatedAt !== undefined) validIso(item.invalidatedAt, 'invalidatedAt');
     if (item.invalidationReason !== undefined) boundedText(item.invalidationReason, 2048, 'invalidationReason');
+    if (item.outcomeReceipts !== undefined) {
+      if (!Array.isArray(item.outcomeReceipts) || item.outcomeReceipts.length > 256) throw corrupt('Procedure outcome receipts are invalid.');
+      for (const receipt of item.outcomeReceipts) shaDigest(receipt, 'outcome receipt');
+      if (new Set(item.outcomeReceipts).size !== item.outcomeReceipts.length) throw corrupt('Procedure outcome receipts must be unique.');
+    }
     const identity = procedureIdentity(item);
     if (identities.has(identity)) throw corrupt('Procedure key/scope identities must be unique.');
     identities.add(identity);
