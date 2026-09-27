@@ -654,6 +654,8 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
   const dispatches: any[] = [];
   const reservations: any[] = [];
   const releases: string[] = [];
+  let currentReservation: any;
+  let heartbeats = 0;
   const hub = {
     async boundProjectDevice(_accountId: string, key: string) {
       if (!bound || bound.key !== key) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'missing');
@@ -662,9 +664,10 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
     async bindProject(_accountId: string, key: string, deviceId: string) { bound = { key, deviceId }; },
     async reserveDevice(accountId: string, request: any) {
       reservations.push({ accountId, request });
-      return {
+      currentReservation = {
         id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
         workloadKey: request.workloadKey,
+        ...(request.projectKey ? { projectKey: request.projectKey } : {}),
         deviceId: DEVICE_ID,
         sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
         requiredCapabilities: request.requiredCapabilities,
@@ -677,8 +680,30 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         state: 'ACTIVE'
       };
+      return currentReservation;
     },
-    async releaseDeviceReservation(_accountId: string, reservationId: string) { releases.push(reservationId); return {}; },
+    async listDeviceReservations(_accountId: string, input: any) {
+      if (!currentReservation) return [];
+      if (input?.deviceId && input.deviceId !== currentReservation.deviceId) return [];
+      if (input?.activeOnly && currentReservation.state !== 'ACTIVE') return [];
+      return [currentReservation];
+    },
+    async heartbeatDeviceReservation(_accountId: string, reservationId: string, sessionId: string, leaseMs: number) {
+      assert.equal(reservationId, currentReservation.id);
+      assert.equal(sessionId, currentReservation.sessionId);
+      heartbeats += 1;
+      currentReservation = {
+        ...currentReservation,
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + leaseMs).toISOString()
+      };
+      return currentReservation;
+    },
+    async releaseDeviceReservation(_accountId: string, reservationId: string) {
+      releases.push(reservationId);
+      currentReservation = { ...currentReservation, state: 'RELEASED' };
+      return currentReservation;
+    },
     async dispatch(input: any) {
       dispatches.push(input);
       return { route: { deviceId: DEVICE_ID }, delivery: { id: `operation-${dispatches.length}`, seq: 80 + dispatches.length } };
@@ -688,7 +713,7 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
     async get(_deviceId: string, seq: number) {
       return {
         deliveryId: `operation-${seq - 80}`,
-        result: { ok: true, operation: { id: operationId, state: 'PENDING' } },
+        result: { ok: true, operation: { id: operationId, state: seq === 81 ? 'PENDING' : 'VERIFIED' } },
         replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
       };
     }
@@ -744,7 +769,9 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
   assert.equal(dispatches[0].kind, 'operation');
   assert.equal(dispatches[0].explicitDeviceId, DEVICE_ID);
   assert.deepEqual(dispatches[0].requiredCapabilities, ['file.read']);
-  assert.deepEqual(releases, ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']);
+  assert.deepEqual(releases, []);
+  assert.equal(currentReservation.state, 'ACTIVE');
+  assert.ok(heartbeats >= 1);
 
   const inspect = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
     method: 'POST',
@@ -755,6 +782,8 @@ test('stage10 relay operation reserves trusted capacity, persists device affinit
   assert.equal(dispatches[1].kind, 'operation');
   assert.equal(dispatches[1].explicitDeviceId, DEVICE_ID);
   assert.deepEqual(dispatches[1].requiredCapabilities, []);
+  assert.deepEqual(releases, ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']);
+  assert.equal(currentReservation.state, 'RELEASED');
 });
 
 test('stage5-9 relay knowledge inspection is developer-only and dispatches read-only knowledge delivery', async (t) => {
