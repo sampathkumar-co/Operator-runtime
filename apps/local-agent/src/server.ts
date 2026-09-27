@@ -232,7 +232,12 @@ export function createLocalAgentServer(options: {
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? '/', 'http://operator.local');
-    const pathname = requestUrl.pathname;
+    const requestedPathname = requestUrl.pathname;
+    // Stage-3 goal API is a semantic alias over the same durable Task Capsule store.
+    // This avoids a second source of truth while giving goal-oriented clients a stable control-plane route.
+    const pathname = requestedPathname === '/v1/goals' || requestedPathname.startsWith('/v1/goals/')
+      ? requestedPathname.replace(/^\/v1\/goals/, '/v1/tasks')
+      : requestedPathname;
 
     if (pathname === '/health' && req.method === 'GET') {
       const emergencyStopped = options.emergencyStop ? (await options.emergencyStop.status()).engaged : false;
