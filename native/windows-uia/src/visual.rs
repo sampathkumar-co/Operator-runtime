@@ -335,6 +335,9 @@ pub fn capture(params: CaptureParams) -> Result<CaptureResult, String> {
                 selector.class_name.as_deref(),
                 params.wait_ms(),
             )?;
+            if !window.foreground {
+                return Err("Window visual capture requires the uniquely matched window to be foreground".into());
+            }
             let hwnd = win32::parse_window_id(&window.window_id)?;
             let rect = window_rect(hwnd)?;
             assert_inside(rect, virtual_rect)?;
