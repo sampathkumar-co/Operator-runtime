@@ -391,12 +391,14 @@ function validateNodes(input: unknown): TaskNode[] {
     const key = raw.key === undefined ? undefined : boundedText(raw.key, 256, `node ${index} key`);
     if (key && keys.has(key)) throw corrupt(`Node ${index} duplicates node key ${key}.`);
     if (key) keys.add(key);
+    const stepKey = raw.stepKey === undefined ? undefined : boundedText(raw.stepKey, 256, `node ${index} stepKey`);
+    const actionId = raw.actionId === undefined ? undefined : boundedText(raw.actionId, 256, `node ${index} actionId`);
     const title = boundedText(raw.title, 16_384, `node ${index} title`);
     const state = validTaskState(raw.state, `node ${index} state`);
     if (typeof raw.required !== 'boolean') throw corrupt(`Node ${index} required must be boolean.`);
     const dependsOn = validateIdArray(raw.dependsOn, MAX_NODES, `node ${index} dependsOn`);
     const evidence = validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `node ${index} evidence`);
-    return { id, ...(key ? { key } : {}), title, state, required: raw.required, dependsOn, evidence };
+    return { id, ...(key ? { key } : {}), ...(stepKey ? { stepKey } : {}), ...(actionId ? { actionId } : {}), title, state, required: raw.required, dependsOn, evidence };
   });
 
   for (const node of nodes) {
