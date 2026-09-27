@@ -209,10 +209,10 @@ Stage 4 is an execution coordinator, not an embedded LLM. External agents such a
 
 The runtime-certified Stage-4/Windows-parity code head is `288d5a1c5ad5742f0f041e42740010eeda50dd92`. On that immutable code head, CI #1375, Platform Matrix #1145, Windows Signing Smoke #1146 and NPM Remote Runtime CI #759 all passed. The dedicated Windows RDC parity and Stage 4 multi-agent certification jobs were both green on the same commit.
 
-Deployment remains a separate state transition. The currently live production endpoint is still the older source recorded in `docs/CURRENT_RELEASE_STATE.md`, with the public 9-tool surface and deployed 24-tool Developer surface, until this successor is merged, deployed and release-state metadata is promoted.
+Historical note: Stage 4 was certified before the later Stage-5–10 rollout. The current production state is recorded in `docs/CURRENT_RELEASE_STATE.md` and now includes the merged Stage-1–10 runtime.
 
 
-## M8 — Stage 5–10 Agent OS successor — REPOSITORY COMPLETE, DEPLOYMENT PENDING
+## M8 — Stage 5–10 Agent OS successor — COMPLETE AND DEPLOYED
 
 Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
@@ -289,4 +289,4 @@ Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
 All Stage-5–10 behavior remains subordinate to the existing provenance, canonical-risk, local policy, approval, emergency-stop, exact-resource, provider and verification boundaries. No stage adds an embedded LLM or permits learned state to become authority.
 
-The source successor is repository-complete. Merge/deployment, live endpoint verification and production release-state promotion remain separate transitions.
+The Stage-5–10 successor is repository-complete, merged to `main`, deployed at `3361b2f77d2b04028d514b178bd4a246fc863e6c`, and live-verified with public 9 / Developer 32 tool surfaces. The npm patch release remains a separately authenticated publication step.
