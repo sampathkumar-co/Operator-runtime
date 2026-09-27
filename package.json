@@ -12,7 +12,8 @@
     "test:performance": "node --experimental-strip-types scripts/run-test-suite.ts performance",
     "verify:release-checkout": "node scripts/verify-release-checkout.mjs",
     "check": "node --experimental-strip-types scripts/check.ts && npm test",
-    "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts"
+    "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts",
+    "test:stage3": "node --experimental-strip-types --test test/task-stage3.test.ts test/task-orchestrator.test.ts test/windows-uia.test.ts test/companion-api.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT."
