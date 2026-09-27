@@ -366,8 +366,14 @@ export class DigitalOperationsLayer {
 
   async #recordFinalOutcome(operation: DigitalOperation): Promise<DigitalOperation> {
     const verified = operation.state === 'VERIFIED';
+    const outcomeReceipt = crypto.createHash('sha256').update(JSON.stringify({
+      operationId: operation.id,
+      submissionDigest: operation.submissionDigest,
+      state: operation.state,
+      receiptDigest: operation.receiptDigest ?? null
+    })).digest('hex');
     try {
-      await this.#optimizer.record(strategyContextFor(operation.scopeKey, operation.mode), operation.selectedStrategy, { verified });
+      await this.#optimizer.record(strategyContextFor(operation.scopeKey, operation.mode), operation.selectedStrategy, { verified }, outcomeReceipt);
       let capturedProcedureId: string | undefined;
       if (verified && operation.procedureCapture && operation.receiptDigest) {
         const verifierEvidenceDigest = await this.#underlyingVerificationDigest(operation);
@@ -386,7 +392,7 @@ export class DigitalOperationsLayer {
         capturedProcedureId = captured.id;
       }
       if (operation.selectedProcedureId && operation.selectedProcedureId !== capturedProcedureId) {
-        await this.#procedures.recordOutcome(operation.selectedProcedureId, verified ? 'verified' : 'failed');
+        await this.#procedures.recordOutcome(operation.selectedProcedureId, verified ? 'verified' : 'failed', outcomeReceipt);
       }
     } finally {
       if (operation.deviceReservationId) {
