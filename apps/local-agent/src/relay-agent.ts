@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayClient, type RelayClientStatus, type RelayDelivery, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
@@ -60,6 +61,7 @@ export class LocalAgentRelayRunner {
       getSessionToken: () => this.#sessionCredentials.forConnection(),
       supportedCapabilities: options.supportedCapabilities,
       getSupportedCapabilities: options.getSupportedCapabilities,
+      resourceProfile: localResourceProfile(),
       onStatus: options.onStatus,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id, context.delivery),
@@ -179,6 +181,20 @@ export class LocalAgentRelayRunner {
   }
 
 
+}
+
+function localResourceProfile() {
+  const configuredJobs = Number(process.env.OPERATOR_DEVICE_MAX_CONCURRENT_JOBS ?? 1);
+  const maxConcurrentJobs = Number.isSafeInteger(configuredJobs) && configuredJobs >= 1 && configuredJobs <= 1024 ? configuredJobs : 1;
+  const configuredTags = (process.env.OPERATOR_DEVICE_RESOURCE_TAGS ?? '')
+    .split(',').map((item) => item.trim()).filter((item) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item));
+  return {
+    cpuSlots: Math.max(1, Math.min(1024, typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length)),
+    memoryMb: Math.max(128, Math.min(16 * 1024 * 1024, Math.floor(os.totalmem() / (1024 * 1024)))),
+    gpu: process.env.OPERATOR_DEVICE_GPU === '1',
+    tags: [...new Set(configuredTags)].sort().slice(0, 64),
+    maxConcurrentJobs
+  };
 }
 
 export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
