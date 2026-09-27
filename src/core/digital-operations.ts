@@ -68,6 +68,7 @@ export type DigitalExecutionSpec =
     };
 
 export interface DigitalOperationSubmit {
+  requestId?: string;
   objective: string;
   scopeKey: string;
   successConditions: string[];
@@ -184,7 +185,7 @@ export class DigitalOperationsLayer {
     const now = this.#clock().toISOString();
     const operation: DigitalOperation = {
       version: 1,
-      id: crypto.randomUUID(),
+      id: normalized.requestId ?? crypto.randomUUID(),
       objective: normalized.objective,
       scopeKey: normalized.scopeKey,
       successConditions: normalized.successConditions,
@@ -422,6 +423,7 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
   }));
   if (strategies.length > 100 || new Set(strategies.map((item) => item.id)).size !== strategies.length) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'Strategy candidates are invalid.');
   return {
+    requestId: input.requestId === undefined ? undefined : validUuid(input.requestId, 'requestId'),
     objective: boundedText(input.objective, 16_384, 'objective'),
     scopeKey: boundedContext(input.scopeKey, 'scopeKey'),
     successConditions,
