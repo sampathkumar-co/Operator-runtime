@@ -843,7 +843,7 @@ test('stage5-9 relay knowledge inspection is developer-only and dispatches read-
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ accountId: ACCOUNT_A, query: { kind: 'procedures', limit: 10 }, waitMs: 1000 })
   });
-  assert.equal(response.status, 200, await response.text());
+  assert.equal(response.status, 200, await response.clone().text());
   const body = await response.json() as any;
   assert.deepEqual(body, { ok: true, procedures: [] });
   assert.equal(dispatchCalls, 1);
