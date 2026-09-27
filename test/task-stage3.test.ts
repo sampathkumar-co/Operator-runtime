@@ -13,7 +13,7 @@ import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
 import { TaskStore } from '../src/core/task-store.ts';
 import { verifyTaskCompletion } from '../src/core/task-verifier.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
-import type { PermissionProfile } from '../src/core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, PermissionProfile } from '../src/core/types.ts';
 import { supportedGitAvailable } from './git-test-support.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
@@ -200,4 +200,140 @@ test('stage3 project quality goal compiles trusted lint/test/build checks at run
   ]);
   assert.ok(completed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'pass'));
   assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
+});
+
+
+test('stage3 crash recovery refreshes active deadline without resetting step or attempt history', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-stage3-restart-root-');
+  const state = await tempDir(t, 'operator-stage3-restart-state-');
+  const target = path.join(root, 'recovered.txt');
+  const content = 'already applied before crash\n';
+  await fs.writeFile(target, content);
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => execFile('git', ['init', '--quiet'], { cwd: root }, (error) => error ? reject(error) : resolve()));
+
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)).register(new GitProvider({ allowedRoots: [root] })),
+    store,
+    permissions: permissions(root, ['file.list', 'file.create', 'file.read', 'file.replace', 'git.status'])
+  });
+  const task = await orchestrator.submit({
+    objective: 'Recover an interrupted file creation after process downtime.',
+    authorizedScope: [root],
+    successConditions: ['do not duplicate mutation', 'fresh verification succeeds after restart'],
+    goal: { kind: 'controlled-file-change', root, path: target, content },
+    timeoutMs: 500
+  });
+  task.state = 'RUNNING';
+  task.execution!.plannerState.phase = 'create';
+  task.execution!.startedAt = new Date(Date.now() - 60_000).toISOString();
+  task.execution!.deadlineAt = new Date(Date.now() - 30_000).toISOString();
+  task.execution!.stepCount = 1;
+  const inputHash = crypto.createHash('sha256').update(JSON.stringify({ content, path: target })).digest('hex');
+  task.execution!.records.push({
+    stepKey: 'create-file',
+    actionId: 'task-' + 'c'.repeat(64),
+    capability: 'file.create',
+    risk: 'write',
+    inputHash,
+    attempt: 1,
+    state: 'STARTED',
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    evidence: []
+  });
+  await store.put(task);
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.equal(completed.execution!.records[0]!.state, 'INTERRUPTED');
+  assert.ok(Date.parse(completed.execution!.deadlineAt!) > Date.now() - 5_000);
+  assert.ok(completed.evidence.some((item) => item.kind === 'task_recovery'));
+  assert.equal(completed.execution!.stepCount >= 1, true);
+});
+
+const STAGE3_SCORE: CapabilityScore = {
+  reliability: 1, latency: 1, determinism: 1, security: 1,
+  reversibility: 1, informationQuality: 1, interactionCost: 0
+};
+
+class RetryableWriteFailureProvider implements CapabilityProvider {
+  readonly name = 'test.retryable-write-failure';
+  calls = 0;
+  supports(action: ActionRequest): boolean { return action.capability === 'file.create'; }
+  score(): CapabilityScore { return STAGE3_SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.calls += 1;
+    return {
+      ok: false,
+      capability: action.capability,
+      provider: this.name,
+      evidence: [],
+      error: { code: 'TEMPORARY_WRITE_FAILURE', message: 'uncertain write result', retryable: true },
+      durationMs: 0
+    };
+  }
+}
+
+test('stage3 never blindly replays a retryable mutating action with uncertain side effects', async (t) => {
+  const root = await tempDir(t, 'operator-stage3-no-write-replay-root-');
+  const state = await tempDir(t, 'operator-stage3-no-write-replay-state-');
+  const provider = new RetryableWriteFailureProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.create'])
+  });
+  const task = await orchestrator.submit({
+    objective: 'Fail closed rather than replay an uncertain write.',
+    authorizedScope: [root],
+    successConditions: ['write dispatch occurs at most once'],
+    goal: { kind: 'controlled-file-change', root, path: path.join(root, 'uncertain.txt'), content: 'x' }
+  });
+  task.execution!.plannerState.phase = 'create';
+  await new TaskStore(state).put(task);
+
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(provider.calls, 1);
+  assert.equal(failed.failures.at(-1)?.code, 'TEMPORARY_WRITE_FAILURE');
+  assert.ok(failed.evidence.some((item) => item.kind === 'strategy_fail_closed'));
+});
+
+test('stage3 quality gate fails closed when a required trusted check is unavailable', async (t) => {
+  const root = await tempDir(t, 'operator-stage3-quality-missing-root-');
+  const authority = await tempDir(t, 'operator-stage3-quality-missing-authority-');
+  const state = await tempDir(t, 'operator-stage3-quality-missing-state-');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'stage3-quality-missing' }));
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root,
+      commands: [{
+        id: 'only-test', kind: 'test', executable: 'node', args: ['-e', 'process.exit(0)'],
+        cwd: '.', risk: 'read', artifacts: []
+      }]
+    }]
+  }));
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime()
+      .register(new ProjectInspectProvider({ allowedRoots: [root] }))
+      .register(new ProjectCommandProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath })),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['project.inspect', 'project.command.inspect', 'project.command.run'])
+  });
+  const task = await orchestrator.submit({
+    objective: 'Require both lint and test.',
+    authorizedScope: [root],
+    successConditions: ['all required checks must exist and pass'],
+    goal: { kind: 'project-quality-gate', root, checks: ['lint', 'test'], requireAll: true }
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.match(failed.failures.at(-1)?.message ?? '', /lint/i);
+  assert.equal(failed.execution!.records.some((record) => record.capability === 'project.command.run'), false);
+  assert.ok(failed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'fail'));
 });
