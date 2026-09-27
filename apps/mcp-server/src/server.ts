@@ -399,7 +399,9 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     successConditions: z.array(z.string().min(1).max(4096)).min(1).max(100),
     preconditions: z.array(operationCondition).max(200).optional(),
     postconditions: z.array(operationCondition).max(200).optional(),
-    execution: operationExecution,
+    execution: operationExecution.optional(),
+    maxRisk: z.enum(['read', 'write', 'external', 'system', 'destructive']).default('write'),
+    budget: operationTeamBudget.optional(),
     procedure: z.object({
       objectiveKind: z.string().min(1).max(128),
       assumptions: z.array(operationAssumption).max(100).default([]),
@@ -480,7 +482,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('operations', {
     title: 'Run governed digital operation',
-    description: 'Submit or control a durable Stage-10 outcome contract. It composes verified procedure memory, world-state pre/postconditions, Stage-4 teams, Stage-8 canary rollouts, bounded Stage-9 strategy learning, and trusted Stage-7 device placement. It cannot carry approval authority or raw device advertisements.',
+    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted: Mecord then decomposes objective + scope + success conditions into a bounded planner/executor/tester/verifier team using only capabilities already authorized locally and no dynamic-risk authority. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
     inputSchema: operationsSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (input) => {
