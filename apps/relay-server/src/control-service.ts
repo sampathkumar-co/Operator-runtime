@@ -11,6 +11,7 @@ import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authorit
 import type { RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
+import type { DeviceReservation } from '../../../src/core/device-pool.ts';
 
 const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
@@ -23,7 +24,7 @@ export interface RelayControlDiagnostic {
 }
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'releaseDeviceReservation'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
@@ -348,10 +349,44 @@ export class RelayControlService {
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const operation = validOperationRelayRequest(body.operation);
     const bindingKey = operationBindingKey(operation.operationId);
+    const leaseMs = operation.operation === 'submit' && operation.request
+      ? operationReservationLeaseMs(operation.request)
+      : 60 * 60_000;
 
     let routedDeviceId: string;
     let delivery: { id: string; seq: number };
-    let reservationId: string | undefined;
+    let reservation: DeviceReservation | undefined;
+    let reservationCreated = false;
+
+    const activeReservationFor = async (deviceId?: string): Promise<DeviceReservation | undefined> => {
+      const reservations = await this.#hub.listDeviceReservations(accountId, { activeOnly: true, ...(deviceId ? { deviceId } : {}), limit: 5000 });
+      return reservations.find((item) => item.workloadKey === bindingKey);
+    };
+    const latestReservationFor = async (deviceId: string): Promise<DeviceReservation | undefined> => {
+      const reservations = await this.#hub.listDeviceReservations(accountId, { deviceId, limit: 5000 });
+      return reservations.find((item) => item.workloadKey === bindingKey);
+    };
+    const renewReservation = async (current: DeviceReservation, renewMs: number): Promise<DeviceReservation> => {
+      try {
+        return await this.#hub.heartbeatDeviceReservation(accountId, current.id, current.sessionId, renewMs);
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_SESSION_CHANGED') throw error;
+        try { await this.#hub.releaseDeviceReservation(accountId, current.id); } catch {}
+        const replacement = await this.#hub.reserveDevice(accountId, {
+          workloadKey: bindingKey,
+          ...(current.projectKey ? { projectKey: current.projectKey } : {}),
+          explicitDeviceId: current.deviceId,
+          requiredCapabilities: current.requiredCapabilities,
+          requiredTags: current.requiredTags,
+          minMemoryMb: current.minMemoryMb,
+          requireGpu: current.requireGpu,
+          slots: current.slots,
+          leaseMs: renewMs
+        });
+        reservationCreated = true;
+        return replacement;
+      }
+    };
 
     if (operation.operation === 'submit') {
       let boundDeviceId: string | undefined;
@@ -361,33 +396,71 @@ export class RelayControlService {
       }
       const requirements = validOperationResourceRequirements(body.resourceRequirements);
       const requiredCapabilities = operationRequiredCapabilities(operation.request);
-      const reservation = await this.#hub.reserveDevice(accountId, {
-        workloadKey: bindingKey,
-        ...(projectKey ? { projectKey } : {}),
-        ...(requestedDeviceId ?? boundDeviceId ? { explicitDeviceId: requestedDeviceId ?? boundDeviceId } : {}),
-        requiredCapabilities,
-        requiredTags: requirements.requiredTags,
-        minMemoryMb: requirements.minMemoryMb,
-        requireGpu: requirements.requireGpu,
-        slots: requirements.slots,
-        leaseMs: Math.min(waitMs, 10 * 60_000)
-      });
-      reservationId = reservation.id;
+      reservation = await activeReservationFor(boundDeviceId ?? requestedDeviceId);
+      if (reservation) {
+        if (requestedDeviceId && reservation.deviceId !== requestedDeviceId) {
+          throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Existing operation reservation conflicts with the requested device.');
+        }
+        if (!operationReservationMatches(reservation, requiredCapabilities, requirements)) {
+          throw new OperatorError('DEVICE_POOL_RESERVATION_CONFLICT', 'Existing operation reservation is bound to different resource requirements.');
+        }
+        reservation = await renewReservation(reservation, leaseMs);
+      } else {
+        reservation = await this.#hub.reserveDevice(accountId, {
+          workloadKey: bindingKey,
+          ...(projectKey ? { projectKey } : {}),
+          ...(requestedDeviceId ?? boundDeviceId ? { explicitDeviceId: requestedDeviceId ?? boundDeviceId } : {}),
+          requiredCapabilities,
+          requiredTags: requirements.requiredTags,
+          minMemoryMb: requirements.minMemoryMb,
+          requireGpu: requirements.requireGpu,
+          slots: requirements.slots,
+          leaseMs
+        });
+        reservationCreated = true;
+      }
       routedDeviceId = reservation.deviceId;
-      const dispatched = await this.#hub.dispatch({
-        accountId,
-        explicitDeviceId: routedDeviceId,
-        requiredCapabilities,
-        kind: 'operation',
-        payload: { operation: operation.payload },
-        idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
-      });
-      delivery = dispatched.delivery;
       await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+      try {
+        const dispatched = await this.#hub.dispatch({
+          accountId,
+          explicitDeviceId: routedDeviceId,
+          requiredCapabilities,
+          kind: 'operation',
+          payload: { operation: operation.payload },
+          idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
+        });
+        delivery = dispatched.delivery;
+      } catch (error) {
+        if (reservationCreated && reservation) {
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+        }
+        throw error;
+      }
     } else {
       const boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey);
       if (requestedDeviceId && requestedDeviceId !== boundDeviceId) throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Explicit device conflicts with the durable operation-to-device binding.');
       routedDeviceId = boundDeviceId;
+      reservation = await activeReservationFor(boundDeviceId);
+      if (reservation) {
+        reservation = await renewReservation(reservation, leaseMs);
+      } else {
+        const previous = await latestReservationFor(boundDeviceId);
+        if (previous && previous.state !== 'ACTIVE') {
+          reservation = await this.#hub.reserveDevice(accountId, {
+            workloadKey: bindingKey,
+            ...(previous.projectKey ? { projectKey: previous.projectKey } : {}),
+            explicitDeviceId: boundDeviceId,
+            requiredCapabilities: previous.requiredCapabilities,
+            requiredTags: previous.requiredTags,
+            minMemoryMb: previous.minMemoryMb,
+            requireGpu: previous.requireGpu,
+            slots: previous.slots,
+            leaseMs
+          });
+          reservationCreated = true;
+        }
+      }
       const dispatched = await this.#hub.dispatch({
         accountId,
         explicitDeviceId: boundDeviceId,
@@ -399,29 +472,34 @@ export class RelayControlService {
       delivery = dispatched.delivery;
     }
 
-    try {
-      const deadline = Date.now() + waitMs;
-      while (Date.now() <= deadline) {
-        if (request.aborted || response.destroyed) return;
-        const stored = await this.#results.get(routedDeviceId, delivery.seq);
-        if (stored && stored.deliveryId === delivery.id) {
-          await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
-          const result = stored.result as unknown;
-          if (!isOperationTransportResult(result)) {
-            send(response, 502, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_INVALID', message: 'Device returned a malformed digital operation result.' } });
-            return;
-          }
-          send(response, 200, result);
+    const deadline = Date.now() + waitMs;
+    while (Date.now() <= deadline) {
+      if (request.aborted || response.destroyed) return;
+      const stored = await this.#results.get(routedDeviceId, delivery.seq);
+      if (stored && stored.deliveryId === delivery.id) {
+        await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
+        const result = stored.result as unknown;
+        if (!isOperationTransportResult(result)) {
+          send(response, 502, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_INVALID', message: 'Device returned a malformed digital operation result.' } });
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        const state = result.ok && result.operation && typeof result.operation.state === 'string' ? result.operation.state : undefined;
+        const terminal = state === 'VERIFIED' || state === 'FAILED' || state === 'CANCELLED';
+        if (reservation) {
+          if (terminal || (!result.ok && operation.operation === 'submit')) {
+            try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+          } else if (result.ok) {
+            try { reservation = await renewReservation(reservation, leaseMs); } catch {}
+          }
+        }
+        send(response, 200, result);
+        return;
       }
-      send(response, 504, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_PENDING', message: 'The routed digital operation has no durable result yet; retry with the same operation UUID.' } });
-    } finally {
-      if (reservationId) {
-        try { await this.#hub.releaseDeviceReservation(accountId, reservationId); } catch {}
-      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // Timeout is an uncertain transport result: keep the reservation alive so
+    // an operation that may already be running is not silently overbooked.
+    send(response, 504, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_PENDING', message: 'The routed digital operation has no durable result yet; retry with the same operation UUID.' } });
   }
 
   async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
@@ -636,6 +714,44 @@ function validOperationResourceRequirements(input: unknown): { requiredTags: str
   if (!Number.isSafeInteger(minMemoryMb) || minMemoryMb < 0 || minMemoryMb > 1024 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'minMemoryMb is invalid.');
   if (!Number.isSafeInteger(slots) || slots < 1 || slots > 64) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'slots is invalid.');
   return { requiredTags: requiredTags.sort(), minMemoryMb, requireGpu: raw.requireGpu === true, slots };
+}
+
+function operationReservationMatches(
+  reservation: DeviceReservation,
+  requiredCapabilities: string[],
+  requirements: { requiredTags: string[]; minMemoryMb: number; requireGpu: boolean; slots: number }
+): boolean {
+  return reservation.slots === requirements.slots
+    && reservation.minMemoryMb === requirements.minMemoryMb
+    && reservation.requireGpu === requirements.requireGpu
+    && JSON.stringify(reservation.requiredCapabilities) === JSON.stringify([...requiredCapabilities].sort())
+    && JSON.stringify(reservation.requiredTags) === JSON.stringify([...requirements.requiredTags].sort());
+}
+
+function operationReservationLeaseMs(request: Record<string, unknown>): number {
+  const candidates: number[] = [];
+  const directBudget = request.budget;
+  if (directBudget && typeof directBudget === 'object' && !Array.isArray(directBudget)) {
+    const value = Number((directBudget as Record<string, unknown>).maxWallClockMs);
+    if (Number.isFinite(value) && value > 0) candidates.push(value);
+  }
+  const execution = request.execution;
+  if (execution && typeof execution === 'object' && !Array.isArray(execution)) {
+    const raw = execution as Record<string, unknown>;
+    if (raw.kind === 'team' && raw.budget && typeof raw.budget === 'object' && !Array.isArray(raw.budget)) {
+      const value = Number((raw.budget as Record<string, unknown>).maxWallClockMs);
+      if (Number.isFinite(value) && value > 0) candidates.push(value);
+    }
+    if (raw.kind === 'organization' && raw.policy && typeof raw.policy === 'object' && !Array.isArray(raw.policy)) {
+      const teamBudget = (raw.policy as Record<string, unknown>).teamBudget;
+      if (teamBudget && typeof teamBudget === 'object' && !Array.isArray(teamBudget)) {
+        const value = Number((teamBudget as Record<string, unknown>).maxWallClockMs);
+        if (Number.isFinite(value) && value > 0) candidates.push(value);
+      }
+    }
+  }
+  const requested = candidates.length > 0 ? Math.max(...candidates) + 5 * 60_000 : 60 * 60_000;
+  return Math.max(10 * 60_000, Math.min(24 * 60 * 60_000, Math.floor(requested)));
 }
 
 function operationBindingKey(operationId: string): string { return `operation:${validUuid(operationId, 'operationId')}`; }
