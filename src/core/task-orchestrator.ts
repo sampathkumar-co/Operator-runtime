@@ -3,17 +3,32 @@ import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
-import { addTaskNode, createTask, finalizeTask, setNodeState } from './task.ts';
+import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
+import { classifyTaskFailure } from './task-failure.ts';
+import { verifyTaskCompletion } from './task-verifier.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
+export type PhysicalInputTaskOperation = 'move' | 'click' | 'double_click' | 'drag' | 'scroll' | 'type_text' | 'key_press' | 'hotkey';
+export type VisualTaskSelector = { name?: string; className?: string; processId?: number };
+export type AppPhysicalFallback = {
+  source: 'screen' | 'window' | 'region';
+  selector?: VisualTaskSelector;
+  region?: { x: number; y: number; width: number; height: number };
+  operation: PhysicalInputTaskOperation;
+  x?: number; y?: number; toX?: number; toY?: number;
+  deltaX?: number; deltaY?: number;
+  text?: string; key?: string; keys?: string[];
+  maxWidth?: number; maxHeight?: number;
+};
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
+export type ProjectQualityCheck = 'lint' | 'test' | 'build';
 
 export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
@@ -29,10 +44,12 @@ export type AtomicSemanticTaskGoal =
       kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
       value?: string; horizontalAmount?: string; verticalAmount?: string;
       verifySelector?: UiaTaskSelector; waitMs?: number;
+      physicalFallback?: AppPhysicalFallback;
     };
 
 export type SemanticTaskGoal =
   | AtomicSemanticTaskGoal
+  | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
   | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
 
 export interface TaskPlannerContext {
@@ -106,7 +123,7 @@ export class TaskOrchestrator {
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
+    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
@@ -217,14 +234,24 @@ export class TaskOrchestrator {
       await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
       const current = task.execution!;
-      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded deadline.', assertLease);
-      this.#markInterrupted(current);
+      const interrupted = this.#markInterrupted(task);
+      if (interrupted > 0) {
+        current.deadlineAt = new Date(Date.now() + current.timeoutMs).toISOString();
+        task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s), refreshed the active execution deadline, and preserved step/attempt budgets.', { count: interrupted }));
+        await this.#persistRunState(task, assertLease);
+      }
+      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
       const context = { task, goal };
       let decision: PlannerDecision;
       try { decision = planner.next(context); }
       catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       if (decision.type === 'complete') {
-        task.evidence.push(evidence('task_completion', 'pass', decision.message));
+        const verification = verifyTaskCompletion(task);
+        task.evidence.push(verification.evidence);
+        if (!verification.ok) {
+          return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
+        }
+        task.evidence.push(evidence('task_completion', 'pass', decision.message, { verificationDigest: verification.bundle.digest }));
         finalizeTask(task);
         await this.#persistRunState(task, assertLease);
         return task;
@@ -244,7 +271,26 @@ export class TaskOrchestrator {
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
       const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
-      const node = task.nodes.find((candidate) => candidate.title === decision.title) ?? addTaskNode(task, decision.title);
+      const executionNodeKey = stableTaskExecutionNodeKey(decision.key, attempt, inputHash);
+      const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
+      let node = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId);
+      if (!node) {
+        const legacyNode = task.nodes.find((candidate) => candidate.key === undefined && candidate.title === decision.title);
+        if (legacyNode) {
+          legacyNode.key = executionNodeKey;
+          legacyNode.stepKey = decision.key;
+          legacyNode.actionId = actionId;
+          if (legacyNode.dependsOn.length === 0 && priorNode && priorNode.id !== legacyNode.id) legacyNode.dependsOn = [priorNode.id];
+          node = legacyNode;
+          task.evidence.push(evidence('task_graph_migration', 'info', 'Migrated a legacy title-only task node to deterministic execution identity.', { stepKey: decision.key, actionId }));
+        }
+      }
+      node ??= addTaskNode(task, decision.title, {
+        key: executionNodeKey,
+        stepKey: decision.key,
+        actionId,
+        dependsOn: priorNode ? [priorNode.id] : []
+      });
       setNodeState(task, node.id, 'RUNNING');
       const record: TaskActionRecord = blockedReplay ?? {
         stepKey: decision.key, actionId, capability: decision.capability, risk, inputHash, attempt,
@@ -299,7 +345,8 @@ export class TaskOrchestrator {
       const latestExecution = task.execution!;
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
       if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
-      const latestNode = task.nodes.find((candidate) => candidate.title === decision.title);
+      const latestNode = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId)
+        ?? task.nodes.find((candidate) => candidate.title === decision.title);
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
@@ -313,10 +360,31 @@ export class TaskOrchestrator {
           planner.accept({ task, goal }, decision, observation);
         } catch (error) {
           await this.#recordLearning(task, result, 'failed', learningContext);
+          const postconditionCode = error instanceof OperatorError ? error.code : 'TASK_POSTCONDITION_FAILED';
+          const postconditionMessage = error instanceof Error ? error.message : String(error);
+          const postconditionObservation: TaskObservation = {
+            ...observation,
+            ok: false,
+            error: { code: postconditionCode, message: postconditionMessage, retryable: false }
+          };
+          const failureDecision = classifyTaskFailure(postconditionObservation.error);
+          task.evidence.push(evidence('failure_classification', 'info', 'Classified semantic postcondition failure before repair decision.', {
+            code: failureDecision.code,
+            class: failureDecision.class,
+            strategy: failureDecision.strategy,
+            capability: result.capability
+          }));
+          if (planner.fallback?.({ task, goal }, decision, postconditionObservation)) {
+            latestRecord.state = 'FAILED';
+            latestRecord.errorCode = postconditionCode;
+            setNodeState(task, latestNode.id, 'SKIPPED');
+            await this.#persistRunState(task, assertLease);
+            continue;
+          }
           latestRecord.state = 'FAILED';
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
-          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', postconditionMessage, assertLease);
         }
         await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
@@ -328,6 +396,13 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
+      const failureDecision = classifyTaskFailure(result.error);
+      task.evidence.push(evidence('failure_classification', 'info', 'Classified failed task action before choosing recovery strategy.', {
+        code: failureDecision.code,
+        class: failureDecision.class,
+        strategy: failureDecision.strategy,
+        capability: result.capability
+      }));
       if (controlState === 'CANCELLED' && latestRecord.errorCode === 'EXECUTION_ABORTED') {
         latestRecord.state = 'INTERRUPTED';
         setNodeState(task, latestNode.id, 'SKIPPED');
@@ -375,7 +450,25 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (result.error?.retryable === true && risk === 'read') { await this.#persistRunState(task, assertLease); continue; }
+      if (failureDecision.retryable && risk === 'read' && failureDecision.strategy === 'retry') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy,
+          actionId: latestRecord.actionId
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
+      if (failureDecision.retryable && risk !== 'read') {
+        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry of a failed mutating action; recovery requires an explicit planner re-observation or repair strategy.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy,
+          risk
+        }));
+      }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
   }
@@ -398,6 +491,10 @@ export class TaskOrchestrator {
       if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
+      if (task.execution?.startedAt) {
+        task.execution.deadlineAt = new Date(Date.now() + task.execution.timeoutMs).toISOString();
+        task.evidence.push(evidence('task_resume', 'info', 'Resumed task with a fresh active execution deadline; step and attempt budgets were preserved.'));
+      }
       await this.#store.put(task);
     });
     return await this.run(taskId, approvedActionIds, authorization);
@@ -488,12 +585,26 @@ export class TaskOrchestrator {
     }
   }
 
-  #markInterrupted(execution: TaskExecution): void {
+  #markInterrupted(task: TaskCapsule): number {
+    const execution = task.execution;
+    if (!execution) return 0;
+    let count = 0;
     for (const record of execution.records) if (record.state === 'STARTED') {
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
+      const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
+      if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
+        node.state = 'SKIPPED';
+        node.evidence.push(evidence('task_recovery', 'info', 'Interrupted execution attempt was superseded during recovery.', {
+          actionId: record.actionId,
+          stepKey: record.stepKey
+        }));
+      }
+      count += 1;
     }
+    if (count > 0) task.updatedAt = new Date().toISOString();
+    return count;
   }
 
   async #fail(task: TaskCapsule, code: string, message: string, assertLease?: () => Promise<void>): Promise<TaskCapsule> {
@@ -507,18 +618,115 @@ export class TaskOrchestrator {
   }
 }
 
+export class ProjectQualityGatePlanner implements TaskPlanner {
+  readonly id = 'operator.project-quality-gate.v1';
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'project-quality-gate'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Project quality planner requires a project-quality-gate goal.');
+    const state = task.execution!.plannerState;
+    const phase = String(state.phase ?? 'start');
+    if (phase === 'start') {
+      return { type: 'step', key: 'quality-inspect-project', title: 'Inspect project before compiling quality gate', capability: 'project.inspect', input: { path: goal.root }, target: goal.root };
+    }
+    if (phase === 'commands') {
+      return { type: 'step', key: 'quality-inspect-commands', title: 'Discover trusted quality checks', capability: 'project.command.inspect', input: { path: goal.root }, target: goal.root };
+    }
+    if (phase === 'run') {
+      const checks = Array.isArray(state.qualityChecks) ? state.qualityChecks.map(asRecord) : [];
+      const index = Number(state.qualityIndex ?? 0);
+      if (!Number.isSafeInteger(index) || index < 0 || index > checks.length) throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Quality gate check index is invalid.');
+      if (index >= checks.length) return { type: 'complete', message: `Project quality gate completed ${checks.length} trusted check(s).` };
+      const current = checks[index]!;
+      const kind = String(current.kind ?? '');
+      const commandId = String(current.id ?? '');
+      const risk = String(current.risk ?? '');
+      if (!['lint', 'test', 'build'].includes(kind) || !commandId || !['read', 'write', 'external'].includes(risk)) {
+        throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Compiled quality gate contains an invalid trusted command.');
+      }
+      if (risk === 'external') {
+        throw new OperatorError('TASK_QUALITY_GATE_IRREVERSIBLE_CHECK', `Trusted ${kind} check is external and cannot be safely rolled back by the autonomous quality gate.`);
+      }
+      return {
+        type: 'step', key: `quality-run:${index}:${kind}`, title: `Run trusted ${kind} quality check`,
+        capability: risk === 'write' ? 'project.transaction.run' : 'project.command.run',
+        input: { path: goal.root, commandId, expectedRisk: risk }, target: goal.root
+      };
+    }
+    return { type: 'complete', message: 'Project quality gate satisfied its compiled trusted checks.' };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
+    if (goal.kind !== 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Project quality planner requires a project-quality-gate goal.');
+    const state = task.execution!.plannerState;
+    if (step.key === 'quality-inspect-project') {
+      state.phase = 'commands';
+      return;
+    }
+    if (step.key === 'quality-inspect-commands') {
+      const output = asRecord(result.output);
+      const commands = Array.isArray(output.commands) ? output.commands.map(asRecord) : [];
+      const requested = goal.checks ?? ['lint', 'test', 'build'];
+      const selected: Array<{ kind: ProjectQualityCheck; id: string; risk: string }> = [];
+      const missing: ProjectQualityCheck[] = [];
+      for (const kind of requested) {
+        const command = commands.find((candidate) => candidate.kind === kind);
+        const id = String(command?.id ?? '');
+        const risk = String(command?.risk ?? '');
+        if (!command || !id || !['read', 'write', 'external'].includes(risk)) missing.push(kind);
+        else if (risk === 'external') {
+          task.evidence.push(evidence('goal_compilation', 'fail', `Trusted ${kind} check is external and is not eligible for autonomous rollback-safe execution.`, { commandId: id }));
+          missing.push(kind);
+        } else selected.push({ kind, id, risk });
+      }
+      if (goal.requireAll && missing.length > 0) {
+        task.evidence.push(evidence('goal_compilation', 'fail', 'Required trusted quality checks are unavailable.', { code: 'TASK_QUALITY_GATE_REQUIRED_CHECK_MISSING', missing }));
+        throw new OperatorError('TASK_QUALITY_GATE_REQUIRED_CHECK_MISSING', `Required trusted quality checks are unavailable: ${missing.join(', ')}.`);
+      }
+      if (selected.length === 0) {
+        task.evidence.push(evidence('goal_compilation', 'fail', 'No requested trusted quality checks are configured.', { code: 'TASK_QUALITY_GATE_EMPTY', requested }));
+        throw new OperatorError('TASK_QUALITY_GATE_EMPTY', 'No requested trusted lint, test, or build command is configured for this project.');
+      }
+      state.qualityChecks = selected;
+      state.missingChecks = missing;
+      state.qualityIndex = 0;
+      state.phase = 'run';
+      task.evidence.push(evidence('goal_compilation', 'pass', `Compiled project quality goal into ${selected.length} trusted check(s).`, { checks: selected.map((item) => item.kind) }));
+      if (missing.length > 0) task.evidence.push(evidence('goal_compilation', 'info', 'Skipped unavailable optional quality checks.', { missing }));
+      return;
+    }
+    if (step.key.startsWith('quality-run:')) {
+      const checks = Array.isArray(state.qualityChecks) ? state.qualityChecks.map(asRecord) : [];
+      const index = Number(state.qualityIndex ?? 0);
+      const current = checks[index];
+      if (!current || step.key !== `quality-run:${index}:${String(current.kind ?? '')}`) {
+        throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Quality gate action does not match the compiled check state.');
+      }
+      task.evidence.push(evidence('quality_check', 'pass', `Trusted ${String(current.kind)} check completed.`, { commandId: String(current.id ?? '') }));
+      state.qualityIndex = index + 1;
+      if (index + 1 >= checks.length) state.phase = 'complete';
+    }
+  }
+}
+
 export class SemanticTaskPlanner implements TaskPlanner {
   readonly id = 'operator.semantic.v1';
   supports(goal: SemanticTaskGoal): boolean { return ['controlled-file-change', 'trusted-project-command', 'browser-navigation', 'docker-lifecycle', 'postgres-select', 'app-operation'].includes(goal.kind); }
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
+    if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a project quality gate envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
       if (phase === 'start') return { type: 'step', key: 'list-parent', title: 'Observe target directory', capability: 'file.list', input: { path: path.dirname(goal.path) || '.' } };
       if (phase === 'create') return { type: 'step', key: 'create-file', title: 'Create requested file', capability: 'file.create', input: { path: goal.path, content: goal.content } };
       if (phase === 'read') return { type: 'step', key: 'verify-file', title: 'Verify exact file content', capability: 'file.read', input: { path: goal.path, encoding: 'utf8' } };
+      if (phase === 'repair') return {
+        type: 'step', key: 'repair-file', title: 'Repair stale file content with SHA precondition',
+        capability: 'file.replace', input: { path: goal.path, content: goal.content, expectedSha256: state.expectedSha256 }
+      };
       if (phase === 'git') return { type: 'step', key: 'inspect-git', title: 'Verify Git observes the file', capability: 'git.status', input: { cwd: goal.root } };
       return { type: 'complete', message: 'Controlled file task satisfied exact-content and Git-state postconditions.' };
     }
@@ -567,7 +775,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
     }
     if (goal.kind === 'app-operation') {
       const selector = phase === 'verify' ? (goal.verifySelector ?? goal.selector) : goal.selector;
-      const inspectInput = { selector, maxNodes: 1, maxDepth: 0, waitMs: goal.waitMs ?? 0 };
+      const inspectInput = { selector, maxNodes: 1, maxDepth: 1, waitMs: goal.waitMs ?? 0 };
       if (phase === 'start') return { type: 'step', key: 'inspect-app-target', title: 'Inspect unique semantic app target', capability: 'app.inspect', input: inspectInput };
       if (phase === 'operate') return {
         type: 'step', key: 'operate-app-target', title: 'Operate verified semantic app target', capability: 'app.operate',
@@ -579,7 +787,48 @@ export class SemanticTaskPlanner implements TaskPlanner {
         }
       };
       if (phase === 'verify') return { type: 'step', key: 'verify-app-target', title: 'Re-inspect app postcondition', capability: 'app.inspect', input: inspectInput };
-      return { type: 'complete', message: 'Application operation satisfied semantic targeting and deterministic postcondition verification.' };
+      if (phase === 'visual-capture') {
+        const fallback = requireAppPhysicalFallback(goal);
+        return {
+          type: 'step', key: 'capture-app-fallback', title: 'Capture bounded visual fallback state', capability: 'visual.capture',
+          input: {
+            source: fallback.source,
+            ...(fallback.selector ? { selector: fallback.selector } : {}),
+            ...(fallback.region ? { region: fallback.region } : {}),
+            maxWidth: fallback.maxWidth ?? 960,
+            maxHeight: fallback.maxHeight ?? 540,
+            waitMs: goal.waitMs ?? 0
+          }
+        };
+      }
+      if (phase === 'physical-operate') {
+        const fallback = requireAppPhysicalFallback(goal);
+        const captureId = boundedText(state.captureId, 128, 'visual fallback captureId');
+        const expectedSha256 = boundedText(state.captureSha256, 64, 'visual fallback SHA-256');
+        return {
+          type: 'step', key: 'operate-app-physical-fallback', title: 'Operate capture-bound physical fallback', capability: 'input.operate',
+          input: {
+            operation: fallback.operation,
+            captureId,
+            expectedSha256,
+            ...(fallback.x !== undefined ? { x: fallback.x } : {}),
+            ...(fallback.y !== undefined ? { y: fallback.y } : {}),
+            ...(fallback.toX !== undefined ? { toX: fallback.toX } : {}),
+            ...(fallback.toY !== undefined ? { toY: fallback.toY } : {}),
+            ...(fallback.deltaX !== undefined ? { deltaX: fallback.deltaX } : {}),
+            ...(fallback.deltaY !== undefined ? { deltaY: fallback.deltaY } : {}),
+            ...(fallback.text !== undefined ? { text: fallback.text } : {}),
+            ...(fallback.key !== undefined ? { key: fallback.key } : {}),
+            ...(fallback.keys !== undefined ? { keys: fallback.keys } : {})
+          }
+        };
+      }
+      return {
+        type: 'complete',
+        message: phase === 'physical-complete'
+          ? 'Application operation satisfied semantic-first visual fallback with capture-bound physical input and AFTER verification.'
+          : 'Application operation satisfied semantic targeting and deterministic postcondition verification.'
+      };
     }
     if (phase === 'start') return { type: 'step', key: 'inspect-browser', title: 'Inspect semantic browser state', capability: 'browser.inspect', input: {} };
     if (phase === 'navigate') return { type: 'step', key: 'navigate-browser', title: 'Navigate the selected browser target', capability: 'browser.navigate', input: { targetId: state.targetId, url: goal.url }, target: goal.url };
@@ -589,6 +838,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
 
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
+    if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a project quality gate envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
@@ -597,6 +847,9 @@ export class SemanticTaskPlanner implements TaskPlanner {
         const output = asRecord(result.output);
         if (output.content !== goal.content) throw new OperatorError('TASK_CONTENT_MISMATCH', 'File content did not match the requested exact content.');
         state.phase = 'git';
+      } else if (step.key === 'repair-file') {
+        state.phase = 'read';
+        delete state.expectedSha256;
       } else if (step.key === 'inspect-git') {
         const entries = Array.isArray(asRecord(result.output).entries) ? asRecord(result.output).entries as Array<Record<string, unknown>> : [];
         const wanted = path.relative(goal.root, goal.path).replace(/\\/g, '/').replace(/^\.\//, '');
@@ -674,6 +927,16 @@ export class SemanticTaskPlanner implements TaskPlanner {
         const element = uniqueInspectedUiaElement(result.output);
         verifyUiaReinspection(goal, element, state.targetIdentity);
         state.phase = 'complete';
+      } else if (step.key === 'capture-app-fallback') {
+        const capture = verifyAppVisualCaptureResult(goal, result.output);
+        state.captureId = capture.captureId;
+        state.captureSha256 = capture.sha256;
+        state.phase = 'physical-operate';
+      } else if (step.key === 'operate-app-physical-fallback') {
+        verifyAppPhysicalFallbackResult(goal, result.output);
+        delete state.captureId;
+        delete state.captureSha256;
+        state.phase = 'physical-complete';
       }
       return;
     }
@@ -706,6 +969,20 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.evidence.push(evidence('strategy_fallback', 'info', 'Target already existed; switched to exact-content verification.'));
       return true;
     }
+    if (step.key === 'verify-file' && result.error?.code === 'TASK_CONTENT_MISMATCH') {
+      const sha256Value = String(asRecord(result.output).sha256 ?? '');
+      if (!/^[0-9a-f]{64}$/i.test(sha256Value)) return false;
+      task.execution!.plannerState.expectedSha256 = sha256Value.toLowerCase();
+      task.execution!.plannerState.phase = 'repair';
+      task.evidence.push(evidence('strategy_repair', 'info', 'Existing file content differed; scheduled SHA-preconditioned replacement followed by fresh verification.'));
+      return true;
+    }
+    if (step.key === 'repair-file' && result.error?.code === 'PRECONDITION_FAILED') {
+      task.execution!.plannerState.phase = 'read';
+      delete task.execution!.plannerState.expectedSha256;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'File changed during repair; discarded the stale SHA and switched to fresh read-before-repair observation.'));
+      return true;
+    }
     if (step.key === 'navigate-browser' && result.error?.code === 'BROWSER_TARGET_NOT_FOUND') {
       task.execution!.plannerState.phase = 'start';
       delete task.execution!.plannerState.targetId;
@@ -718,10 +995,32 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.evidence.push(evidence('strategy_fallback', 'info', 'Docker project state changed; switched to fresh inspection before requesting a new approval.'));
       return true;
     }
-    if (step.key === 'operate-app-target' && ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT'].includes(result.error?.code ?? '')) {
-      task.execution!.plannerState.phase = 'start';
-      delete task.execution!.plannerState.targetIdentity;
-      task.evidence.push(evidence('strategy_fallback', 'info', 'UIA target disappeared or timed out; switched to bounded semantic target re-discovery.'));
+    const appSemanticFailure = ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT', 'UIA_UNAVAILABLE', 'WIN32_FALLBACK_NOT_FOUND', 'TASK_UIA_PATTERN_UNAVAILABLE', 'TASK_UIA_TARGET_NOT_UNIQUE'].includes(result.error?.code ?? '');
+    if ((step.key === 'inspect-app-target' || step.key === 'operate-app-target') && appSemanticFailure) {
+      const goal = task.execution?.plannerState.goal as SemanticTaskGoal | undefined;
+      if (goal?.kind === 'app-operation' && goal.physicalFallback) {
+        task.execution!.plannerState.phase = 'visual-capture';
+        delete task.execution!.plannerState.targetIdentity;
+        task.evidence.push(evidence('strategy_fallback', 'info', 'Semantic app targeting was unavailable; switched to the pre-authorized bounded visual fallback contract.', {
+          failedStep: step.key,
+          errorCode: result.error?.code
+        }));
+        return true;
+      }
+      if (step.key === 'operate-app-target') {
+        task.execution!.plannerState.phase = 'start';
+        delete task.execution!.plannerState.targetIdentity;
+        task.evidence.push(evidence('strategy_fallback', 'info', 'UIA target disappeared or timed out; switched to bounded semantic target re-discovery.'));
+        return true;
+      }
+    }
+    if (step.key === 'operate-app-physical-fallback' && ['INPUT_CAPTURE_STALE', 'INPUT_CAPTURE_REVALIDATION_FAILED'].includes(result.error?.code ?? '')) {
+      task.execution!.plannerState.phase = 'visual-capture';
+      delete task.execution!.plannerState.captureId;
+      delete task.execution!.plannerState.captureSha256;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'Visual state changed before physical dispatch; discarded the stale lease and scheduled a fresh capture with a new action identity.', {
+        errorCode: result.error?.code
+      }));
       return true;
     }
     return false;
@@ -856,6 +1155,21 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     boundedText(goal.root, 4096, 'goal root');
     if (!['build', 'test', 'lint'].includes(goal.commandKind)) throw new OperatorError('TASK_GOAL_INVALID', 'Trusted command kind is invalid.');
     goal.root = path.resolve(goal.root);
+  } else if (goal.kind === 'project-quality-gate') {
+    goal.root = path.resolve(boundedText(goal.root, 4096, 'quality gate root'));
+    const requested = goal.checks === undefined ? ['lint', 'test', 'build'] : goal.checks;
+    if (!Array.isArray(requested) || requested.length < 1 || requested.length > 3) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate requires 1-3 lint/test/build checks.');
+    }
+    const checks = requested.map((check) => String(check) as ProjectQualityCheck);
+    if (checks.some((check) => !['lint', 'test', 'build'].includes(check)) || new Set(checks).size !== checks.length) {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate checks must be unique lint/test/build values.');
+    }
+    if (goal.requireAll !== undefined && typeof goal.requireAll !== 'boolean') {
+      throw new OperatorError('TASK_GOAL_INVALID', 'Project quality gate requireAll must be boolean.');
+    }
+    goal.checks = checks;
+    goal.requireAll = goal.requireAll ?? false;
   } else if (goal.kind === 'browser-navigation') {
     const rawUrl = boundedText(goal.url, 16_384, 'goal URL');
     let url: URL;
@@ -901,6 +1215,7 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
       throw new OperatorError('TASK_GOAL_INVALID', `${goal.operation} does not accept scroll amounts.`);
     }
     goal.waitMs = boundedInteger(goal.waitMs, 0, 10_000, 0);
+    if (goal.physicalFallback !== undefined) goal.physicalFallback = normalizeAppPhysicalFallback(goal.physicalFallback, 'app physicalFallback');
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
 }
@@ -1001,6 +1316,148 @@ function verifyDockerServicesState(operation: 'start' | 'stop' | 'restart', expe
 
 const UIA_TASK_OPERATIONS: readonly UiaTaskOperation[] = ['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window'];
 const UIA_SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
+const PHYSICAL_INPUT_TASK_OPERATIONS: readonly PhysicalInputTaskOperation[] = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'];
+
+function requireAppPhysicalFallback(goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>): AppPhysicalFallback {
+  if (!goal.physicalFallback) throw new OperatorError('TASK_VISUAL_FALLBACK_NOT_AUTHORIZED', 'Application goal does not authorize physical fallback.');
+  return goal.physicalFallback;
+}
+
+function normalizeAppPhysicalFallback(input: unknown, label: string): AppPhysicalFallback {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const allowed = new Set(['source', 'selector', 'region', 'operation', 'x', 'y', 'toX', 'toY', 'deltaX', 'deltaY', 'text', 'key', 'keys', 'maxWidth', 'maxHeight']);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label} contains an unsupported field.`);
+
+  const source = String(raw.source ?? '') as AppPhysicalFallback['source'];
+  if (!['screen', 'window', 'region'].includes(source)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.source must be screen, window, or region.`);
+  const operation = String(raw.operation ?? '') as PhysicalInputTaskOperation;
+  if (!PHYSICAL_INPUT_TASK_OPERATIONS.includes(operation)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.operation is outside the closed physical input set.`);
+  const maxWidth = optionalTaskInteger(raw.maxWidth, 1, 1280, `${label}.maxWidth`) ?? 960;
+  const maxHeight = optionalTaskInteger(raw.maxHeight, 1, 720, `${label}.maxHeight`) ?? 540;
+
+  let selector: VisualTaskSelector | undefined;
+  let region: AppPhysicalFallback['region'];
+  if (source === 'window') {
+    selector = normalizeVisualTaskSelector(raw.selector, `${label}.selector`);
+    if (raw.region !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region is not accepted for window capture.`);
+  } else if (source === 'region') {
+    if (raw.selector !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.selector is not accepted for region capture.`);
+    if (!raw.region || typeof raw.region !== 'object' || Array.isArray(raw.region)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region is required for region capture.`);
+    const value = raw.region as Record<string, unknown>;
+    const regionAllowed = new Set(['x', 'y', 'width', 'height']);
+    if (Object.keys(value).some((key) => !regionAllowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label}.region contains an unsupported field.`);
+    region = {
+      x: requiredTaskInteger(value.x, -100_000, 100_000, `${label}.region.x`),
+      y: requiredTaskInteger(value.y, -100_000, 100_000, `${label}.region.y`),
+      width: requiredTaskInteger(value.width, 1, 16_384, `${label}.region.width`),
+      height: requiredTaskInteger(value.height, 1, 16_384, `${label}.region.height`)
+    };
+  } else if (raw.selector !== undefined || raw.region !== undefined) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} screen capture does not accept selector or region.`);
+  }
+
+  const fallback: AppPhysicalFallback = { source, operation, maxWidth, maxHeight, ...(selector ? { selector } : {}), ...(region ? { region } : {}) };
+  const x = optionalTaskInteger(raw.x, 0, maxWidth - 1, `${label}.x`);
+  const y = optionalTaskInteger(raw.y, 0, maxHeight - 1, `${label}.y`);
+  const toX = optionalTaskInteger(raw.toX, 0, maxWidth - 1, `${label}.toX`);
+  const toY = optionalTaskInteger(raw.toY, 0, maxHeight - 1, `${label}.toY`);
+  const deltaX = optionalTaskInteger(raw.deltaX, -1200, 1200, `${label}.deltaX`);
+  const deltaY = optionalTaskInteger(raw.deltaY, -1200, 1200, `${label}.deltaY`);
+
+  if (['move', 'click', 'double_click', 'drag', 'scroll'].includes(operation)) {
+    if (x === undefined || y === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label} pointer operation requires x and y in capture coordinates.`);
+    fallback.x = x; fallback.y = y;
+  } else if ([x, y, toX, toY, deltaX, deltaY].some((value) => value !== undefined)) {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} keyboard operation does not accept pointer fields.`);
+  }
+  if (operation === 'drag') {
+    if (toX === undefined || toY === undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.drag requires toX and toY.`);
+    fallback.toX = toX; fallback.toY = toY;
+  } else if (toX !== undefined || toY !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.toX/toY are accepted only for drag.`);
+
+  if (operation === 'scroll') {
+    if ((deltaX ?? 0) === 0 && (deltaY ?? 0) === 0) throw new OperatorError('TASK_GOAL_INVALID', `${label}.scroll requires a non-zero deltaX or deltaY.`);
+    fallback.deltaX = deltaX ?? 0; fallback.deltaY = deltaY ?? 0;
+  } else if (deltaX !== undefined || deltaY !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.deltaX/deltaY are accepted only for scroll.`);
+
+  if (operation === 'type_text') fallback.text = boundedText(raw.text, 4096, `${label}.text`);
+  else if (raw.text !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.text is accepted only for type_text.`);
+  if (operation === 'key_press') fallback.key = boundedText(raw.key, 32, `${label}.key`);
+  else if (raw.key !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.key is accepted only for key_press.`);
+  if (operation === 'hotkey') {
+    const keys = boundedTextArray(raw.keys, 4, 32, `${label}.keys`);
+    if (keys.length < 1) throw new OperatorError('TASK_GOAL_INVALID', `${label}.keys requires 1-4 keys.`);
+    fallback.keys = keys;
+  } else if (raw.keys !== undefined) throw new OperatorError('TASK_GOAL_INVALID', `${label}.keys is accepted only for hotkey.`);
+
+  if (['type_text', 'key_press', 'hotkey'].includes(operation) && source !== 'window') {
+    throw new OperatorError('TASK_GOAL_INVALID', `${label} keyboard fallback requires a window capture so foreground identity can be verified.`);
+  }
+  return fallback;
+}
+
+function normalizeVisualTaskSelector(input: unknown, label: string): VisualTaskSelector {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
+  const raw = input as Record<string, unknown>;
+  const allowed = new Set(['name', 'className', 'processId']);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) throw new OperatorError('TASK_GOAL_INVALID', `${label} supports only name, className, and processId.`);
+  const selector: VisualTaskSelector = {};
+  if (raw.name !== undefined) selector.name = boundedText(raw.name, 512, `${label}.name`);
+  if (raw.className !== undefined) selector.className = boundedText(raw.className, 512, `${label}.className`);
+  if (raw.processId !== undefined) selector.processId = requiredTaskInteger(raw.processId, 1, 0xffff_ffff, `${label}.processId`);
+  if (Object.keys(selector).length === 0) throw new OperatorError('TASK_GOAL_INVALID', `${label} must identify one top-level window.`);
+  return selector;
+}
+
+function requiredTaskInteger(value: unknown, min: number, max: number, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an integer from ${min} to ${max}.`);
+  return parsed;
+}
+
+function optionalTaskInteger(value: unknown, min: number, max: number, label: string): number | undefined {
+  return value === undefined ? undefined : requiredTaskInteger(value, min, max, label);
+}
+
+function verifyAppVisualCaptureResult(
+  goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>,
+  outputValue: unknown
+): { captureId: string; sha256: string } {
+  const fallback = requireAppPhysicalFallback(goal);
+  const output = asRecord(outputValue);
+  const captureId = boundedText(output.captureId, 128, 'visual captureId');
+  const sha256Value = boundedText(output.sha256, 64, 'visual capture SHA-256').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha256Value)) throw new OperatorError('TASK_VISUAL_CAPTURE_INVALID', 'Visual fallback capture did not return a valid SHA-256.');
+  const width = requiredTaskInteger(output.width, 1, 1280, 'visual capture width');
+  const height = requiredTaskInteger(output.height, 1, 720, 'visual capture height');
+  for (const [x, y, label] of [[fallback.x, fallback.y, 'target'], [fallback.toX, fallback.toY, 'drag target']] as const) {
+    if (x === undefined && y === undefined) continue;
+    if (x === undefined || y === undefined || x >= width || y >= height) throw new OperatorError('TASK_VISUAL_POINT_OUTSIDE_CAPTURE', `Physical fallback ${label} is outside the returned capture.`);
+  }
+  if (['type_text', 'key_press', 'hotkey'].includes(fallback.operation) && typeof output.windowId !== 'string') {
+    throw new OperatorError('TASK_VISUAL_WINDOW_IDENTITY_MISSING', 'Keyboard visual fallback requires a capture-bound window identity.');
+  }
+  return { captureId, sha256: sha256Value };
+}
+
+function verifyAppPhysicalFallbackResult(
+  goal: Extract<SemanticTaskGoal, { kind: 'app-operation' }>,
+  outputValue: unknown
+): void {
+  const fallback = requireAppPhysicalFallback(goal);
+  const output = asRecord(outputValue);
+  if (output.operation !== fallback.operation) throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback result did not identify the requested operation.');
+  const postcondition = asRecord(output.postcondition);
+  if (postcondition.dispatched !== true || postcondition.captureLeaseConsumed !== true || postcondition.afterCaptured !== true) {
+    throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback did not prove dispatch, one-shot lease consumption, and AFTER capture.');
+  }
+  const afterSha256 = String(postcondition.afterSha256 ?? '');
+  if (!/^[0-9a-f]{64}$/i.test(afterSha256)) throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback AFTER capture did not return a valid SHA-256.');
+  if (fallback.source === 'window' && postcondition.windowStable !== true) {
+    throw new OperatorError('TASK_PHYSICAL_POSTCONDITION_FAILED', 'Physical fallback AFTER capture did not preserve the capture-bound window identity.');
+  }
+}
 
 function normalizeUiaTaskSelector(input: unknown, label: string): UiaTaskSelector {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} must be an object.`);
@@ -1135,8 +1592,9 @@ function canonicalJson(value: unknown): string {
 }
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function observe(result: ActionResult): TaskObservation {
+  const channel: TaskObservation['channel'] = result.capability === 'visual.capture' || result.capability === 'input.operate' ? 'visual' : 'semantic';
   return {
-    channel: 'semantic', domain: observationDomain(result.capability, result.provider), observedAt: new Date().toISOString(),
+    channel, domain: observationDomain(result.capability, result.provider), observedAt: new Date().toISOString(),
     ok: result.ok, capability: result.capability, provider: result.provider,
     ...(result.output === undefined ? {} : { output: structuredClone(result.output) }),
     evidence: structuredClone(result.evidence),

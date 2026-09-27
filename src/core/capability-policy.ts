@@ -14,6 +14,9 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'file.write': 'write',
   'file.create': 'write',
   'file.replace': 'destructive',
+  'file.info': 'read',
+  'file.search': 'read',
+  'file.manage': 'dynamic',
   'git.status': 'read',
   'git.diff': 'read',
   'git.rev-parse': 'read',
@@ -28,13 +31,18 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'vscode.inspect': 'read',
   'vscode.open': 'system',
   'terminal.execute': 'destructive',
+  'terminal.session': 'dynamic',
+  'process.inspect': 'read',
+  'process.manage': 'destructive',
   'browser.inspect': 'read',
   'browser.navigate': 'write',
   'browser.interact': 'external',
   'browser.tab.focus': 'write',
   'browser.tab.close': 'destructive',
   'app.inspect': 'read',
-  'app.operate': 'external'
+  'app.operate': 'external',
+  'visual.capture': 'read',
+  'input.operate': 'external'
 });
 
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {

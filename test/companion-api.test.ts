@@ -53,6 +53,19 @@ test('companion read APIs expose authoritative task/device/settings state withou
   const base = `http://127.0.0.1:${bound.port}`;
   const headers = { authorization: `Bearer ${token}` };
 
+
+  const controlCenterResponse = await fetch(`${base}/control-center`);
+  assert.equal(controlCenterResponse.status, 200);
+  assert.match(controlCenterResponse.headers.get('content-type') ?? '', /^text\/html/);
+  assert.match(controlCenterResponse.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+  assert.match(controlCenterResponse.headers.get('content-security-policy') ?? '', /script-src 'nonce-/);
+  const controlCenterHtml = await controlCenterResponse.text();
+  assert.match(controlCenterHtml, /Mecord Control Center/);
+  assert.match(controlCenterHtml, /\/v1\/goals/);
+  assert.match(controlCenterHtml, /Approve & resume/);
+  assert.equal(controlCenterHtml.includes(token), false);
+  assert.equal(controlCenterHtml.includes('PRIVATE KEY'), false);
+
   const tasksResponse = await fetch(`${base}/v1/tasks?limit=10`, { headers });
   assert.equal(tasksResponse.status, 200);
   const tasksBody = await tasksResponse.json() as any;
