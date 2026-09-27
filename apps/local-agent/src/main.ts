@@ -203,7 +203,7 @@ async function resetLocalDevice() {
 }
 
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
