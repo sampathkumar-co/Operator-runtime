@@ -221,7 +221,7 @@ export class TaskOrchestrator {
       await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
       const current = task.execution!;
-      const interrupted = this.#markInterrupted(current);
+      const interrupted = this.#markInterrupted(task);
       if (interrupted > 0) {
         current.deadlineAt = new Date(Date.now() + current.timeoutMs).toISOString();
         task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s), refreshed the active execution deadline, and preserved step/attempt budgets.', { count: interrupted }));
@@ -572,14 +572,25 @@ export class TaskOrchestrator {
     }
   }
 
-  #markInterrupted(execution: TaskExecution): number {
+  #markInterrupted(task: TaskCapsule): number {
+    const execution = task.execution;
+    if (!execution) return 0;
     let count = 0;
     for (const record of execution.records) if (record.state === 'STARTED') {
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
+      const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
+      if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
+        node.state = 'SKIPPED';
+        node.evidence.push(evidence('task_recovery', 'info', 'Interrupted execution attempt was superseded during recovery.', {
+          actionId: record.actionId,
+          stepKey: record.stepKey
+        }));
+      }
       count += 1;
     }
+    if (count > 0) task.updatedAt = new Date().toISOString();
     return count;
   }
 
