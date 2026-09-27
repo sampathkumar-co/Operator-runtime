@@ -8,6 +8,8 @@ test('Windows UIA provider is platform-gated', () => {
   const provider = new WindowsUiaProvider({ platform: 'linux' });
   assert.equal(provider.supports({ id: 'i1', capability: 'app.inspect', risk: 'read', input: {}, provenance }), false);
   assert.equal(provider.supports({ id: 'o1', capability: 'app.operate', risk: 'external', input: {}, provenance }), false);
+  assert.equal(provider.supports({ id: 'v1', capability: 'visual.capture', risk: 'read', input: {}, provenance }), false);
+  assert.equal(provider.supports({ id: 'p1', capability: 'input.operate', risk: 'external', input: {}, provenance }), false);
   provider.close();
 });
 
@@ -91,4 +93,32 @@ test('activate_window is a closed semantic operation rather than a raw-handle AP
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'UIA_SIDECAR_START_FAILED');
   provider.close();
+});
+
+
+test('physical input requires a live SHA-bound visual capture lease before sidecar dispatch', async () => {
+  const provider = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
+  assert.equal(provider.supports({ id: 'p2', capability: 'input.operate', risk: 'external', input: {}, provenance }), true);
+  const result = await provider.execute({
+    id: 'no-capture-lease',
+    capability: 'input.operate',
+    risk: 'external',
+    provenance,
+    input: {
+      operation: 'click',
+      captureId: 'missing-capture',
+      expectedSha256: 'a'.repeat(64),
+      x: 10,
+      y: 10
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'INPUT_CAPTURE_STALE');
+  provider.close();
+});
+
+test('visual capture remains a Windows-only provider capability', () => {
+  const windows = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
+  assert.equal(windows.supports({ id: 'v2', capability: 'visual.capture', risk: 'read', input: {}, provenance }), true);
+  windows.close();
 });
