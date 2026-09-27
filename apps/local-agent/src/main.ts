@@ -19,6 +19,13 @@ import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
 import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
+import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
+import { WorldModelStore } from '../../../src/core/world-model.ts';
+import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
+import { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
+import { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
+import { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
+import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
@@ -58,8 +65,22 @@ const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
 const teams = new TeamCoordinator(stateDir);
+const procedures = new ProcedureMemoryStore(stateDir);
+const world = new WorldModelStore(stateDir);
+const optimizer = new ExecutionOptimizerStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
+const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
+const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
+const organizations = new OrganizationCoordinator(stateDir, teams);
+const operations = new DigitalOperationsLayer(stateDir, {
+  procedures,
+  world,
+  devices: devicePool,
+  optimizer,
+  teams,
+  organizations
+});
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -250,6 +271,12 @@ const agent = createLocalAgentServer({
   tasks,
   taskOrchestrator,
   teams,
+  procedures,
+  world,
+  devicePool,
+  optimizer,
+  organizations,
+  operations,
   deviceIdentity,
   deviceRegistry,
   privacy,
