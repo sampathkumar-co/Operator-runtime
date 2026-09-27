@@ -338,6 +338,134 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) })
   ]);
 
+  const operationCondition = z.object({
+    entityKey: z.string().min(1).max(512),
+    factKey: z.string().min(1).max(128),
+    expectedValueDigest: z.string().regex(/^[0-9a-f]{64}$/i)
+  });
+  const operationAssumption = z.object({
+    key: z.string().min(1).max(128),
+    fingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
+  });
+  const operationWorkItem = z.object({
+    key: z.string().min(1).max(128),
+    title: z.string().min(1).max(4096),
+    role: z.enum(['supervisor', 'planner', 'coder', 'tester', 'browser', 'ui', 'verifier', 'general']),
+    risk: z.enum(['read', 'write', 'external', 'system', 'destructive']).optional(),
+    priority: z.number().int().min(-1000).max(1000).optional(),
+    dependsOn: z.array(z.string().min(1).max(128)).max(1000).optional(),
+    resources: z.array(z.string().min(1).max(1024)).max(5000).optional(),
+    allowedCapabilities: z.array(z.string().min(1).max(256)).max(200).optional()
+  });
+  const operationTeamBudget = z.object({
+    maxWorkers: z.number().int().min(1).max(64).optional(),
+    maxConcurrentLeases: z.number().int().min(1).max(64).optional(),
+    maxAttemptsPerWorkItem: z.number().int().min(1).max(10).optional(),
+    maxWallClockMs: z.number().int().min(1000).max(24 * 60 * 60_000).optional(),
+    leaseMs: z.number().int().min(1000).max(60 * 60_000).optional()
+  });
+  const operationExecution = z.discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('team'),
+      workItems: z.array(operationWorkItem).min(1).max(1000),
+      budget: operationTeamBudget.optional()
+    }),
+    z.object({
+      kind: z.literal('organization'),
+      targets: z.array(z.object({
+        key: z.string().min(1).max(128),
+        scopeKey: z.string().min(1).max(512),
+        workItems: z.array(operationWorkItem).min(1).max(1000)
+      })).min(1).max(5000),
+      policy: z.object({
+        canarySize: z.number().int().min(1).max(200).optional(),
+        waveSize: z.number().int().min(1).max(200).optional(),
+        maxParallel: z.number().int().min(1).max(200).optional(),
+        allowedScopePrefixes: z.array(z.string().min(1).max(512)).min(1).max(100).optional(),
+        teamBudget: operationTeamBudget.optional()
+      }).optional()
+    })
+  ]);
+  const operationProcedureStep = z.object({
+    capability: z.string().min(1).max(256),
+    risk: z.enum(['read', 'write', 'external', 'system', 'destructive']),
+    summary: z.string().min(1).max(4096)
+  });
+  const operationSubmitSchema = z.object({
+    operation: z.literal('submit'),
+    requestId: taskUuid,
+    objective: z.string().min(1).max(16_384),
+    scopeKey: z.string().min(1).max(512),
+    successConditions: z.array(z.string().min(1).max(4096)).min(1).max(100),
+    preconditions: z.array(operationCondition).max(200).optional(),
+    postconditions: z.array(operationCondition).max(200).optional(),
+    execution: operationExecution.optional(),
+    maxRisk: z.enum(['read', 'write', 'external', 'system', 'destructive']).default('read'),
+    authority: z.object({
+      capabilities: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/)).min(1).max(500),
+      resources: z.array(z.string().min(1).max(1024)).min(1).max(5000)
+    }).optional(),
+    budget: operationTeamBudget.optional(),
+    procedure: z.object({
+      objectiveKind: z.string().min(1).max(128),
+      assumptions: z.array(operationAssumption).max(100).default([]),
+      requiredCapabilities: z.array(z.string().min(1).max(256)).max(200).optional()
+    }).optional(),
+    captureProcedure: z.object({
+      key: z.string().min(1).max(256),
+      title: z.string().min(1).max(4096),
+      objectiveKind: z.string().min(1).max(256),
+      assumptions: z.array(operationAssumption).max(100).default([]),
+      steps: z.array(operationProcedureStep).min(1).max(200),
+      resources: z.array(z.string().min(1).max(1024)).max(200).optional(),
+      ttlMs: z.number().int().min(60_000).max(365 * 24 * 60 * 60_000).optional()
+    }).optional(),
+    strategies: z.array(z.object({
+      id: z.string().min(1).max(256),
+      staticScore: z.number().min(0).max(1)
+    })).max(100).optional(),
+    resourceRequirements: z.object({
+      requiredTags: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)).max(64).optional(),
+      minMemoryMb: z.number().int().min(0).max(1024 * 1024).optional(),
+      requireGpu: z.boolean().optional(),
+      slots: z.number().int().min(1).max(64).optional()
+    }).optional(),
+    run: z.boolean().default(true)
+  });
+  const operationsSchema = z.discriminatedUnion('operation', [
+    operationSubmitSchema,
+    z.object({ operation: z.enum(['inspect', 'start', 'refresh', 'pause', 'cancel']), operationId: taskUuid }),
+    z.object({ operation: z.literal('promote'), operationId: taskUuid, verificationDigest: z.string().regex(/^[0-9a-f]{64}$/i) })
+  ]);
+  const knowledgeSchema = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('procedures'), limit: z.number().int().min(1).max(500).default(100) }),
+    z.object({
+      kind: z.literal('procedure-query'),
+      objectiveKind: z.string().min(1).max(128),
+      scopeKey: z.string().min(1).max(512),
+      assumptions: z.array(operationAssumption).max(100).default([]),
+      requiredCapabilities: z.array(z.string().min(1).max(256)).max(200).default([]),
+      maxResults: z.number().int().min(1).max(100).default(10)
+    }),
+    z.object({ kind: z.literal('world-entity'), entityKey: z.string().min(1).max(512) }),
+    z.object({ kind: z.literal('world-fact'), entityKey: z.string().min(1).max(512), factKey: z.string().min(1).max(128) }),
+    z.object({
+      kind: z.literal('world-trace'),
+      fromKey: z.string().min(1).max(512),
+      toKey: z.string().min(1).max(512).optional(),
+      targetType: z.string().min(1).max(128).optional(),
+      maxDepth: z.number().int().min(1).max(12).optional(),
+      minConfidence: z.number().min(0).max(1).optional()
+    }).refine((value) => Boolean(value.toKey || value.targetType), 'world-trace requires toKey or targetType'),
+    z.object({
+      kind: z.literal('world-list'),
+      scopeKey: z.string().min(1).max(512).optional(),
+      type: z.string().min(1).max(128).optional(),
+      limit: z.number().int().min(1).max(1000).default(100)
+    }),
+    z.object({ kind: z.literal('optimizer'), limit: z.number().int().min(1).max(1000).default(200) })
+  ]);
+
   server.registerTool('task.submit', {
     title: 'Submit durable semantic task',
     description: 'Create one durable, UUID-addressed semantic task or bounded semantic workflow and optionally start it. The UUID makes submission retry-safe. Workflow children remain typed and every action still passes local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
@@ -355,6 +483,29 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     inputSchema: z.object({ taskId: taskUuid, operation: z.enum(['inspect', 'run', 'pause', 'resume', 'cancel']) }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   }, async ({ taskId, operation }) => taskResultWithAgent(agent, await agent.controlTask(taskId, operation), 'task.control'));
+
+  server.registerTool('operations', {
+    title: 'Run governed digital operation',
+    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted only with an explicit authority envelope containing a requested capability subset and exact Stage-4 resource keys; the runtime intersects that subset with capabilities already authorized locally, so the envelope can restrict but never grant authority. maxRisk defaults to read, and dynamic-risk capabilities are excluded from auto-planning. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
+    inputSchema: operationsSchema,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async (input) => {
+    if (input.operation === 'submit') {
+      const { operation: _operation, ...request } = input;
+      return operationResultWithAgent(agent, await agent.submitOperation(request as any));
+    }
+    return operationResultWithAgent(
+      agent,
+      await agent.controlOperation(input.operationId, input.operation, input.operation === 'promote' ? input.verificationDigest : undefined)
+    );
+  });
+
+  server.registerTool('knowledge.inspect', {
+    title: 'Inspect verified agent knowledge',
+    description: 'Read verified procedural memory, evidence-backed world-model entities/facts/relations, or bounded aggregate execution-optimizer statistics. This tool is read-only and cannot promote procedures, publish world claims, widen authority, or alter policy.',
+    inputSchema: knowledgeSchema,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async (input) => knowledgeResultWithAgent(await agent.inspectKnowledge(input as any)));
 
   server.registerTool('computer.inspect', {
     title: 'Inspect computer',
@@ -438,6 +589,43 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ path, content, expectedSha256 }) => invoke('file.write', 'write', { path, content, expectedSha256 }, path));
+
+  server.registerTool('file.info', {
+    title: 'Inspect file or directory metadata',
+    description: 'Inspect bounded metadata for a path inside an authorized root. Regular files include SHA-256 when within the local read bound.',
+    inputSchema: z.object({ path: z.string().min(1) }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ path }) => invoke('file.info', 'read', { path }, path));
+
+  server.registerTool('file.search', {
+    title: 'Search authorized project files',
+    description: 'Perform a bounded recursive filename search inside an authorized directory without following symlinks.',
+    inputSchema: z.object({
+      path: z.string().min(1),
+      query: z.string().min(1).max(512),
+      kind: z.enum(['all', 'file', 'directory']).default('all'),
+      maxDepth: z.number().int().min(0).max(20).default(8),
+      maxResults: z.number().int().min(1).max(1000).default(100)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ path, query, kind, maxDepth, maxResults }) => invoke('file.search', 'read', { path, query, kind, maxDepth, maxResults }, path));
+
+  server.registerTool('file.manage', {
+    title: 'Manage authorized files and directories',
+    description: 'Create directories, copy regular files without overwrite, SHA-guard move operations, or remove SHA-guarded files/empty directories. Move/remove remain destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.enum(['mkdir', 'copy', 'move', 'remove']),
+      path: z.string().min(1).optional(),
+      source: z.string().min(1).optional(),
+      destination: z.string().min(1).optional(),
+      recursive: z.boolean().default(false),
+      expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, path, source, destination, recursive, expectedSha256 }) => {
+    const risk = operation === 'mkdir' || operation === 'copy' ? 'write' : 'destructive';
+    return invoke('file.manage', risk, { operation, path, source, destination, recursive, expectedSha256 }, path ?? source);
+  });
 
   server.registerTool('git.status', {
     title: 'Git status',
@@ -684,6 +872,48 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, timeoutMs }, cwd));
 
+  server.registerTool('terminal.session', {
+    title: 'Manage interactive terminal session',
+    description: 'Start an allowlisted shell-free process session, read bounded cursor-based output, write bounded stdin, list owned sessions, or terminate the owned process tree. Start/write/terminate remain destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.enum(['start', 'list', 'read', 'write', 'terminate']),
+      executable: z.string().min(1).optional(),
+      args: z.array(z.string()).max(200).default([]),
+      cwd: z.string().min(1).optional(),
+      sessionId: z.string().uuid().optional(),
+      input: z.string().max(65536).optional(),
+      afterCursor: z.number().int().min(0).optional(),
+      maxEvents: z.number().int().min(1).max(500).default(100),
+      maxBytes: z.number().int().min(1024).max(2097152).default(262144)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
+    const risk = operation === 'list' || operation === 'read' ? 'read' : 'destructive';
+    return invoke('terminal.session', risk, { operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }, cwd);
+  });
+
+  server.registerTool('process.inspect', {
+    title: 'Inspect Windows process table',
+    description: 'Read bounded Windows process metadata using tasklist. Returns image name, PID, session identity and memory usage only; command lines, environments and process memory are not exposed.',
+    inputSchema: z.object({
+      name: z.string().min(1).max(260).optional(),
+      pid: z.number().int().positive().optional(),
+      limit: z.number().int().min(1).max(500).default(200)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ name, pid, limit }) => invoke('process.inspect', 'read', { name, pid, limit }));
+
+  server.registerTool('process.manage', {
+    title: 'Manage fingerprinted Windows process',
+    description: 'Terminate one freshly inspected current-user Windows process tree. Requires the exact SHA-256 identity fingerprint from process.inspect, refuses Operator/system-critical/other-user processes, re-inspects the postcondition, and is destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.literal('terminate'),
+      pid: z.number().int().positive(),
+      expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/i)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, pid, expectedFingerprint }) => invoke('process.manage', 'destructive', { operation, pid, expectedFingerprint }, 'process:' + pid));
+
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
     description: 'Inspect compact Chromium tab state or a bounded semantic/accessibility snapshot of one target. Raw HTML and DevTools WebSocket URLs are not returned.',
@@ -829,6 +1059,31 @@ function attachActionImage<T extends { content: Array<Record<string, unknown>>; 
   delete cursor[key];
   result.content.push({ type: 'image', data, mimeType });
   return result;
+}
+
+function operationResultWithAgent(
+  _agent: LocalAgentClient,
+  result: Awaited<ReturnType<LocalAgentClient['submitOperation']>>
+) {
+  const operation = result.operation as Record<string, unknown> | undefined;
+  const summary = result.ok
+    ? `operations: ${String(operation?.state ?? 'PENDING')} operation ${String(operation?.id ?? '')}`.trim()
+    : `operations: NOT VERIFIED (${result.error?.code ?? 'UNKNOWN'}) ${result.error?.message ?? ''}`;
+  return {
+    isError: !result.ok,
+    content: [{ type: 'text' as const, text: summary }],
+    structuredContent: result
+  };
+}
+
+function knowledgeResultWithAgent(result: Awaited<ReturnType<LocalAgentClient['inspectKnowledge']>>) {
+  const error = result.error as { code?: string; message?: string } | undefined;
+  const summary = result.ok ? 'knowledge.inspect: VERIFIED read' : `knowledge.inspect: failed (${error?.code ?? 'UNKNOWN'}) ${error?.message ?? ''}`;
+  return {
+    isError: !result.ok,
+    content: [{ type: 'text' as const, text: summary }],
+    structuredContent: result
+  };
 }
 
 function taskResultWithAgent(

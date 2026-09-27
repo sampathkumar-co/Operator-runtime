@@ -1,7 +1,11 @@
 import type { AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
-import type { TaskControlOperation, TaskSubmitInput, TaskTransportResult } from './local-agent-client.ts';
+import type {
+  KnowledgeInspectInput, KnowledgeTransportResult,
+  OperationControlOperation, OperationSubmitInput, OperationTransportResult,
+  TaskControlOperation, TaskSubmitInput, TaskTransportResult
+} from './local-agent-client.ts';
 import { currentMcpTaskId } from './request-context.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
@@ -96,6 +100,61 @@ export class RelayAgentClient {
 
   async controlTask(taskId: string, operation: TaskControlOperation): Promise<TaskTransportResult> {
     return await this.#taskRequest({ operation, taskId: validUuid(taskId, 'taskId') });
+  }
+
+  async submitOperation(input: OperationSubmitInput): Promise<OperationTransportResult> {
+    const { resourceRequirements, ...request } = input;
+    return await this.#operationRequest({ operation: 'submit', request }, resourceRequirements);
+  }
+
+  async controlOperation(operationId: string, operation: OperationControlOperation, verificationDigest?: string): Promise<OperationTransportResult> {
+    return await this.#operationRequest({
+      operation,
+      operationId: validUuid(operationId, 'operationId'),
+      ...(operation === 'promote' ? { verificationDigest } : {})
+    });
+  }
+
+  async inspectKnowledge(input: KnowledgeInspectInput): Promise<KnowledgeTransportResult> {
+    const response = await fetch(new URL('/v1/knowledge', this.#url), {
+      redirect: 'error', method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify({
+        ...(this.#accountId ? { accountId: this.#accountId } : {}),
+        ...(this.#principal ? { principal: this.#principal } : {}),
+        ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
+        ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
+        ...(this.#developerBoundary ? { developerBoundary: true } : {}),
+        query: input,
+        waitMs: this.#waitMs
+      }),
+      signal: AbortSignal.timeout(this.#waitMs + 5_000)
+    });
+    const body = await response.json() as KnowledgeTransportResult;
+    if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean') throw new Error(`Relay knowledge control returned malformed HTTP ${response.status} response.`);
+    return body;
+  }
+
+  async #operationRequest(operation: Record<string, unknown>, resourceRequirements?: OperationSubmitInput['resourceRequirements']): Promise<OperationTransportResult> {
+    const response = await fetch(new URL('/v1/operation', this.#url), {
+      redirect: 'error', method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.#token}` },
+      body: JSON.stringify({
+        ...(this.#accountId ? { accountId: this.#accountId } : {}),
+        ...(this.#principal ? { principal: this.#principal } : {}),
+        ...(this.#deviceId ? { deviceId: this.#deviceId } : {}),
+        ...(this.#projectKey ? { projectKey: this.#projectKey } : {}),
+        operation,
+        ...(resourceRequirements ? { resourceRequirements } : {}),
+        waitMs: this.#waitMs
+      }),
+      signal: AbortSignal.timeout(this.#waitMs + 5_000)
+    });
+    const body = await response.json() as OperationTransportResult;
+    if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean') {
+      throw new Error(`Relay operation control returned malformed HTTP ${response.status} response.`);
+    }
+    return body;
   }
 
   async #taskRequest(task: Record<string, unknown>): Promise<TaskTransportResult> {

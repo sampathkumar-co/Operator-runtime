@@ -18,6 +18,14 @@ import { OperatorError } from '../../../src/core/errors.ts';
 import { RelayEnrollmentClient } from './relay-enrollment.ts';
 import { DEVELOPER_RELAY_CAPABILITIES } from '../../../src/core/developer-relay-surface.ts';
 import { TaskOrchestrator } from '../../../src/core/task-orchestrator.ts';
+import { TeamCoordinator } from '../../../src/core/team-coordinator.ts';
+import { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
+import { WorldModelStore } from '../../../src/core/world-model.ts';
+import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
+import { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
+import { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
+import { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
+import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
@@ -51,13 +59,27 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 }
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
+const permissions = {
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
+  allowedRoots,
+  allowExternalWrites: false,
+  allowSystemChanges: false,
+  allowDestructive: false
+};
 const emergencyStop = new EmergencyStopStore(stateDir);
 const approvals = new ApprovalStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
+const teams = new TeamCoordinator(stateDir);
+const procedures = new ProcedureMemoryStore(stateDir);
+const world = new WorldModelStore(stateDir);
+const optimizer = new ExecutionOptimizerStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
+const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
+const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
+const organizations = new OrganizationCoordinator(stateDir, teams);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -94,6 +116,16 @@ const runtime = createRuntime({
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
+});
+const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
+const operations = new DigitalOperationsLayer(stateDir, {
+  procedures,
+  world,
+  devices: devicePool,
+  optimizer,
+  teams,
+  organizations,
+  availableCapabilities: operationCapabilities
 });
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
@@ -202,13 +234,6 @@ async function resetLocalDevice() {
   return await coordinator.reset();
 }
 
-const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
-  allowedRoots,
-  allowExternalWrites: false,
-  allowSystemChanges: false,
-  allowDestructive: false
-};
 const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
@@ -247,6 +272,13 @@ const agent = createLocalAgentServer({
   audit,
   tasks,
   taskOrchestrator,
+  teams,
+  procedures,
+  world,
+  devicePool,
+  optimizer,
+  organizations,
+  operations,
   deviceIdentity,
   deviceRegistry,
   privacy,

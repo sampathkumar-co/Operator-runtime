@@ -13,7 +13,15 @@
     "verify:release-checkout": "node scripts/verify-release-checkout.mjs",
     "check": "node --experimental-strip-types scripts/check.ts && npm test",
     "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts",
-    "test:stage3": "node --experimental-strip-types --test test/task-stage3.test.ts test/task-orchestrator.test.ts test/windows-uia.test.ts test/companion-api.test.ts"
+    "test:stage3": "node --experimental-strip-types --test test/task-stage3.test.ts test/task-orchestrator.test.ts test/windows-uia.test.ts test/companion-api.test.ts",
+    "test:windows-parity": "node --experimental-strip-types --test test/filesystem.test.ts test/process.test.ts test/canonical-risk.test.ts",
+    "test:stage4": "node --experimental-strip-types --test test/team-coordinator.test.ts test/team-api.test.ts test/team-cancellation.test.ts",
+    "test:stage5": "node --experimental-strip-types --test test/procedure-memory.test.ts",
+    "test:stage6": "node --experimental-strip-types --test test/world-model.test.ts test/world-publication.test.ts",
+    "test:stage7": "node --experimental-strip-types --test test/device-pool.test.ts test/relay-client.test.ts",
+    "test:stage8": "node --experimental-strip-types --test test/organization-coordinator.test.ts",
+    "test:stage9": "node --experimental-strip-types --test test/execution-optimizer.test.ts",
+    "test:stage10": "node --experimental-strip-types --test test/outcome-planner.test.ts test/digital-operations.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT."

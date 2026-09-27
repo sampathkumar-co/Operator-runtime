@@ -17,18 +17,18 @@ const SCORE: CapabilityScore = {
 const STATIC_EXPECTED = {
   'computer.inspect': 'read', 'project.inspect': 'read', 'project.command.inspect': 'read',
   'project.transaction.run': 'destructive', 'file.read': 'read', 'file.list': 'read',
-  'file.write': 'write', 'file.create': 'write', 'file.replace': 'destructive',
+  'file.write': 'write', 'file.create': 'write', 'file.replace': 'destructive', 'file.info': 'read', 'file.search': 'read',
   'git.status': 'read', 'git.diff': 'read', 'git.rev-parse': 'read',
   'git.checkpoint.inspect': 'read', 'git.checkpoint.create': 'write', 'git.checkpoint.restore': 'destructive',
   'git.write': 'write', 'docker.inspect': 'read', 'docker.manage': 'system',
   'postgres.inspect': 'read', 'postgres.select': 'read', 'vscode.inspect': 'read',
-  'vscode.open': 'system', 'terminal.execute': 'destructive', 'browser.inspect': 'read',
+  'vscode.open': 'system', 'terminal.execute': 'destructive', 'process.inspect': 'read', 'process.manage': 'destructive', 'browser.inspect': 'read',
   'browser.navigate': 'write', 'browser.interact': 'external', 'browser.tab.focus': 'write',
   'browser.tab.close': 'destructive', 'app.inspect': 'read', 'app.operate': 'external',
   'visual.capture': 'read', 'input.operate': 'external'
 } as const;
 test('canonical risk registry covers every known static capability exactly', () => {
-  const dynamic = { 'project.command.run': 'dynamic' } as const;
+  const dynamic = { 'project.command.run': 'dynamic', 'file.manage': 'dynamic', 'terminal.session': 'dynamic' } as const;
   assert.deepEqual(CAPABILITY_RISK_RULES, { ...STATIC_EXPECTED, ...dynamic });
 });
 
