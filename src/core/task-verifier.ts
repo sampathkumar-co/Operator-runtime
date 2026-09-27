@@ -29,6 +29,15 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   const activeRecords = execution?.records.filter((record) => record.state === 'STARTED' || record.state === 'BLOCKED') ?? [];
   const failedRequired = required.filter((node) => node.state === 'FAILED' || node.state === 'BLOCKED');
   const conditionsPresent = task.successConditions.length > 0;
+  const keyedNodeRecordMismatches = required.filter((node) => {
+    if (!node.key) return false;
+    const matching = execution?.records.filter((record) => record.stepKey === node.key) ?? [];
+    if (node.state === 'VERIFIED') return !matching.some((record) => record.state === 'SUCCEEDED');
+    if (node.state === 'SKIPPED') return !matching.some((record) => record.state === 'FAILED' || record.state === 'INTERRUPTED');
+    return false;
+  });
+  const plannerTerminal = builtinPlannerStateIsTerminal(task);
+  const semanticObservationPresent = execution?.records.some((record) => record.observation !== undefined) ?? false;
 
   checks.push({
     name: 'required-nodes-resolved',
@@ -44,8 +53,19 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   });
   checks.push({
     name: 'planner-contract',
-    ok: Boolean(execution?.plannerId && execution.goalKind),
-    detail: execution ? `Planner ${execution.plannerId} completed goal kind ${execution.goalKind}.` : 'Execution metadata is missing.'
+    ok: Boolean(execution?.plannerId && execution.goalKind) && plannerTerminal,
+    detail: execution
+      ? plannerTerminal
+        ? `Planner ${execution.plannerId} is in a terminal persisted state for goal kind ${execution.goalKind}.`
+        : `Planner ${execution.plannerId} reported completion without a terminal persisted state.`
+      : 'Execution metadata is missing.'
+  });
+  checks.push({
+    name: 'graph-record-integrity',
+    ok: keyedNodeRecordMismatches.length === 0,
+    detail: keyedNodeRecordMismatches.length === 0
+      ? 'Every keyed verified/skipped graph node reconciles with a durable action record.'
+      : `${keyedNodeRecordMismatches.length} keyed graph node(s) do not reconcile with durable action records.`
   });
   checks.push({
     name: 'declared-success-conditions',
@@ -56,8 +76,10 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   });
   checks.push({
     name: 'evidence-present',
-    ok: task.evidence.length > 0 || (execution?.records.some((record) => record.evidence.length > 0) ?? false),
-    detail: 'Completion requires recorded runtime or semantic verification evidence.'
+    ok: semanticObservationPresent || (execution?.records.some((record) => record.evidence.length > 0) ?? false),
+    detail: semanticObservationPresent
+      ? 'At least one durable semantic/visual machine observation supports completion.'
+      : 'Completion requires durable provider evidence or a machine observation; planner completion text alone is insufficient.'
   });
 
   const stateVersions = [...new Set(
@@ -102,4 +124,23 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
       }
     )
   };
+}
+
+
+function builtinPlannerStateIsTerminal(task: TaskCapsule): boolean {
+  const execution = task.execution;
+  if (!execution) return false;
+  const state = execution.plannerState;
+  if (execution.plannerId === 'operator.semantic.v1') return state.phase === 'complete';
+  if (execution.plannerId === 'operator.project-quality-gate.v1') return state.phase === 'complete';
+  if (execution.plannerId === 'operator.semantic-workflow.v1') {
+    const goal = state.goal;
+    if (!goal || typeof goal !== 'object' || Array.isArray(goal)) return false;
+    const steps = (goal as Record<string, unknown>).steps;
+    const index = Number(state.workflowIndex ?? 0);
+    return Array.isArray(steps) && Number.isSafeInteger(index) && index === steps.length;
+  }
+  // Custom/test planners remain extensible; they are still constrained by graph,
+  // action-record, observation and success-condition verification above.
+  return true;
 }
