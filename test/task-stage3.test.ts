@@ -148,7 +148,9 @@ test('stage3 repairs wrong existing file content with SHA precondition, explicit
   assert.ok(completed.evidence.some((item) => item.kind === 'strategy_repair'));
   assert.ok(completed.evidence.some((item) => item.kind === 'failure_classification'));
   assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
-  assert.deepEqual(completed.nodes.map((node) => node.key), ['list-parent', 'create-file', 'verify-file', 'repair-file', 'inspect-git']);
+  assert.deepEqual(completed.nodes.map((node) => node.stepKey), ['list-parent', 'create-file', 'verify-file', 'repair-file', 'verify-file', 'inspect-git']);
+  assert.equal(new Set(completed.nodes.map((node) => node.key)).size, completed.nodes.length);
+  assert.equal(new Set(completed.nodes.map((node) => node.actionId)).size, completed.nodes.length);
   for (let index = 1; index < completed.nodes.length; index += 1) {
     assert.ok(completed.nodes[index]!.dependsOn.length <= 1);
   }
