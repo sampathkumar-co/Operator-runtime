@@ -1,0 +1,203 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
+import { GitProvider } from '../src/capabilities/git.ts';
+import { ProjectCommandProvider } from '../src/capabilities/project-command.ts';
+import { ProjectInspectProvider } from '../src/capabilities/project.ts';
+import { classifyTaskFailure } from '../src/core/task-failure.ts';
+import { createTask, addTaskNode, stableTaskNodeId } from '../src/core/task.ts';
+import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
+import { TaskStore } from '../src/core/task-store.ts';
+import { verifyTaskCompletion } from '../src/core/task-verifier.ts';
+import { OperatorRuntime } from '../src/core/runtime.ts';
+import type { PermissionProfile } from '../src/core/types.ts';
+import { supportedGitAvailable } from './git-test-support.ts';
+
+async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function permissions(root: string, capabilities: string[]): PermissionProfile {
+  return {
+    allowedCapabilities: capabilities,
+    allowedRoots: [root],
+    allowDestructive: false,
+    allowExternalWrites: false,
+    allowSystemChanges: false
+  };
+}
+
+function filesystem(root: string): FilesystemProvider {
+  return new FilesystemProvider({
+    allowedRoots: [root],
+    windowsPathLeaseExecutable: process.platform === 'win32'
+      ? path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe')
+      : undefined
+  });
+}
+
+test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
+  assert.deepEqual(classifyTaskFailure({ code: 'APPROVAL_REQUIRED', message: 'approval' }), {
+    class: 'approval', strategy: 'block', retryable: false, code: 'APPROVAL_REQUIRED'
+  });
+  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
+  assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
+  assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
+});
+
+test('stage3 graph node identity is stable across reconstruction and dependencies remain explicit', () => {
+  const task = createTask({
+    userObjective: 'stable graph',
+    interpretedObjective: 'controlled-file-change:stable graph',
+    authorizedScope: ['/tmp/project'],
+    prohibitedScope: [],
+    successConditions: ['graph is stable']
+  });
+  const first = addTaskNode(task, 'Inspect', { key: 'inspect' });
+  const same = addTaskNode(task, 'Inspect renamed presentation', { key: 'inspect' });
+  const second = addTaskNode(task, 'Mutate', { key: 'mutate', dependsOn: [first.id] });
+  assert.equal(first.id, stableTaskNodeId(task.id, 'inspect'));
+  assert.equal(same.id, first.id);
+  assert.equal(second.id, stableTaskNodeId(task.id, 'mutate'));
+  assert.deepEqual(second.dependsOn, [first.id]);
+});
+
+test('stage3 independent verifier rejects in-flight graph state and emits a stable evidence digest', () => {
+  const task = createTask({
+    userObjective: 'verify independently',
+    interpretedObjective: 'controlled-file-change:verify independently',
+    authorizedScope: ['/tmp/project'],
+    prohibitedScope: [],
+    successConditions: ['nothing remains in flight']
+  });
+  const node = addTaskNode(task, 'Inspect', { key: 'inspect' });
+  node.state = 'RUNNING';
+  task.execution = {
+    schemaVersion: 1,
+    plannerId: 'test',
+    goalKind: 'controlled-file-change',
+    plannerState: { phase: 'complete', goal: { kind: 'controlled-file-change' } },
+    maxSteps: 5,
+    maxAttemptsPerStep: 2,
+    timeoutMs: 1000,
+    stepCount: 1,
+    records: [{
+      stepKey: 'inspect',
+      actionId: 'task-' + 'a'.repeat(64),
+      capability: 'file.read',
+      risk: 'read',
+      inputHash: 'b'.repeat(64),
+      attempt: 1,
+      state: 'STARTED',
+      startedAt: new Date().toISOString(),
+      evidence: []
+    }]
+  };
+  task.evidence.push({ kind: 'runtime', status: 'info', message: 'observed', timestamp: new Date().toISOString() });
+  const verdict = verifyTaskCompletion(task);
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.bundle.digest, /^[0-9a-f]{64}$/);
+  assert.equal(verdict.evidence.status, 'fail');
+  assert.ok(verdict.bundle.checks.some((check) => check.name === 'no-inflight-actions' && !check.ok));
+});
+
+test('stage3 repairs wrong existing file content with SHA precondition, explicit approval, and fresh verification', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-stage3-repair-root-');
+  const state = await tempDir(t, 'operator-stage3-repair-state-');
+  const target = path.join(root, 'repair.txt');
+  await fs.writeFile(target, 'stale content\n');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => execFile('git', ['init', '--quiet'], { cwd: root }, (error) => error ? reject(error) : resolve()));
+
+  const runtime = new OperatorRuntime()
+    .register(filesystem(root))
+    .register(new GitProvider({ allowedRoots: [root] }));
+  const orchestrator = new TaskOrchestrator({
+    runtime,
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.read', 'file.replace', 'git.status'])
+  });
+
+  const submitted = await orchestrator.submit({
+    objective: 'Make repair.txt exactly match the requested durable content.',
+    authorizedScope: [root],
+    successConditions: ['exact content is present', 'repair uses a fresh SHA precondition', 'Git observes the file'],
+    goal: { kind: 'controlled-file-change', root, path: target, content: 'fresh content\n' }
+  });
+
+  const blocked = await orchestrator.run(submitted.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(await fs.readFile(target, 'utf8'), 'stale content\n');
+  const repair = blocked.execution!.records.find((record) => record.stepKey === 'repair-file');
+  assert.ok(repair);
+  assert.equal(repair!.capability, 'file.replace');
+  assert.equal(repair!.state, 'BLOCKED');
+
+  const completed = await orchestrator.resume(submitted.id, [repair!.actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(await fs.readFile(target, 'utf8'), 'fresh content\n');
+  assert.ok(completed.evidence.some((item) => item.kind === 'strategy_repair'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'failure_classification'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
+  assert.deepEqual(completed.nodes.map((node) => node.key), ['list-parent', 'create-file', 'verify-file', 'repair-file', 'inspect-git']);
+  for (let index = 1; index < completed.nodes.length; index += 1) {
+    assert.ok(completed.nodes[index]!.dependsOn.length <= 1);
+  }
+});
+
+test('stage3 project quality goal compiles trusted lint/test/build checks at runtime', async (t) => {
+  const root = await tempDir(t, 'operator-stage3-quality-root-');
+  const authority = await tempDir(t, 'operator-stage3-quality-authority-');
+  const state = await tempDir(t, 'operator-stage3-quality-state-');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'stage3-quality-fixture' }));
+  const definitions = [
+    { id: 'quality-lint', kind: 'lint', marker: 'lint.marker' },
+    { id: 'quality-test', kind: 'test', marker: 'test.marker' },
+    { id: 'quality-build', kind: 'build', marker: 'build.marker' }
+  ] as const;
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root,
+      commands: definitions.map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        executable: 'node',
+        args: ['-e', `require('fs').writeFileSync(${JSON.stringify(path.join(root, entry.marker))},${JSON.stringify(entry.kind)})`],
+        cwd: '.',
+        risk: 'read',
+        artifacts: [{ path: entry.marker, kind: 'file', minBytes: 1, mustChange: true }]
+      }))
+    }]
+  }));
+
+  const runtime = new OperatorRuntime()
+    .register(new ProjectInspectProvider({ allowedRoots: [root] }))
+    .register(new ProjectCommandProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath }));
+  const orchestrator = new TaskOrchestrator({
+    runtime,
+    store: new TaskStore(state),
+    permissions: permissions(root, ['project.inspect', 'project.command.inspect', 'project.command.run'])
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Prove project quality using only locally trusted commands.',
+    authorizedScope: [root],
+    successConditions: ['lint, test, and build trusted checks all pass'],
+    goal: { kind: 'project-quality-gate', root, checks: ['lint', 'test', 'build'], requireAll: true }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), [
+    'project.inspect', 'project.command.inspect', 'project.command.run', 'project.command.run', 'project.command.run'
+  ]);
+  assert.ok(completed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'pass'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
+});
