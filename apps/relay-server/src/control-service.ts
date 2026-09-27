@@ -594,7 +594,8 @@ function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequ
 
 function operationRequiredCapabilities(request: Record<string, unknown>): string[] {
   const execution = request.execution;
-  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is required.');
+  if (execution === undefined) return [];
+  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is invalid.');
   const raw = execution as Record<string, unknown>;
   const capabilities = new Set<string>();
   const collect = (workItems: unknown) => {
