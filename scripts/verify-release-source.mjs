@@ -79,12 +79,39 @@ export async function verifyReleaseSource({ repository, sha, token }) {
   return evidence;
 }
 
+function releaseSourceEvidenceMayStillArrive(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /missing required .+ push evidence|run is not green \(status=(?:queued|in_progress|pending|requested|waiting)/i.test(message);
+}
+
+export async function verifyReleaseSourceWithRetry({ repository, sha, token, waitMs = 0, pollMs = 15_000 }) {
+  const boundedWaitMs = Number(waitMs);
+  const boundedPollMs = Number(pollMs);
+  if (!Number.isSafeInteger(boundedWaitMs) || boundedWaitMs < 0 || boundedWaitMs > 30 * 60_000) {
+    fail('Release source wait window must be an integer from 0 to 1800000 milliseconds.');
+  }
+  if (!Number.isSafeInteger(boundedPollMs) || boundedPollMs < 1_000 || boundedPollMs > 60_000) {
+    fail('Release source poll interval must be an integer from 1000 to 60000 milliseconds.');
+  }
+  const deadline = Date.now() + boundedWaitMs;
+  for (;;) {
+    try {
+      return await verifyReleaseSource({ repository, sha, token });
+    } catch (error) {
+      if (Date.now() >= deadline || !releaseSourceEvidenceMayStillArrive(error)) throw error;
+      console.log(`operator-release-source:WAIT sha=${sha} reason=${error instanceof Error ? error.message : String(error)}`);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(boundedPollMs, Math.max(1, deadline - Date.now()))));
+    }
+  }
+}
+
 const isEntrypoint = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isEntrypoint) {
   if (process.env.GITHUB_REF !== 'refs/heads/main') fail('Production release must run from refs/heads/main.');
-  await verifyReleaseSource({
+  await verifyReleaseSourceWithRetry({
     repository: process.env.GITHUB_REPOSITORY,
     sha: process.env.GITHUB_SHA,
-    token: process.env.GITHUB_TOKEN
+    token: process.env.GITHUB_TOKEN,
+    waitMs: Number(process.env.OPERATOR_RELEASE_SOURCE_WAIT_MS ?? 0)
   });
 }
