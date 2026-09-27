@@ -4,8 +4,12 @@ import { OperatorError } from './errors.ts';
 
 export interface TaskNode {
   id: string;
-  /** Stable planner step identity. Optional only for backwards compatibility with v1 capsules. */
+  /** Stable execution-node identity. Optional only for backwards compatibility with v1 capsules. */
   key?: string;
+  /** Logical planner step identity; multiple attempts may share the same stepKey. */
+  stepKey?: string;
+  /** Deterministic action identity correlated to this execution node. */
+  actionId?: string;
   title: string;
   state: TaskState;
   required: boolean;
@@ -101,15 +105,19 @@ export function createTask(input: Omit<TaskCapsule, 'id' | 'state' | 'nodes' | '
   };
 }
 
-export function addTaskNode(task: TaskCapsule, title: string, options: { key?: string; required?: boolean; dependsOn?: string[] } = {}): TaskNode {
+export function addTaskNode(task: TaskCapsule, title: string, options: { key?: string; stepKey?: string; actionId?: string; required?: boolean; dependsOn?: string[] } = {}): TaskNode {
   const key = options.key?.trim();
   if (key) {
     const existing = task.nodes.find((candidate) => candidate.key === key);
     if (existing) return existing;
   }
+  const stepKey = options.stepKey?.trim();
+  const actionId = options.actionId?.trim();
   const node: TaskNode = {
     id: key ? stableTaskNodeId(task.id, key) : randomUUID(),
     ...(key ? { key } : {}),
+    ...(stepKey ? { stepKey } : {}),
+    ...(actionId ? { actionId } : {}),
     title,
     state: 'PENDING',
     required: options.required ?? true,
@@ -159,4 +167,8 @@ export function stableTaskNodeId(taskId: string, stepKey: string): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function stableTaskExecutionNodeKey(stepKey: string, attempt: number, inputHash: string): string {
+  return `node-${createHash('sha256').update(stepKey).update('\0').update(String(attempt)).update('\0').update(inputHash).digest('hex')}`;
 }
