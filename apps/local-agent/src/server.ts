@@ -11,7 +11,7 @@ import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
 import type { TeamCoordinator, TeamRole, TeamWorkInput } from '../../../src/core/team-coordinator.ts';
 import type { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
-import type { WorldModelStore, WorldDomain } from '../../../src/core/world-model.ts';
+import { validateWorldObservation, type WorldModelStore } from '../../../src/core/world-model.ts';
 import type { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
 import type { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
 import type { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
@@ -662,6 +662,33 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    const worldPublishRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/world-publish$/i.exec(pathname);
+    if (worldPublishRoute && req.method === 'POST') {
+      if (!options.teams || !options.world) {
+        send(res, 503, { ok: false, error: { code: 'WORLD_PUBLICATION_NOT_CONFIGURED', message: 'Team/world integration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const missionId = worldPublishRoute[1]!;
+        const workItemId = worldPublishRoute[2]!;
+        const mission = await options.teams.inspect(missionId);
+        const item = mission.workItems.find((candidate) => candidate.id === workItemId);
+        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+          throw Object.assign(new Error('Completed verifier world-observation commitment is required.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+        }
+        const prepared = prepareVerifierWorldObservations(body.worldObservations, missionId, workItemId);
+        if (prepared.digest !== item.result.worldObservationDigest) {
+          throw Object.assign(new Error('World observation payload does not match the verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_COMMITMENT_MISMATCH' });
+        }
+        const published = await publishVerifierWorldObservations(options.world, mission, item, prepared.observations);
+        send(res, 200, { ok: true, mission, worldObservationsPublished: published });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORLD_PUBLICATION_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     const workRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/(complete|fail|reconcile)$/i.exec(pathname);
     if (workRoute && req.method === 'POST') {
       if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
@@ -670,24 +697,56 @@ export function createLocalAgentServer(options: {
         const id = workRoute[1]!;
         const workItemId = workRoute[2]!;
         const operation = workRoute[3]!;
-        const mission = operation === 'complete'
-          ? await options.teams.complete(id, {
+        if (operation === 'complete') {
+          let preparedWorld: ReturnType<typeof prepareVerifierWorldObservations> | undefined;
+          if (body.worldObservations !== undefined) {
+            if (!options.world) throw Object.assign(new Error('World model is not configured.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
+            const before = await options.teams.inspect(id);
+            const item = before.workItems.find((candidate) => candidate.id === workItemId);
+            if (!item || item.role !== 'verifier' || body.verificationPassed !== true) {
+              throw Object.assign(new Error('Only a passing verifier may commit world observations.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+            }
+            preparedWorld = prepareVerifierWorldObservations(body.worldObservations, id, workItemId);
+          }
+          const mission = await options.teams.complete(id, {
+            workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
+            summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
+            verificationPassed: body.verificationPassed === true,
+            ...(preparedWorld ? { worldObservationDigest: preparedWorld.digest } : {})
+          });
+          let worldObservationsPublished = 0;
+          let worldObservationWarning: { code: string; message: string } | undefined;
+          if (preparedWorld && options.world) {
+            const completed = mission.workItems.find((candidate) => candidate.id === workItemId)!;
+            try {
+              worldObservationsPublished = await publishVerifierWorldObservations(options.world, mission, completed, preparedWorld.observations);
+            } catch (error) {
+              worldObservationWarning = {
+                code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORLD_PUBLICATION_FAILED',
+                message: error instanceof Error ? error.message : String(error)
+              };
+            }
+          }
+          send(res, 200, {
+            ok: true, mission,
+            ...(preparedWorld ? { worldObservationsPublished } : {}),
+            ...(worldObservationWarning ? { worldObservationWarning } : {})
+          });
+          return;
+        }
+
+        const mission = operation === 'fail'
+          ? await options.teams.fail(id, {
               workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
-              summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
-              verificationPassed: body.verificationPassed === true
+              code: String(body.code ?? ''), message: String(body.message ?? ''),
+              sideEffectState: body.sideEffectState as 'none' | 'known' | 'uncertain',
+              retryable: body.retryable === true
             })
-          : operation === 'fail'
-            ? await options.teams.fail(id, {
-                workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
-                code: String(body.code ?? ''), message: String(body.message ?? ''),
-                sideEffectState: body.sideEffectState as 'none' | 'known' | 'uncertain',
-                retryable: body.retryable === true
-              })
-            : await options.teams.reconcile(id, {
-                workerId: String(body.workerId ?? ''), workItemId,
-                resolution: body.resolution as 'completed' | 'retry' | 'failed',
-                summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : []
-              });
+          : await options.teams.reconcile(id, {
+              workerId: String(body.workerId ?? ''), workItemId,
+              resolution: body.resolution as 'completed' | 'retry' | 'failed',
+              summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : []
+            });
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORK_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -1146,6 +1205,62 @@ export function createLocalAgentServer(options: {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   };
+}
+
+function prepareVerifierWorldObservations(input: unknown, missionId: string, workItemId: string): {
+  digest: string;
+  observations: Array<ReturnType<typeof validateWorldObservation>>;
+} {
+  if (!Array.isArray(input) || input.length < 1 || input.length > 100) {
+    throw Object.assign(new Error('worldObservations must contain 1-100 entries.'), { code: 'TEAM_WORLD_OBSERVATION_INVALID' });
+  }
+  const source = `team:${missionId}:verifier:${workItemId}`;
+  const zeroDigest = '0'.repeat(64);
+  const observations = input.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw Object.assign(new Error(`worldObservations[${index}] must be an object.`), { code: 'TEAM_WORLD_OBSERVATION_INVALID' });
+    }
+    const raw = value as Record<string, unknown>;
+    return validateWorldObservation({
+      entity: raw.entity as any,
+      source,
+      domain: raw.domain as any,
+      evidenceDigest: zeroDigest,
+      facts: raw.facts && typeof raw.facts === 'object' && !Array.isArray(raw.facts) ? raw.facts as Record<string, unknown> : {},
+      relations: Array.isArray(raw.relations) ? raw.relations as any : [],
+      confidence: raw.confidence === undefined ? undefined : Number(raw.confidence),
+      ttlMs: raw.ttlMs === undefined ? undefined : Number(raw.ttlMs)
+    });
+  });
+  const committed = observations.map(({ evidenceDigest: _evidenceDigest, ...observation }) => observation);
+  const digest = crypto.createHash('sha256').update(JSON.stringify(committed)).digest('hex');
+  return { digest, observations };
+}
+
+async function publishVerifierWorldObservations(
+  world: WorldModelStore,
+  mission: Awaited<ReturnType<TeamCoordinator['inspect']>>,
+  item: Awaited<ReturnType<TeamCoordinator['inspect']>>['workItems'][number],
+  observations: Array<ReturnType<typeof validateWorldObservation>>
+): Promise<number> {
+  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+    throw Object.assign(new Error('World publication requires a completed passing verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+  }
+  const evidenceDigest = crypto.createHash('sha256').update(JSON.stringify({
+    missionId: mission.id,
+    workItemId: item.id,
+    workerId: item.result.workerId,
+    completedAt: item.result.completedAt,
+    verificationPassed: true,
+    worldObservationDigest: item.result.worldObservationDigest,
+    evidence: item.result.evidence
+  })).digest('hex');
+  let published = 0;
+  for (const observation of observations) {
+    await world.observe({ ...observation, evidenceDigest });
+    published += 1;
+  }
+  return published;
 }
 
 function teamActionResourceKeys(action: ActionRequest): string[] {
