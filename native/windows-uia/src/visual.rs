@@ -16,6 +16,8 @@ const MAX_WAIT_MS: u64 = 10_000;
 const MAX_TEXT_UTF16_UNITS: usize = 4096;
 const MAX_HOTKEY_KEYS: usize = 4;
 
+fn default_source() -> String { "screen".into() }
+
 const SM_XVIRTUALSCREEN: i32 = 76;
 const SM_YVIRTUALSCREEN: i32 = 77;
 const SM_CXVIRTUALSCREEN: i32 = 78;
