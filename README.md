@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: Mecord Connect v1 production release complete — OpenAI directory verification blocked
+## Status: production v1 live; Windows RDC-parity + Stage-4 successor certified
 
-The execution kernel, browser kernel, Windows semantic kernel, development adapters and relay/multi-device architecture are implemented and covered by automated gates. Production is deployed from source `94becbf734817121fbea1a017b9e1b10c144d125`; the public MCP surface exposes exactly 9 tools, the separate Developer MCP surface exposes exactly 24 tools, and `mecord-connect@1.0.1` is public on npm under `latest`. OpenAI developer verification/app-directory submission remains external and intentionally incomplete. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
+The currently deployed production release remains source `94becbf734817121fbea1a017b9e1b10c144d125`, with exactly 9 public tools, 24 deployed Developer tools and `mecord-connect@1.0.1` under `latest`. A newer source successor on `feature/windows-parity-stage4` has completed Windows RDC-parity and Stage-4 shared-state multi-agent certification; its runtime code was certified at `288d5a1c5ad5742f0f041e42740010eeda50dd92` and expands the private/Developer source surface to 30 grouped semantic tools while leaving the public 9-tool surface unchanged. That successor is not production until it is merged/deployed and release-state metadata is promoted. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -35,7 +35,7 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - account-scoped multi-device registry, deterministic routing and project-to-device binding
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
-- full/private MCP runtime with **24 semantic tools**
+- source-successor full/private MCP runtime with **30 grouped semantic tools**; currently deployed production Developer endpoint remains 24 until successor deployment
 - curated public Mecord Connect MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
@@ -45,12 +45,15 @@ The execution kernel, browser kernel, Windows semantic kernel, development adapt
 - SignTool SHA-256 signing pipeline with publisher/certificate-subject enforcement
 - ephemeral-certificate Windows install/uninstall smoke certification
 - dedicated security red-team and performance-regression CI gates
+- Windows RDC-parity layer with bounded file search/info/manage, interactive terminal sessions, process inspection and fingerprinted current-user process termination
+- durable Stage-4 team coordinator with worker leases, dependency scheduling, resource locks/revisions, CAS blackboard state, bounded budgets, reconciliation, cancellation and verifier-gated completion
+- dedicated Windows RDC parity and Stage 4 multi-agent certification CI gates
 
 The full root runtime/import suite is CI-gated alongside independent MCP transport, relay WebSocket, native Windows, MSIX packaging/sign-install, red-team, performance and cross-platform matrix checks. Exact test counts are intentionally not frozen in documentation because the suite grows with each hardened boundary.
 
 ## Remaining external gates
 
-Production deployment, npm publication, the public 9-tool runtime path, and the separate 24-tool Developer endpoint are complete. Remaining work is OpenAI-side only:
+The existing production deployment, npm publication, public 9-tool path and deployed 24-tool Developer endpoint are complete. The certified 30-tool/Stage-4 successor still requires merge/deployment/promotion before it becomes the live production runtime. OpenAI directory work remains external:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
@@ -130,6 +133,13 @@ The local agent is **loopback-only**: startup rejects wildcard, LAN, DNS-name, a
 
 The authenticated local boundary also exposes durable task execution: `POST /v1/tasks` submits controlled-file-change, trusted-project-command, semantic browser-navigation, semantic app-operation, Docker lifecycle, bounded PostgreSQL SELECT, or a `semantic-workflow` containing 1–20 of those typed goals, while `POST /v1/tasks/:id/run`, `/pause`, `/resume`, and `/cancel` control them. Workflow children never become raw shell/model actions: each child is revalidated by the existing semantic planner, canonical risk resolver, local policy, approval boundary and postcondition verifier. `GET /v1/tasks/:id` returns the persisted Task Capsule, including action attempts, normalized machine observations, and evidence. The private MCP surface exposes the same durable boundary through `task.submit` and `task.control`, including relay-persisted task-to-device affinity; neither private MCP tool accepts recovery credentials or an approval action ID. Approval of a blocked action remains a separate local recovery-authority operation bound to the exact deterministic blocked action ID.
 
+## Stage-4 multi-agent execution
+
+The source successor adds an authenticated durable team coordinator under `/v1/teams`. It coordinates multiple external workers rather than embedding a specific LLM: workers register a role/capability set, claim dependency-ready work under a lease, operate only on declared resources, share revisioned CAS blackboard state, heartbeat while active and complete/fail/reconcile work with evidence.
+
+Mutating work owns resource locks and base revisions. If ownership is lost or a mutating lease expires, the work becomes `NEEDS_RECONCILIATION` instead of being blindly replayed. Mission pause/cancel and worker revocation preempt active provider execution. Final mission completion requires a verifier work item that transitively covers every non-verifier work item and explicitly passes verification.
+
+The existing provenance, canonical risk resolver, local policy, approvals, emergency stop, provider routing and postcondition verification remain authoritative underneath every team action. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/MILESTONES.md`](docs/MILESTONES.md).
 ## MCP development adapter
 
 From `apps/mcp-server`:
@@ -140,9 +150,9 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. Relay mode preserves the same 24-tool private MCP surface while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. On the certified successor branch, relay mode preserves the same 30-tool private MCP surface while routing execution through the relay control authority to a paired device. The currently deployed Developer endpoint remains the older 24-tool production snapshot until successor deployment. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-For private owner/developer automation, the same 24-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
+For private owner/developer automation, the successor's 30-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge** after deployment. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
 The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. Real paired-Windows device inspection/read/Git/create paths have been proven, and the separate Developer endpoint reports exactly 24 tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
