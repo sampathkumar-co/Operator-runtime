@@ -214,7 +214,7 @@ test('file.manage mkdir and bounded remove preserve destructive safeguards', asy
   const provider = new FilesystemProvider({ allowedRoots: [root] });
   const dir = path.join(root, 'new-dir');
   const made = await provider.execute({ ...action('file.manage', { operation: 'mkdir', path: dir }), risk: 'write' });
-  assert.equal(made.ok, true);
+  assert.equal(made.ok, true, made.error?.message);
 
   const file = path.join(dir, 'item.txt');
   await fs.writeFile(file, 'v1');
@@ -224,7 +224,7 @@ test('file.manage mkdir and bounded remove preserve destructive safeguards', asy
 
   const digest = crypto.createHash('sha256').update('v1').digest('hex');
   const removed = await provider.execute({ ...action('file.manage', { operation: 'remove', path: file, expectedSha256: digest }), risk: 'destructive' });
-  assert.equal(removed.ok, true);
+  assert.equal(removed.ok, true, removed.error?.message);
   const removedDir = await provider.execute({ ...action('file.manage', { operation: 'remove', path: dir }), risk: 'destructive' });
-  assert.equal(removedDir.ok, true);
+  assert.equal(removedDir.ok, true, removedDir.error?.message);
 });
