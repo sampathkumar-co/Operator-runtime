@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
-import { addTaskNode, createTask, finalizeTask, setNodeState } from './task.ts';
+import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
@@ -258,19 +258,24 @@ export class TaskOrchestrator {
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
       const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
+      const executionNodeKey = stableTaskExecutionNodeKey(decision.key, attempt, inputHash);
       const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
-      let node = task.nodes.find((candidate) => candidate.key === decision.key);
+      let node = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId);
       if (!node) {
         const legacyNode = task.nodes.find((candidate) => candidate.key === undefined && candidate.title === decision.title);
         if (legacyNode) {
-          legacyNode.key = decision.key;
+          legacyNode.key = executionNodeKey;
+          legacyNode.stepKey = decision.key;
+          legacyNode.actionId = actionId;
           if (legacyNode.dependsOn.length === 0 && priorNode && priorNode.id !== legacyNode.id) legacyNode.dependsOn = [priorNode.id];
           node = legacyNode;
-          task.evidence.push(evidence('task_graph_migration', 'info', 'Migrated a legacy title-only task node to stable planner identity.', { stepKey: decision.key }));
+          task.evidence.push(evidence('task_graph_migration', 'info', 'Migrated a legacy title-only task node to deterministic execution identity.', { stepKey: decision.key, actionId }));
         }
       }
       node ??= addTaskNode(task, decision.title, {
-        key: decision.key,
+        key: executionNodeKey,
+        stepKey: decision.key,
+        actionId,
         dependsOn: priorNode ? [priorNode.id] : []
       });
       setNodeState(task, node.id, 'RUNNING');
@@ -327,7 +332,7 @@ export class TaskOrchestrator {
       const latestExecution = task.execution!;
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
       if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
-      const latestNode = task.nodes.find((candidate) => candidate.key === decision.key)
+      const latestNode = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId)
         ?? task.nodes.find((candidate) => candidate.title === decision.title);
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
