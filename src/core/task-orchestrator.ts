@@ -774,7 +774,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
     }
     if (goal.kind === 'app-operation') {
       const selector = phase === 'verify' ? (goal.verifySelector ?? goal.selector) : goal.selector;
-      const inspectInput = { selector, maxNodes: 1, maxDepth: 0, waitMs: goal.waitMs ?? 0 };
+      const inspectInput = { selector, maxNodes: 1, maxDepth: 1, waitMs: goal.waitMs ?? 0 };
       if (phase === 'start') return { type: 'step', key: 'inspect-app-target', title: 'Inspect unique semantic app target', capability: 'app.inspect', input: inspectInput };
       if (phase === 'operate') return {
         type: 'step', key: 'operate-app-target', title: 'Operate verified semantic app target', capability: 'app.operate',
@@ -786,7 +786,48 @@ export class SemanticTaskPlanner implements TaskPlanner {
         }
       };
       if (phase === 'verify') return { type: 'step', key: 'verify-app-target', title: 'Re-inspect app postcondition', capability: 'app.inspect', input: inspectInput };
-      return { type: 'complete', message: 'Application operation satisfied semantic targeting and deterministic postcondition verification.' };
+      if (phase === 'visual-capture') {
+        const fallback = requireAppPhysicalFallback(goal);
+        return {
+          type: 'step', key: 'capture-app-fallback', title: 'Capture bounded visual fallback state', capability: 'visual.capture',
+          input: {
+            source: fallback.source,
+            ...(fallback.selector ? { selector: fallback.selector } : {}),
+            ...(fallback.region ? { region: fallback.region } : {}),
+            maxWidth: fallback.maxWidth ?? 960,
+            maxHeight: fallback.maxHeight ?? 540,
+            waitMs: goal.waitMs ?? 0
+          }
+        };
+      }
+      if (phase === 'physical-operate') {
+        const fallback = requireAppPhysicalFallback(goal);
+        const captureId = boundedText(state.captureId, 128, 'visual fallback captureId');
+        const expectedSha256 = boundedText(state.captureSha256, 64, 'visual fallback SHA-256');
+        return {
+          type: 'step', key: 'operate-app-physical-fallback', title: 'Operate capture-bound physical fallback', capability: 'input.operate',
+          input: {
+            operation: fallback.operation,
+            captureId,
+            expectedSha256,
+            ...(fallback.x !== undefined ? { x: fallback.x } : {}),
+            ...(fallback.y !== undefined ? { y: fallback.y } : {}),
+            ...(fallback.toX !== undefined ? { toX: fallback.toX } : {}),
+            ...(fallback.toY !== undefined ? { toY: fallback.toY } : {}),
+            ...(fallback.deltaX !== undefined ? { deltaX: fallback.deltaX } : {}),
+            ...(fallback.deltaY !== undefined ? { deltaY: fallback.deltaY } : {}),
+            ...(fallback.text !== undefined ? { text: fallback.text } : {}),
+            ...(fallback.key !== undefined ? { key: fallback.key } : {}),
+            ...(fallback.keys !== undefined ? { keys: fallback.keys } : {})
+          }
+        };
+      }
+      return {
+        type: 'complete',
+        message: phase === 'physical-complete'
+          ? 'Application operation satisfied semantic-first visual fallback with capture-bound physical input and AFTER verification.'
+          : 'Application operation satisfied semantic targeting and deterministic postcondition verification.'
+      };
     }
     if (phase === 'start') return { type: 'step', key: 'inspect-browser', title: 'Inspect semantic browser state', capability: 'browser.inspect', input: {} };
     if (phase === 'navigate') return { type: 'step', key: 'navigate-browser', title: 'Navigate the selected browser target', capability: 'browser.navigate', input: { targetId: state.targetId, url: goal.url }, target: goal.url };
