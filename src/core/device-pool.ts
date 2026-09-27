@@ -10,7 +10,7 @@ const MAX_ADVERTISEMENTS = 1000;
 const MAX_CAPABILITIES = 256;
 const MAX_TAGS = 64;
 const MIN_LEASE_MS = 10_000;
-const MAX_LEASE_MS = 30 * 60_000;
+const MAX_LEASE_MS = 24 * 60 * 60_000;
 const MAX_LIVENESS_MS = 5 * 60_000;
 const STORE_OPTIONS = {
   maxBytes: 4 * 1024 * 1024,
