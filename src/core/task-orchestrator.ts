@@ -1014,6 +1014,15 @@ export class SemanticTaskPlanner implements TaskPlanner {
         return true;
       }
     }
+    if (step.key === 'operate-app-physical-fallback' && ['INPUT_CAPTURE_STALE', 'INPUT_CAPTURE_REVALIDATION_FAILED'].includes(result.error?.code ?? '')) {
+      task.execution!.plannerState.phase = 'visual-capture';
+      delete task.execution!.plannerState.captureId;
+      delete task.execution!.plannerState.captureSha256;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'Visual state changed before physical dispatch; discarded the stale lease and scheduled a fresh capture with a new action identity.', {
+        errorCode: result.error?.code
+      }));
+      return true;
+    }
     return false;
   }
 }
