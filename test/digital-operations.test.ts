@@ -371,3 +371,61 @@ test('stage10 organization procedure capture hashes every target Stage4 verifier
   assert.ok(captured);
   assert.equal(captured!.verifierEvidenceDigest, expectedDigest);
 });
+
+
+test('stage10 final outcome replay after a crash does not double-learn or double-count procedure reuse', async (t) => {
+  const { state, ops, world, procedures, teams, optimizer } = await setup(t);
+  const scope = 'project:retry-learning';
+  const procedure = await procedures.recordVerified({
+    key: 'retry-learning',
+    title: 'Retry learning',
+    objectiveKind: 'maintenance',
+    scopeKey: scope,
+    steps: [{ capability: 'file.read', risk: 'read', summary: 'Inspect.' }],
+    assumptions: [],
+    verificationDigest: 'a'.repeat(64),
+    verifierEvidenceDigest: 'b'.repeat(64)
+  });
+  await world.observe({
+    entity: { key: 'service:retry-learning', type: 'service', scopeKey: scope, label: 'Retry service' },
+    source: 'trusted-check', domain: 'application', evidenceDigest: 'c'.repeat(64),
+    facts: { state: 'healthy' }, confidence: 0.99
+  });
+  const operation = await ops.submit({
+    objective: 'Verify retry-safe learning',
+    scopeKey: scope,
+    successConditions: ['verified'],
+    postconditions: [{
+      entityKey: 'service:retry-learning',
+      factKey: 'state',
+      expectedValueDigest: worldValueDigest('healthy')
+    }],
+    procedure: { objectiveKind: 'maintenance', assumptions: [], requiredCapabilities: ['file.read'] },
+    execution: { kind: 'team', workItems: work() },
+    run: true
+  });
+  assert.equal(operation.selectedProcedureId, procedure.id);
+  await finishTeam(teams, operation.teamMissionId!);
+  const first = await ops.refresh(operation.id);
+  assert.equal(first.state, 'VERIFIED');
+  assert.equal(first.outcomeRecorded, true);
+
+  const procedureAfterFirst = (await procedures.list()).find((item) => item.id === procedure.id)!;
+  const optimizerAfterFirst = (await optimizer.inspect()).find((item) => item.strategy === 'procedure:' + procedure.id)!;
+  assert.equal(procedureAfterFirst.verifiedRuns, 2);
+  assert.equal(optimizerAfterFirst.verified, 1);
+
+  const operationFile = path.join(state, 'digital-operations.json');
+  const persisted = JSON.parse(await fs.readFile(operationFile, 'utf8'));
+  persisted.operations.find((item: any) => item.id === operation.id).outcomeRecorded = false;
+  await fs.writeFile(operationFile, JSON.stringify(persisted, null, 2));
+
+  const replay = await ops.refresh(operation.id);
+  assert.equal(replay.state, 'VERIFIED');
+  assert.equal(replay.outcomeRecorded, true);
+  const procedureAfterReplay = (await procedures.list()).find((item) => item.id === procedure.id)!;
+  const optimizerAfterReplay = (await optimizer.inspect()).find((item) => item.strategy === 'procedure:' + procedure.id)!;
+  assert.equal(procedureAfterReplay.verifiedRuns, 2);
+  assert.equal(optimizerAfterReplay.verified, 1);
+  assert.equal(optimizerAfterReplay.samples, 1);
+});
