@@ -13,6 +13,8 @@ export interface OutcomePlanInput {
   successConditions: string[];
   maxRisk?: ActionRisk;
   availableCapabilities: string[];
+  requestedCapabilities?: string[];
+  resources?: string[];
   budget?: Partial<TeamBudget>;
 }
 
@@ -32,13 +34,23 @@ export class OutcomePlanner {
     const scopeKey = boundedContext(input.scopeKey, 'scopeKey');
     const successConditions = uniqueStrings(input.successConditions, MAX_SUCCESS_CONDITIONS, 4096, 'successConditions');
     if (successConditions.length < 1) throw new OperatorError('OUTCOME_PLAN_INVALID', 'At least one success condition is required.');
-    const maxRisk = validRisk(input.maxRisk ?? 'write');
+    const maxRisk = validRisk(input.maxRisk ?? 'read');
     const maxRiskIndex = RISK_ORDER.indexOf(maxRisk);
     const permissionRules = uniqueStrings(input.availableCapabilities, 500, 256, 'availableCapabilities');
+    const requestedCapabilities = input.requestedCapabilities === undefined
+      ? []
+      : uniqueStrings(input.requestedCapabilities, 500, 256, 'requestedCapabilities');
+    const resources = input.resources === undefined ? [] : uniqueStrings(input.resources, 5000, 1024, 'resources');
+    if (maxRiskIndex > 0 && (requestedCapabilities.length === 0 || resources.length === 0)) {
+      throw new OperatorError('OUTCOME_PLAN_AUTHORITY_REQUIRED', 'Outcome planning above read-only risk requires caller-declared capability and resource authority.');
+    }
+    const effectiveRules = requestedCapabilities.length > 0
+      ? permissionRules.filter((capability) => requestedCapabilities.includes(capability))
+      : permissionRules;
 
     const staticCapabilities = Object.entries(CAPABILITY_RISK_RULES)
       .filter(([, risk]) => risk !== 'dynamic')
-      .filter(([capability]) => permissionRules.some((rule) => capabilityAllowed(capability, rule)))
+      .filter(([capability]) => effectiveRules.some((rule) => capabilityAllowed(capability, rule)))
       .map(([capability, risk]) => ({ capability, risk: risk as ActionRisk }))
       .filter(({ risk }) => RISK_ORDER.indexOf(risk) <= maxRiskIndex);
 
@@ -64,7 +76,8 @@ export class OutcomePlanner {
       role: 'planner',
       risk: 'read',
       priority: 100,
-      allowedCapabilities: readCapabilities
+      allowedCapabilities: readCapabilities,
+      resources
     }];
 
     const executionKeys: string[] = [];
@@ -80,7 +93,8 @@ export class OutcomePlanner {
         risk,
         priority: 80 - RISK_ORDER.indexOf(risk),
         dependsOn: ['plan', ...executionKeys.slice(0, -1)],
-        allowedCapabilities: [...readCapabilities, ...capabilities].sort()
+        allowedCapabilities: [...readCapabilities, ...capabilities].sort(),
+        resources
       });
     }
 
@@ -91,7 +105,8 @@ export class OutcomePlanner {
       risk: 'read',
       priority: 20,
       dependsOn: executionKeys.length > 0 ? [...executionKeys] : ['plan'],
-      allowedCapabilities: readCapabilities
+      allowedCapabilities: readCapabilities,
+      resources
     });
     workItems.push({
       key: 'verify',
@@ -100,7 +115,8 @@ export class OutcomePlanner {
       risk: 'read',
       priority: 10,
       dependsOn: ['test'],
-      allowedCapabilities: readCapabilities
+      allowedCapabilities: readCapabilities,
+      resources
     });
 
     const canonical = {
@@ -110,6 +126,8 @@ export class OutcomePlanner {
       scopeKey,
       successConditions,
       maxRisk,
+      requestedCapabilities,
+      resources,
       workItems,
       budget: input.budget ?? null,
       excludedDynamicCapabilities
