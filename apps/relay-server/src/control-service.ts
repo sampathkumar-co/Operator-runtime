@@ -23,7 +23,7 @@ export interface RelayControlDiagnostic {
 }
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'releaseDeviceReservation'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
@@ -33,7 +33,7 @@ export class RelayControlService {
   #onDiagnostic?: (event: RelayControlDiagnostic) => void;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'releaseDeviceReservation'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -55,7 +55,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -109,6 +109,10 @@ export class RelayControlService {
         }
         if (request.url === '/v1/task') {
           await this.#handleTaskRequest(request, response);
+          return;
+        }
+        if (request.url === '/v1/operation') {
+          await this.#handleOperationRequest(request, response);
           return;
         }
         const body = await readJson(request) as {
@@ -284,6 +288,97 @@ export class RelayControlService {
     send(response, 504, { ok: false, error: { code: 'RELAY_TASK_RESULT_PENDING', message: 'The routed durable task operation has no result yet; retry with the same task UUID.' } });
   }
 
+  async #handleOperationRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const body = await readJson(request) as {
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown;
+      operation?: unknown; resourceRequirements?: unknown; waitMs?: unknown;
+    };
+    const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+    const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Digital operations require an explicitly entitled Mecord developer account.');
+    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+    const operation = validOperationRelayRequest(body.operation);
+    const bindingKey = operationBindingKey(operation.operationId);
+
+    let routedDeviceId: string;
+    let delivery: { id: string; seq: number };
+    let reservationId: string | undefined;
+
+    if (operation.operation === 'submit') {
+      let boundDeviceId: string | undefined;
+      try { boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey); }
+      catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'ROUTE_PROJECT_UNBOUND') throw error;
+      }
+      const requirements = validOperationResourceRequirements(body.resourceRequirements);
+      const requiredCapabilities = operationRequiredCapabilities(operation.request);
+      const reservation = await this.#hub.reserveDevice(accountId, {
+        workloadKey: bindingKey,
+        ...(projectKey ? { projectKey } : {}),
+        ...(requestedDeviceId ?? boundDeviceId ? { explicitDeviceId: requestedDeviceId ?? boundDeviceId } : {}),
+        requiredCapabilities,
+        requiredTags: requirements.requiredTags,
+        minMemoryMb: requirements.minMemoryMb,
+        requireGpu: requirements.requireGpu,
+        slots: requirements.slots,
+        leaseMs: Math.min(waitMs, 10 * 60_000)
+      });
+      reservationId = reservation.id;
+      routedDeviceId = reservation.deviceId;
+      const dispatched = await this.#hub.dispatch({
+        accountId,
+        explicitDeviceId: routedDeviceId,
+        requiredCapabilities,
+        kind: 'operation',
+        payload: { operation: operation.payload },
+        idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
+      });
+      delivery = dispatched.delivery;
+      await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+    } else {
+      const boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey);
+      if (requestedDeviceId && requestedDeviceId !== boundDeviceId) throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Explicit device conflicts with the durable operation-to-device binding.');
+      routedDeviceId = boundDeviceId;
+      const dispatched = await this.#hub.dispatch({
+        accountId,
+        explicitDeviceId: boundDeviceId,
+        requiredCapabilities: [],
+        kind: 'operation',
+        payload: { operation: operation.payload },
+        idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
+      });
+      delivery = dispatched.delivery;
+    }
+
+    try {
+      const deadline = Date.now() + waitMs;
+      while (Date.now() <= deadline) {
+        if (request.aborted || response.destroyed) return;
+        const stored = await this.#results.get(routedDeviceId, delivery.seq);
+        if (stored && stored.deliveryId === delivery.id) {
+          await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
+          const result = stored.result as unknown;
+          if (!isOperationTransportResult(result)) {
+            send(response, 502, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_INVALID', message: 'Device returned a malformed digital operation result.' } });
+            return;
+          }
+          send(response, 200, result);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      send(response, 504, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_PENDING', message: 'The routed digital operation has no durable result yet; retry with the same operation UUID.' } });
+    } finally {
+      if (reservationId) {
+        try { await this.#hub.releaseDeviceReservation(accountId, reservationId); } catch {}
+      }
+    }
+  }
+
   async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
     if (!authority || authority.accountId !== accountId || authority.deviceId !== deviceId) {
       throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result is not bound to the current account/device authority.');
@@ -396,6 +491,98 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
     }
     default: throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal kind is unsupported.');
   }
+}
+
+type ValidatedOperationRelayRequest = {
+  operation: 'submit' | 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel' | 'promote';
+  operationId: string;
+  payload: Record<string, unknown>;
+  request?: Record<string, unknown>;
+};
+
+function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation request is required.');
+  const raw = input as Record<string, unknown>;
+  const operation = String(raw.operation ?? '');
+  if (operation === 'submit') {
+    if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation submit request is required.');
+    const request = structuredClone(raw.request as Record<string, unknown>);
+    const operationId = validUuid(String(request.requestId ?? ''), 'operation requestId');
+    request.requestId = operationId;
+    if (request.device !== undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Operation request cannot provide device advertisements.');
+    const encoded = canonicalJson(request);
+    if (Buffer.byteLength(encoded, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation request exceeds bounded size.');
+    return { operation: 'submit', operationId, request, payload: { operation: 'submit', request } };
+  }
+  if (!['inspect', 'start', 'refresh', 'pause', 'cancel', 'promote'].includes(operation)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation control action is invalid.');
+  const operationId = validUuid(String(raw.operationId ?? ''), 'operationId');
+  if (operation === 'promote') {
+    const verificationDigest = String(raw.verificationDigest ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(verificationDigest)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation promotion requires SHA-256 verificationDigest.');
+    return { operation: 'promote', operationId, payload: { operation, operationId, verificationDigest } };
+  }
+  return { operation: operation as ValidatedOperationRelayRequest['operation'], operationId, payload: { operation, operationId } };
+}
+
+function operationRequiredCapabilities(request: Record<string, unknown>): string[] {
+  const execution = request.execution;
+  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is required.');
+  const raw = execution as Record<string, unknown>;
+  const capabilities = new Set<string>();
+  const collect = (workItems: unknown) => {
+    if (!Array.isArray(workItems)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation workItems are invalid.');
+    for (const item of workItems) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation work item is invalid.');
+      const allowed = (item as Record<string, unknown>).allowedCapabilities;
+      if (allowed === undefined) continue;
+      if (!Array.isArray(allowed) || allowed.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation allowedCapabilities are invalid.');
+      for (const value of allowed) capabilities.add(validName(String(value), 'allowed capability'));
+    }
+  };
+  if (raw.kind === 'team') collect(raw.workItems);
+  else if (raw.kind === 'organization') {
+    if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > 5000) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'organization operation targets are invalid.');
+    for (const target of raw.targets) {
+      if (!target || typeof target !== 'object' || Array.isArray(target)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'organization target is invalid.');
+      collect((target as Record<string, unknown>).workItems);
+    }
+  } else throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution kind is invalid.');
+  return [...capabilities].sort();
+}
+
+function validOperationResourceRequirements(input: unknown): { requiredTags: string[]; minMemoryMb: number; requireGpu: boolean; slots: number } {
+  if (input === undefined) return { requiredTags: [], minMemoryMb: 0, requireGpu: false, slots: 1 };
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'resourceRequirements must be an object.');
+  const raw = input as Record<string, unknown>;
+  const requiredTags = raw.requiredTags === undefined ? [] : Array.isArray(raw.requiredTags)
+    ? raw.requiredTags.map((value) => {
+        const tag = String(value ?? '');
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tag)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'resource tag is invalid.');
+        return tag;
+      })
+    : (() => { throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'requiredTags are invalid.'); })();
+  if (requiredTags.length > 64 || new Set(requiredTags).size !== requiredTags.length) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'requiredTags are invalid.');
+  const minMemoryMb = Number(raw.minMemoryMb ?? 0);
+  const slots = Number(raw.slots ?? 1);
+  if (!Number.isSafeInteger(minMemoryMb) || minMemoryMb < 0 || minMemoryMb > 1024 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'minMemoryMb is invalid.');
+  if (!Number.isSafeInteger(slots) || slots < 1 || slots > 64) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'slots is invalid.');
+  return { requiredTags: requiredTags.sort(), minMemoryMb, requireGpu: raw.requireGpu === true, slots };
+}
+
+function operationBindingKey(operationId: string): string { return `operation:${validUuid(operationId, 'operationId')}`; }
+
+function operationIdempotencyKey(accountId: string, payload: Record<string, unknown>): string {
+  return crypto.createHash('sha256').update('operator-relay-operation-receipt-v1:').update(accountId).update(':').update(canonicalJson(payload)).digest('hex');
+}
+
+function isOperationTransportResult(input: unknown): input is { ok: boolean; operation?: Record<string, unknown>; error?: { code?: string; message?: string } } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.ok !== 'boolean') return false;
+  if (raw.ok) return Boolean(raw.operation && typeof raw.operation === 'object' && !Array.isArray(raw.operation));
+  if (!raw.error || typeof raw.error !== 'object' || Array.isArray(raw.error)) return false;
+  const error = raw.error as Record<string, unknown>;
+  return typeof error.code === 'string' && typeof error.message === 'string';
 }
 
 function taskBindingKey(taskId: string): string { return `task:${validUuid(taskId, 'taskId')}`; }
