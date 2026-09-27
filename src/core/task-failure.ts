@@ -1,4 +1,6 @@
-import type { ActionError } from './types.ts';
+import type { ActionResult } from './types.ts';
+
+type ActionError = NonNullable<ActionResult['error']>;
 
 export type TaskFailureClass =
   | 'approval'
