@@ -2,172 +2,140 @@
 
 Status date: **2026-09-27**
 
-This document answers the development question "what is actually finished now?" It is about repository/source progress. For what is currently deployed in production, use `docs/CURRENT_RELEASE_STATE.md`.
+This document answers "what is actually finished in source?" For deployed production facts, use `docs/CURRENT_RELEASE_STATE.md`.
 
 ## Executive status
 
-| Area | Repository status | Production status |
+| Area | Repository/source | Production |
 | --- | --- | --- |
-| Core execution/policy/evidence runtime | Complete and CI-certified | Deployed |
-| Browser semantic kernel | Complete and CI-certified | Available in existing private runtime path |
-| Windows UI Automation kernel | Complete and CI-certified | Available in existing private runtime path |
-| Git / project / Docker / PostgreSQL / VS Code adapters | Complete and CI-certified | Existing production/private runtime snapshot |
-| Relay + pairing + multi-device routing | Complete and CI-certified | Deployed architecture |
-| Public ChatGPT-facing surface | Complete at 9 review-bounded tools | Deployed |
-| Existing Developer surface | Historical production snapshot | 24 tools deployed |
-| Stage 3 bounded autonomous execution | Complete and CI-certified | Successor deployment still required for latest source |
-| Windows RDC parity layer | Complete and CI-certified | **Not deployed yet** |
-| Stage 4 shared-state multi-agent runtime | Complete and CI-certified | **Not deployed yet** |
-| Successor private/Developer surface | Complete and CI-certified at 30 tools | **Not deployed yet** |
-| Linux/macOS runtime regression | Green | Runtime supported; advanced GUI parity not claimed |
-| Linux/macOS advanced GUI automation | Intentionally out of current scope | Not claimed |
-| OpenAI directory verification/submission | External blocker | Not completed |
+| Core execution / policy / evidence | ✅ Complete + CI-certified | Deployed |
+| Browser semantic kernel | ✅ Complete + CI-certified | Existing private runtime |
+| Windows semantic/UIA kernel | ✅ Complete + CI-certified | Existing private runtime |
+| Git / project / Docker / PostgreSQL / VS Code adapters | ✅ Complete + CI-certified | Existing private runtime |
+| Relay / pairing / multi-device identity + routing | ✅ Complete + CI-certified | Deployed architecture |
+| Public MCP surface | ✅ 9 tools | ✅ 9 tools deployed |
+| Deployed Developer MCP | Historical production snapshot | ✅ 24 tools |
+| Windows RDC parity | ✅ Complete + CI-certified | Not yet promoted from successor |
+| Stage 3 bounded autonomous loop | ✅ Complete + CI-certified | Successor promotion required for latest source |
+| Stage 4 shared-state multi-agent runtime | ✅ Complete + CI-certified | Not yet promoted from successor |
+| Stage 5 verified procedural memory | ✅ Complete + CI-certified | Not deployed |
+| Stage 6 cross-application world model | ✅ Complete + CI-certified | Not deployed |
+| Stage 7 trusted cross-device resource pool | ✅ Complete + CI-certified | Not deployed |
+| Stage 8 organization-scale execution | ✅ Complete + CI-certified | Not deployed |
+| Stage 9 bounded self-optimization | ✅ Complete + CI-certified | Not deployed |
+| Stage 10 autonomous digital operations layer | ✅ Complete + CI-certified | Not deployed |
+| Successor private/Developer surface | ✅ **32 grouped tools** | Not deployed |
+| Linux/macOS runtime regression | ✅ Green | Runtime supported; advanced GUI parity not claimed |
+| OpenAI directory verification/submission | External | Not completed |
 
 ## Certified successor
 
-Branch:
+Branch: `feature/stage5-10-agent-os`
 
-`feature/windows-parity-stage4`
+Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
-Runtime-certified code commit:
+Later commits that only update Markdown do not change the certified runtime implementation.
 
-`288d5a1c5ad5742f0f041e42740010eeda50dd92`
+The Stage-5–10 successor is gated together with the predecessor runtime: Stage 3 autonomous certification, Windows RDC parity, Stage 4 multi-agent, Stage 5–10 certification, core runtime, MCP/Inspector, relay WebSocket E2E, security red-team, performance regression, Windows UIA/path authority/native packaging, and the Windows/macOS/Linux platform matrix.
 
-Documentation-only commits after that point do not change the certified runtime code.
+## Stage progress
 
-The code commit passed the following top-level workflows on the same immutable head:
+### Stage 1 — Secure computer/execution foundation
+**Complete.** Capability routing, local policy, provenance, evidence, rooted filesystem authority, shell-free process execution, Git/project semantics, local-agent auth and audit.
 
-- CI #1375
-- Platform Matrix #1145
-- Windows Signing Smoke #1146
-- NPM Remote Runtime CI #759
+### Stage 2 — Semantic computer control
+**Complete for the certified target.** Persistent browser CDP plus Windows UIA/Win32 semantic control. Windows is the advanced GUI target; Linux/macOS GUI parity is intentionally not claimed.
 
-The CI run included green gates for:
+### Stage 3 — Bounded autonomous task loop
+**Complete + certified.** Durable Task Capsules, typed goals/workflows, dependency graph execution, retry/repair/reobserve, pause/resume/cancel, crash recovery, deadlines, no blind mutating retry, independent verification and evidence-backed completion.
 
-- Windows RDC parity certification
-- Stage 4 multi-agent certification
-- Stage 3 autonomous certification
-- core runtime
-- MCP v2 + Inspector E2E
-- security red-team
-- performance regression
-- relay WebSocket E2E
-- Windows UIA
-- Windows path authority
-- Windows DPAPI helper
-- public edge container smoke
-- Windows unsigned MSIX packaging
+### Stage 4 — Shared-state multi-agent execution
+**Complete + certified.** Durable missions, worker roles/leases, dependency scheduling, budgets, resource locks/revisions, CAS blackboard, uncertain-mutation reconciliation, cancellation, verifier coverage and verifier-gated completion.
 
-The platform matrix passed Windows, macOS and Linux runtime regression on the same code head.
+### Stage 5 — Verified procedural memory
+**Complete + certified.**
+- only independently verified outcomes can be promoted;
+- procedure assumptions are stored as bounded fingerprints rather than raw secret-bearing values;
+- expiry, invalidation and automatic suspension are supported;
+- reuse requires matching scope/assumptions/capability needs;
+- verification and reuse outcome receipts are retry-idempotent.
 
-## Progress by major stage
+### Stage 6 — Cross-application intelligence
+**Complete + certified.**
+- one durable entity/relation graph spans browser, application, filesystem, Git, database, process, device, project and organization observations;
+- source/evidence/freshness/confidence are retained per claim;
+- conflicting observations remain explicit rather than being silently overwritten;
+- only passing Stage-4 verifiers can publish normal agent world observations;
+- world publication is commitment-bound for exact replay;
+- secret-bearing keys, nested credential structures and obvious credential strings are rejected.
 
-### Stage 1 — execution foundation
+### Stage 7 — Trusted cross-device orchestration
+**Complete + certified.**
+- paired devices advertise a bounded resource profile inside the signed relay hello;
+- scheduling uses active account-owned relay sessions rather than caller-forged capacity;
+- capability/tag/GPU/memory/capacity filtering is bounded;
+- project/default device authority remains fail-closed;
+- long-lived operation reservations prevent overbooking;
+- operation UUIDs keep durable device affinity;
+- reservation lifecycle survives retries/reconnects and releases on terminal completion;
+- signed per-host concurrent-work capacity is honored within configured bounds.
 
-**Complete.**
+### Stage 8 — Organization-scale execution
+**Complete + certified.**
+- organization programs compile many target scopes into Stage-4 missions;
+- canary-first waves and bounded parallel blast radius;
+- explicit verified promotion before expanding rollout;
+- failed/cancelled canaries halt expansion;
+- scope prefixes constrain target authority;
+- partial wave/start failures compensate already-created/resumed missions so hidden work is not orphaned.
 
-Includes capability routing, local policy, provenance, evidence, Task Capsules, rooted filesystem access, shell-free process execution, Git inspection, semantic project inspection, local-agent authentication and audit.
+### Stage 9 — Bounded self-optimizing execution
+**Complete + certified.**
+- learns aggregate verified/failed reliability, retry rate, latency and cost;
+- learned strategy adjustment is intentionally small and bounded;
+- concurrency recommendations stay inside caller policy floor/ceiling;
+- optimizer state carries no permissions/approvals/recovery authority;
+- learning receipts are retry-idempotent;
+- learning cannot grant capability, lower canonical risk, widen scope, bypass approval or remove verification.
 
-### Stage 2 — semantic computer control
-
-**Complete for the certified target.**
-
-Includes persistent browser CDP semantics and the Windows semantic kernel using UI Automation/Win32 fallback. Windows remains the advanced desktop-control target; Linux/macOS GUI parity is not part of the current completion claim.
-
-### Stage 3 — bounded autonomous execution
-
-**Complete in the repository and CI-certified.**
-
-Includes:
-
-- durable semantic workflows;
-- dependency-aware child work;
-- retries and loop detection;
-- pause/resume/cancel;
-- crash-safe persisted execution state;
-- preemptive cancellation into providers;
-- provider reliability/latency learning that cannot change policy/risk;
-- evidence-backed postconditions.
-
-### Windows RDC-parity sprint
-
-**Complete and CI-certified.**
-
-Added the raw-control gaps that previously made Desktop Commander/RDC more capable for generic Windows machine work:
-
-- `file.info`;
-- `file.search`;
-- `file.manage` for mkdir/copy/move/remove;
-- `terminal.session` for interactive processes;
-- `process.inspect`;
-- `process.manage` for fingerprinted current-user process termination.
-
-The implementation keeps Mecord's stricter authority model: no unrestricted shell, no cross-user process kill, no critical Windows process termination, no weakening of the reparse-point/path-authority helper, and destructive operations remain approval-gated.
-
-### Stage 4 — shared-state multi-agent execution
-
-**Complete and CI-certified.**
-
-Implemented:
-
-- durable team missions;
-- supervisor/planner/coder/tester/browser/UI/verifier/general worker roles;
-- worker registration/heartbeat/revocation;
-- dependency and priority scheduling;
-- concurrency/attempt/wall-clock/lease budgets;
-- work-item leases;
-- explicit resources;
-- resource locks and revisions;
-- base-revision conflict detection;
-- per-worker/per-work capability authorization;
-- canonical risk checks before each worker action;
-- inferred action-resource binding;
-- CAS shared blackboard;
-- uncertainty tracking for interrupted mutation;
-- `NEEDS_RECONCILIATION`;
-- supervisor/verifier reconciliation;
-- preemptive cancellation;
-- verifier coverage requirement;
-- verifier-gated final mission state;
-- authenticated `/v1/teams` API;
-- Control Center team visibility;
-- real-runtime Stage-4 E2E tests.
-
-Stage 4 is **not** an embedded LLM. It is the coordination and authority substrate that external agents use.
+### Stage 10 — Autonomous digital operations layer
+**Complete + certified.**
+- durable outcome contract with objective, scope, success conditions and world pre/postconditions;
+- client-stable UUID + canonical submission digest gives idempotent submit semantics;
+- explicit work graphs or bounded outcome auto-planning;
+- auto-planning always requires a caller-declared capability subset **and exact Stage-4 resource keys**;
+- the authority envelope can only restrict the machine's actual locally allowed capabilities;
+- default auto-plan risk is read and dynamic-risk capabilities are excluded;
+- verified procedure reuse/capture, Stage-4 team execution and Stage-8 organization rollouts compose under one governor;
+- final state cannot become `VERIFIED` from worker self-report; underlying verifier + world postconditions must pass;
+- organization procedure capture hashes actual target verifier results;
+- operation final learning is crash/retry-idempotent;
+- relay Stage-10 operations reserve a trusted paired device, keep durable operation-to-device affinity and preserve resource capacity across the operation lifecycle;
+- grouped private MCP `operations` and read-only `knowledge.inspect` expose the new layer without adding raw authority bypasses.
 
 ## Current source vs production
 
-Do not mix these states:
-
 ### Production now
-
-- source: `94becbf734817121fbea1a017b9e1b10c144d125`;
+- production source: `94becbf734817121fbea1a017b9e1b10c144d125`;
 - public tools: **9**;
 - Developer tools: **24**;
 - npm: `mecord-connect@1.0.1`.
 
-### Certified successor
+### Certified Stage-1–10 successor
+- runtime code: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;
+- public tools: **9** by design;
+- private/Developer source surface: **32 grouped tools**;
+- Windows RDC parity + Stages 3–10: complete and CI-certified.
 
-- runtime code: `288d5a1c5ad5742f0f041e42740010eeda50dd92`;
-- public tools: still **9** by design;
-- private/Developer source surface: **30**;
-- Windows RDC parity: complete;
-- Stage 4: complete.
+The successor does not become production merely because source/CI are complete.
 
-The successor does not become production simply because CI is green. It still needs the normal merge/deployment/release-state promotion.
+## Remaining release work
 
-## What is actually left
+1. merge PR #43;
+2. deploy the successor runtime/private edge;
+3. verify live health/source identity and exact tool counts;
+4. run fresh real paired-Windows Stage-10 workflows through the live ChatGPT/Developer path when that external path is available;
+5. promote `docs/release-state.json` only after deployment facts are verified;
+6. continue the external OpenAI verification/app-directory process separately.
 
-For the scope completed in this branch, there is no known repository implementation gap in Windows RDC parity or Stage 4 certification.
-
-The meaningful next work is:
-
-1. review and merge PR #42;
-2. deploy the successor runtime;
-3. promote `docs/release-state.json` only after deployment facts are verified;
-4. verify the live Developer endpoint imports the intended 30-tool private surface;
-5. run fresh live ChatGPT/Developer workflows against a real paired Windows device;
-6. continue the external OpenAI verification/app-directory process;
-7. optionally close remaining RDC convenience gaps such as content search, rich file previews and native PDF/Excel/DOCX workflows, without weakening Mecord's security/verification model.
-
-See `docs/RDC_VS_MECORD_CONNECT.md` for the current feature-by-feature comparison.
+There is no known Stage-1–10 repository implementation blocker on the certified successor.

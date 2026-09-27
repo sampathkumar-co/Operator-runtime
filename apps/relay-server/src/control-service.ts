@@ -11,6 +11,7 @@ import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authorit
 import type { RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
+import type { DeviceReservation } from '../../../src/core/device-pool.ts';
 
 const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
@@ -23,7 +24,7 @@ export interface RelayControlDiagnostic {
 }
 
 export class RelayControlService {
-  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice'>;
+  #hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>;
   #results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>;
   #accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>;
   #enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>;
@@ -33,7 +34,7 @@ export class RelayControlService {
   #onDiagnostic?: (event: RelayControlDiagnostic) => void;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'releaseDeviceReservation'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -55,7 +56,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/knowledge', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -109,6 +110,14 @@ export class RelayControlService {
         }
         if (request.url === '/v1/task') {
           await this.#handleTaskRequest(request, response);
+          return;
+        }
+        if (request.url === '/v1/operation') {
+          await this.#handleOperationRequest(request, response);
+          return;
+        }
+        if (request.url === '/v1/knowledge') {
+          await this.#handleKnowledgeRequest(request, response);
           return;
         }
         const body = await readJson(request) as {
@@ -284,6 +293,222 @@ export class RelayControlService {
     send(response, 504, { ok: false, error: { code: 'RELAY_TASK_RESULT_PENDING', message: 'The routed durable task operation has no result yet; retry with the same task UUID.' } });
   }
 
+  async #handleKnowledgeRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const body = await readJson(request) as {
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; query?: unknown; waitMs?: unknown;
+    };
+    const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+    const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Knowledge inspection requires an explicitly entitled Mecord developer account.');
+    const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const query = validKnowledgeRelayQuery(body.query);
+    const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+    const dispatched = await this.#hub.dispatch({
+      accountId,
+      explicitDeviceId: deviceId,
+      projectKey,
+      requiredCapabilities: [],
+      kind: 'knowledge',
+      payload: { query },
+      idempotencyKey: freshKnowledgeReceiptKey(accountId, query)
+    });
+    const deadline = Date.now() + waitMs;
+    while (Date.now() <= deadline) {
+      if (request.aborted || response.destroyed) return;
+      const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
+      if (stored && stored.deliveryId === dispatched.delivery.id) {
+        await this.#assertReplayAuthority(accountId, dispatched.route.deviceId, stored.replayAuthority);
+        const result = stored.result as unknown;
+        if (!isKnowledgeTransportResult(result)) {
+          send(response, 502, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_INVALID', message: 'Device returned a malformed knowledge result.' } });
+          return;
+        }
+        send(response, 200, result);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    send(response, 504, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_PENDING', message: 'The routed knowledge read has no durable result yet; retry is safe.' } });
+  }
+
+  async #handleOperationRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const body = await readJson(request) as {
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown;
+      operation?: unknown; resourceRequirements?: unknown; waitMs?: unknown;
+    };
+    const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+    const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Digital operations require an explicitly entitled Mecord developer account.');
+    const requestedDeviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+    const operation = validOperationRelayRequest(body.operation);
+    const bindingKey = operationBindingKey(operation.operationId);
+    const submitLeaseMs = operation.operation === 'submit' && operation.request
+      ? operationReservationLeaseMs(operation.request)
+      : undefined;
+
+    let routedDeviceId: string;
+    let delivery: { id: string; seq: number };
+    let reservation: DeviceReservation | undefined;
+    let reservationCreated = false;
+
+    const activeReservationFor = async (deviceId?: string): Promise<DeviceReservation | undefined> => {
+      const reservations = await this.#hub.listDeviceReservations(accountId, { activeOnly: true, ...(deviceId ? { deviceId } : {}), limit: 5000 });
+      return reservations.find((item) => item.workloadKey === bindingKey);
+    };
+    const latestReservationFor = async (deviceId: string): Promise<DeviceReservation | undefined> => {
+      const reservations = await this.#hub.listDeviceReservations(accountId, { deviceId, limit: 5000 });
+      return reservations.find((item) => item.workloadKey === bindingKey);
+    };
+    const renewReservation = async (current: DeviceReservation, renewMs: number): Promise<DeviceReservation> => {
+      try {
+        return await this.#hub.heartbeatDeviceReservation(accountId, current.id, current.sessionId, renewMs);
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_SESSION_CHANGED') throw error;
+        try { await this.#hub.releaseDeviceReservation(accountId, current.id); } catch {}
+        const replacement = await this.#hub.reserveDevice(accountId, {
+          workloadKey: bindingKey,
+          ...(current.projectKey ? { projectKey: current.projectKey } : {}),
+          explicitDeviceId: current.deviceId,
+          requiredCapabilities: current.requiredCapabilities,
+          requiredTags: current.requiredTags,
+          minMemoryMb: current.minMemoryMb,
+          requireGpu: current.requireGpu,
+          slots: current.slots,
+          leaseMs: renewMs
+        });
+        reservationCreated = true;
+        return replacement;
+      }
+    };
+
+    if (operation.operation === 'submit') {
+      let boundDeviceId: string | undefined;
+      try { boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey); }
+      catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'ROUTE_PROJECT_UNBOUND') throw error;
+      }
+      const requirements = validOperationResourceRequirements(body.resourceRequirements);
+      const requiredCapabilities = operationRequiredCapabilities(operation.request);
+      reservation = await activeReservationFor(boundDeviceId ?? requestedDeviceId);
+      if (reservation) {
+        if (requestedDeviceId && reservation.deviceId !== requestedDeviceId) {
+          throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Existing operation reservation conflicts with the requested device.');
+        }
+        if (!operationReservationMatches(reservation, requiredCapabilities, requirements)) {
+          throw new OperatorError('DEVICE_POOL_RESERVATION_CONFLICT', 'Existing operation reservation is bound to different resource requirements.');
+        }
+        reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation));
+      } else {
+        reservation = await this.#hub.reserveDevice(accountId, {
+          workloadKey: bindingKey,
+          ...(projectKey ? { projectKey } : {}),
+          ...(requestedDeviceId ?? boundDeviceId ? { explicitDeviceId: requestedDeviceId ?? boundDeviceId } : {}),
+          requiredCapabilities,
+          requiredTags: requirements.requiredTags,
+          minMemoryMb: requirements.minMemoryMb,
+          requireGpu: requirements.requireGpu,
+          slots: requirements.slots,
+          leaseMs: submitLeaseMs!
+        });
+        reservationCreated = true;
+      }
+      routedDeviceId = reservation.deviceId;
+      try {
+        await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+      } catch (error) {
+        if (reservationCreated) {
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+        }
+        throw error;
+      }
+      try {
+        const dispatched = await this.#hub.dispatch({
+          accountId,
+          explicitDeviceId: routedDeviceId,
+          requiredCapabilities,
+          kind: 'operation',
+          payload: { operation: operation.payload },
+          idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
+        });
+        delivery = dispatched.delivery;
+      } catch (error) {
+        if (reservationCreated && reservation) {
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+        }
+        throw error;
+      }
+    } else {
+      const boundDeviceId = await this.#hub.boundProjectDevice(accountId, bindingKey);
+      if (requestedDeviceId && requestedDeviceId !== boundDeviceId) throw new OperatorError('ROUTE_PROJECT_DEVICE_CONFLICT', 'Explicit device conflicts with the durable operation-to-device binding.');
+      routedDeviceId = boundDeviceId;
+      reservation = await activeReservationFor(boundDeviceId);
+      if (reservation) {
+        reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation));
+      } else {
+        const previous = await latestReservationFor(boundDeviceId);
+        if (previous && previous.state !== 'ACTIVE') {
+          reservation = await this.#hub.reserveDevice(accountId, {
+            workloadKey: bindingKey,
+            ...(previous.projectKey ? { projectKey: previous.projectKey } : {}),
+            explicitDeviceId: boundDeviceId,
+            requiredCapabilities: previous.requiredCapabilities,
+            requiredTags: previous.requiredTags,
+            minMemoryMb: previous.minMemoryMb,
+            requireGpu: previous.requireGpu,
+            slots: previous.slots,
+            leaseMs: reservationLeaseDuration(previous)
+          });
+          reservationCreated = true;
+        }
+      }
+      const dispatched = await this.#hub.dispatch({
+        accountId,
+        explicitDeviceId: boundDeviceId,
+        requiredCapabilities: [],
+        kind: 'operation',
+        payload: { operation: operation.payload },
+        idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
+      });
+      delivery = dispatched.delivery;
+    }
+
+    const deadline = Date.now() + waitMs;
+    while (Date.now() <= deadline) {
+      if (request.aborted || response.destroyed) return;
+      const stored = await this.#results.get(routedDeviceId, delivery.seq);
+      if (stored && stored.deliveryId === delivery.id) {
+        await this.#assertReplayAuthority(accountId, routedDeviceId, stored.replayAuthority);
+        const result = stored.result as unknown;
+        if (!isOperationTransportResult(result)) {
+          send(response, 502, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_INVALID', message: 'Device returned a malformed digital operation result.' } });
+          return;
+        }
+        const state = result.ok && result.operation && typeof result.operation.state === 'string' ? result.operation.state : undefined;
+        const terminal = state === 'VERIFIED' || state === 'FAILED' || state === 'CANCELLED';
+        if (reservation) {
+          if (terminal || (!result.ok && operation.operation === 'submit')) {
+            try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+          } else if (result.ok) {
+            try { reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation)); } catch {}
+          }
+        }
+        send(response, 200, result);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    // Timeout is an uncertain transport result: keep the reservation alive so
+    // an operation that may already be running is not silently overbooked.
+    send(response, 504, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_PENDING', message: 'The routed digital operation has no durable result yet; retry with the same operation UUID.' } });
+  }
+
   async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
     if (!authority || authority.accountId !== accountId || authority.deviceId !== deviceId) {
       throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Stored relay result is not bound to the current account/device authority.');
@@ -396,6 +621,185 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
     }
     default: throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal kind is unsupported.');
   }
+}
+
+function validKnowledgeRelayQuery(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query must be an object.');
+  const raw = structuredClone(input as Record<string, unknown>);
+  const kind = String(raw.kind ?? '');
+  if (!['procedures', 'procedure-query', 'world-entity', 'world-fact', 'world-trace', 'world-list', 'optimizer'].includes(kind)) {
+    throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query kind is invalid.');
+  }
+  const encoded = canonicalJson(raw);
+  if (Buffer.byteLength(encoded, 'utf8') > 128 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query exceeds bounded size.');
+  return raw;
+}
+
+function freshKnowledgeReceiptKey(accountId: string, query: Record<string, unknown>): string {
+  return crypto.createHash('sha256')
+    .update('operator-relay-knowledge-receipt-v1:')
+    .update(accountId).update(':').update(canonicalJson(query)).update(':').update(crypto.randomBytes(32))
+    .digest('hex');
+}
+
+function isKnowledgeTransportResult(input: unknown): input is { ok: boolean } {
+  return Boolean(input && typeof input === 'object' && !Array.isArray(input) && typeof (input as Record<string, unknown>).ok === 'boolean');
+}
+
+type ValidatedOperationRelayRequest = {
+  operation: 'submit' | 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel' | 'promote';
+  operationId: string;
+  payload: Record<string, unknown>;
+  request?: Record<string, unknown>;
+};
+
+function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation request is required.');
+  const raw = input as Record<string, unknown>;
+  const operation = String(raw.operation ?? '');
+  if (operation === 'submit') {
+    if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation submit request is required.');
+    const request = structuredClone(raw.request as Record<string, unknown>);
+    const operationId = validUuid(String(request.requestId ?? ''), 'operation requestId');
+    request.requestId = operationId;
+    if (request.device !== undefined) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Operation request cannot provide device advertisements.');
+    const encoded = canonicalJson(request);
+    if (Buffer.byteLength(encoded, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation request exceeds bounded size.');
+    return { operation: 'submit', operationId, request, payload: { operation: 'submit', request } };
+  }
+  if (!['inspect', 'start', 'refresh', 'pause', 'cancel', 'promote'].includes(operation)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation control action is invalid.');
+  const operationId = validUuid(String(raw.operationId ?? ''), 'operationId');
+  if (operation === 'promote') {
+    const verificationDigest = String(raw.verificationDigest ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(verificationDigest)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation promotion requires SHA-256 verificationDigest.');
+    return { operation: 'promote', operationId, payload: { operation, operationId, verificationDigest } };
+  }
+  return { operation: operation as ValidatedOperationRelayRequest['operation'], operationId, payload: { operation, operationId } };
+}
+
+function operationRequiredCapabilities(request: Record<string, unknown>): string[] {
+  const execution = request.execution;
+  if (execution === undefined) {
+    const requested = new Set<string>();
+    const authority = request.authority;
+    if (authority !== undefined) {
+      if (!authority || typeof authority !== 'object' || Array.isArray(authority)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority is invalid.');
+      const capabilities = (authority as Record<string, unknown>).capabilities;
+      if (!Array.isArray(capabilities) || capabilities.length < 1 || capabilities.length > 500) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation authority capabilities are invalid.');
+      for (const value of capabilities) requested.add(validName(String(value), 'operation authority capability'));
+    }
+    const procedure = request.procedure;
+    if (procedure !== undefined) {
+      if (!procedure || typeof procedure !== 'object' || Array.isArray(procedure)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation procedure is invalid.');
+      const required = (procedure as Record<string, unknown>).requiredCapabilities;
+      if (required !== undefined) {
+        if (!Array.isArray(required) || required.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'procedure requiredCapabilities are invalid.');
+        for (const value of required) requested.add(validName(String(value), 'procedure required capability'));
+      }
+    }
+    return [...requested].sort();
+  }
+  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is invalid.');
+  const raw = execution as Record<string, unknown>;
+  const capabilities = new Set<string>();
+  const collect = (workItems: unknown) => {
+    if (!Array.isArray(workItems)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation workItems are invalid.');
+    for (const item of workItems) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation work item is invalid.');
+      const allowed = (item as Record<string, unknown>).allowedCapabilities;
+      if (allowed === undefined) continue;
+      if (!Array.isArray(allowed) || allowed.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation allowedCapabilities are invalid.');
+      for (const value of allowed) capabilities.add(validName(String(value), 'allowed capability'));
+    }
+  };
+  if (raw.kind === 'team') collect(raw.workItems);
+  else if (raw.kind === 'organization') {
+    if (!Array.isArray(raw.targets) || raw.targets.length < 1 || raw.targets.length > 5000) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'organization operation targets are invalid.');
+    for (const target of raw.targets) {
+      if (!target || typeof target !== 'object' || Array.isArray(target)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'organization target is invalid.');
+      collect((target as Record<string, unknown>).workItems);
+    }
+  } else throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution kind is invalid.');
+  return [...capabilities].sort();
+}
+
+function validOperationResourceRequirements(input: unknown): { requiredTags: string[]; minMemoryMb: number; requireGpu: boolean; slots: number } {
+  if (input === undefined) return { requiredTags: [], minMemoryMb: 0, requireGpu: false, slots: 1 };
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'resourceRequirements must be an object.');
+  const raw = input as Record<string, unknown>;
+  const requiredTags = raw.requiredTags === undefined ? [] : Array.isArray(raw.requiredTags)
+    ? raw.requiredTags.map((value) => {
+        const tag = String(value ?? '');
+        if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tag)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'resource tag is invalid.');
+        return tag;
+      })
+    : (() => { throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'requiredTags are invalid.'); })();
+  if (requiredTags.length > 64 || new Set(requiredTags).size !== requiredTags.length) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'requiredTags are invalid.');
+  const minMemoryMb = Number(raw.minMemoryMb ?? 0);
+  const slots = Number(raw.slots ?? 1);
+  if (!Number.isSafeInteger(minMemoryMb) || minMemoryMb < 0 || minMemoryMb > 1024 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'minMemoryMb is invalid.');
+  if (!Number.isSafeInteger(slots) || slots < 1 || slots > 64) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'slots is invalid.');
+  return { requiredTags: requiredTags.sort(), minMemoryMb, requireGpu: raw.requireGpu === true, slots };
+}
+
+function operationReservationMatches(
+  reservation: DeviceReservation,
+  requiredCapabilities: string[],
+  requirements: { requiredTags: string[]; minMemoryMb: number; requireGpu: boolean; slots: number }
+): boolean {
+  return reservation.slots === requirements.slots
+    && reservation.minMemoryMb === requirements.minMemoryMb
+    && reservation.requireGpu === requirements.requireGpu
+    && JSON.stringify(reservation.requiredCapabilities) === JSON.stringify([...requiredCapabilities].sort())
+    && JSON.stringify(reservation.requiredTags) === JSON.stringify([...requirements.requiredTags].sort());
+}
+
+function reservationLeaseDuration(reservation: DeviceReservation): number {
+  const duration = Date.parse(reservation.expiresAt) - Date.parse(reservation.heartbeatAt);
+  if (!Number.isFinite(duration)) return 60 * 60_000;
+  return Math.max(10 * 60_000, Math.min(24 * 60 * 60_000, Math.floor(duration)));
+}
+
+function operationReservationLeaseMs(request: Record<string, unknown>): number {
+  const candidates: number[] = [];
+  const directBudget = request.budget;
+  if (directBudget && typeof directBudget === 'object' && !Array.isArray(directBudget)) {
+    const value = Number((directBudget as Record<string, unknown>).maxWallClockMs);
+    if (Number.isFinite(value) && value > 0) candidates.push(value);
+  }
+  const execution = request.execution;
+  if (execution && typeof execution === 'object' && !Array.isArray(execution)) {
+    const raw = execution as Record<string, unknown>;
+    if (raw.kind === 'team' && raw.budget && typeof raw.budget === 'object' && !Array.isArray(raw.budget)) {
+      const value = Number((raw.budget as Record<string, unknown>).maxWallClockMs);
+      if (Number.isFinite(value) && value > 0) candidates.push(value);
+    }
+    if (raw.kind === 'organization' && raw.policy && typeof raw.policy === 'object' && !Array.isArray(raw.policy)) {
+      const teamBudget = (raw.policy as Record<string, unknown>).teamBudget;
+      if (teamBudget && typeof teamBudget === 'object' && !Array.isArray(teamBudget)) {
+        const value = Number((teamBudget as Record<string, unknown>).maxWallClockMs);
+        if (Number.isFinite(value) && value > 0) candidates.push(value);
+      }
+    }
+  }
+  const requested = candidates.length > 0 ? Math.max(...candidates) + 5 * 60_000 : 60 * 60_000;
+  return Math.max(10 * 60_000, Math.min(24 * 60 * 60_000, Math.floor(requested)));
+}
+
+function operationBindingKey(operationId: string): string { return `operation:${validUuid(operationId, 'operationId')}`; }
+
+function operationIdempotencyKey(accountId: string, payload: Record<string, unknown>): string {
+  return crypto.createHash('sha256').update('operator-relay-operation-receipt-v1:').update(accountId).update(':').update(canonicalJson(payload)).digest('hex');
+}
+
+function isOperationTransportResult(input: unknown): input is { ok: boolean; operation?: Record<string, unknown>; error?: { code?: string; message?: string } } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.ok !== 'boolean') return false;
+  if (raw.ok) return Boolean(raw.operation && typeof raw.operation === 'object' && !Array.isArray(raw.operation));
+  if (!raw.error || typeof raw.error !== 'object' || Array.isArray(raw.error)) return false;
+  const error = raw.error as Record<string, unknown>;
+  return typeof error.code === 'string' && typeof error.message === 'string';
 }
 
 function taskBindingKey(taskId: string): string { return `task:${validUuid(taskId, 'taskId')}`; }

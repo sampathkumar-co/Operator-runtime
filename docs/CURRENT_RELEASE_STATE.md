@@ -18,19 +18,28 @@ Live verification on 2026-09-24 confirmed both health endpoints report the same 
 
 ## Certified source successor (not deployed yet)
 
-The repository now has a certified successor on branch `feature/windows-parity-stage4`. The runtime code was certified at commit `288d5a1c5ad5742f0f041e42740010eeda50dd92`; documentation-only commits may advance the branch head without changing that certified runtime code.
+The repository now has a certified Stage-1–10 successor on branch `feature/stage5-10-agent-os`, with runtime head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`.
 
-This successor is **not the production deployment yet**. Until deployment/release-state promotion occurs, the production facts above remain authoritative.
+This successor is **not the production deployment yet**. Until merge/deployment/release-state promotion occurs, the production facts above remain authoritative.
 
 Successor changes include:
 
-- private/Developer MCP surface expanded from **24 to 30 grouped semantic tools** while the public review-bounded surface remains **9**;
-- Windows RDC-parity additions: `file.info`, `file.search`, dynamic-risk `file.manage`, interactive `terminal.session`, `process.inspect`, and fingerprinted destructive `process.manage`;
-- durable Stage-4 shared-state multi-agent coordination with worker roles, dependency scheduling, work leases, resource locks/revisions, CAS blackboard state, bounded budgets, reconciliation of uncertain mutations, preemptive cancellation and verifier-gated completion;
-- Control Center visibility for Stage-4 missions;
-- dedicated `Windows RDC parity certification` and `Stage 4 multi-agent certification` CI gates.
+- public review-bounded MCP surface remains exactly **9** tools;
+- private/Developer source surface expands from the deployed 24 tools to **32 grouped semantic tools**;
+- Windows RDC-parity primitives remain included;
+- Stage 4 durable shared-state multi-agent coordination remains included;
+- **Stage 5:** verified procedural memory with assumption fingerprints, expiry/invalidation, verifier-only promotion and receipt-idempotent reuse outcomes;
+- **Stage 6:** evidence-backed cross-application world model with freshness, multi-source conflicts, verifier-committed publication and nested-secret rejection;
+- **Stage 7:** signed paired-device resource advertisements, bounded device-capacity reservations, operation-to-device affinity and lifecycle-aware reservation renewal/release;
+- **Stage 8:** organization-scale canary/wave execution with bounded blast radius, explicit verified promotion, halt-on-failure and compensating cleanup;
+- **Stage 9:** bounded authority-neutral strategy/concurrency optimization that cannot grant capabilities, lower risk, widen scope, bypass approval or remove verification;
+- **Stage 10:** governed digital operations with durable/idempotent outcome contracts, explicit capability+resource authority envelopes for auto-planning, world pre/postconditions, verified procedure reuse/capture, Stage-4/8 execution and final verification receipts;
+- private grouped MCP `operations` and `knowledge.inspect` surfaces for Stage-10 control and read-only verified memory/world/optimizer inspection;
+- Linux/macOS runtime regression remains supported, while advanced desktop GUI parity remains Windows-first.
 
-The certified runtime commit passed CI #1375, Platform Matrix #1145, Windows Signing Smoke #1146, and NPM Remote Runtime CI #759 on the same immutable code head. Windows, macOS and Linux runtime regression jobs were green; Windows GUI parity is the certified desktop-control target for this successor, while Linux/macOS GUI parity remains intentionally out of scope.
+The Stage-5–10 branch is CI-gated together with all predecessor certification, including Stage 3 autonomous execution, Windows RDC parity, Stage 4 multi-agent, core runtime, MCP/Inspector, relay WebSocket, security red-team, performance regression, Windows UIA/path-authority/native packaging, and the Windows/macOS/Linux platform matrix.
+
+Deployment remains a separate state transition. Do not promote `docs/release-state.json` or the production source/tool counts until the successor is actually merged and deployed.
 
 ## Version policy
 
@@ -43,7 +52,7 @@ The public version tracks the stable public MCP schema/review snapshot. The Wind
 
 ## OpenAI-side state
 
-The currently deployed software/runtime release is complete. The certified successor above still requires merge/deployment/promotion before its 30-tool Developer surface and Stage-4 runtime are live. The remaining external limitation for directory publication is OpenAI-side:
+The currently deployed software/runtime release is complete. The certified successor above still requires merge/deployment/promotion before its **32-tool Developer surface and Stage-1–10 runtime** are live. The remaining external limitation for directory publication is OpenAI-side:
 
 - developer verification: blocked/rejected externally;
 - app-directory submission: not submitted;

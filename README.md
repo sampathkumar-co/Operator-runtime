@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: production v1 live; Windows RDC-parity + Stage-4 successor certified
+## Status: production v1 live; Stage 1–10 source successor certified
 
-The currently deployed production release remains source `94becbf734817121fbea1a017b9e1b10c144d125`, with exactly 9 public tools, 24 deployed Developer tools and `mecord-connect@1.0.1` under `latest`. A newer source successor on `feature/windows-parity-stage4` has completed Windows RDC-parity and Stage-4 shared-state multi-agent certification; its runtime code was certified at `288d5a1c5ad5742f0f041e42740010eeda50dd92` and expands the private/Developer source surface to 30 grouped semantic tools while leaving the public 9-tool surface unchanged. That successor is not production until it is merged/deployed and release-state metadata is promoted. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
+The currently deployed production release remains source `94becbf734817121fbea1a017b9e1b10c144d125`, with exactly 9 public tools, 24 deployed Developer tools and `mecord-connect@1.0.1` under `latest`. The certified source successor on `feature/stage5-10-agent-os` is recorded at runtime head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`, keeps the public 9-tool review surface unchanged, and expands the private/Developer source surface to **32 grouped tools**. It includes the already-certified Windows RDC-parity and Stage-4 runtime plus Stages 5–10: verified procedural memory, an evidence-backed cross-application world model, trusted paired-device resource scheduling, canary-gated organization execution, bounded authority-neutral self-optimization, and the governed digital-operations layer. It is not production until merge/deployment/release-state promotion. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -48,12 +48,19 @@ The currently deployed production release remains source `94becbf734817121fbea1a
 - Windows RDC-parity layer with bounded file search/info/manage, interactive terminal sessions, process inspection and fingerprinted current-user process termination
 - durable Stage-4 team coordinator with worker leases, dependency scheduling, resource locks/revisions, CAS blackboard state, bounded budgets, reconciliation, cancellation and verifier-gated completion
 - dedicated Windows RDC parity and Stage 4 multi-agent certification CI gates
+- Stage 5 verified procedural memory with assumption fingerprints, verifier-only promotion, invalidation/suspension and receipt-idempotent reuse outcomes
+- Stage 6 evidence-backed cross-application world model with multi-source conflict preservation, freshness, verifier-committed publication and nested credential rejection
+- Stage 7 authenticated paired-device resource pool with signed host resource profiles, durable capacity reservations and operation-to-device affinity
+- Stage 8 organization coordinator with canary waves, bounded blast radius, explicit promotion, failure halt and compensating cleanup
+- Stage 9 bounded execution optimizer that may tune strategy/concurrency only inside pre-authorized policy ceilings and cannot change authority/risk/approval
+- Stage 10 governed digital operations layer with outcome contracts, explicit authority envelopes, world pre/postconditions, idempotent operation identity, verified-procedure reuse/capture, Stage-4/8 execution and final verification receipts
+- grouped private MCP `operations` + `knowledge.inspect` surfaces, bringing the certified private/Developer source surface to **32 tools** while the public 9-tool surface remains unchanged
 
 The full root runtime/import suite is CI-gated alongside independent MCP transport, relay WebSocket, native Windows, MSIX packaging/sign-install, red-team, performance and cross-platform matrix checks. Exact test counts are intentionally not frozen in documentation because the suite grows with each hardened boundary.
 
 ## Remaining external gates
 
-The existing production deployment, npm publication, public 9-tool path and deployed 24-tool Developer endpoint are complete. The certified 30-tool/Stage-4 successor still requires merge/deployment/promotion before it becomes the live production runtime. OpenAI directory work remains external:
+The existing production deployment, npm publication, public 9-tool path and deployed 24-tool Developer endpoint are complete. The certified **32-tool Stage-1–10 successor** still requires merge/deployment/promotion before it becomes the live production runtime. OpenAI directory work remains external:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
@@ -150,9 +157,9 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. On the certified successor branch, relay mode preserves the same 30-tool private MCP surface while routing execution through the relay control authority to a paired device. The currently deployed Developer endpoint remains the older 24-tool production snapshot until successor deployment. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. On the certified successor branch, relay mode preserves the same **32-tool private MCP surface** while routing execution through the relay control authority to a paired device. The currently deployed Developer endpoint remains the older 24-tool production snapshot until successor deployment. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-For private owner/developer automation, the successor's 30-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge** after deployment. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
+For private owner/developer automation, the successor's 32-tool surface can be served by the separate OAuth-authenticated **Developer MCP edge** after deployment. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
 The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. Real paired-Windows device inspection/read/Git/create paths have been proven, and the separate Developer endpoint reports exactly 24 tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 

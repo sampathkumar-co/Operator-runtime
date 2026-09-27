@@ -426,3 +426,65 @@ test('explicit reconnect does not depend on the current WebSocket emitting close
   assert.equal(sockets.length, 2);
   assert.equal(sockets[0]?.readyState, 2);
 });
+
+
+test('stage7 relay signs bounded resource profile into authenticated hello', async (t) => {
+  const state = await stateDir(t, 'operator-relay-resource-profile-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Resource Profile PC');
+  const socket = new FakeSocket();
+  let client!: RelayClient;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    assert.deepEqual(frame.payload.resourceProfile, {
+      cpuSlots: 8,
+      memoryMb: 16384,
+      gpu: true,
+      tags: ['gpu', 'render'],
+      maxConcurrentJobs: 3
+    });
+    void (async () => {
+      assert.equal(await identity.verify(Buffer.from(JSON.stringify(frame.payload), 'utf8'), frame.signature), true);
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: 'resource-profile',
+        resumeFromSeq: 0,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: ['file.read']
+      });
+      setTimeout(() => { client.stop(); socket.close(); }, 0);
+    })();
+  };
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    resourceProfile: { cpuSlots: 8, memoryMb: 16384, gpu: true, tags: ['render', 'gpu'], maxConcurrentJobs: 3 },
+    onDelivery: async () => { throw new Error('no delivery expected'); },
+    sleep: async () => {}
+  });
+  await client.run();
+});
+
+test('stage7 relay rejects invalid resource profile before opening authority', async (t) => {
+  const state = await stateDir(t, 'operator-relay-resource-profile-invalid-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Invalid Resource PC');
+  assert.throws(() => new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => new FakeSocket(),
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.read'],
+    resourceProfile: { cpuSlots: 0, memoryMb: 16384, gpu: false, tags: [], maxConcurrentJobs: 1 },
+    onDelivery: async () => {}
+  }), (error: any) => error?.code === 'RELAY_RESOURCE_PROFILE_INVALID');
+});

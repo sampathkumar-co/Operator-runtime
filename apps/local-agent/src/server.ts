@@ -10,6 +10,12 @@ import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
 import type { TeamCoordinator, TeamRole, TeamWorkInput } from '../../../src/core/team-coordinator.ts';
+import type { ProcedureMemoryStore } from '../../../src/core/procedure-memory.ts';
+import { validateWorldObservation, type WorldModelStore } from '../../../src/core/world-model.ts';
+import type { DevicePoolScheduler } from '../../../src/core/device-pool.ts';
+import type { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.ts';
+import type { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
+import type { DigitalOperationsLayer, DigitalOperationSubmit } from '../../../src/core/digital-operations.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
@@ -139,6 +145,12 @@ export function createLocalAgentServer(options: {
   tasks?: TaskStore;
   taskOrchestrator?: TaskOrchestrator;
   teams?: TeamCoordinator;
+  procedures?: ProcedureMemoryStore;
+  world?: WorldModelStore;
+  devicePool?: DevicePoolScheduler;
+  optimizer?: ExecutionOptimizerStore;
+  organizations?: OrganizationCoordinator;
+  operations?: DigitalOperationsLayer;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
@@ -290,6 +302,155 @@ export function createLocalAgentServer(options: {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
       send(res, 200, { ok: true, events: options.audit ? await options.audit.tail(limit) : [], configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/procedures' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.procedures), procedures: options.procedures ? await options.procedures.list(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/procedures/query' && req.method === 'POST') {
+      if (!options.procedures) { send(res, 503, { ok: false, error: { code: 'PROCEDURE_MEMORY_NOT_CONFIGURED', message: 'Verified procedure memory is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const candidates = await options.procedures.findReusable({
+          objectiveKind: String(body.objectiveKind ?? ''),
+          scopeKey: String(body.scopeKey ?? ''),
+          assumptions: Array.isArray(body.assumptions) ? body.assumptions as any : [],
+          requiredCapabilities: Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities.map(String) : [],
+          maxResults: body.maxResults === undefined ? undefined : Number(body.maxResults)
+        });
+        send(res, 200, { ok: true, candidates });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PROCEDURE_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/world/entities' && req.method === 'GET') {
+      if (!options.world) { send(res, 503, { ok: false, error: { code: 'WORLD_MODEL_NOT_CONFIGURED', message: 'World model is not configured.' } }); return; }
+      try {
+        const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+        const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 100;
+        const scopeKey = requestUrl.searchParams.get('scopeKey') ?? undefined;
+        const type = requestUrl.searchParams.get('type') ?? undefined;
+        send(res, 200, { ok: true, entities: await options.world.listEntities({ ...(scopeKey ? { scopeKey } : {}), ...(type ? { type } : {}), limit }) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/world/query' && req.method === 'POST') {
+      if (!options.world) { send(res, 503, { ok: false, error: { code: 'WORLD_MODEL_NOT_CONFIGURED', message: 'World model is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const operation = String(body.operation ?? '');
+        if (operation === 'fact') {
+          send(res, 200, { ok: true, fact: await options.world.resolveFact(String(body.entityKey ?? ''), String(body.factKey ?? '')) });
+          return;
+        }
+        if (operation === 'entity') {
+          send(res, 200, { ok: true, entity: await options.world.inspectEntity(String(body.entityKey ?? '')) ?? null });
+          return;
+        }
+        if (operation === 'trace') {
+          send(res, 200, { ok: true, trace: await options.world.trace({
+            fromKey: String(body.fromKey ?? ''),
+            ...(body.toKey === undefined ? {} : { toKey: String(body.toKey) }),
+            ...(body.targetType === undefined ? {} : { targetType: String(body.targetType) }),
+            ...(body.maxDepth === undefined ? {} : { maxDepth: Number(body.maxDepth) }),
+            ...(body.minConfidence === undefined ? {} : { minConfidence: Number(body.minConfidence) })
+          }) ?? null });
+          return;
+        }
+        throw new Error('world query operation must be fact, entity, or trace.');
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/device-pool/reservations' && req.method === 'GET') {
+      if (!options.devicePool) { send(res, 503, { ok: false, error: { code: 'DEVICE_POOL_NOT_CONFIGURED', message: 'Device pool is not configured.' } }); return; }
+      try {
+        const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+        const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 100;
+        const deviceId = requestUrl.searchParams.get('deviceId') ?? undefined;
+        send(res, 200, { ok: true, reservations: await options.devicePool.list({ activeOnly: requestUrl.searchParams.get('activeOnly') === '1', ...(deviceId ? { deviceId } : {}), limit }) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_POOL_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/optimizer' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 200);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 200;
+      send(res, 200, { ok: true, configured: Boolean(options.optimizer), entries: options.optimizer ? await options.optimizer.inspect(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/organizations' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.organizations), programs: options.organizations ? await options.organizations.list(limit) : [] });
+      return;
+    }
+
+    const organizationRoute = /^\/v1\/organizations\/([0-9a-f-]{36})$/i.exec(pathname);
+    if (organizationRoute && req.method === 'GET') {
+      if (!options.organizations) { send(res, 503, { ok: false, error: { code: 'ORGANIZATION_NOT_CONFIGURED', message: 'Organization coordinator is not configured.' } }); return; }
+      try { send(res, 200, { ok: true, program: await options.organizations.inspect(organizationRoute[1]!) }); }
+      catch (error) { send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ORGANIZATION_PROGRAM_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } }); }
+      return;
+    }
+
+    if (pathname === '/v1/operations' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.operations), operations: options.operations ? await options.operations.list(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/operations' && req.method === 'POST') {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (body.device !== undefined) throw new Error('Device advertisements are relay-authority data and cannot be supplied through the local agent operation API.');
+        const operation = await options.operations.submit(body as unknown as DigitalOperationSubmit);
+        send(res, body.run === true ? 200 : 202, { ok: true, operation });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_SUBMISSION_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const operationRoute = /^\/v1\/operations\/([0-9a-f-]{36})(?:\/(start|refresh|pause|cancel|promote))?$/i.exec(pathname);
+    if (operationRoute && req.method === 'GET' && !operationRoute[2]) {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try { send(res, 200, { ok: true, operation: await options.operations.inspect(operationRoute[1]!) }); }
+      catch (error) { send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } }); }
+      return;
+    }
+    if (operationRoute && req.method === 'POST' && operationRoute[2]) {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try {
+        const id = operationRoute[1]!;
+        const op = operationRoute[2]!;
+        const body = await readJson(req) as Record<string, unknown>;
+        const operation = op === 'start' ? await options.operations.start(id)
+          : op === 'refresh' ? await options.operations.refresh(id)
+          : op === 'pause' ? await options.operations.pause(id)
+          : op === 'cancel' ? await options.operations.cancel(id)
+          : await options.operations.promoteOrganization(id, String(body.verificationDigest ?? ''));
+        send(res, 200, { ok: true, operation });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
@@ -501,6 +662,33 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    const worldPublishRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/world-publish$/i.exec(pathname);
+    if (worldPublishRoute && req.method === 'POST') {
+      if (!options.teams || !options.world) {
+        send(res, 503, { ok: false, error: { code: 'WORLD_PUBLICATION_NOT_CONFIGURED', message: 'Team/world integration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const missionId = worldPublishRoute[1]!;
+        const workItemId = worldPublishRoute[2]!;
+        const mission = await options.teams.inspect(missionId);
+        const item = mission.workItems.find((candidate) => candidate.id === workItemId);
+        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+          throw Object.assign(new Error('Completed verifier world-observation commitment is required.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+        }
+        const prepared = prepareVerifierWorldObservations(body.worldObservations, missionId, workItemId);
+        if (prepared.digest !== item.result.worldObservationDigest) {
+          throw Object.assign(new Error('World observation payload does not match the verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_COMMITMENT_MISMATCH' });
+        }
+        const published = await publishVerifierWorldObservations(options.world, mission, item, prepared.observations);
+        send(res, 200, { ok: true, mission, worldObservationsPublished: published });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORLD_PUBLICATION_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     const workRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/(complete|fail|reconcile)$/i.exec(pathname);
     if (workRoute && req.method === 'POST') {
       if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
@@ -509,24 +697,56 @@ export function createLocalAgentServer(options: {
         const id = workRoute[1]!;
         const workItemId = workRoute[2]!;
         const operation = workRoute[3]!;
-        const mission = operation === 'complete'
-          ? await options.teams.complete(id, {
+        if (operation === 'complete') {
+          let preparedWorld: ReturnType<typeof prepareVerifierWorldObservations> | undefined;
+          if (body.worldObservations !== undefined) {
+            if (!options.world) throw Object.assign(new Error('World model is not configured.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
+            const before = await options.teams.inspect(id);
+            const item = before.workItems.find((candidate) => candidate.id === workItemId);
+            if (!item || item.role !== 'verifier' || body.verificationPassed !== true) {
+              throw Object.assign(new Error('Only a passing verifier may commit world observations.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+            }
+            preparedWorld = prepareVerifierWorldObservations(body.worldObservations, id, workItemId);
+          }
+          const mission = await options.teams.complete(id, {
+            workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
+            summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
+            verificationPassed: body.verificationPassed === true,
+            ...(preparedWorld ? { worldObservationDigest: preparedWorld.digest } : {})
+          });
+          let worldObservationsPublished = 0;
+          let worldObservationWarning: { code: string; message: string } | undefined;
+          if (preparedWorld && options.world) {
+            const completed = mission.workItems.find((candidate) => candidate.id === workItemId)!;
+            try {
+              worldObservationsPublished = await publishVerifierWorldObservations(options.world, mission, completed, preparedWorld.observations);
+            } catch (error) {
+              worldObservationWarning = {
+                code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORLD_PUBLICATION_FAILED',
+                message: error instanceof Error ? error.message : String(error)
+              };
+            }
+          }
+          send(res, 200, {
+            ok: true, mission,
+            ...(preparedWorld ? { worldObservationsPublished } : {}),
+            ...(worldObservationWarning ? { worldObservationWarning } : {})
+          });
+          return;
+        }
+
+        const mission = operation === 'fail'
+          ? await options.teams.fail(id, {
               workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
-              summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
-              verificationPassed: body.verificationPassed === true
+              code: String(body.code ?? ''), message: String(body.message ?? ''),
+              sideEffectState: body.sideEffectState as 'none' | 'known' | 'uncertain',
+              retryable: body.retryable === true
             })
-          : operation === 'fail'
-            ? await options.teams.fail(id, {
-                workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
-                code: String(body.code ?? ''), message: String(body.message ?? ''),
-                sideEffectState: body.sideEffectState as 'none' | 'known' | 'uncertain',
-                retryable: body.retryable === true
-              })
-            : await options.teams.reconcile(id, {
-                workerId: String(body.workerId ?? ''), workItemId,
-                resolution: body.resolution as 'completed' | 'retry' | 'failed',
-                summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : []
-              });
+          : await options.teams.reconcile(id, {
+              workerId: String(body.workerId ?? ''), workItemId,
+              resolution: body.resolution as 'completed' | 'retry' | 'failed',
+              summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : []
+            });
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORK_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
@@ -985,6 +1205,62 @@ export function createLocalAgentServer(options: {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   };
+}
+
+function prepareVerifierWorldObservations(input: unknown, missionId: string, workItemId: string): {
+  digest: string;
+  observations: Array<ReturnType<typeof validateWorldObservation>>;
+} {
+  if (!Array.isArray(input) || input.length < 1 || input.length > 100) {
+    throw Object.assign(new Error('worldObservations must contain 1-100 entries.'), { code: 'TEAM_WORLD_OBSERVATION_INVALID' });
+  }
+  const source = `team:${missionId}:verifier:${workItemId}`;
+  const zeroDigest = '0'.repeat(64);
+  const observations = input.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw Object.assign(new Error(`worldObservations[${index}] must be an object.`), { code: 'TEAM_WORLD_OBSERVATION_INVALID' });
+    }
+    const raw = value as Record<string, unknown>;
+    return validateWorldObservation({
+      entity: raw.entity as any,
+      source,
+      domain: raw.domain as any,
+      evidenceDigest: zeroDigest,
+      facts: raw.facts && typeof raw.facts === 'object' && !Array.isArray(raw.facts) ? raw.facts as Record<string, unknown> : {},
+      relations: Array.isArray(raw.relations) ? raw.relations as any : [],
+      confidence: raw.confidence === undefined ? undefined : Number(raw.confidence),
+      ttlMs: raw.ttlMs === undefined ? undefined : Number(raw.ttlMs)
+    });
+  });
+  const committed = observations.map(({ evidenceDigest: _evidenceDigest, ...observation }) => observation);
+  const digest = crypto.createHash('sha256').update(JSON.stringify(committed)).digest('hex');
+  return { digest, observations };
+}
+
+async function publishVerifierWorldObservations(
+  world: WorldModelStore,
+  mission: Awaited<ReturnType<TeamCoordinator['inspect']>>,
+  item: Awaited<ReturnType<TeamCoordinator['inspect']>>['workItems'][number],
+  observations: Array<ReturnType<typeof validateWorldObservation>>
+): Promise<number> {
+  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+    throw Object.assign(new Error('World publication requires a completed passing verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
+  }
+  const evidenceDigest = crypto.createHash('sha256').update(JSON.stringify({
+    missionId: mission.id,
+    workItemId: item.id,
+    workerId: item.result.workerId,
+    completedAt: item.result.completedAt,
+    verificationPassed: true,
+    worldObservationDigest: item.result.worldObservationDigest,
+    evidence: item.result.evidence
+  })).digest('hex');
+  let published = 0;
+  for (const observation of observations) {
+    await world.observe({ ...observation, evidenceDigest });
+    published += 1;
+  }
+  return published;
 }
 
 function teamActionResourceKeys(action: ActionRequest): string[] {
