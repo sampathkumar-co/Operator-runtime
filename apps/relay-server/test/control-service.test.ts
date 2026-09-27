@@ -851,3 +851,144 @@ test('stage5-9 relay knowledge inspection is developer-only and dispatches read-
   assert.deepEqual(dispatched.requiredCapabilities, []);
   assert.deepEqual(dispatched.payload, { query: { kind: 'procedures', limit: 10 } });
 });
+
+
+test('stage7 releases a new placement reservation if durable operation binding cannot be committed', async (t) => {
+  const operationId = '12121212-1212-4121-8121-121212121212';
+  const releases: string[] = [];
+  let dispatchCalls = 0;
+  const reservation = {
+    id: '13131313-1313-4131-8131-131313131313',
+    workloadKey: `operation:${operationId}`,
+    deviceId: DEVICE_ID,
+    sessionId: '14141414-1414-4141-8141-141414141414',
+    requiredCapabilities: ['file.read'],
+    requiredTags: [],
+    minMemoryMb: 0,
+    requireGpu: false,
+    slots: 1,
+    acquiredAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    state: 'ACTIVE'
+  };
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => { throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'none'); },
+      listDeviceReservations: async () => [],
+      reserveDevice: async () => reservation,
+      bindProject: async () => { throw new Error('simulated binding persistence failure'); },
+      releaseDeviceReservation: async (_accountId: string, id: string) => { releases.push(id); return { ...reservation, state: 'RELEASED' }; },
+      dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch'); }
+    } as any,
+    results: {} as any,
+    accounts: {} as any,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      operation: {
+        operation: 'submit',
+        request: {
+          requestId: operationId,
+          objective: 'Binding must be durable',
+          scopeKey: 'project:binding',
+          successConditions: ['verified'],
+          execution: {
+            kind: 'team',
+            workItems: [
+              { key: 'inspect', title: 'Inspect', role: 'general', risk: 'read', allowedCapabilities: ['file.read'] },
+              { key: 'verify', title: 'Verify', role: 'verifier', risk: 'read', dependsOn: ['inspect'], allowedCapabilities: ['file.read'] }
+            ]
+          },
+          run: false
+        }
+      },
+      waitMs: 1000
+    })
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual(releases, [reservation.id]);
+  assert.equal(dispatchCalls, 0);
+});
+
+test('stage7 uses procedure capability requirements only as trusted routing filters for auto-planned Stage10 operations', async (t) => {
+  const operationId = '15151515-1515-4151-8151-151515151515';
+  let reservedRequest: any;
+  let dispatched: any;
+  const reservation = {
+    id: '16161616-1616-4161-8161-161616161616',
+    workloadKey: `operation:${operationId}`,
+    deviceId: DEVICE_ID,
+    sessionId: '17171717-1717-4171-8171-171717171717',
+    requiredCapabilities: ['browser.inspect'],
+    requiredTags: [],
+    minMemoryMb: 0,
+    requireGpu: false,
+    slots: 1,
+    acquiredAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    state: 'ACTIVE'
+  };
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => { throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'none'); },
+      listDeviceReservations: async () => [],
+      reserveDevice: async (_accountId: string, request: any) => { reservedRequest = request; return reservation; },
+      bindProject: async () => undefined,
+      dispatch: async (input: any) => { dispatched = input; return { route: { deviceId: DEVICE_ID }, delivery: { id: 'auto-plan-op', seq: 120 } }; },
+      heartbeatDeviceReservation: async () => reservation,
+      releaseDeviceReservation: async () => ({ ...reservation, state: 'RELEASED' })
+    } as any,
+    results: {
+      get: async () => ({
+        deliveryId: 'auto-plan-op',
+        result: { ok: true, operation: { id: operationId, state: 'PENDING' } },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      })
+    } as any,
+    accounts: {
+      activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 })
+    } as any,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      operation: {
+        operation: 'submit',
+        request: {
+          requestId: operationId,
+          objective: 'Auto-plan on a browser-capable device',
+          scopeKey: 'project:auto-route',
+          successConditions: ['verified'],
+          procedure: {
+            objectiveKind: 'browser-check',
+            assumptions: [],
+            requiredCapabilities: ['browser.inspect']
+          },
+          maxRisk: 'read',
+          run: false
+        }
+      },
+      waitMs: 1000
+    })
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.deepEqual(reservedRequest.requiredCapabilities, ['browser.inspect']);
+  assert.deepEqual(dispatched.requiredCapabilities, ['browser.inspect']);
+});
