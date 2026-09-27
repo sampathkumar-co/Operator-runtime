@@ -3,7 +3,7 @@ import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { ProcedureMemoryStore, type ProcedureAssumption, type ProcedureStep } from './procedure-memory.ts';
-import { WorldModelStore } from './world-model.ts';
+import { WorldModelStore, worldValueDigest } from './world-model.ts';
 import { DevicePoolScheduler, type DevicePoolRequest, type DeviceResourceAdvertisement } from './device-pool.ts';
 import { ExecutionOptimizerStore } from './execution-optimizer.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
@@ -411,8 +411,8 @@ export class DigitalOperationsLayer {
     for (const condition of conditions) {
       const fact = await this.#world.resolveFact(condition.entityKey, condition.factKey);
       if (fact.status !== 'resolved') return { ok: false, reason: `${condition.entityKey}.${condition.factKey} is ${fact.status}.` };
-      if (!fact.claims.some((claim) => claim.valueDigest === condition.expectedValueDigest)) {
-        return { ok: false, reason: `${condition.entityKey}.${condition.factKey} does not match expected verified value.` };
+      if (worldValueDigest(fact.value) !== condition.expectedValueDigest) {
+        return { ok: false, reason: `${condition.entityKey}.${condition.factKey} resolved value does not match the expected verified value.` };
       }
     }
     return { ok: true };
