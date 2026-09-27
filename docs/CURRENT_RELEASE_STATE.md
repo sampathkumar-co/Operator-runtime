@@ -1,6 +1,6 @@
 # Mecord Connect — Current Release State
 
-Status date: **2026-09-24**
+Status date: **2026-09-27**
 
 This file is the canonical human-readable current-state summary. Machine-readable values live in `docs/release-state.json`. Older certification and gate documents may preserve historical evidence, but they must not override this file for current production facts.
 
@@ -16,6 +16,22 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 
 Live verification on 2026-09-24 confirmed both health endpoints report the same production source commit, with public toolCount 9 and Developer toolCount 24. The deployed image also rejects traversal, drive-relative, UNC and glob `git.diff` path filters before agent dispatch.
 
+## Certified source successor (not deployed yet)
+
+The repository now has a certified successor on branch `feature/windows-parity-stage4`. The runtime code was certified at commit `288d5a1c5ad5742f0f041e42740010eeda50dd92`; documentation-only commits may advance the branch head without changing that certified runtime code.
+
+This successor is **not the production deployment yet**. Until deployment/release-state promotion occurs, the production facts above remain authoritative.
+
+Successor changes include:
+
+- private/Developer MCP surface expanded from **24 to 30 grouped semantic tools** while the public review-bounded surface remains **9**;
+- Windows RDC-parity additions: `file.info`, `file.search`, dynamic-risk `file.manage`, interactive `terminal.session`, `process.inspect`, and fingerprinted destructive `process.manage`;
+- durable Stage-4 shared-state multi-agent coordination with worker roles, dependency scheduling, work leases, resource locks/revisions, CAS blackboard state, bounded budgets, reconciliation of uncertain mutations, preemptive cancellation and verifier-gated completion;
+- Control Center visibility for Stage-4 missions;
+- dedicated `Windows RDC parity certification` and `Stage 4 multi-agent certification` CI gates.
+
+The certified runtime commit passed CI #1375, Platform Matrix #1145, Windows Signing Smoke #1146, and NPM Remote Runtime CI #759 on the same immutable code head. Windows, macOS and Linux runtime regression jobs were green; Windows GUI parity is the certified desktop-control target for this successor, while Linux/macOS GUI parity remains intentionally out of scope.
+
 ## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
@@ -27,13 +43,15 @@ The public version tracks the stable public MCP schema/review snapshot. The Wind
 
 ## OpenAI-side state
 
-The software/runtime release is complete. The remaining external limitation is OpenAI-side:
+The currently deployed software/runtime release is complete. The certified successor above still requires merge/deployment/promotion before its 30-tool Developer surface and Stage-4 runtime are live. The remaining external limitation for directory publication is OpenAI-side:
 
 - developer verification: blocked/rejected externally;
 - app-directory submission: not submitted;
 - live Developer ChatGPT connection: unavailable until the OpenAI verification issue is resolved.
 
-Do not reinterpret those OpenAI-side blockers as a failure of the live public or Developer MCP servers.## Audit checkout rule
+Do not reinterpret those OpenAI-side blockers as a failure of the live public or Developer MCP servers.
+
+## Audit checkout rule
 
 A directory name such as `Mecord-Current-Main` is not proof of revision identity. For a release audit, run the verifier from the current source and optionally point it at a separate frozen checkout:
 
