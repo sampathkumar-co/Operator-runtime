@@ -61,3 +61,15 @@ test('stage9 learning requires repeated evidence before changing ranking materia
   const learned = await store.recommend('build', [{ id: 'a', staticScore: 0.8 }, { id: 'b', staticScore: 0.79 }]);
   assert.equal(learned[0]?.id, 'b');
 });
+
+
+test('stage9 receipt idempotency prevents crash retries from double-counting one outcome', async (t) => {
+  const store = new ExecutionOptimizerStore(await tempDir(t));
+  const receipt = 'a'.repeat(64);
+  await store.record('retry-safe', 'strategy', { verified: true, durationMs: 100 }, receipt);
+  await store.record('retry-safe', 'strategy', { verified: true, durationMs: 100 }, receipt);
+  const entry = (await store.inspect()).find((item) => item.context === 'retry-safe' && item.strategy === 'strategy');
+  assert.ok(entry);
+  assert.equal(entry!.verified, 1);
+  assert.equal(entry!.samples, 1);
+});
