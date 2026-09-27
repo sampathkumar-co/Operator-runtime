@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -128,4 +129,39 @@ test('stage8 rejects targets outside explicit organization scope prefixes', asyn
     }),
     (error: any) => error?.code === 'ORGANIZATION_SCOPE_DENIED'
   );
+});
+
+
+test('stage8 compensates already-created missions when a later wave target fails to start', async (t) => {
+  const state = await tempDir(t);
+  const created: string[] = [];
+  const cancelled: string[] = [];
+  let submits = 0;
+  const fakeTeams = {
+    async submit() {
+      submits += 1;
+      if (submits === 2) throw new Error('simulated second target creation failure');
+      const id = crypto.randomUUID();
+      created.push(id);
+      return { id };
+    },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async cancel(id: string) { cancelled.push(id); return { id, state: 'CANCELLED' }; }
+  };
+  const org = new OrganizationCoordinator(state, fakeTeams as any);
+  const program = await org.create({
+    objective: 'Atomic rollout start',
+    policy: { canarySize: 2, waveSize: 2, maxParallel: 2, allowedScopePrefixes: ['org:atomic'] },
+    targets: [
+      { key: 'one', scopeKey: 'org:atomic:one', workItems: work('one') },
+      { key: 'two', scopeKey: 'org:atomic:two', workItems: work('two') }
+    ]
+  });
+
+  await assert.rejects(org.start(program.id), /second target creation failure/);
+  assert.deepEqual(cancelled, created);
+  const persisted = await org.inspect(program.id);
+  assert.equal(persisted.state, 'PENDING');
+  assert.equal(persisted.waves[0]?.state, 'PENDING');
+  assert.ok(persisted.targets.every((target) => target.missionId === undefined && target.state === 'PENDING'));
 });
