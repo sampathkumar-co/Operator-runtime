@@ -32,6 +32,19 @@ jobs:
           (cd packages/operator-runtime-cli && npm pack --dry-run --json) > /tmp/operator-runtime-cli-pack.json
           node -e "const p=require('fs').readFileSync('/tmp/operator-runtime-cli-pack.json','utf8'); const j=JSON.parse(p)[0]; if (!j?.files?.some(f=>f.path==='bin/operator-runtime-cli.mjs')) process.exit(1)"
 
+  stage3-autonomous:
+    name: Stage 3 autonomous certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Durable loop, recovery, fallback, and Control Center certification
+        run: npm run test:stage3
+
   security-red-team:
     name: Security red-team suite
     runs-on: ubuntu-latest
