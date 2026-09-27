@@ -64,16 +64,17 @@ test('authenticated local-agent fetch refuses redirects before forwarding the re
 test('network authority fetches remain redirect-disabled', async () => {
   const root = path.resolve(import.meta.dirname, '..');
   const cases = [
-    ['apps/mcp-server/src/local-agent-client.ts', 2],
-    ['apps/mcp-server/src/relay-agent-client.ts', 3],
-    ['apps/local-agent/src/relay-agent.ts', 3],
-    ['src/capabilities/browser-cdp.ts', 5],
-    ['src/capabilities/browser-managed.ts', 1]
+    'apps/mcp-server/src/local-agent-client.ts',
+    'apps/mcp-server/src/relay-agent-client.ts',
+    'apps/local-agent/src/relay-agent.ts',
+    'src/capabilities/browser-cdp.ts',
+    'src/capabilities/browser-managed.ts'
   ] as const;
-  for (const [relative, expected] of cases) {
+  for (const relative of cases) {
     const source = await fs.readFile(path.join(root, relative), 'utf8');
-    const count = source.split("redirect: 'error'").length - 1;
-    assert.equal(count, expected, `${relative} must reject redirects at every network boundary`);
+    const fetchCount = source.match(/\bfetch\s*\(/g)?.length ?? 0;
+    const redirectDeniedCount = source.split("redirect: 'error'").length - 1;
+    assert.equal(redirectDeniedCount, fetchCount, `${relative} must reject redirects at every network boundary`);
   }
 });
 
