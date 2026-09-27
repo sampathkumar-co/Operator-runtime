@@ -485,7 +485,7 @@ export class TeamCoordinator {
       } else if (input.resolution === 'retry') {
         if (item.attempts >= mission.budget.maxAttemptsPerWorkItem) throw new OperatorError('TEAM_ATTEMPT_BUDGET_EXHAUSTED', 'Cannot retry after attempt budget is exhausted.');
         item.state = 'PENDING';
-        item.failure = undefined;
+        delete item.failure;
       } else {
         item.state = 'FAILED';
         item.failure = { code: 'TEAM_RECONCILIATION_FAILED', message: boundedText(input.summary, 64 * 1024, 'reconciliation summary'), at: now };
