@@ -42,6 +42,7 @@ export interface DigitalOperation {
   preconditions: WorldCondition[];
   postconditions: WorldCondition[];
   selectedStrategy: string;
+  submissionDigest: string;
   selectedProcedureId?: string;
   procedureCapture?: ProcedureCaptureSpec;
   deviceReservationId?: string;
@@ -127,90 +128,100 @@ export class DigitalOperationsLayer {
 
   async submit(input: DigitalOperationSubmit): Promise<DigitalOperation> {
     const normalized = normalizeSubmit(input);
-    await this.#assertWorldConditions(normalized.preconditions, 'precondition');
-
-    let selectedProcedureId: string | undefined;
-    const candidateStrategies = normalized.strategies.length > 0 ? [...normalized.strategies] : [{ id: 'fresh-plan', staticScore: 0.5 }];
-    if (normalized.procedure) {
-      const procedures = await this.#procedures.findReusable({
-        objectiveKind: normalized.procedure.objectiveKind,
-        scopeKey: normalized.scopeKey,
-        assumptions: normalized.procedure.assumptions,
-        requiredCapabilities: normalized.procedure.requiredCapabilities
-      });
-      for (const candidate of procedures.slice(0, 20)) {
-        if (!candidateStrategies.some((item) => item.id === `procedure:${candidate.procedure.id}`)) {
-          candidateStrategies.push({ id: `procedure:${candidate.procedure.id}`, staticScore: Math.max(0.5, candidate.confidence) });
-        }
-      }
-    }
-    const strategyContext = strategyContextFor(normalized.scopeKey, normalized.execution.kind);
-    const ranked = await this.#optimizer.recommend(strategyContext, candidateStrategies);
-    const selectedStrategy = ranked[0]!.id;
-    if (selectedStrategy.startsWith('procedure:')) selectedProcedureId = selectedStrategy.slice('procedure:'.length);
-
-    let deviceReservationId: string | undefined;
-    if (normalized.device) {
-      const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
-      deviceReservationId = reservation.id;
-    }
-
-    let teamMissionId: string | undefined;
-    let organizationProgramId: string | undefined;
-    try {
-      if (normalized.execution.kind === 'team') {
-        const mission = await this.#teams.submit({
-          objective: normalized.objective,
-          workItems: normalized.execution.workItems,
-          budget: normalized.execution.budget
-        });
-        teamMissionId = mission.id;
-        if (normalized.run) await this.#teams.start(mission.id);
-      } else {
-        const program = await this.#organizations.create({
-          objective: normalized.objective,
-          targets: normalized.execution.targets,
-          policy: normalized.execution.policy
-        });
-        organizationProgramId = program.id;
-        if (normalized.run) await this.#organizations.start(program.id);
-      }
-    } catch (error) {
-      if (deviceReservationId) {
-        try { await this.#devices.release(deviceReservationId); } catch {}
-      }
-      throw error;
-    }
-
-    const now = this.#clock().toISOString();
-    const operation: DigitalOperation = {
-      version: 1,
-      id: normalized.requestId ?? crypto.randomUUID(),
-      objective: normalized.objective,
-      scopeKey: normalized.scopeKey,
-      successConditions: normalized.successConditions,
-      state: normalized.run ? 'RUNNING' : 'PENDING',
-      mode: normalized.execution.kind,
-      preconditions: normalized.preconditions,
-      postconditions: normalized.postconditions,
-      selectedStrategy,
-      ...(selectedProcedureId ? { selectedProcedureId } : {}),
-      ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
-      ...(deviceReservationId ? { deviceReservationId } : {}),
-      ...(teamMissionId ? { teamMissionId } : {}),
-      ...(organizationProgramId ? { organizationProgramId } : {}),
-      outcomeRecorded: false,
-      createdAt: now,
-      updatedAt: now
-    };
-
+    const operationId = normalized.requestId ?? crypto.randomUUID();
+    const submissionDigest = operationSubmissionDigest(normalized);
     const run = this.#serial.then(async () => {
       const state = await this.#read();
+      const existing = state.operations.find((item) => item.id === operationId);
+      if (existing) {
+        if (existing.submissionDigest !== submissionDigest) {
+          throw new OperatorError('OPERATIONS_REQUEST_CONFLICT', 'Operation requestId is already bound to a different outcome contract.');
+        }
+        return structuredClone(existing);
+      }
       if (state.operations.length >= MAX_OPERATIONS) {
         const reclaim = state.operations.findIndex((item) => ['FAILED', 'CANCELLED', 'VERIFIED'].includes(item.state));
         if (reclaim >= 0) state.operations.splice(reclaim, 1);
         else throw new OperatorError('OPERATIONS_LIMIT', 'Digital operation retention limit reached.');
       }
+
+      await this.#assertWorldConditions(normalized.preconditions, 'precondition');
+
+      let selectedProcedureId: string | undefined;
+      const candidateStrategies = normalized.strategies.length > 0 ? [...normalized.strategies] : [{ id: 'fresh-plan', staticScore: 0.5 }];
+      if (normalized.procedure) {
+        const procedures = await this.#procedures.findReusable({
+          objectiveKind: normalized.procedure.objectiveKind,
+          scopeKey: normalized.scopeKey,
+          assumptions: normalized.procedure.assumptions,
+          ...(normalized.procedure.requiredCapabilities ? { requiredCapabilities: normalized.procedure.requiredCapabilities } : {})
+        });
+        for (const candidate of procedures.slice(0, 20)) {
+          if (!candidateStrategies.some((item) => item.id === `procedure:${candidate.procedure.id}`)) {
+            candidateStrategies.push({ id: `procedure:${candidate.procedure.id}`, staticScore: Math.max(0.5, candidate.confidence) });
+          }
+        }
+      }
+      const strategyContext = strategyContextFor(normalized.scopeKey, normalized.execution.kind);
+      const ranked = await this.#optimizer.recommend(strategyContext, candidateStrategies);
+      const selectedStrategy = ranked[0]!.id;
+      if (selectedStrategy.startsWith('procedure:')) selectedProcedureId = selectedStrategy.slice('procedure:'.length);
+
+      let deviceReservationId: string | undefined;
+      if (normalized.device) {
+        const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
+        deviceReservationId = reservation.id;
+      }
+
+      let teamMissionId: string | undefined;
+      let organizationProgramId: string | undefined;
+      try {
+        if (normalized.execution.kind === 'team') {
+          const mission = await this.#teams.submit({
+            objective: normalized.objective,
+            workItems: normalized.execution.workItems,
+            ...(normalized.execution.budget ? { budget: normalized.execution.budget } : {})
+          });
+          teamMissionId = mission.id;
+          if (normalized.run) await this.#teams.start(mission.id);
+        } else {
+          const program = await this.#organizations.create({
+            objective: normalized.objective,
+            targets: normalized.execution.targets,
+            ...(normalized.execution.policy ? { policy: normalized.execution.policy } : {})
+          });
+          organizationProgramId = program.id;
+          if (normalized.run) await this.#organizations.start(program.id);
+        }
+      } catch (error) {
+        if (deviceReservationId) {
+          try { await this.#devices.release(deviceReservationId); } catch {}
+        }
+        throw error;
+      }
+
+      const now = this.#clock().toISOString();
+      const operation: DigitalOperation = {
+        version: 1,
+        id: operationId,
+        objective: normalized.objective,
+        scopeKey: normalized.scopeKey,
+        successConditions: normalized.successConditions,
+        state: normalized.run ? 'RUNNING' : 'PENDING',
+        mode: normalized.execution.kind,
+        preconditions: normalized.preconditions,
+        postconditions: normalized.postconditions,
+        selectedStrategy,
+        submissionDigest,
+        ...(selectedProcedureId ? { selectedProcedureId } : {}),
+        ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
+        ...(deviceReservationId ? { deviceReservationId } : {}),
+        ...(teamMissionId ? { teamMissionId } : {}),
+        ...(organizationProgramId ? { organizationProgramId } : {}),
+        outcomeRecorded: false,
+        createdAt: now,
+        updatedAt: now
+      };
       state.operations.push(operation);
       await this.#write(state);
       return structuredClone(operation);
@@ -476,6 +487,24 @@ function mapUnderlyingState(state: string): DigitalOperationState {
   return 'RUNNING';
 }
 
+function operationSubmissionDigest(normalized: ReturnType<typeof normalizeSubmit>): string {
+  const contract = {
+    requestId: normalized.requestId ?? null,
+    objective: normalized.objective,
+    scopeKey: normalized.scopeKey,
+    successConditions: normalized.successConditions,
+    preconditions: normalized.preconditions,
+    postconditions: normalized.postconditions,
+    execution: normalized.execution,
+    procedure: normalized.procedure ?? null,
+    captureProcedure: normalized.captureProcedure ?? null,
+    strategies: normalized.strategies,
+    deviceRequest: normalized.device?.request ?? null,
+    run: normalized.run
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
+}
+
 function operationReceipt(operation: DigitalOperation): string {
   const receipt = {
     version: 1,
@@ -521,6 +550,7 @@ function validateOperation(operation: DigitalOperation): void {
   if (!['team', 'organization'].includes(operation.mode)) throw corrupt('Operation mode is invalid.');
   normalizeConditions(operation.preconditions); normalizeConditions(operation.postconditions);
   boundedKey(operation.selectedStrategy, 'selectedStrategy');
+  shaDigest(operation.submissionDigest, 'submissionDigest');
   if (operation.selectedProcedureId !== undefined) validUuid(operation.selectedProcedureId, 'selectedProcedureId');
   if (operation.procedureCapture !== undefined) normalizeProcedureCapture(operation.procedureCapture);
   if (operation.deviceReservationId !== undefined) validUuid(operation.deviceReservationId, 'deviceReservationId');
