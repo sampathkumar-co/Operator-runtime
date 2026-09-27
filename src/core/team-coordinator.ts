@@ -68,6 +68,7 @@ export interface TeamWorkItem {
     summary: string;
     evidence: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>;
     verificationPassed?: boolean;
+    worldObservationDigest?: string;
     completedAt: string;
     workerId: string;
   };
@@ -485,6 +486,7 @@ export class TeamCoordinator {
     summary: string;
     evidence?: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>;
     verificationPassed?: boolean;
+    worldObservationDigest?: string;
   }): Promise<TeamMission> {
     return await this.#store.update(missionId, (mission) => {
       reapExpired(mission);
@@ -500,11 +502,20 @@ export class TeamCoordinator {
       if (item.role === 'verifier' && input.verificationPassed !== true) {
         throw new OperatorError('TEAM_VERIFICATION_REQUIRED', 'Verifier work can complete only with verificationPassed=true.');
       }
+      if (input.worldObservationDigest !== undefined) {
+        if (item.role !== 'verifier' || input.verificationPassed !== true) {
+          throw new OperatorError('TEAM_WORLD_OBSERVATION_DENIED', 'Only a passing verifier may commit world observations.');
+        }
+        if (!/^[0-9a-f]{64}$/i.test(input.worldObservationDigest)) {
+          throw new OperatorError('TEAM_INPUT_INVALID', 'worldObservationDigest must be SHA-256.');
+        }
+      }
       const now = new Date().toISOString();
       item.result = {
         summary: boundedText(input.summary, 64 * 1024, 'completion summary'),
         evidence: validateEvidence(input.evidence ?? []),
         ...(item.role === 'verifier' ? { verificationPassed: true } : {}),
+        ...(input.worldObservationDigest ? { worldObservationDigest: input.worldObservationDigest.toLowerCase() } : {}),
         completedAt: now,
         workerId: worker.id
       };
