@@ -256,11 +256,20 @@ export class TaskOrchestrator {
       const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
       const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
       const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
-      const node = task.nodes.find((candidate) => candidate.key === decision.key)
-        ?? addTaskNode(task, decision.title, {
-          key: decision.key,
-          dependsOn: priorNode ? [priorNode.id] : []
-        });
+      let node = task.nodes.find((candidate) => candidate.key === decision.key);
+      if (!node) {
+        const legacyNode = task.nodes.find((candidate) => candidate.key === undefined && candidate.title === decision.title);
+        if (legacyNode) {
+          legacyNode.key = decision.key;
+          if (legacyNode.dependsOn.length === 0 && priorNode && priorNode.id !== legacyNode.id) legacyNode.dependsOn = [priorNode.id];
+          node = legacyNode;
+          task.evidence.push(evidence('task_graph_migration', 'info', 'Migrated a legacy title-only task node to stable planner identity.', { stepKey: decision.key }));
+        }
+      }
+      node ??= addTaskNode(task, decision.title, {
+        key: decision.key,
+        dependsOn: priorNode ? [priorNode.id] : []
+      });
       setNodeState(task, node.id, 'RUNNING');
       const record: TaskActionRecord = blockedReplay ?? {
         stepKey: decision.key, actionId, capability: decision.capability, risk, inputHash, attempt,
