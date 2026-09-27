@@ -420,7 +420,14 @@ export class RelayControlService {
         reservationCreated = true;
       }
       routedDeviceId = reservation.deviceId;
-      await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+      try {
+        await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
+      } catch (error) {
+        if (reservationCreated) {
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+        }
+        throw error;
+      }
       try {
         const dispatched = await this.#hub.dispatch({
           accountId,
@@ -672,7 +679,14 @@ function validOperationRelayRequest(input: unknown): ValidatedOperationRelayRequ
 
 function operationRequiredCapabilities(request: Record<string, unknown>): string[] {
   const execution = request.execution;
-  if (execution === undefined) return [];
+  if (execution === undefined) {
+    const procedure = request.procedure;
+    if (!procedure || typeof procedure !== 'object' || Array.isArray(procedure)) return [];
+    const required = (procedure as Record<string, unknown>).requiredCapabilities;
+    if (required === undefined) return [];
+    if (!Array.isArray(required) || required.length > 200) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'procedure requiredCapabilities are invalid.');
+    return [...new Set(required.map((value) => validName(String(value), 'procedure required capability')))].sort();
+  }
   if (!execution || typeof execution !== 'object' || Array.isArray(execution)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'operation execution specification is invalid.');
   const raw = execution as Record<string, unknown>;
   const capabilities = new Set<string>();
