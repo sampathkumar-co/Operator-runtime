@@ -349,9 +349,9 @@ export class RelayControlService {
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const operation = validOperationRelayRequest(body.operation);
     const bindingKey = operationBindingKey(operation.operationId);
-    const leaseMs = operation.operation === 'submit' && operation.request
+    const submitLeaseMs = operation.operation === 'submit' && operation.request
       ? operationReservationLeaseMs(operation.request)
-      : 60 * 60_000;
+      : undefined;
 
     let routedDeviceId: string;
     let delivery: { id: string; seq: number };
@@ -404,7 +404,7 @@ export class RelayControlService {
         if (!operationReservationMatches(reservation, requiredCapabilities, requirements)) {
           throw new OperatorError('DEVICE_POOL_RESERVATION_CONFLICT', 'Existing operation reservation is bound to different resource requirements.');
         }
-        reservation = await renewReservation(reservation, leaseMs);
+        reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation));
       } else {
         reservation = await this.#hub.reserveDevice(accountId, {
           workloadKey: bindingKey,
@@ -415,7 +415,7 @@ export class RelayControlService {
           minMemoryMb: requirements.minMemoryMb,
           requireGpu: requirements.requireGpu,
           slots: requirements.slots,
-          leaseMs
+          leaseMs: submitLeaseMs!
         });
         reservationCreated = true;
       }
@@ -450,7 +450,7 @@ export class RelayControlService {
       routedDeviceId = boundDeviceId;
       reservation = await activeReservationFor(boundDeviceId);
       if (reservation) {
-        reservation = await renewReservation(reservation, leaseMs);
+        reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation));
       } else {
         const previous = await latestReservationFor(boundDeviceId);
         if (previous && previous.state !== 'ACTIVE') {
@@ -463,7 +463,7 @@ export class RelayControlService {
             minMemoryMb: previous.minMemoryMb,
             requireGpu: previous.requireGpu,
             slots: previous.slots,
-            leaseMs
+            leaseMs: reservationLeaseDuration(previous)
           });
           reservationCreated = true;
         }
@@ -496,7 +496,7 @@ export class RelayControlService {
           if (terminal || (!result.ok && operation.operation === 'submit')) {
             try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
           } else if (result.ok) {
-            try { reservation = await renewReservation(reservation, leaseMs); } catch {}
+            try { reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation)); } catch {}
           }
         }
         send(response, 200, result);
@@ -752,6 +752,12 @@ function operationReservationMatches(
     && reservation.requireGpu === requirements.requireGpu
     && JSON.stringify(reservation.requiredCapabilities) === JSON.stringify([...requiredCapabilities].sort())
     && JSON.stringify(reservation.requiredTags) === JSON.stringify([...requirements.requiredTags].sort());
+}
+
+function reservationLeaseDuration(reservation: DeviceReservation): number {
+  const duration = Date.parse(reservation.expiresAt) - Date.parse(reservation.heartbeatAt);
+  if (!Number.isFinite(duration)) return 60 * 60_000;
+  return Math.max(10 * 60_000, Math.min(24 * 60 * 60_000, Math.floor(duration)));
 }
 
 function operationReservationLeaseMs(request: Record<string, unknown>): number {
