@@ -55,7 +55,7 @@ export class RelayControlService {
           send(response, 200, { ok: true, service: 'operator-relay-control', version: 1 });
           return;
         }
-        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
+        if (request.method !== 'POST' || !['/v1/execute', '/v1/task', '/v1/operation', '/v1/knowledge', '/v1/account/erase', '/v1/account/default-device', '/v1/device-enrollment/claim'].includes(request.url ?? '')) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
         }
@@ -113,6 +113,10 @@ export class RelayControlService {
         }
         if (request.url === '/v1/operation') {
           await this.#handleOperationRequest(request, response);
+          return;
+        }
+        if (request.url === '/v1/knowledge') {
+          await this.#handleKnowledgeRequest(request, response);
           return;
         }
         const body = await readJson(request) as {
@@ -286,6 +290,47 @@ export class RelayControlService {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     send(response, 504, { ok: false, error: { code: 'RELAY_TASK_RESULT_PENDING', message: 'The routed durable task operation has no result yet; retry with the same task UUID.' } });
+  }
+
+  async #handleKnowledgeRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    const body = await readJson(request) as {
+      accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; query?: unknown; waitMs?: unknown;
+    };
+    const principal = body.principal === undefined ? undefined : validPrincipal(body.principal);
+    const explicitAccountId = body.accountId === undefined ? undefined : validUuid(String(body.accountId), 'accountId');
+    if (Boolean(principal) === Boolean(explicitAccountId)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Exactly one accountId or verified principal is required.');
+    const accountId = principal ? (await this.#accounts.resolveOrCreateAccount(principal)).accountId : explicitAccountId!;
+    if (!this.#developerAccounts.has(accountId)) throw new OperatorError('DEVELOPER_ACCOUNT_REQUIRED', 'Knowledge inspection requires an explicitly entitled Mecord developer account.');
+    const deviceId = body.deviceId === undefined ? undefined : validUuid(String(body.deviceId), 'deviceId');
+    const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
+    const query = validKnowledgeRelayQuery(body.query);
+    const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
+    const dispatched = await this.#hub.dispatch({
+      accountId,
+      explicitDeviceId: deviceId,
+      projectKey,
+      requiredCapabilities: [],
+      kind: 'knowledge',
+      payload: { query },
+      idempotencyKey: freshKnowledgeReceiptKey(accountId, query)
+    });
+    const deadline = Date.now() + waitMs;
+    while (Date.now() <= deadline) {
+      if (request.aborted || response.destroyed) return;
+      const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
+      if (stored && stored.deliveryId === dispatched.delivery.id) {
+        await this.#assertReplayAuthority(accountId, dispatched.route.deviceId, stored.replayAuthority);
+        const result = stored.result as unknown;
+        if (!isKnowledgeTransportResult(result)) {
+          send(response, 502, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_INVALID', message: 'Device returned a malformed knowledge result.' } });
+          return;
+        }
+        send(response, 200, result);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    send(response, 504, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_PENDING', message: 'The routed knowledge read has no durable result yet; retry is safe.' } });
   }
 
   async #handleOperationRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -491,6 +536,29 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
     }
     default: throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'task goal kind is unsupported.');
   }
+}
+
+function validKnowledgeRelayQuery(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query must be an object.');
+  const raw = structuredClone(input as Record<string, unknown>);
+  const kind = String(raw.kind ?? '');
+  if (!['procedures', 'procedure-query', 'world-entity', 'world-fact', 'world-trace', 'world-list', 'optimizer'].includes(kind)) {
+    throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query kind is invalid.');
+  }
+  const encoded = canonicalJson(raw);
+  if (Buffer.byteLength(encoded, 'utf8') > 128 * 1024) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'knowledge query exceeds bounded size.');
+  return raw;
+}
+
+function freshKnowledgeReceiptKey(accountId: string, query: Record<string, unknown>): string {
+  return crypto.createHash('sha256')
+    .update('operator-relay-knowledge-receipt-v1:')
+    .update(accountId).update(':').update(canonicalJson(query)).update(':').update(crypto.randomBytes(32))
+    .digest('hex');
+}
+
+function isKnowledgeTransportResult(input: unknown): input is { ok: boolean } {
+  return Boolean(input && typeof input === 'object' && !Array.isArray(input) && typeof (input as Record<string, unknown>).ok === 'boolean');
 }
 
 type ValidatedOperationRelayRequest = {
