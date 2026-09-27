@@ -80,15 +80,6 @@ const deviceRegistry = new DeviceRegistryStore(stateDir);
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
-const operations = new DigitalOperationsLayer(stateDir, {
-  procedures,
-  world,
-  devices: devicePool,
-  optimizer,
-  teams,
-  organizations,
-  availableCapabilities: permissions.allowedCapabilities
-});
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -125,6 +116,16 @@ const runtime = createRuntime({
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
+});
+const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
+const operations = new DigitalOperationsLayer(stateDir, {
+  procedures,
+  world,
+  devices: devicePool,
+  optimizer,
+  teams,
+  organizations,
+  availableCapabilities: operationCapabilities
 });
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
