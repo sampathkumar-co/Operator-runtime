@@ -1,10 +1,12 @@
 mod protocol;
 mod uia;
+mod visual;
 mod win32;
 
 use std::io::{self, BufRead, Write};
 
 use protocol::{InspectParams, MAX_REQUEST_BYTES, OperateParams, Request, Response, Selector};
+use visual::{CaptureParams, InputParams};
 use serde_json::{json, Value};
 use uia::UiaEngine;
 use win32::WindowDiscovery;
@@ -71,7 +73,7 @@ fn handle_line(engine: &Result<UiaEngine, String>, line: &str) -> Response<Value
                 "protocol": 1,
                 "uia_available": uia_available,
                 "uia_error": uia_error,
-                "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait", "window_discovery", "activate_window", "win32_fallback"]
+                "capabilities": ["inspect", "invoke", "set_value", "focus", "select", "expand", "collapse", "scroll", "wait", "window_discovery", "activate_window", "win32_fallback", "visual_capture", "physical_input"]
             }))
         }
         "inspect" => {
@@ -91,7 +93,30 @@ fn handle_line(engine: &Result<UiaEngine, String>, line: &str) -> Response<Value
             }
             operate_request(engine, request.id, params)
         }
-        _ => Response::failure(request.id, "METHOD_NOT_ALLOWED", "method must be health, inspect, or operate", false),
+        "capture" => {
+            let params: CaptureParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => return Response::failure(request.id, "INVALID_PARAMS", format!("Invalid capture params: {error}"), false),
+            };
+            match visual::capture(params) {
+                Ok(result) => Response::success(request.id, serde_json::to_value(result).unwrap_or(Value::Null)),
+                Err(error) => Response::failure(request.id, "VISUAL_CAPTURE_FAILED", error, true),
+            }
+        }
+        "input" => {
+            let params: InputParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => return Response::failure(request.id, "INVALID_PARAMS", format!("Invalid input params: {error}"), false),
+            };
+            if let Err(error) = params.validate() {
+                return Response::failure(request.id, "INVALID_PARAMS", error, false);
+            }
+            match visual::operate(params) {
+                Ok(result) => Response::success(request.id, result),
+                Err(error) => Response::failure(request.id, "PHYSICAL_INPUT_FAILED", error, true),
+            }
+        }
+        _ => Response::failure(request.id, "METHOD_NOT_ALLOWED", "method must be health, inspect, operate, capture, or input", false),
     }
 }
 
