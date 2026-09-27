@@ -301,6 +301,7 @@ export function validateWorldObservation(input: {
   for (const [keyInput, value] of Object.entries(input.facts ?? {})) {
     const key = boundedKey(keyInput, 'fact key');
     if (SECRET_KEY.test(key)) throw new OperatorError('WORLD_SECRET_FACT_DENIED', 'Secret-bearing fact keys are not accepted by the world model.');
+    assertWorldValueSafe(value, `facts.${key}`);
     const encoded = JSON.stringify(value);
     if (encoded === undefined || Buffer.byteLength(encoded, 'utf8') > MAX_FACT_BYTES) throw new OperatorError('WORLD_INPUT_INVALID', `Fact ${key} exceeds bounded JSON size.`);
     facts[key] = JSON.parse(encoded);
@@ -361,6 +362,37 @@ function validateState(input: unknown): WorldModelState {
     boundedContext(relation.source, 'relation source'); validDomain(relation.domain); shaDigest(relation.evidenceDigest, 'relation evidence'); boundedConfidence(relation.confidence, 'relation confidence'); validIso(relation.observedAt, 'relation observedAt'); validIso(relation.expiresAt, 'relation expiresAt');
   }
   return structuredClone(raw);
+}
+
+function assertWorldValueSafe(value: unknown, label: string, depth = 0): void {
+  if (depth > 8) throw new OperatorError('WORLD_INPUT_INVALID', `${label} exceeds maximum nested depth.`);
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return;
+  if (typeof value === 'string') {
+    if (value.length > 16_384 || value.includes('\0')) throw new OperatorError('WORLD_INPUT_INVALID', `${label} contains an invalid string value.`);
+    if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/i.test(value)
+      || /\bBearer\s+[A-Za-z0-9._~+\/-]{16,}/i.test(value)
+      || /\bAKIA[0-9A-Z]{16}\b/.test(value)
+      || /\bsk-[A-Za-z0-9_-]{20,}\b/.test(value)) {
+      throw new OperatorError('WORLD_SECRET_FACT_DENIED', `${label} appears to contain credential material.`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 256) throw new OperatorError('WORLD_INPUT_INVALID', `${label} array is too large.`);
+    value.forEach((item, index) => assertWorldValueSafe(item, `${label}[${index}]`, depth + 1));
+    return;
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > 256) throw new OperatorError('WORLD_INPUT_INVALID', `${label} object is too large.`);
+    for (const [key, child] of entries) {
+      if (!key || key.length > 128 || key.includes('\0')) throw new OperatorError('WORLD_INPUT_INVALID', `${label} contains an invalid nested key.`);
+      if (SECRET_KEY.test(key)) throw new OperatorError('WORLD_SECRET_FACT_DENIED', `${label} contains a secret-bearing nested key.`);
+      assertWorldValueSafe(child, `${label}.${key}`, depth + 1);
+    }
+    return;
+  }
+  throw new OperatorError('WORLD_INPUT_INVALID', `${label} contains an unsupported value type.`);
 }
 
 function combinedConfidence(claims: WorldClaim[]): number {
