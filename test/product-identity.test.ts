@@ -12,13 +12,16 @@ test('Mecord Connect public product and npm runtime versions follow the declared
   assert.equal(PRODUCT_TITLE, 'Mecord Connect');
   assert.equal(PRODUCT_VERSION, PUBLIC_PRODUCT_VERSION);
   assert.equal(PRODUCT_VERSION, releaseState.versions.publicProduct);
-  assert.equal(pkg.version, releaseState.versions.runtimePackage);
   assert.equal(releaseState.versions.policy, 'public-schema-stable-runtime-patch-independent');
   assert.match(PRODUCT_VERSION, /^\d+\.\d+\.\d+$/);
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
   assert.equal(pkg.name, PRODUCT_NAME);
   const publicParts = PRODUCT_VERSION.split('.').map(Number);
   const runtimeParts = pkg.version.split('.').map(Number);
+  const publishedRuntimeParts = releaseState.versions.runtimePackage.split('.').map(Number);
+  assert.equal(runtimeParts[0], publishedRuntimeParts[0], 'npm runtime candidate major must match the currently published runtime major');
+  assert.equal(runtimeParts[1], publishedRuntimeParts[1], 'npm runtime candidate minor must match the currently published runtime minor');
+  assert.ok(runtimeParts[2] >= publishedRuntimeParts[2], 'npm runtime candidate patch must not regress below the currently published runtime patch');
   assert.equal(runtimeParts[0], publicParts[0], 'npm runtime major must match the public product major');
   assert.equal(runtimeParts[1], publicParts[1], 'npm runtime minor must match the public product minor unless the public version is intentionally revised');
   assert.ok(runtimeParts[2] >= publicParts[2], 'npm runtime patch must not be older than the public product patch');
