@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import os from 'node:os';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
@@ -86,7 +87,7 @@ export class ProcessProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    return ['terminal.execute', 'terminal.session', 'process.inspect'].includes(action.capability);
+    return ['terminal.execute', 'terminal.session', 'process.inspect', 'process.manage'].includes(action.capability);
   }
 
   resolveRisk(action: ActionRequest): ActionRisk {
@@ -103,6 +104,7 @@ export class ProcessProvider implements CapabilityProvider {
     const started = performance.now();
     if (action.capability === 'terminal.session') return await this.#session(action, started);
     if (action.capability === 'process.inspect') return await this.#inspectProcesses(action, started, context.signal);
+    if (action.capability === 'process.manage') return await this.#manageProcess(action, started, context.signal);
     const executable = String(action.input.executable ?? '').trim();
     const args = Array.isArray(action.input.args) ? action.input.args.map(String) : [];
     const timeoutMs = boundedInteger(action.input.timeoutMs, DEFAULT_TIMEOUT_MS, 100, MAX_TIMEOUT_MS);
@@ -297,6 +299,38 @@ export class ProcessProvider implements CapabilityProvider {
       };
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_INSPECT_FAILED', error instanceof Error ? error.message : String(error));
+      return failure(action, this.name, started, op.code, op.message);
+    }
+  }
+
+  async #manageProcess(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    if (process.platform !== 'win32') return failure(action, this.name, started, 'WINDOWS_ONLY', 'System process management is currently certified only on Windows.');
+    if (String(action.input.operation ?? '') !== 'terminate') return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', 'process.manage currently supports only terminate.');
+    const pid = boundedInteger(action.input.pid, 0, 1, 0x7fff_ffff);
+    const expectedFingerprint = String(action.input.expectedFingerprint ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expectedFingerprint)) return failure(action, this.name, started, 'PROCESS_PRECONDITION_REQUIRED', 'process.manage terminate requires expectedFingerprint from a fresh process.inspect.');
+    if (pid === process.pid || pid <= 4) return failure(action, this.name, started, 'PROCESS_TERMINATE_DENIED', 'Refusing to terminate the Operator process or reserved system PIDs.');
+    try {
+      const processes = await runTasklist(signal);
+      const target = processes.find((entry) => entry.pid === pid);
+      if (!target) return failure(action, this.name, started, 'PROCESS_NOT_FOUND', 'Process no longer exists.');
+      if (target.fingerprint !== expectedFingerprint) return failure(action, this.name, started, 'PROCESS_PRECONDITION_FAILED', 'Process identity changed since inspection.');
+      if (!sameWindowsUser(target.userName, os.userInfo().username)) return failure(action, this.name, started, 'PROCESS_TERMINATE_DENIED', 'Refusing to terminate a process owned by another Windows account.');
+      if (CRITICAL_WINDOWS_PROCESSES.has(target.imageName.toLowerCase())) return failure(action, this.name, started, 'PROCESS_TERMINATE_DENIED', 'Refusing to terminate a critical Windows process.');
+      await runTaskkill(pid, signal);
+      const remaining = (await runTasklist(signal)).some((entry) => entry.pid === pid && entry.fingerprint === expectedFingerprint);
+      if (remaining) throw new OperatorError('PROCESS_TERMINATE_POSTCONDITION_FAILED', 'Target process remained after taskkill completed.');
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: { operation: 'terminate', pid, imageName: target.imageName, fingerprint: target.fingerprint },
+        evidence: [
+          evidence('process_terminate', 'pass', 'Freshly fingerprinted current-user Windows process tree terminated.', { pid, imageName: target.imageName }),
+          evidence('postcondition', 'pass', 'The inspected process identity is no longer present.', { pid, fingerprint: target.fingerprint })
+        ],
+        durationMs: Math.round(performance.now() - started)
+      };
+    } catch (error) {
+      const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_TERMINATE_FAILED', error instanceof Error ? error.message : String(error));
       return failure(action, this.name, started, op.code, op.message);
     }
   }
@@ -512,24 +546,47 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams, pid: 
   try { child.kill('SIGTERM'); } catch {}
 }
 
-async function runTasklist(signal?: AbortSignal): Promise<Array<{ imageName: string; pid: number; sessionName: string; sessionNumber: number; memoryKb: number }>> {
+const CRITICAL_WINDOWS_PROCESSES = new Set([
+  'system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe',
+  'lsass.exe', 'winlogon.exe', 'fontdrvhost.exe'
+]);
+
+type WindowsProcessRow = {
+  imageName: string; pid: number; sessionName: string; sessionNumber: number; memoryKb: number;
+  status: string; userName: string; cpuTime: string; windowTitle: string; fingerprint: string;
+};
+
+async function runTasklist(signal?: AbortSignal): Promise<WindowsProcessRow[]> {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
   const executable = path.join(systemRoot, 'System32', 'tasklist.exe');
-  const output = await runProcess(executable, ['/FO', 'CSV', '/NH'], process.cwd(), 15_000, 4 * 1024 * 1024, {}, signal);
+  const output = await runProcess(executable, ['/V', '/FO', 'CSV', '/NH'], process.cwd(), 15_000, 8 * 1024 * 1024, {}, signal);
   if (output.exitCode !== 0) throw new OperatorError('PROCESS_INSPECT_FAILED', `tasklist exited with ${String(output.exitCode)}.`);
-  const rows: Array<{ imageName: string; pid: number; sessionName: string; sessionNumber: number; memoryKb: number }> = [];
+  const rows: WindowsProcessRow[] = [];
   for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
     const cols = parseCsvLine(line);
-    if (cols.length < 5) continue;
+    if (cols.length < 9) continue;
     const pid = Number(cols[1]);
     const sessionNumber = Number(cols[3]);
     const memoryKb = Number(String(cols[4]).replace(/[^0-9]/g, ''));
     if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    const imageName = cols[0]!;
+    const sessionName = cols[2] ?? '';
+    const status = cols[5] ?? '';
+    const userName = cols[6] ?? '';
+    const cpuTime = cols[7] ?? '';
+    const windowTitle = cols.slice(8).join(',');
+    const fingerprint = crypto.createHash('sha256')
+      .update(imageName.toLowerCase()).update('\0')
+      .update(String(pid)).update('\0')
+      .update(sessionName.toLowerCase()).update('\0')
+      .update(String(Number.isFinite(sessionNumber) ? sessionNumber : 0)).update('\0')
+      .update(userName.toLowerCase())
+      .digest('hex');
     rows.push({
-      imageName: cols[0]!, pid,
-      sessionName: cols[2] ?? '',
+      imageName, pid, sessionName,
       sessionNumber: Number.isFinite(sessionNumber) ? sessionNumber : 0,
-      memoryKb: Number.isFinite(memoryKb) ? memoryKb : 0
+      memoryKb: Number.isFinite(memoryKb) ? memoryKb : 0,
+      status, userName, cpuTime, windowTitle, fingerprint
     });
   }
   return rows;
@@ -550,4 +607,19 @@ function parseCsvLine(line: string): string[] {
   }
   values.push(current);
   return values;
+}
+
+
+function sameWindowsUser(tasklistUser: string, currentUser: string): boolean {
+  const left = tasklistUser.trim().toLowerCase();
+  const right = currentUser.trim().toLowerCase();
+  return left === right || left.endsWith('\\' + right);
+}
+
+async function runTaskkill(pid: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Process termination was cancelled.', { retryable: false });
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const executable = path.join(systemRoot, 'System32', 'taskkill.exe');
+  const output = await runProcess(executable, ['/PID', String(pid), '/T', '/F'], process.cwd(), 20_000, 512 * 1024, {}, signal);
+  if (output.exitCode !== 0) throw new OperatorError('PROCESS_TERMINATE_FAILED', `taskkill exited with ${String(output.exitCode)}.`);
 }
