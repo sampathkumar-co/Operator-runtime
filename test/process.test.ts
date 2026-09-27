@@ -123,3 +123,91 @@ test('Windows executable lookup ignores an authorized cwd shadow binary', async 
   assert.equal(result.ok, true, result.error?.message);
   assert.match((result.output as { stdout: string }).stdout, /^git version /i);
 });
+
+
+test('interactive terminal session supports start, stdin, cursor output, list and termination', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-session-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  t.after(() => provider.close());
+
+  const start = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'destructive',
+    input: {
+      operation: 'start', executable: 'node', cwd: root,
+      args: ['-e', 'process.stdin.setEncoding("utf8");process.stdin.on("data",d=>process.stdout.write("echo:"+d));setInterval(()=>{},1000)']
+    },
+    provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(start.ok, true, start.error?.message);
+  const sessionId = (start.output as any).sessionId as string;
+  assert.match(sessionId, /^[0-9a-f-]{36}$/);
+
+  const write = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'destructive',
+    input: { operation: 'write', sessionId, input: 'hello\n' }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(write.ok, true, write.error?.message);
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const read = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
+    input: { operation: 'read', sessionId, afterCursor: 0, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(read.ok, true, read.error?.message);
+  const events = (read.output as any).events as Array<{ stream: string; text: string; cursor: number }>;
+  assert.ok(events.some((event) => event.stream === 'stdout' && event.text.includes('echo:hello')));
+  const cursor = (read.output as any).cursor as number;
+
+  const emptyRead = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
+    input: { operation: 'read', sessionId, afterCursor: cursor, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(emptyRead.ok, true);
+  assert.equal((emptyRead.output as any).events.length, 0);
+
+  const list = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
+    input: { operation: 'list' }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(list.ok, true);
+  assert.ok(((list.output as any).sessions as any[]).some((session) => session.sessionId === sessionId));
+
+  const terminate = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'destructive',
+    input: { operation: 'terminate', sessionId }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(terminate.ok, true, terminate.error?.message);
+});
+
+test('terminal session refuses non-allowlisted executables before process creation', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-session-deny-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  t.after(() => provider.close());
+  const denied = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'destructive',
+    input: { operation: 'start', executable: 'git', args: ['status'], cwd: root },
+    provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error?.code, 'EXECUTABLE_DENIED');
+});
+
+test('Windows process inspection returns bounded metadata without command lines', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows-only process inspection');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-inspect-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const result = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+    input: { pid: process.pid, limit: 10 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(result.ok, true, result.error?.message);
+  const processes = (result.output as any).processes as any[];
+  assert.ok(processes.some((entry) => entry.pid === process.pid));
+  for (const entry of processes) {
+    assert.equal('commandLine' in entry, false);
+    assert.equal('environment' in entry, false);
+  }
+});
