@@ -5,7 +5,8 @@ import type { TaskObservationDomain, TaskObservationSummaryV2 } from './task.ts'
 const SAFE_STATE_KEYS = new Set([
   'sha256', 'size', 'bytes', 'count', 'clean', 'operation', 'verified',
   'exitCode', 'state', 'healthy', 'selected', 'expand_collapse_state', 'truncated',
-  'events_truncated', 'waited_ms', 'observed_ms', 'max_nodes', 'max_depth'
+  'events_truncated', 'waited_ms', 'observed_ms', 'max_nodes', 'max_depth',
+  'afterCaptured', 'captureLeaseConsumed', 'changed', 'windowStable', 'afterSha256'
 ]);
 const AMBIGUOUS_ERROR = /AMBIGUOUS|MULTIPLE_MATCH|TARGET_NOT_UNIQUE/i;
 
