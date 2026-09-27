@@ -30,8 +30,10 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   const failedRequired = required.filter((node) => node.state === 'FAILED' || node.state === 'BLOCKED');
   const conditionsPresent = task.successConditions.length > 0;
   const keyedNodeRecordMismatches = required.filter((node) => {
-    if (!node.key) return false;
-    const matching = execution?.records.filter((record) => record.stepKey === node.key) ?? [];
+    if (!node.key && !node.stepKey && !node.actionId) return false;
+    const matching = execution?.records.filter((record) =>
+      node.actionId ? record.actionId === node.actionId : record.stepKey === (node.stepKey ?? node.key)
+    ) ?? [];
     if (node.state === 'VERIFIED') return !matching.some((record) => record.state === 'SUCCEEDED');
     if (node.state === 'SKIPPED') return !matching.some((record) => record.state === 'FAILED' || record.state === 'INTERRUPTED');
     return false;
