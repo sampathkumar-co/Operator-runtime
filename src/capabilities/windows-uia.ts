@@ -44,6 +44,7 @@ type CaptureLease = {
   returnedHeight: number;
   scaleX: number;
   scaleY: number;
+  captureParams: Record<string, unknown>;
   windowId?: string;
 };
 
@@ -300,7 +301,8 @@ export class WindowsUiaProvider implements CapabilityProvider {
 
   async #capture(action: ActionRequest, signal?: AbortSignal): Promise<unknown> {
     this.#pruneCaptureLeases();
-    const raw = asRecord(await this.#client.call('capture', normalizeVisualCaptureInput(action.input), signal));
+    const captureParams = normalizeVisualCaptureInput(action.input);
+    const raw = asRecord(await this.#client.call('capture', captureParams, signal));
     const pngBase64 = String(raw.png_base64 ?? '');
     const png = Buffer.from(pngBase64, 'base64');
     if (png.length < 16 || png.length > 8 * 1024 * 1024) throw new OperatorError('VISUAL_CAPTURE_INVALID', 'Native capture returned an invalid PNG payload.');
@@ -317,6 +319,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       returnedHeight: boundedCaptureInteger(raw.returned_height, 1, 720, 'returned_height'),
       scaleX: boundedCaptureNumber(raw.scale_x, 0.0001, 1000, 'scale_x'),
       scaleY: boundedCaptureNumber(raw.scale_y, 0.0001, 1000, 'scale_y'),
+      captureParams: structuredClone(captureParams),
       ...(typeof raw.window_id === 'string' && raw.window_id ? { windowId: raw.window_id } : {})
     };
     this.#captureLeases.set(captureId, lease);
@@ -381,8 +384,56 @@ export class WindowsUiaProvider implements CapabilityProvider {
     }
     const before = { captureId, sha256: lease.sha256, expiresAt: new Date(lease.expiresAt).toISOString() };
     const native = asRecord(await this.#client.call('input', params, signal));
+    // A physical action consumes its BEFORE lease regardless of verification outcome.
     this.#captureLeases.delete(captureId);
-    return { operation, before, native, postcondition: { dispatched: true, captureLeaseConsumed: true } };
+
+    let afterRaw: Record<string, unknown>;
+    try {
+      afterRaw = asRecord(await this.#client.call('capture', lease.captureParams, signal));
+    } catch (error) {
+      throw new OperatorError(
+        'INPUT_AFTER_CAPTURE_FAILED',
+        `Physical input was dispatched but AFTER capture verification failed: ${error instanceof Error ? error.message : String(error)}`,
+        { retryable: false }
+      );
+    }
+    const afterBase64 = String(afterRaw.png_base64 ?? '');
+    const afterPng = Buffer.from(afterBase64, 'base64');
+    if (afterPng.length < 16 || afterPng.length > 8 * 1024 * 1024) {
+      throw new OperatorError('INPUT_AFTER_CAPTURE_INVALID', 'Physical input was dispatched but AFTER capture returned an invalid PNG payload.', { retryable: false });
+    }
+    const afterSha256 = crypto.createHash('sha256').update(afterPng).digest('hex');
+    const after = {
+      sha256: afterSha256,
+      changed: afterSha256 !== lease.sha256,
+      source: afterRaw.source,
+      originX: boundedCaptureInteger(afterRaw.origin_x, -100_000, 100_000, 'after.origin_x'),
+      originY: boundedCaptureInteger(afterRaw.origin_y, -100_000, 100_000, 'after.origin_y'),
+      sourceWidth: boundedCaptureInteger(afterRaw.source_width, 1, 100_000, 'after.source_width'),
+      sourceHeight: boundedCaptureInteger(afterRaw.source_height, 1, 100_000, 'after.source_height'),
+      width: boundedCaptureInteger(afterRaw.returned_width, 1, 1280, 'after.returned_width'),
+      height: boundedCaptureInteger(afterRaw.returned_height, 1, 720, 'after.returned_height'),
+      ...(typeof afterRaw.window_id === 'string' && afterRaw.window_id ? { windowId: afterRaw.window_id } : {}),
+      mimeType: 'image/png',
+      imageBase64: afterBase64
+    };
+    if (lease.windowId && after.windowId !== lease.windowId) {
+      throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
+    }
+    return {
+      operation,
+      before,
+      native,
+      after,
+      postcondition: {
+        dispatched: true,
+        captureLeaseConsumed: true,
+        afterCaptured: true,
+        afterSha256,
+        changed: after.changed,
+        windowStable: lease.windowId ? after.windowId === lease.windowId : true
+      }
+    };
   }
 
   #pruneCaptureLeases(): void {
