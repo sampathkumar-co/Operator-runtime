@@ -162,3 +162,51 @@ M6 deliberately does **not** introduce arbitrary model-generated shell commands 
 Provider learning remains a routing hint rather than execution authority. State is bounded to capability/provider/semantic-context reliability counters and an aggregate latency EWMA; raw task text, URLs, paths, commands, credentials and result payloads are never persisted in the learning store. The learned adjustment remains capped so static security, determinism and policy boundaries remain authoritative.
 
 Cancellation is durable-first: the task is persisted as CANCELLED before the in-process abort signal is raised. Long-running subprocess-backed providers terminate their child process and Windows UIA closes the native sidecar request; browser waits and discovery calls observe the same abort signal. This closes the earlier gap where cancellation could be recorded only after an in-flight provider returned.
+
+
+## M7 — Windows RDC parity + shared-state multi-agent runtime — REPOSITORY COMPLETE
+
+### Windows RDC parity
+
+- [x] bounded recursive filename search
+- [x] file/directory metadata inspection with SHA-256 for bounded files
+- [x] dynamic-risk file management: mkdir/copy/move/remove
+- [x] Windows-safe staged move transaction without weakening path-authority leases
+- [x] interactive shell-free terminal sessions with cursor-based output and stdin
+- [x] owned process-session lifecycle and tree termination
+- [x] bounded Windows process inspection without command line/environment disclosure
+- [x] fingerprinted current-user process termination with critical-process denylist and destructive approval
+- [x] private Developer MCP surface expanded from 24 to 30 grouped semantic tools
+- [x] dedicated Windows RDC parity CI certification
+
+The raw-control parity layer is intentionally subordinate to the semantic runtime. It exists for gaps where structured Git/browser/UIA/Docker/PostgreSQL/VS Code adapters are not sufficient. It does not turn Mecord Connect into an unrestricted shell: filesystem authority remains root-scoped and reparse-point defended, process execution remains shell-free/allowlisted, and destructive process management requires a fresh inspected identity fingerprint plus local destructive authority.
+
+The Windows move primitive does not weaken the native path-lease helper by enabling delete sharing. Regular-file moves are implemented as verified destination staging, a fresh SHA precondition check, source removal, and final destination verification with rollback/restoration safeguards. This keeps the anti-junction boundary intact while avoiding Windows rename-handle conflicts.
+
+### Stage 4 shared-state multi-agent runtime
+
+- [x] durable team mission store with deterministic work-item IDs
+- [x] supervisor / planner / coder / tester / browser / UI / verifier / general roles
+- [x] dependency-aware scheduling and priority ordering
+- [x] bounded worker, concurrency, attempt, wall-clock and lease budgets
+- [x] worker registration, heartbeat and revocation
+- [x] artifact/resource declarations, exclusive locks and monotonic revisions
+- [x] optimistic base-revision conflict detection
+- [x] capability/risk/resource authorization before every worker action
+- [x] lease-expiry handling that distinguishes safe read replay from uncertain mutation
+- [x] `NEEDS_RECONCILIATION` state for uncertain mutating work
+- [x] supervisor/verifier-only reconciliation
+- [x] durable CAS shared blackboard with bounded JSON values
+- [x] mission pause/cancel and worker revoke abort active provider execution
+- [x] verifier coverage requirement across every non-verifier work item
+- [x] verifier-gated final `VERIFIED` mission state
+- [x] authenticated `/v1/teams` local-agent APIs
+- [x] Control Center team-mission visibility
+- [x] real-runtime Stage-4 execution E2E
+- [x] dedicated Stage 4 multi-agent CI certification
+
+Stage 4 is an execution coordinator, not an embedded LLM. External agents such as ChatGPT/Codex/Claude or another worker implementation can register against the coordinator, but no model receives authority merely by identifying as a role. Every action remains constrained by the worker capability set, claimed work lease, canonical risk, declared resources, normal local policy/approval, emergency stop and provider-level postconditions.
+
+The runtime-certified Stage-4/Windows-parity code head is `288d5a1c5ad5742f0f041e42740010eeda50dd92`. On that immutable code head, CI #1375, Platform Matrix #1145, Windows Signing Smoke #1146 and NPM Remote Runtime CI #759 all passed. The dedicated Windows RDC parity and Stage 4 multi-agent certification jobs were both green on the same commit.
+
+Deployment remains a separate state transition. The currently live production endpoint is still the older source recorded in `docs/CURRENT_RELEASE_STATE.md`, with the public 9-tool surface and deployed 24-tool Developer surface, until this successor is merged, deployed and release-state metadata is promoted.
