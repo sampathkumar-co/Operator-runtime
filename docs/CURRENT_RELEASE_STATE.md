@@ -36,16 +36,16 @@ Production now includes:
 
 The runtime-certified Stage-5–10 code head remains `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`; the deployed merged mainline source is `3361b2f77d2b04028d514b178bd4a246fc863e6c`.
 
-The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm patch release is published.
+The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.0 release is published.
 
 ## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
 
 - public product / plugin snapshot: **1.0.0**
-- npm runtime: **1.0.1**
+- npm runtime currently published: **1.0.1**; next candidate: **2.0.0**
 
-The public version tracks the stable public MCP schema/review snapshot. The Windows runtime may receive patch-only updates without forcing a new public plugin version. Tests must enforce the declared release-state values, matching public major/minor compatibility, and a runtime patch version that is not older than the public snapshot.
+The public version tracks the stable public MCP schema/review snapshot. The The npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged. Tests require the runtime candidate to be valid SemVer and never older than the actually published runtime.
 
 ## OpenAI-side state
 
