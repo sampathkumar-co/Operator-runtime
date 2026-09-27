@@ -210,3 +210,83 @@ Stage 4 is an execution coordinator, not an embedded LLM. External agents such a
 The runtime-certified Stage-4/Windows-parity code head is `288d5a1c5ad5742f0f041e42740010eeda50dd92`. On that immutable code head, CI #1375, Platform Matrix #1145, Windows Signing Smoke #1146 and NPM Remote Runtime CI #759 all passed. The dedicated Windows RDC parity and Stage 4 multi-agent certification jobs were both green on the same commit.
 
 Deployment remains a separate state transition. The currently live production endpoint is still the older source recorded in `docs/CURRENT_RELEASE_STATE.md`, with the public 9-tool surface and deployed 24-tool Developer surface, until this successor is merged, deployed and release-state metadata is promoted.
+
+
+## M8 — Stage 5–10 Agent OS successor — REPOSITORY COMPLETE, DEPLOYMENT PENDING
+
+Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
+
+### Stage 5 — verified procedural memory
+- [x] verifier-only procedure promotion
+- [x] bounded assumption fingerprints
+- [x] scope/capability-aware reuse
+- [x] expiry / invalidation / suspension
+- [x] raw secret avoidance
+- [x] receipt-idempotent promotion and reuse outcomes
+- [x] dedicated Stage 5 certification
+
+### Stage 6 — cross-application intelligence
+- [x] durable entity/relation world graph
+- [x] browser/application/filesystem/Git/database/process/device/project/organization domains
+- [x] source/evidence/freshness/confidence claims
+- [x] explicit conflict preservation and bounded resolution
+- [x] verifier-committed world publication
+- [x] exact-payload replay binding
+- [x] nested credential/secret rejection
+- [x] dedicated Stage 6 certification
+
+### Stage 7 — trusted cross-device orchestration
+- [x] signed host resource profile in relay hello
+- [x] active paired/account-owned resource advertisements
+- [x] capability/tag/GPU/memory/capacity filtering
+- [x] deterministic project/default-device authority preservation
+- [x] operation-to-device durable affinity
+- [x] durable operation-lifetime capacity reservations
+- [x] renewal/reconnect handling and terminal release
+- [x] bounded signed host concurrency
+- [x] placement compensation on binding failure
+- [x] dedicated Stage 7 certification
+
+### Stage 8 — organization-scale execution
+- [x] durable organization programs
+- [x] target-scope allow prefixes
+- [x] canary-first rollout
+- [x] bounded wave size / parallel blast radius
+- [x] explicit verified promotion
+- [x] failure halt
+- [x] Stage-4 mission per target
+- [x] compensating cleanup for partial startup/resume transitions
+- [x] dedicated Stage 8 certification
+
+### Stage 9 — bounded self-optimization
+- [x] verified/failed strategy reliability learning
+- [x] latency/retry/cost aggregates only
+- [x] bounded learned ranking adjustment
+- [x] concurrency recommendation inside caller min/max
+- [x] no capability/risk/scope/approval/recovery mutation
+- [x] receipt-idempotent learning
+- [x] dedicated Stage 9 certification
+
+### Stage 10 — autonomous digital operations layer
+- [x] durable outcome contracts
+- [x] stable operation UUID + canonical submission digest
+- [x] world preconditions / postconditions
+- [x] verified procedure reuse and verifier-backed capture
+- [x] explicit Stage-4/Stage-8 execution support
+- [x] bounded outcome auto-planner
+- [x] mandatory capability + exact-resource authority envelope for auto-planning
+- [x] local capability intersection; envelope cannot grant authority
+- [x] read-default max risk and dynamic-risk exclusion
+- [x] verifier-gated final state
+- [x] organization procedure capture hashes actual target verifier evidence
+- [x] crash/retry-idempotent final learning
+- [x] trusted paired-device placement + operation-lifetime reservation
+- [x] grouped private MCP `operations` tool
+- [x] read-only grouped private MCP `knowledge.inspect` tool
+- [x] private source surface = **32 grouped tools**
+- [x] public surface remains **9 tools**
+- [x] dedicated Stage 10 certification
+
+All Stage-5–10 behavior remains subordinate to the existing provenance, canonical-risk, local policy, approval, emergency-stop, exact-resource, provider and verification boundaries. No stage adds an embedded LLM or permits learned state to become authority.
+
+The source successor is repository-complete. Merge/deployment, live endpoint verification and production release-state promotion remain separate transitions.
