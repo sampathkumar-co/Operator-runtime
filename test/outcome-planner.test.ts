@@ -9,7 +9,9 @@ test('stage10 outcome planner expands only already-authorized static capabilitie
     scopeKey: 'project:alpha',
     successConditions: ['build succeeds', 'verification passes'],
     maxRisk: 'write',
-    availableCapabilities: ['project.inspect', 'file.*', 'browser.interact', 'terminal.session']
+    availableCapabilities: ['project.inspect', 'file.read', 'file.write', 'file.replace', 'file.manage', 'browser.interact', 'terminal.session'],
+    requestedCapabilities: ['project.inspect', 'file.read', 'file.write', 'browser.interact'],
+    resources: ['repo:/workspace/alpha']
   });
 
   assert.match(plan.planDigest, /^[0-9a-f]{64}$/);
@@ -22,6 +24,8 @@ test('stage10 outcome planner expands only already-authorized static capabilitie
   assert.equal(capabilities.has('browser.interact'), false);
   assert.equal(capabilities.has('terminal.session'), false);
   assert.deepEqual(plan.excludedDynamicCapabilities, ['file.manage', 'terminal.session']);
+  assert.ok(plan.workItems.every((item) => JSON.stringify(item.resources) === JSON.stringify(['repo:/workspace/alpha'])));
+  assert.ok(plan.workItems.every((item) => !(item.allowedCapabilities ?? []).includes('file.replace')));
 });
 
 test('stage10 outcome planner creates independent tester and verifier coverage for generated work', () => {
@@ -30,7 +34,10 @@ test('stage10 outcome planner creates independent tester and verifier coverage f
     objective: 'Make a bounded change',
     scopeKey: 'project:beta',
     successConditions: ['desired state is observable'],
-    availableCapabilities: ['file.read', 'file.write']
+    maxRisk: 'write',
+    availableCapabilities: ['file.read', 'file.write'],
+    requestedCapabilities: ['file.read', 'file.write'],
+    resources: ['file:/workspace/beta/output.txt']
   });
   const byKey = new Map(plan.workItems.map((item) => [item.key, item]));
   assert.deepEqual(plan.workItems.map((item) => item.key), ['plan', 'execute-write', 'test', 'verify']);
@@ -47,7 +54,6 @@ test('stage10 outcome planner honors an explicit read-only ceiling', () => {
     objective: 'Inspect without changing anything',
     scopeKey: 'project:gamma',
     successConditions: ['state is understood'],
-    maxRisk: 'read',
     availableCapabilities: ['file.read', 'file.write', 'browser.interact', 'process.manage']
   });
   assert.deepEqual(plan.workItems.map((item) => item.key), ['plan', 'test', 'verify']);
@@ -65,5 +71,32 @@ test('stage10 outcome planner fails closed when no authorized read observation c
       availableCapabilities: ['file.write', 'terminal.session']
     }),
     (error: any) => error?.code === 'OUTCOME_PLAN_CAPABILITY_EMPTY'
+  );
+});
+
+
+test('stage10 outcome planner refuses mutation without explicit capability and resource authority', () => {
+  const planner = new OutcomePlanner();
+  assert.throws(
+    () => planner.plan({
+      objective: 'Do not widen mutation authority',
+      scopeKey: 'project:authority',
+      successConditions: ['verified'],
+      maxRisk: 'write',
+      availableCapabilities: ['file.read', 'file.write']
+    }),
+    (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
+  );
+  assert.throws(
+    () => planner.plan({
+      objective: 'Resources are mandatory for mutation',
+      scopeKey: 'project:authority',
+      successConditions: ['verified'],
+      maxRisk: 'write',
+      availableCapabilities: ['file.read', 'file.write'],
+      requestedCapabilities: ['file.read', 'file.write'],
+      resources: []
+    }),
+    (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
   );
 });
