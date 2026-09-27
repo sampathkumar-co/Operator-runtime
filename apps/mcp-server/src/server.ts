@@ -710,48 +710,80 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   const scrollAmount = z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']);
 
   server.registerTool('app.inspect', {
-    title: 'Inspect Windows application controls',
-    description: 'Wait up to 10 seconds for a unique semantic selector, inspect a bounded Microsoft UI Automation control tree, optionally observe selector-scoped property/structure changes for up to 5 seconds, and optionally include up to 200 top-level Win32 windows with PID, executable basename, title/class and foreground state. No screenshots, process memory, command lines, or full executable paths are returned.',
+    title: 'Inspect Windows application',
+    description: 'Inspect Windows semantically through UI Automation/Win32 discovery, or explicitly request a bounded visual capture when semantic structure is insufficient. Visual mode returns a short-lived captureId + SHA-256 lease for verified physical fallback; screen/window/region captures are bounded to 1280x720 and never expose process memory, command lines, or full executable paths.',
     inputSchema: z.object({
+      mode: z.enum(['semantic', 'visual']).default('semantic'),
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
       maxDepth: z.number().int().min(1).max(12).default(6),
       observeMs: z.number().int().min(0).max(5000).default(0),
       waitMs: z.number().int().min(0).max(10000).default(0),
       includeWindows: z.boolean().default(false),
-      maxWindows: z.number().int().min(1).max(200).default(50)
+      maxWindows: z.number().int().min(1).max(200).default(50),
+      source: z.enum(['screen', 'window', 'region']).default('screen'),
+      region: z.object({
+        x: z.number().int().min(-100000).max(100000),
+        y: z.number().int().min(-100000).max(100000),
+        width: z.number().int().min(1).max(16384),
+        height: z.number().int().min(1).max(16384)
+      }).optional(),
+      maxWidth: z.number().int().min(1).max(1280).default(960),
+      maxHeight: z.number().int().min(1).max(720).default(540)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows }) => invoke('app.inspect', 'read', {
-    selector,
-    maxNodes,
-    maxDepth,
-    observeMs,
-    waitMs,
-    includeWindows,
-    maxWindows
-  }));
+  }, async ({ mode, selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows, source, region, maxWidth, maxHeight }) => {
+    if (mode === 'visual') {
+      return invoke('visual.capture', 'read', { source, selector, region, maxWidth, maxHeight, waitMs });
+    }
+    return invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows });
+  });
+
+  const semanticAppOperations = new Set(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']);
+  const physicalAppOperations = new Set(['move', 'click', 'double_click', 'drag', 'physical_scroll', 'type_text', 'key_press', 'hotkey']);
 
   server.registerTool('app.operate', {
-    title: 'Operate Windows application control',
-    description: 'Wait up to 10 seconds for one uniquely matched Windows control, then operate it through Microsoft UI Automation Invoke, Value, Focus, SelectionItem, ExpandCollapse, bounded Scroll, or verified semantic window activation. Window activation never accepts a raw HWND; it resolves the selector first and verifies the resulting foreground window. Ambiguous selectors fail immediately. This action may cause external side effects and remains approval-gated locally.',
+    title: 'Operate Windows application',
+    description: 'Operate a Windows control semantically when UI Automation can identify it, or use a capture-bound physical fallback after app.inspect visual mode. Physical input requires the exact fresh captureId and SHA-256, consumes the lease once, checks window/foreground identity for keyboard input, and performs a fresh AFTER capture for post-action verification. This remains approval-gated as an external action.',
     inputSchema: z.object({
-      operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']),
-      selector: appSelector,
+      operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window', 'move', 'click', 'double_click', 'drag', 'physical_scroll', 'type_text', 'key_press', 'hotkey']),
+      selector: appSelector.optional(),
       value: z.string().max(65536).optional(),
       horizontalAmount: scrollAmount.optional(),
       verticalAmount: scrollAmount.optional(),
-      waitMs: z.number().int().min(0).max(10000).default(0)
+      waitMs: z.number().int().min(0).max(10000).default(0),
+      captureId: z.string().min(1).max(128).optional(),
+      expectedSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+      x: z.number().int().min(0).max(1279).optional(),
+      y: z.number().int().min(0).max(719).optional(),
+      toX: z.number().int().min(0).max(1279).optional(),
+      toY: z.number().int().min(0).max(719).optional(),
+      deltaX: z.number().int().min(-1200).max(1200).optional(),
+      deltaY: z.number().int().min(-1200).max(1200).optional(),
+      text: z.string().max(4096).optional(),
+      key: z.string().min(1).max(32).optional(),
+      keys: z.array(z.string().min(1).max(32)).min(1).max(4).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  }, async ({ operation, selector, value, horizontalAmount, verticalAmount, waitMs }) => invoke('app.operate', 'external', {
-    operation,
-    selector,
-    value,
-    horizontalAmount,
-    verticalAmount,
-    waitMs
-  }));
+  }, async ({ operation, selector, value, horizontalAmount, verticalAmount, waitMs, captureId, expectedSha256, x, y, toX, toY, deltaX, deltaY, text, key, keys }) => {
+    if (physicalAppOperations.has(operation)) {
+      const physicalOperation = operation === 'physical_scroll' ? 'scroll' : operation;
+      return invoke('input.operate', 'external', {
+        operation: physicalOperation, captureId, expectedSha256, x, y, toX, toY, deltaX, deltaY, text, key, keys
+      });
+    }
+    if (!semanticAppOperations.has(operation) || !selector) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'Semantic app operations require a unique semantic selector.' }],
+        structuredContent: {
+          ok: false, capability: 'app.operate', provider: 'mcp.validation', evidence: [],
+          error: { code: 'APP_SELECTOR_REQUIRED', message: 'Semantic app operations require selector.', retryable: false }, durationMs: 0
+        }
+      };
+    }
+    return invoke('app.operate', 'external', { operation, selector, value, horizontalAmount, verticalAmount, waitMs });
+  });
 
   return server;
 }
