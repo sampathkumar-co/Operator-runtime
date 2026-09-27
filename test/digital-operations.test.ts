@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -171,4 +172,28 @@ test('stage10 operation cannot verify from worker success alone without Stage4 v
   });
   const current = await ops.refresh(operation.id);
   assert.notEqual(current.state, 'VERIFIED');
+});
+
+
+test('stage10 requestId is idempotent for identical contract and rejects conflicting reuse', async (t) => {
+  const { ops } = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId,
+    objective: 'Idempotent operation',
+    scopeKey: 'project:idempotent',
+    successConditions: ['verified'],
+    execution: { kind: 'team' as const, workItems: work() },
+    run: false
+  };
+  const first = await ops.submit(request);
+  const second = await ops.submit(structuredClone(request));
+  assert.equal(second.id, first.id);
+  assert.equal(second.teamMissionId, first.teamMissionId);
+  assert.equal(second.submissionDigest, first.submissionDigest);
+
+  await assert.rejects(
+    ops.submit({ ...request, objective: 'Different contract' }),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_CONFLICT'
+  );
 });
