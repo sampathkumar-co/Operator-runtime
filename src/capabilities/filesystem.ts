@@ -219,7 +219,7 @@ export class FilesystemProvider implements CapabilityProvider {
     if (operation === 'copy') {
       const sourceInput = requiredString(action.input.source, 'source');
       const destinationInput = requiredString(action.input.destination, 'destination');
-      return await this.#scope.withExisting(sourceInput, async (source) => await this.#scope.withForWrite(destinationInput, async (destination) => {
+      return await this.#scope.withForWrite(sourceInput, async (source) => await this.#scope.withForWrite(destinationInput, async (destination) => {
         await this.#pathLeaseHook?.(action.capability, source);
         await this.#pathLeaseHook?.(action.capability, destination);
         const sourceStat = await fs.lstat(source);
@@ -266,9 +266,14 @@ export class FilesystemProvider implements CapabilityProvider {
     }
     if (operation === 'remove') {
       const requested = requiredString(action.input.path, 'path');
-      return await this.#scope.withExisting(requested, async (target) => {
+      return await this.#scope.withForWrite(requested, async (target) => {
         await this.#pathLeaseHook?.(action.capability, target);
-        const stat = await fs.lstat(target);
+        let stat;
+        try { stat = await fs.lstat(target); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TARGET_MISSING', 'Remove target does not exist.');
+          throw error;
+        }
         if (stat.isSymbolicLink()) throw new OperatorError('FILE_REMOVE_SYMLINK_DENIED', 'Refusing to remove a symbolic link through this capability.');
         if (stat.isFile()) {
           const expectedSha = normalizeExpectedSha(action.input.expectedSha256);
