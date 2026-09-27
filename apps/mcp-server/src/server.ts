@@ -289,6 +289,25 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     className: z.string().min(1).max(512).optional(), controlType: z.string().min(1).max(128).optional(),
     processId: z.number().int().positive().optional()
   }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one semantic selector field is required.');
+  const visualTaskSelector = z.object({
+    name: z.string().min(1).max(512).optional(), className: z.string().min(1).max(512).optional(),
+    processId: z.number().int().positive().optional()
+  }).refine((selector) => Object.values(selector).some((value) => value !== undefined), 'At least one visual window selector field is required.');
+  const taskPhysicalFallback = z.object({
+    source: z.enum(['screen', 'window', 'region']),
+    selector: visualTaskSelector.optional(),
+    region: z.object({
+      x: z.number().int().min(-100000).max(100000), y: z.number().int().min(-100000).max(100000),
+      width: z.number().int().min(1).max(16384), height: z.number().int().min(1).max(16384)
+    }).optional(),
+    operation: z.enum(['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey']),
+    x: z.number().int().min(0).max(1279).optional(), y: z.number().int().min(0).max(719).optional(),
+    toX: z.number().int().min(0).max(1279).optional(), toY: z.number().int().min(0).max(719).optional(),
+    deltaX: z.number().int().min(-1200).max(1200).optional(), deltaY: z.number().int().min(-1200).max(1200).optional(),
+    text: z.string().max(4096).optional(), key: z.string().min(1).max(32).optional(),
+    keys: z.array(z.string().min(1).max(32)).min(1).max(4).optional(),
+    maxWidth: z.number().int().min(1).max(1280).optional(), maxHeight: z.number().int().min(1).max(720).optional()
+  });
   const atomicTaskGoal = z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('controlled-file-change'), root: z.string().min(1).max(4096), path: z.string().min(1).max(4096), content: z.string().max(256 * 1024) }),
     z.object({ kind: z.literal('trusted-project-command'), root: z.string().min(1).max(4096), commandKind: z.enum(['build', 'test', 'lint']) }),
@@ -304,7 +323,8 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     z.object({
       kind: z.literal('app-operation'), operation: z.enum(['invoke', 'set_value', 'focus', 'select', 'expand', 'collapse', 'scroll', 'activate_window']), selector: taskSelector,
       value: z.string().max(65_536).optional(), horizontalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(),
-      verticalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(), verifySelector: taskSelector.optional(), waitMs: z.number().int().min(0).max(10_000).optional()
+      verticalAmount: z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']).optional(), verifySelector: taskSelector.optional(), waitMs: z.number().int().min(0).max(10_000).optional(),
+      physicalFallback: taskPhysicalFallback.optional()
     })
   ]);
   const taskGoal = z.union([
