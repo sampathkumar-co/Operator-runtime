@@ -432,14 +432,22 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (failureDecision.retryable && (risk === 'read' || failureDecision.strategy === 'reobserve' || failureDecision.strategy === 'retry')) {
-        task.evidence.push(evidence('strategy_retry', 'info', 'Retrying a bounded task step under the same policy and attempt budget.', {
+      if (failureDecision.retryable && risk === 'read' && failureDecision.strategy === 'retry') {
+        task.evidence.push(evidence('strategy_retry', 'info', 'Retrying a bounded read-only task step under the same policy and attempt budget.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy
         }));
         await this.#persistRunState(task, assertLease);
         continue;
+      }
+      if (failureDecision.retryable && risk !== 'read') {
+        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry of a failed mutating action; recovery requires an explicit planner re-observation or repair strategy.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy,
+          risk
+        }));
       }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
@@ -883,6 +891,12 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.execution!.plannerState.expectedSha256 = sha256Value.toLowerCase();
       task.execution!.plannerState.phase = 'repair';
       task.evidence.push(evidence('strategy_repair', 'info', 'Existing file content differed; scheduled SHA-preconditioned replacement followed by fresh verification.'));
+      return true;
+    }
+    if (step.key === 'repair-file' && result.error?.code === 'PRECONDITION_FAILED') {
+      task.execution!.plannerState.phase = 'read';
+      delete task.execution!.plannerState.expectedSha256;
+      task.evidence.push(evidence('strategy_fallback', 'info', 'File changed during repair; discarded the stale SHA and switched to fresh read-before-repair observation.'));
       return true;
     }
     if (step.key === 'navigate-browser' && result.error?.code === 'BROWSER_TARGET_NOT_FOUND') {
