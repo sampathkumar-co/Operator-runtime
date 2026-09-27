@@ -383,7 +383,9 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
     case 'trusted-project-command': return ['project.inspect', 'project.command.inspect', 'project.command.run'];
     case 'project-quality-gate': return ['project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run'];
     case 'browser-navigation': return ['browser.inspect', 'browser.navigate'];
-    case 'app-operation': return ['app.inspect', 'app.operate'];
+    case 'app-operation': return goal.physicalFallback === undefined
+      ? ['app.inspect', 'app.operate']
+      : ['app.inspect', 'app.operate', 'visual.capture', 'input.operate'];
     case 'docker-lifecycle': return ['docker.inspect', 'docker.manage'];
     case 'postgres-select': return ['postgres.inspect', 'postgres.select'];
     case 'semantic-workflow': {
