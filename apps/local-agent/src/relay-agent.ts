@@ -83,7 +83,9 @@ export class LocalAgentRelayRunner {
         ? await this.#executeTaskPayload(delivery.payload)
         : delivery.kind === 'operation'
           ? await this.#executeOperationPayload(delivery.payload)
-          : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
+          : delivery.kind === 'knowledge'
+            ? await this.#executeKnowledgePayload(delivery.payload)
+            : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
     const safe = boundedResult(result);
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
     await this.#submitResult(delivery.seq, delivery.id, safe);
@@ -144,6 +146,44 @@ export class LocalAgentRelayRunner {
     return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', { approvalAuthority });
   }
 
+  async #executeKnowledgePayload(payload: JsonObject): Promise<JsonObject> {
+    const query = validateRelayKnowledgeQuery(payload.query);
+    if (query.kind === 'procedures') return await this.#callOperationApi(`/v1/procedures?limit=${query.limit}`, 'GET');
+    if (query.kind === 'procedure-query') return await this.#callOperationApi('/v1/procedures/query', 'POST', query);
+    if (query.kind === 'optimizer') return await this.#callOperationApi(`/v1/optimizer?limit=${query.limit}`, 'GET');
+    if (query.kind === 'world-list') {
+      const url = new URL('/v1/world/entities', this.#localAgentBaseUrl);
+      if (query.scopeKey) url.searchParams.set('scopeKey', query.scopeKey);
+      if (query.type) url.searchParams.set('type', query.type);
+      url.searchParams.set('limit', String(query.limit));
+      return await this.#callAbsoluteOperationApi(url, 'GET');
+    }
+    if (query.kind === 'world-entity') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'entity', entityKey: query.entityKey });
+    if (query.kind === 'world-fact') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'fact', entityKey: query.entityKey, factKey: query.factKey });
+    return await this.#callOperationApi('/v1/world/query', 'POST', {
+      operation: 'trace', fromKey: query.fromKey, toKey: query.toKey, targetType: query.targetType,
+      maxDepth: query.maxDepth, minConfidence: query.minConfidence
+    });
+  }
+
+  async #callAbsoluteOperationApi(url: URL, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
+    const response = await fetch(url, {
+      redirect: 'error', method,
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
+      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
+    });
+    let bodyValue: unknown;
+    try { bodyValue = await response.json(); }
+    catch { throw new OperatorError('RELAY_LOCAL_KNOWLEDGE_RESULT_INVALID', 'Local agent returned a non-JSON knowledge response.', { retryable: false }); }
+    if (!bodyValue || typeof bodyValue !== 'object' || Array.isArray(bodyValue) || typeof (bodyValue as Record<string, unknown>).ok !== 'boolean') {
+      throw new OperatorError('RELAY_LOCAL_KNOWLEDGE_RESULT_INVALID', 'Local agent returned a malformed knowledge response.', { retryable: false });
+    }
+    if (![200, 400, 404, 503].includes(response.status)) {
+      throw new OperatorError('RELAY_LOCAL_KNOWLEDGE_UNCERTAIN', `Local knowledge API returned HTTP ${response.status}.`, { retryable: true });
+    }
+    return boundedResult(bodyValue);
+  }
+
   async #executeOperationPayload(payload: JsonObject): Promise<JsonObject> {
     const request = validateRelayOperationRequest(payload.operation);
     if (request.operation === 'submit') {
@@ -156,21 +196,7 @@ export class LocalAgentRelayRunner {
   }
 
   async #callOperationApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
-    const response = await fetch(new URL(pathname, this.#localAgentBaseUrl), {
-      redirect: 'error', method,
-      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
-      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
-    });
-    let bodyValue: unknown;
-    try { bodyValue = await response.json(); }
-    catch { throw new OperatorError('RELAY_LOCAL_OPERATION_RESULT_INVALID', 'Local agent returned a non-JSON digital operation response.', { retryable: false }); }
-    if (!bodyValue || typeof bodyValue !== 'object' || Array.isArray(bodyValue) || typeof (bodyValue as Record<string, unknown>).ok !== 'boolean') {
-      throw new OperatorError('RELAY_LOCAL_OPERATION_RESULT_INVALID', 'Local agent returned a malformed digital operation response.', { retryable: false });
-    }
-    if (![200, 202, 400, 404, 409, 423, 503].includes(response.status)) {
-      throw new OperatorError('RELAY_LOCAL_OPERATION_UNCERTAIN', `Local operation API returned HTTP ${response.status}; durable operation state must be reconciled before retry.`, { retryable: true });
-    }
-    return boundedResult(bodyValue);
+    return await this.#callAbsoluteOperationApi(new URL(pathname, this.#localAgentBaseUrl), method, body);
   }
 
   async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
@@ -237,11 +263,71 @@ export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean
       const request = validateRelayOperationRequest(delivery.payload.operation);
       return request.operation !== 'submit' || typeof request.request.requestId === 'string';
     }
+    if (delivery.kind === 'knowledge') { validateRelayKnowledgeQuery(delivery.payload.query); return true; }
     if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
     return false;
   } catch {
     return false;
   }
+}
+
+type RelayKnowledgeQuery =
+  | { kind: 'procedures'; limit: number }
+  | { kind: 'procedure-query'; objectiveKind: string; scopeKey: string; assumptions: unknown[]; requiredCapabilities: string[]; maxResults: number }
+  | { kind: 'world-entity'; entityKey: string }
+  | { kind: 'world-fact'; entityKey: string; factKey: string }
+  | { kind: 'world-trace'; fromKey: string; toKey?: string; targetType?: string; maxDepth?: number; minConfidence?: number }
+  | { kind: 'world-list'; scopeKey?: string; type?: string; limit: number }
+  | { kind: 'optimizer'; limit: number };
+
+function validateRelayKnowledgeQuery(input: unknown): RelayKnowledgeQuery {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_KNOWLEDGE_INVALID', 'Relay knowledge query must be an object.');
+  const raw = input as Record<string, unknown>;
+  const kind = String(raw.kind ?? '');
+  const text = (value: unknown, label: string, max = 512) => {
+    const result = String(value ?? '');
+    if (!result || result.length > max || result.includes('\0')) throw new OperatorError('RELAY_KNOWLEDGE_INVALID', `${label} is invalid.`);
+    return result;
+  };
+  const limit = (value: unknown, fallback: number, max: number) => {
+    const n = value === undefined ? fallback : Number(value);
+    if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new OperatorError('RELAY_KNOWLEDGE_INVALID', 'Knowledge limit is invalid.');
+    return n;
+  };
+  if (kind === 'procedures') return { kind, limit: limit(raw.limit, 100, 500) };
+  if (kind === 'optimizer') return { kind, limit: limit(raw.limit, 200, 1000) };
+  if (kind === 'procedure-query') {
+    return {
+      kind,
+      objectiveKind: text(raw.objectiveKind, 'objectiveKind', 128),
+      scopeKey: text(raw.scopeKey, 'scopeKey'),
+      assumptions: Array.isArray(raw.assumptions) ? structuredClone(raw.assumptions) : [],
+      requiredCapabilities: Array.isArray(raw.requiredCapabilities) ? raw.requiredCapabilities.map((value) => text(value, 'requiredCapability', 256)) : [],
+      maxResults: limit(raw.maxResults, 10, 100)
+    };
+  }
+  if (kind === 'world-entity') return { kind, entityKey: text(raw.entityKey, 'entityKey') };
+  if (kind === 'world-fact') return { kind, entityKey: text(raw.entityKey, 'entityKey'), factKey: text(raw.factKey, 'factKey', 128) };
+  if (kind === 'world-list') return {
+    kind,
+    ...(raw.scopeKey === undefined ? {} : { scopeKey: text(raw.scopeKey, 'scopeKey') }),
+    ...(raw.type === undefined ? {} : { type: text(raw.type, 'type', 128) }),
+    limit: limit(raw.limit, 100, 1000)
+  };
+  if (kind === 'world-trace') {
+    const maxDepth = raw.maxDepth === undefined ? undefined : Number(raw.maxDepth);
+    const minConfidence = raw.minConfidence === undefined ? undefined : Number(raw.minConfidence);
+    if (maxDepth !== undefined && (!Number.isSafeInteger(maxDepth) || maxDepth < 1 || maxDepth > 12)) throw new OperatorError('RELAY_KNOWLEDGE_INVALID', 'maxDepth is invalid.');
+    if (minConfidence !== undefined && (!Number.isFinite(minConfidence) || minConfidence < 0 || minConfidence > 1)) throw new OperatorError('RELAY_KNOWLEDGE_INVALID', 'minConfidence is invalid.');
+    return {
+      kind, fromKey: text(raw.fromKey, 'fromKey'),
+      ...(raw.toKey === undefined ? {} : { toKey: text(raw.toKey, 'toKey') }),
+      ...(raw.targetType === undefined ? {} : { targetType: text(raw.targetType, 'targetType', 128) }),
+      ...(maxDepth === undefined ? {} : { maxDepth }),
+      ...(minConfidence === undefined ? {} : { minConfidence })
+    };
+  }
+  throw new OperatorError('RELAY_KNOWLEDGE_INVALID', 'Knowledge query kind is invalid.');
 }
 
 type RelayOperationRequest =
