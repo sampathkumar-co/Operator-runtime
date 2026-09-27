@@ -82,7 +82,7 @@ export class DevicePoolScheduler {
 
   async reserve(requestInput: DevicePoolRequest, advertisementsInput: DeviceResourceAdvertisement[]): Promise<DeviceReservation> {
     const request = normalizeRequest(requestInput);
-    const advertisements = validateAdvertisements(advertisementsInput, this.#clock(), request.livenessMs);
+    const advertisements = validateAdvertisements(advertisementsInput, this.#clock, request.livenessMs);
     const registered = new Map((await this.#registry.listDevices()).filter((item) => item.status === 'active').map((item) => [item.deviceId, item]));
     const candidates = advertisements.filter((item) => registered.has(item.deviceId));
 
