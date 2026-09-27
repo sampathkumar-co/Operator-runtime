@@ -221,12 +221,13 @@ export class TaskOrchestrator {
       await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
       const current = task.execution!;
-      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded deadline.', assertLease);
       const interrupted = this.#markInterrupted(current);
       if (interrupted > 0) {
-        task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s) before replanning.', { count: interrupted }));
+        current.deadlineAt = new Date(Date.now() + current.timeoutMs).toISOString();
+        task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s), refreshed the active execution deadline, and preserved step/attempt budgets.', { count: interrupted }));
         await this.#persistRunState(task, assertLease);
       }
+      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
       const context = { task, goal };
       let decision: PlannerDecision;
       try { decision = planner.next(context); }
@@ -462,6 +463,10 @@ export class TaskOrchestrator {
       if (this.#controlRequests.get(taskId) === 'PAUSED') this.#controlRequests.delete(taskId);
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
+      if (task.execution?.startedAt) {
+        task.execution.deadlineAt = new Date(Date.now() + task.execution.timeoutMs).toISOString();
+        task.evidence.push(evidence('task_resume', 'info', 'Resumed task with a fresh active execution deadline; step and attempt budgets were preserved.'));
+      }
       await this.#store.put(task);
     });
     return await this.run(taskId, approvedActionIds, authorization);
