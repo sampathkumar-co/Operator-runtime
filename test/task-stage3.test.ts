@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
 import { GitProvider } from '../src/capabilities/git.ts';
 import { ProjectCommandProvider } from '../src/capabilities/project-command.ts';
 import { ProjectInspectProvider } from '../src/capabilities/project.ts';
+import { ProjectTransactionProvider } from '../src/capabilities/project-transaction.ts';
 import { classifyTaskFailure } from '../src/core/task-failure.ts';
 import { createTask, addTaskNode, stableTaskNodeId } from '../src/core/task.ts';
 import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
@@ -336,4 +338,76 @@ test('stage3 quality gate fails closed when a required trusted check is unavaila
   assert.match(failed.failures.at(-1)?.message ?? '', /lint/i);
   assert.equal(failed.execution!.records.some((record) => record.capability === 'project.command.run'), false);
   assert.ok(failed.evidence.some((item) => item.kind === 'goal_compilation' && item.status === 'fail'));
+});
+
+
+test('stage3 mutating quality check runs transactionally and rolls back false-green output', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-stage3-quality-rollback-root-');
+  const authority = await tempDir(t, 'operator-stage3-quality-rollback-authority-');
+  const state = await tempDir(t, 'operator-stage3-quality-rollback-state-');
+  const registryPath = path.join(authority, 'commands.json');
+  const { execFile } = await import('node:child_process');
+  const git = (...args: string[]) => new Promise<void>((resolve, reject) =>
+    execFile('git', args, { cwd: root }, (error) => error ? reject(error) : resolve())
+  );
+  await git('init', '--quiet');
+  await git('config', 'user.name', 'Operator Stage3');
+  await git('config', 'user.email', 'stage3@example.invalid');
+  await git('config', 'core.autocrlf', 'false');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'stage3-quality-rollback' }));
+  await fs.writeFile(path.join(root, 'app.txt'), 'base\n');
+  await git('add', 'package.json', 'app.txt');
+  await git('commit', '-m', 'base');
+
+  const script = [
+    "const fs=require('fs')",
+    "fs.writeFileSync('app.txt','broken-but-zero-exit\\n')",
+    "process.stdout.write('looks-green')"
+  ].join(';');
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{
+      root,
+      commands: [{
+        id: 'false-green-build',
+        kind: 'build',
+        executable: 'node',
+        args: ['-e', script],
+        cwd: '.',
+        risk: 'write',
+        artifacts: [{ path: 'required-report.json', kind: 'json', minBytes: 2, mustChange: true }]
+      }]
+    }]
+  }));
+
+  const runtime = new OperatorRuntime()
+    .register(new ProjectInspectProvider({ allowedRoots: [root] }))
+    .register(new ProjectCommandProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath }))
+    .register(new ProjectTransactionProvider({ allowedRoots: [root], allowedExecutables: ['node'], registryPath }));
+  const orchestrator = new TaskOrchestrator({
+    runtime,
+    store: new TaskStore(state),
+    permissions: permissions(root, ['project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run'])
+  });
+  const task = await orchestrator.submit({
+    objective: 'Run the trusted build without leaving failed mutations behind.',
+    authorizedScope: [root],
+    successConditions: ['build artifacts verify', 'failed mutation is rolled back'],
+    goal: { kind: 'project-quality-gate', root, checks: ['build'], requireAll: true }
+  });
+
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  const transaction = blocked.execution!.records.find((record) => record.capability === 'project.transaction.run');
+  assert.ok(transaction);
+  const failed = await orchestrator.resume(task.id, [transaction!.actionId]);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'TRANSACTION_FAILED_ROLLED_BACK');
+  assert.equal(await fs.readFile(path.join(root, 'app.txt'), 'utf8'), 'base\n');
+  const status = await new Promise<string>((resolve, reject) =>
+    execFile('git', ['status', '--porcelain=v1'], { cwd: root, encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout))
+  );
+  assert.equal(status, '');
+  assert.ok(failed.execution!.records.some((record) => record.capability === 'project.transaction.run' && record.state === 'FAILED'));
 });
