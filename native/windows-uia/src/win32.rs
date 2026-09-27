@@ -269,7 +269,7 @@ fn process_basename(process_id: u32) -> Option<String> {
     basename(&full_path).map(|name| truncate(name.to_string(), 260))
 }
 
-fn parse_window_id(value: &str) -> Result<isize, String> {
+pub fn parse_window_id(value: &str) -> Result<isize, String> {
     let hex = value
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
@@ -277,6 +277,18 @@ fn parse_window_id(value: &str) -> Result<isize, String> {
     let raw = usize::from_str_radix(hex, 16)
         .map_err(|_| "Internal Win32 window id could not be parsed".to_string())?;
     Ok(raw as isize)
+}
+
+pub fn ensure_foreground_window_id(window_id: &str) -> Result<WindowSummary, String> {
+    let hwnd = parse_window_id(window_id)?;
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground != hwnd {
+        return Err("Expected capture-leased window is no longer foreground".into());
+    }
+    let discovery = discover_windows(MAX_WINDOWS)?;
+    discovery.windows.into_iter()
+        .find(|window| window.window_id.eq_ignore_ascii_case(window_id))
+        .ok_or_else(|| "Expected capture-leased foreground window is no longer discoverable".into())
 }
 
 fn basename(path: &str) -> Option<&str> {
