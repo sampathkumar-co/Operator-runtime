@@ -309,6 +309,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   ]);
   const taskGoal = z.union([
     atomicTaskGoal,
+    z.object({
+      kind: z.literal('project-quality-gate'),
+      root: z.string().min(1).max(4096),
+      checks: z.array(z.enum(['lint', 'test', 'build'])).min(1).max(3).optional(),
+      requireAll: z.boolean().optional()
+    }),
     z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) })
   ]);
 
