@@ -161,3 +161,70 @@ test('file.replace never overwrites a concurrent recreation after claiming the e
   assert.equal(await fs.readFile(filePath, 'utf8'), 'concurrent');
   assert.equal((await fs.readdir(root)).some((name) => name.endsWith('.bak') || name.endsWith('.tmp')), false);
 });
+
+
+test('file.search recursively finds bounded matches without following symlinks', async (ctx) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-search-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-search-outside-'));
+  ctx.after(async () => { await fs.rm(root, { recursive: true, force: true }); await fs.rm(outside, { recursive: true, force: true }); });
+  await fs.mkdir(path.join(root, 'src', 'nested'), { recursive: true });
+  await fs.writeFile(path.join(root, 'src', 'nested', 'needle-file.txt'), 'x');
+  await fs.writeFile(path.join(outside, 'needle-secret.txt'), 'secret');
+  try { await fs.symlink(outside, path.join(root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir'); } catch {}
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const result = await provider.execute(action('file.search', { path: root, query: 'needle', maxDepth: 5, maxResults: 10 }));
+  assert.equal(result.ok, true, result.error?.message);
+  const paths = ((result.output as any).results as any[]).map((item) => item.path);
+  assert.equal(paths.some((item) => item.endsWith('needle-file.txt')), true);
+  assert.equal(paths.some((item) => item.includes('needle-secret.txt')), false);
+});
+
+test('file.info returns SHA and file.manage copy/move require safe preconditions', async (ctx) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-manage-'));
+  ctx.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const source = path.join(root, 'source.txt');
+  const copy = path.join(root, 'copy.txt');
+  const moved = path.join(root, 'moved.txt');
+  await fs.writeFile(source, 'content');
+
+  const info = await provider.execute(action('file.info', { path: source }));
+  assert.equal(info.ok, true);
+  const digest = (info.output as any).sha256 as string;
+  assert.match(digest, /^[0-9a-f]{64}$/);
+
+  const copied = await provider.execute({ ...action('file.manage', { operation: 'copy', source, destination: copy }), risk: 'write' });
+  assert.equal(copied.ok, true, copied.error?.message);
+  assert.equal(await fs.readFile(copy, 'utf8'), 'content');
+
+  const staleMove = await provider.execute({ ...action('file.manage', { operation: 'move', source: copy, destination: moved, expectedSha256: '0'.repeat(64) }), risk: 'destructive' });
+  assert.equal(staleMove.ok, false);
+  assert.equal(staleMove.error?.code, 'PRECONDITION_FAILED');
+
+  const copyDigest = crypto.createHash('sha256').update('content').digest('hex');
+  const move = await provider.execute({ ...action('file.manage', { operation: 'move', source: copy, destination: moved, expectedSha256: copyDigest }), risk: 'destructive' });
+  assert.equal(move.ok, true, move.error?.message);
+  await assert.rejects(fs.access(copy));
+  assert.equal(await fs.readFile(moved, 'utf8'), 'content');
+});
+
+test('file.manage mkdir and bounded remove preserve destructive safeguards', async (ctx) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-remove-'));
+  ctx.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const dir = path.join(root, 'new-dir');
+  const made = await provider.execute({ ...action('file.manage', { operation: 'mkdir', path: dir }), risk: 'write' });
+  assert.equal(made.ok, true);
+
+  const file = path.join(dir, 'item.txt');
+  await fs.writeFile(file, 'v1');
+  const wrong = await provider.execute({ ...action('file.manage', { operation: 'remove', path: file, expectedSha256: '0'.repeat(64) }), risk: 'destructive' });
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.error?.code, 'PRECONDITION_FAILED');
+
+  const digest = crypto.createHash('sha256').update('v1').digest('hex');
+  const removed = await provider.execute({ ...action('file.manage', { operation: 'remove', path: file, expectedSha256: digest }), risk: 'destructive' });
+  assert.equal(removed.ok, true);
+  const removedDir = await provider.execute({ ...action('file.manage', { operation: 'remove', path: dir }), risk: 'destructive' });
+  assert.equal(removedDir.ok, true);
+});
