@@ -8,6 +8,8 @@ import { DevicePoolScheduler, type DevicePoolRequest, type DeviceResourceAdverti
 import { ExecutionOptimizerStore } from './execution-optimizer.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
 import { OrganizationCoordinator, type OrganizationPolicy } from './organization-coordinator.ts';
+import { OutcomePlanner } from './outcome-planner.ts';
+import type { ActionRisk } from './types.ts';
 
 const MAX_OPERATIONS = 2000;
 const MAX_CONDITIONS = 200;
@@ -43,6 +45,7 @@ export interface DigitalOperation {
   postconditions: WorldCondition[];
   selectedStrategy: string;
   submissionDigest: string;
+  planDigest?: string;
   selectedProcedureId?: string;
   procedureCapture?: ProcedureCaptureSpec;
   deviceReservationId?: string;
@@ -75,7 +78,9 @@ export interface DigitalOperationSubmit {
   successConditions: string[];
   preconditions?: WorldCondition[];
   postconditions?: WorldCondition[];
-  execution: DigitalExecutionSpec;
+  execution?: DigitalExecutionSpec;
+  maxRisk?: ActionRisk;
+  budget?: Partial<TeamBudget>;
   procedure?: {
     objectiveKind: string;
     assumptions: ProcedureAssumption[];
@@ -104,6 +109,8 @@ export class DigitalOperationsLayer {
   #optimizer: ExecutionOptimizerStore;
   #teams: TeamCoordinator;
   #organizations: OrganizationCoordinator;
+  #planner: OutcomePlanner;
+  #availableCapabilities: string[];
   #clock: () => Date;
   #serial: Promise<void> = Promise.resolve();
 
@@ -114,6 +121,8 @@ export class DigitalOperationsLayer {
     optimizer: ExecutionOptimizerStore;
     teams: TeamCoordinator;
     organizations: OrganizationCoordinator;
+    planner?: OutcomePlanner;
+    availableCapabilities?: string[];
     clock?: () => Date;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'digital-operations.json');
@@ -123,13 +132,29 @@ export class DigitalOperationsLayer {
     this.#optimizer = dependencies.optimizer;
     this.#teams = dependencies.teams;
     this.#organizations = dependencies.organizations;
+    this.#planner = dependencies.planner ?? new OutcomePlanner();
+    this.#availableCapabilities = [...new Set(dependencies.availableCapabilities ?? [])].sort();
     this.#clock = dependencies.clock ?? (() => new Date());
   }
 
   async submit(input: DigitalOperationSubmit): Promise<DigitalOperation> {
     const normalized = normalizeSubmit(input);
-    const operationId = normalized.requestId ?? crypto.randomUUID();
-    const submissionDigest = operationSubmissionDigest(normalized);
+    const generatedPlan = normalized.execution ? undefined : this.#planner.plan({
+      objective: normalized.objective,
+      scopeKey: normalized.scopeKey,
+      successConditions: normalized.successConditions,
+      maxRisk: normalized.maxRisk,
+      availableCapabilities: this.#availableCapabilities,
+      ...(normalized.budget ? { budget: normalized.budget } : {})
+    });
+    const execution: DigitalExecutionSpec = normalized.execution ?? {
+      kind: 'team',
+      workItems: generatedPlan!.workItems,
+      ...(generatedPlan!.budget ? { budget: generatedPlan!.budget } : {})
+    };
+    const resolved = { ...normalized, execution, planDigest: generatedPlan?.planDigest };
+    const operationId = resolved.requestId ?? crypto.randomUUID();
+    const submissionDigest = operationSubmissionDigest(resolved);
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const existing = state.operations.find((item) => item.id === operationId);
@@ -162,7 +187,7 @@ export class DigitalOperationsLayer {
           }
         }
       }
-      const strategyContext = strategyContextFor(normalized.scopeKey, normalized.execution.kind);
+      const strategyContext = strategyContextFor(normalized.scopeKey, resolved.execution.kind);
       const ranked = await this.#optimizer.recommend(strategyContext, candidateStrategies);
       const selectedStrategy = ranked[0]!.id;
       if (selectedStrategy.startsWith('procedure:')) selectedProcedureId = selectedStrategy.slice('procedure:'.length);
@@ -176,19 +201,19 @@ export class DigitalOperationsLayer {
       let teamMissionId: string | undefined;
       let organizationProgramId: string | undefined;
       try {
-        if (normalized.execution.kind === 'team') {
+        if (resolved.execution.kind === 'team') {
           const mission = await this.#teams.submit({
             objective: normalized.objective,
-            workItems: normalized.execution.workItems,
-            ...(normalized.execution.budget ? { budget: normalized.execution.budget } : {})
+            workItems: resolved.execution.workItems,
+            ...(resolved.execution.budget ? { budget: resolved.execution.budget } : {})
           });
           teamMissionId = mission.id;
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
           const program = await this.#organizations.create({
             objective: normalized.objective,
-            targets: normalized.execution.targets,
-            ...(normalized.execution.policy ? { policy: normalized.execution.policy } : {})
+            targets: resolved.execution.targets,
+            ...(resolved.execution.policy ? { policy: resolved.execution.policy } : {})
           });
           organizationProgramId = program.id;
           if (normalized.run) await this.#organizations.start(program.id);
@@ -208,11 +233,12 @@ export class DigitalOperationsLayer {
         scopeKey: normalized.scopeKey,
         successConditions: normalized.successConditions,
         state: normalized.run ? 'RUNNING' : 'PENDING',
-        mode: normalized.execution.kind,
+        mode: resolved.execution.kind,
         preconditions: normalized.preconditions,
         postconditions: normalized.postconditions,
         selectedStrategy,
         submissionDigest,
+        ...(resolved.planDigest ? { planDigest: resolved.planDigest } : {}),
         ...(selectedProcedureId ? { selectedProcedureId } : {}),
         ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
         ...(deviceReservationId ? { deviceReservationId } : {}),
@@ -427,7 +453,7 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
   if (!input || typeof input !== 'object') throw new OperatorError('OPERATIONS_INPUT_INVALID', 'Operation submission is invalid.');
   const successConditions = uniqueStrings(input.successConditions, 100, 4096, 'successConditions');
   if (successConditions.length < 1) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'At least one success condition is required.');
-  if (!input.execution || !['team', 'organization'].includes(input.execution.kind)) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'Execution specification is invalid.');
+  if (input.execution && !['team', 'organization'].includes(input.execution.kind)) throw new OperatorError('OPERATIONS_INPUT_INVALID', 'Execution specification is invalid.');
   const strategies = (input.strategies ?? []).map((item, index) => ({
     id: boundedKey(item.id, `strategies[${index}].id`),
     staticScore: boundedNumber(item.staticScore, 0, 1, `strategies[${index}].staticScore`)
@@ -440,7 +466,9 @@ function normalizeSubmit(input: DigitalOperationSubmit) {
     successConditions,
     preconditions: normalizeConditions(input.preconditions ?? []),
     postconditions: normalizeConditions(input.postconditions ?? []),
-    execution: structuredClone(input.execution),
+    execution: input.execution ? structuredClone(input.execution) : undefined,
+    maxRisk: input.maxRisk === undefined ? 'write' as ActionRisk : validOperationRisk(input.maxRisk),
+    budget: input.budget ? structuredClone(input.budget) : undefined,
     procedure: input.procedure ? {
       objectiveKind: boundedKey(input.procedure.objectiveKind, 'procedure.objectiveKind'),
       assumptions: structuredClone(input.procedure.assumptions),
@@ -496,6 +524,9 @@ function operationSubmissionDigest(normalized: ReturnType<typeof normalizeSubmit
     preconditions: normalized.preconditions,
     postconditions: normalized.postconditions,
     execution: normalized.execution,
+    planDigest: (normalized as any).planDigest ?? null,
+    maxRisk: normalized.maxRisk,
+    budget: normalized.budget ?? null,
     procedure: normalized.procedure ?? null,
     captureProcedure: normalized.captureProcedure ?? null,
     strategies: normalized.strategies,
@@ -516,6 +547,7 @@ function operationReceipt(operation: DigitalOperation): string {
     preconditions: operation.preconditions,
     postconditions: operation.postconditions,
     selectedStrategy: operation.selectedStrategy,
+    planDigest: operation.planDigest ?? null,
     selectedProcedureId: operation.selectedProcedureId ?? null,
     deviceReservationId: operation.deviceReservationId ?? null,
     teamMissionId: operation.teamMissionId ?? null,
@@ -551,6 +583,7 @@ function validateOperation(operation: DigitalOperation): void {
   normalizeConditions(operation.preconditions); normalizeConditions(operation.postconditions);
   boundedKey(operation.selectedStrategy, 'selectedStrategy');
   shaDigest(operation.submissionDigest, 'submissionDigest');
+  if (operation.planDigest !== undefined) shaDigest(operation.planDigest, 'planDigest');
   if (operation.selectedProcedureId !== undefined) validUuid(operation.selectedProcedureId, 'selectedProcedureId');
   if (operation.procedureCapture !== undefined) normalizeProcedureCapture(operation.procedureCapture);
   if (operation.deviceReservationId !== undefined) validUuid(operation.deviceReservationId, 'deviceReservationId');
@@ -582,6 +615,14 @@ function boundedText(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw new OperatorError('OPERATIONS_INPUT_INVALID', `${label} is invalid.`);
   return input;
 }
+function validOperationRisk(input: unknown): ActionRisk {
+  const value = String(input ?? '') as ActionRisk;
+  if (!['read', 'write', 'external', 'system', 'destructive'].includes(value)) {
+    throw new OperatorError('OPERATIONS_INPUT_INVALID', 'maxRisk is invalid.');
+  }
+  return value;
+}
+
 function boundedNumber(input: unknown, min: number, max: number, label: string): number {
   const value = Number(input);
   if (!Number.isFinite(value) || value < min || value > max) throw new OperatorError('OPERATIONS_INPUT_INVALID', `${label} is invalid.`);
