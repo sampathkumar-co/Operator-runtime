@@ -81,7 +81,9 @@ export class LocalAgentRelayRunner {
       ? await this.#executeActionPayload(delivery.payload)
       : delivery.kind === 'task'
         ? await this.#executeTaskPayload(delivery.payload)
-        : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
+        : delivery.kind === 'operation'
+          ? await this.#executeOperationPayload(delivery.payload)
+          : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
     const safe = boundedResult(result);
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
     await this.#submitResult(delivery.seq, delivery.id, safe);
@@ -140,6 +142,35 @@ export class LocalAgentRelayRunner {
     if (task.operation === 'run' && ['VERIFIED', 'FAILED', 'CANCELLED'].includes(state)) return current;
     if (task.operation === 'resume' && ['VERIFIED', 'FAILED'].includes(state)) return current;
     return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', { approvalAuthority });
+  }
+
+  async #executeOperationPayload(payload: JsonObject): Promise<JsonObject> {
+    const request = validateRelayOperationRequest(payload.operation);
+    if (request.operation === 'submit') {
+      return await this.#callOperationApi('/v1/operations', 'POST', request.request);
+    }
+    const pathname = `/v1/operations/${request.operationId}`;
+    if (request.operation === 'inspect') return await this.#callOperationApi(pathname, 'GET');
+    const body = request.operation === 'promote' ? { verificationDigest: request.verificationDigest } : {};
+    return await this.#callOperationApi(`${pathname}/${request.operation}`, 'POST', body);
+  }
+
+  async #callOperationApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
+    const response = await fetch(new URL(pathname, this.#localAgentBaseUrl), {
+      redirect: 'error', method,
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
+      ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
+    });
+    let bodyValue: unknown;
+    try { bodyValue = await response.json(); }
+    catch { throw new OperatorError('RELAY_LOCAL_OPERATION_RESULT_INVALID', 'Local agent returned a non-JSON digital operation response.', { retryable: false }); }
+    if (!bodyValue || typeof bodyValue !== 'object' || Array.isArray(bodyValue) || typeof (bodyValue as Record<string, unknown>).ok !== 'boolean') {
+      throw new OperatorError('RELAY_LOCAL_OPERATION_RESULT_INVALID', 'Local agent returned a malformed digital operation response.', { retryable: false });
+    }
+    if (![200, 202, 400, 404, 409, 423, 503].includes(response.status)) {
+      throw new OperatorError('RELAY_LOCAL_OPERATION_UNCERTAIN', `Local operation API returned HTTP ${response.status}; durable operation state must be reconciled before retry.`, { retryable: true });
+    }
+    return boundedResult(bodyValue);
   }
 
   async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
@@ -202,11 +233,43 @@ export { readRelaySessionTokenFile } from './relay-session-credentials.ts';
 export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean {
   try {
     if (delivery.kind === 'task') { validateRelayTaskRequest(delivery.payload.task); return true; }
+    if (delivery.kind === 'operation') {
+      const request = validateRelayOperationRequest(delivery.payload.operation);
+      return request.operation !== 'submit' || typeof request.request.requestId === 'string';
+    }
     if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
     return false;
   } catch {
     return false;
   }
+}
+
+type RelayOperationRequest =
+  | { operation: 'submit'; request: Record<string, unknown> }
+  | { operation: 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel'; operationId: string }
+  | { operation: 'promote'; operationId: string; verificationDigest: string };
+
+function validateRelayOperationRequest(input: unknown): RelayOperationRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_OPERATION_INVALID', 'Relay operation payload must be an object.');
+  const raw = input as Record<string, unknown>;
+  const operation = String(raw.operation ?? '');
+  if (operation === 'submit') {
+    if (!raw.request || typeof raw.request !== 'object' || Array.isArray(raw.request)) throw new OperatorError('RELAY_OPERATION_INVALID', 'Relay operation submit requires a request object.');
+    const request = structuredClone(raw.request as Record<string, unknown>);
+    request.requestId = validTaskUuid(request.requestId, 'operation requestId');
+    if (request.device !== undefined) throw new OperatorError('RELAY_OPERATION_INVALID', 'Remote operation request cannot provide device advertisements.');
+    const text = JSON.stringify(request);
+    if (Buffer.byteLength(text, 'utf8') > 256 * 1024) throw new OperatorError('RELAY_OPERATION_INVALID', 'Relay operation request exceeds bounded size.');
+    return { operation: 'submit', request };
+  }
+  const operationId = validTaskUuid(raw.operationId, 'operationId');
+  if (operation === 'promote') {
+    const verificationDigest = String(raw.verificationDigest ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(verificationDigest)) throw new OperatorError('RELAY_OPERATION_INVALID', 'Relay operation promotion requires a SHA-256 verification digest.');
+    return { operation: 'promote', operationId, verificationDigest };
+  }
+  if (!['inspect', 'start', 'refresh', 'pause', 'cancel'].includes(operation)) throw new OperatorError('RELAY_OPERATION_INVALID', 'Relay operation control action is invalid.');
+  return { operation: operation as 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel', operationId };
 }
 
 type RelayTaskRequest =
