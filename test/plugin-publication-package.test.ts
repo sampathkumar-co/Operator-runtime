@@ -22,9 +22,12 @@ test('public plugin manifest satisfies final directory field limits', async () =
   const runtimePackage = await json('packages/mecord-connect/package.json');
   assert.match(runtimePackage.version, /^\d+\.\d+\.\d+$/);
   assert.equal(runtimePackage.name, 'mecord-connect');
-  assert.equal(runtimePackage.version, releaseState.versions.runtimePackage);
   const publicParts = manifest.version.split('.').map(Number);
   const runtimeParts = runtimePackage.version.split('.').map(Number);
+  const publishedRuntimeParts = releaseState.versions.runtimePackage.split('.').map(Number);
+  assert.equal(runtimeParts[0], publishedRuntimeParts[0], 'npm runtime candidate major must match the currently published runtime major');
+  assert.equal(runtimeParts[1], publishedRuntimeParts[1], 'npm runtime candidate minor must match the currently published runtime minor');
+  assert.ok(runtimeParts[2] >= publishedRuntimeParts[2], 'npm runtime candidate patch must not regress below the currently published runtime patch');
   assert.equal(runtimeParts[0], publicParts[0], 'npm runtime major must remain compatible with the public plugin major');
   assert.equal(runtimeParts[1], publicParts[1], 'runtime patch releases must stay within the public plugin major/minor line');
   assert.ok(runtimeParts[2] >= publicParts[2], 'runtime patch must not be older than the public plugin patch');
