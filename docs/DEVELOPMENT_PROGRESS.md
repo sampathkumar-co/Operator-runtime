@@ -117,7 +117,7 @@ The deployed runtime is gated together with the predecessor runtime: Stage 3 aut
 - production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
 - public tools: **9**;
 - Developer tools: **32 grouped tools**;
-- npm: `mecord-connect@1.0.1` until the separately authenticated patch publish.
+- npm: `mecord-connect@1.0.1` currently published; `2.0.0` is the certified major-release candidate until registry publication completes.
 
 ### Certified runtime lineage
 - Stage-5–10 runtime certification head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;
@@ -126,7 +126,7 @@ The deployed runtime is gated together with the predecessor runtime: Stage 3 aut
 
 ## Remaining release work
 
-1. publish the separately authenticated npm patch release so `npx mecord-connect@latest` installs the Stage-1–10 runtime;
+1. publish the separately authenticated npm 2.0.0 release so `npx mecord-connect@latest` installs the Stage-1–10 runtime;
 2. run fresh real paired-Windows Stage-10 workflows through the live ChatGPT/Developer path when the external OpenAI verification path is available;
 3. continue the external OpenAI verification/app-directory process separately.
 
