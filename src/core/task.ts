@@ -136,7 +136,7 @@ export function setNodeState(task: TaskCapsule, nodeId: string, state: TaskState
   if (state === 'RUNNING') {
     const blockedDependency = node.dependsOn
       .map((id) => task.nodes.find((candidate) => candidate.id === id))
-      .find((dep) => !dep || dep.state !== 'VERIFIED');
+      .find((dep) => !dep || (dep.state !== 'VERIFIED' && dep.state !== 'SKIPPED'));
     if (blockedDependency) {
       throw new OperatorError('TASK_DEPENDENCY_BLOCKED', `Node ${node.title} has an unverified dependency.`);
     }
