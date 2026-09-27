@@ -925,6 +925,16 @@ export class SemanticTaskPlanner implements TaskPlanner {
         const element = uniqueInspectedUiaElement(result.output);
         verifyUiaReinspection(goal, element, state.targetIdentity);
         state.phase = 'complete';
+      } else if (step.key === 'capture-app-fallback') {
+        const capture = verifyAppVisualCaptureResult(goal, result.output);
+        state.captureId = capture.captureId;
+        state.captureSha256 = capture.sha256;
+        state.phase = 'physical-operate';
+      } else if (step.key === 'operate-app-physical-fallback') {
+        verifyAppPhysicalFallbackResult(goal, result.output);
+        delete state.captureId;
+        delete state.captureSha256;
+        state.phase = 'physical-complete';
       }
       return;
     }
@@ -983,11 +993,24 @@ export class SemanticTaskPlanner implements TaskPlanner {
       task.evidence.push(evidence('strategy_fallback', 'info', 'Docker project state changed; switched to fresh inspection before requesting a new approval.'));
       return true;
     }
-    if (step.key === 'operate-app-target' && ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT'].includes(result.error?.code ?? '')) {
-      task.execution!.plannerState.phase = 'start';
-      delete task.execution!.plannerState.targetIdentity;
-      task.evidence.push(evidence('strategy_fallback', 'info', 'UIA target disappeared or timed out; switched to bounded semantic target re-discovery.'));
-      return true;
+    const appSemanticFailure = ['UIA_ELEMENT_NOT_FOUND', 'UIA_WAIT_TIMEOUT', 'UIA_UNAVAILABLE', 'WIN32_FALLBACK_NOT_FOUND', 'TASK_UIA_PATTERN_UNAVAILABLE', 'TASK_UIA_TARGET_NOT_UNIQUE'].includes(result.error?.code ?? '');
+    if ((step.key === 'inspect-app-target' || step.key === 'operate-app-target') && appSemanticFailure) {
+      const goal = task.execution?.plannerState.goal as SemanticTaskGoal | undefined;
+      if (goal?.kind === 'app-operation' && goal.physicalFallback) {
+        task.execution!.plannerState.phase = 'visual-capture';
+        delete task.execution!.plannerState.targetIdentity;
+        task.evidence.push(evidence('strategy_fallback', 'info', 'Semantic app targeting was unavailable; switched to the pre-authorized bounded visual fallback contract.', {
+          failedStep: step.key,
+          errorCode: result.error?.code
+        }));
+        return true;
+      }
+      if (step.key === 'operate-app-target') {
+        task.execution!.plannerState.phase = 'start';
+        delete task.execution!.plannerState.targetIdentity;
+        task.evidence.push(evidence('strategy_fallback', 'info', 'UIA target disappeared or timed out; switched to bounded semantic target re-discovery.'));
+        return true;
+      }
     }
     return false;
   }
@@ -1415,8 +1438,9 @@ function canonicalJson(value: unknown): string {
 }
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function observe(result: ActionResult): TaskObservation {
+  const channel: TaskObservation['channel'] = result.capability === 'visual.capture' || result.capability === 'input.operate' ? 'visual' : 'semantic';
   return {
-    channel: 'semantic', domain: observationDomain(result.capability, result.provider), observedAt: new Date().toISOString(),
+    channel, domain: observationDomain(result.capability, result.provider), observedAt: new Date().toISOString(),
     ok: result.ok, capability: result.capability, provider: result.provider,
     ...(result.output === undefined ? {} : { output: structuredClone(result.output) }),
     evidence: structuredClone(result.evidence),
