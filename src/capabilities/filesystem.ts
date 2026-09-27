@@ -219,7 +219,7 @@ export class FilesystemProvider implements CapabilityProvider {
     if (operation === 'copy') {
       const sourceInput = requiredString(action.input.source, 'source');
       const destinationInput = requiredString(action.input.destination, 'destination');
-      return await this.#scope.withForWrite(sourceInput, async (source) => await this.#scope.withForWrite(destinationInput, async (destination) => {
+      return await this.#scope.withExisting(sourceInput, async (source) => await this.#scope.withForWrite(destinationInput, async (destination) => {
         await this.#pathLeaseHook?.(action.capability, source);
         await this.#pathLeaseHook?.(action.capability, destination);
         const sourceStat = await fs.lstat(source);
@@ -241,28 +241,115 @@ export class FilesystemProvider implements CapabilityProvider {
     if (operation === 'move') {
       const sourceInput = requiredString(action.input.source, 'source');
       const destinationInput = requiredString(action.input.destination, 'destination');
-      return await this.#scope.withExisting(sourceInput, async (source) => await this.#scope.withForWrite(destinationInput, async (destination) => {
+      const expectedSha = normalizeExpectedSha(action.input.expectedSha256);
+
+      const staged = await this.#scope.withExisting(sourceInput, async (source) => {
         await this.#pathLeaseHook?.(action.capability, source);
-        await this.#pathLeaseHook?.(action.capability, destination);
         const sourceStat = await fs.lstat(source);
         if (sourceStat.isSymbolicLink()) throw new OperatorError('FILE_MOVE_SYMLINK_DENIED', 'Refusing to move a symbolic link.');
-        await assertMissing(destination, 'Move destination already exists.');
-        const expectedSha = sourceStat.isFile() ? normalizeExpectedSha(action.input.expectedSha256) : undefined;
+        if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new OperatorError('FILE_MOVE_TYPE_DENIED', 'Move supports regular files and empty directories only.');
+
         if (sourceStat.isFile()) {
           if (!expectedSha) throw new OperatorError('PRECONDITION_REQUIRED', 'Moving a file requires expectedSha256 from a fresh file.info or file.read.');
-          const actual = sha256(await fs.readFile(source));
-          if (actual !== expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'Move source changed since it was inspected.', { details: { expectedSha, actualSha: actual } });
+          const sourceBytes = await fs.readFile(source);
+          const actualSha = sha256(sourceBytes);
+          if (actualSha !== expectedSha) throw new OperatorError('PRECONDITION_FAILED', 'Move source changed since it was inspected.', { details: { expectedSha, actualSha } });
+          const destination = await this.#scope.withForWrite(destinationInput, async (target) => {
+            await this.#pathLeaseHook?.(action.capability, target);
+            await assertMissing(target, 'Move destination already exists.');
+            await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL);
+            const copied = await fs.readFile(target);
+            const copiedSha = sha256(copied);
+            if (copiedSha !== expectedSha) {
+              await fs.rm(target, { force: true });
+              throw new OperatorError('FILE_MANAGE_POSTCONDITION_FAILED', 'Staged move destination hash does not match the inspected source.');
+            }
+            return target;
+          });
+          return { type: 'file' as const, source, destination, sourceBytes, sha256: expectedSha };
         }
-        await fs.rename(source, destination);
-        await assertMissing(source, 'Move source still exists after rename.', true);
-        const movedStat = await fs.stat(destination);
+
+        const entries = await fs.readdir(source);
+        if (entries.length !== 0) throw new OperatorError('FILE_MOVE_DIRECTORY_NOT_EMPTY', 'Directory move is currently limited to empty directories.');
+        const destination = await this.#scope.withForWrite(destinationInput, async (target) => {
+          await this.#pathLeaseHook?.(action.capability, target);
+          await assertMissing(target, 'Move destination already exists.');
+          await fs.mkdir(target);
+          return target;
+        });
+        return { type: 'directory' as const, source, destination };
+      });
+
+      try {
+        await this.#scope.withForWrite(sourceInput, async (source) => {
+          await this.#pathLeaseHook?.(action.capability, source);
+          const current = await fs.lstat(source);
+          if (current.isSymbolicLink()) throw new OperatorError('FILE_MOVE_SYMLINK_DENIED', 'Move source became a symbolic link before removal.');
+          if (staged.type === 'file') {
+            if (!current.isFile()) throw new OperatorError('PRECONDITION_FAILED', 'Move source type changed before removal.');
+            const currentSha = sha256(await fs.readFile(source));
+            if (currentSha !== staged.sha256) throw new OperatorError('PRECONDITION_FAILED', 'Move source changed after destination staging.', { details: { expectedSha: staged.sha256, actualSha: currentSha } });
+            await fs.rm(source);
+          } else {
+            if (!current.isDirectory() || (await fs.readdir(source)).length !== 0) throw new OperatorError('PRECONDITION_FAILED', 'Move source directory changed after destination staging.');
+            await fs.rmdir(source);
+          }
+          await assertMissing(source, 'Move source still exists after removal.', true);
+        });
+      } catch (error) {
+        // Source remains authoritative when removal fails. Remove only the destination
+        // we just staged, and only when it still matches our own staged state.
+        try {
+          await this.#scope.withForWrite(destinationInput, async (destination) => {
+            await this.#pathLeaseHook?.(action.capability, destination);
+            const stat = await fs.lstat(destination);
+            if (staged.type === 'file' && stat.isFile() && sha256(await fs.readFile(destination)) === staged.sha256) await fs.rm(destination);
+            else if (staged.type === 'directory' && stat.isDirectory() && (await fs.readdir(destination)).length === 0) await fs.rmdir(destination);
+          });
+        } catch {}
+        throw error;
+      }
+
+      if (staged.type === 'file') {
+        const verified = await this.#scope.withExisting(destinationInput, async (destination) => {
+          await this.#pathLeaseHook?.(action.capability, destination);
+          const stat = await fs.lstat(destination);
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new OperatorError('FILE_MANAGE_POSTCONDITION_FAILED', 'Move destination is no longer a regular file.');
+          return { destination, sha256: sha256(await fs.readFile(destination)) };
+        });
+        if (verified.sha256 !== staged.sha256) {
+          // Best-effort source restoration is create-only; never overwrite a concurrent recreation.
+          try {
+            await this.#scope.withForWrite(sourceInput, async (source) => {
+              await this.#pathLeaseHook?.(action.capability, source);
+              await assertMissing(source, 'Move source was concurrently recreated.');
+              await fs.writeFile(source, staged.sourceBytes, { flag: 'wx' });
+            });
+          } catch {}
+          throw new OperatorError('FILE_MANAGE_POSTCONDITION_FAILED', 'Move destination changed before final verification.');
+        }
         return {
           ok: true, capability: action.capability, provider: this.name,
-          output: { operation, source, destination, type: movedStat.isDirectory() ? 'directory' : 'file' },
-          evidence: [evidence('file_move', 'pass', 'Path moved inside authorized scope without overwrite.', { source, destination })],
+          output: { operation, source: staged.source, destination: verified.destination, type: 'file', sha256: staged.sha256 },
+          evidence: [evidence('file_move', 'pass', 'File move completed as verified stage-copy then fresh-precondition source removal.', { source: staged.source, destination: verified.destination, sha256: staged.sha256 })],
           durationMs: Math.round(performance.now() - started)
         };
-      }));
+      }
+
+      const verifiedDirectory = await this.#scope.withExisting(destinationInput, async (destination) => {
+        await this.#pathLeaseHook?.(action.capability, destination);
+        const stat = await fs.lstat(destination);
+        if (!stat.isDirectory() || stat.isSymbolicLink() || (await fs.readdir(destination)).length !== 0) {
+          throw new OperatorError('FILE_MANAGE_POSTCONDITION_FAILED', 'Moved empty directory did not remain an empty real directory.');
+        }
+        return destination;
+      });
+      return {
+        ok: true, capability: action.capability, provider: this.name,
+        output: { operation, source: staged.source, destination: verifiedDirectory, type: 'directory' },
+        evidence: [evidence('file_move', 'pass', 'Empty directory move completed through verified create/remove semantics.', { source: staged.source, destination: verifiedDirectory })],
+        durationMs: Math.round(performance.now() - started)
+      };
     }
     if (operation === 'remove') {
       const requested = requiredString(action.input.path, 'path');
