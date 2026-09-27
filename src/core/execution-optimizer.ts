@@ -31,6 +31,7 @@ interface StrategyEntry {
 interface OptimizerState {
   version: 1;
   entries: StrategyEntry[];
+  receipts?: string[];
 }
 
 export interface StrategyCandidate {
@@ -62,12 +63,15 @@ export class ExecutionOptimizerStore {
     this.#clock = options.clock ?? (() => new Date());
   }
 
-  async record(contextInput: string, strategyInput: string, outcome: StrategyOutcome): Promise<void> {
+  async record(contextInput: string, strategyInput: string, outcome: StrategyOutcome, receiptInput?: string): Promise<void> {
     const context = boundedKey(contextInput, 'context');
     const strategy = boundedKey(strategyInput, 'strategy');
     const normalized = normalizeOutcome(outcome);
+    const receipt = receiptInput === undefined ? undefined : shaDigest(receiptInput, 'receipt');
     const run = this.#serial.then(async () => {
       const state = await this.#read();
+      state.receipts ??= [];
+      if (receipt && state.receipts.includes(receipt)) return;
       let entry = state.entries.find((item) => item.context === context && item.strategy === strategy);
       if (!entry) {
         if (state.entries.length >= MAX_ENTRIES) {
@@ -93,6 +97,10 @@ export class ExecutionOptimizerStore {
       entry.retriesEwma = ewma(entry.retriesEwma, normalized.retries, entry.samples);
       entry.costEwma = ewma(entry.costEwma, normalized.costUnits, entry.samples);
       entry.updatedAt = this.#clock().toISOString();
+      if (receipt) {
+        state.receipts.push(receipt);
+        if (state.receipts.length > 20_000) state.receipts.splice(0, state.receipts.length - 20_000);
+      }
       state.entries.sort((a, b) => identity(a).localeCompare(identity(b)));
       await this.#write(state);
     });
@@ -157,7 +165,7 @@ export class ExecutionOptimizerStore {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entries: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entries: [], receipts: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('EXECUTION_OPTIMIZER_CORRUPT', 'Execution optimizer state could not be read.');
     }
@@ -199,6 +207,11 @@ function validateState(input: unknown): OptimizerState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
   const state = input as OptimizerState;
   if (state.version !== 1 || !Array.isArray(state.entries) || state.entries.length > MAX_ENTRIES) throw corrupt('State shape is invalid.');
+  if (state.receipts !== undefined) {
+    if (!Array.isArray(state.receipts) || state.receipts.length > 20_000) throw corrupt('Optimizer receipts are invalid.');
+    for (const receipt of state.receipts) shaDigest(receipt, 'receipt');
+    if (new Set(state.receipts).size !== state.receipts.length) throw corrupt('Optimizer receipts must be unique.');
+  }
   const seen = new Set<string>();
   for (const entry of state.entries) {
     boundedKey(entry.context, 'context'); boundedKey(entry.strategy, 'strategy');
@@ -209,7 +222,7 @@ function validateState(input: unknown): OptimizerState {
     boundedNumber(entry.durationEwmaMs, 0, MAX_DURATION_MS, 'durationEwmaMs'); boundedNumber(entry.retriesEwma, 0, 1000, 'retriesEwma'); boundedNumber(entry.costEwma, 0, MAX_COST, 'costEwma');
     validIso(entry.updatedAt, 'updatedAt');
   }
-  return structuredClone(state);
+  return { version: 1, entries: structuredClone(state.entries), receipts: [...(state.receipts ?? [])] };
 }
 function identity(entry: Pick<StrategyEntry, 'context' | 'strategy'>): string { return `${entry.context}\0${entry.strategy}`; }
 function boundedKey(input: unknown, label: string): string {
@@ -226,6 +239,11 @@ function boundedNumber(input: unknown, min: number, max: number, label: string):
 function boundedInteger(input: unknown, min: number, max: number, label: string): number {
   const value = Number(input);
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('EXECUTION_OPTIMIZER_INPUT_INVALID', `${label} is invalid.`);
+  return value;
+}
+function shaDigest(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('EXECUTION_OPTIMIZER_INPUT_INVALID', `${label} must be SHA-256.`);
   return value;
 }
 function validIso(input: unknown, label: string): string {
