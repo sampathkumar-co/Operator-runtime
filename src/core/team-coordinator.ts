@@ -74,6 +74,14 @@ export interface TeamWorkItem {
   failure?: { code: string; message: string; at: string };
 }
 
+export interface TeamBlackboardEntry {
+  key: string;
+  revision: number;
+  value: unknown;
+  workerId: string;
+  updatedAt: string;
+}
+
 export interface TeamMission {
   version: 1;
   id: string;
@@ -84,6 +92,7 @@ export interface TeamMission {
   workers: TeamWorker[];
   resources: TeamResource[];
   workItems: TeamWorkItem[];
+  blackboard: TeamBlackboardEntry[];
   events: TeamEvent[];
   startedAt?: string;
   deadlineAt?: string;
@@ -116,6 +125,8 @@ const MAX_WORK_ITEMS = 1000;
 const MAX_WORKERS = 64;
 const MAX_RESOURCES = 5000;
 const MAX_EVENTS = 20_000;
+const MAX_BLACKBOARD_ENTRIES = 2000;
+const MAX_BLACKBOARD_VALUE_BYTES = 64 * 1024;
 const STORE_OPTIONS = {
   maxBytes: MAX_MISSION_BYTES,
   errorCode: 'TEAM_STATE_CORRUPT',
@@ -186,6 +197,7 @@ export class TeamCoordinator {
       workers: [],
       resources: [...resources].sort().map((key) => ({ key, revision: 0, uncertain: false, updatedAt: now })),
       workItems,
+      blackboard: [],
       events: [],
       createdAt: now,
       updatedAt: now
@@ -368,6 +380,45 @@ export class TeamCoordinator {
       return current;
     });
     return { mission, ...(claimed ? { workItem: claimed } : {}) };
+  }
+
+  async putBlackboard(missionId: string, input: {
+    workerId: string;
+    key: string;
+    value: unknown;
+    expectedRevision?: number;
+    workItemId?: string;
+    leaseId?: string;
+  }): Promise<TeamMission> {
+    return await this.#store.update(missionId, (mission) => {
+      reapExpired(mission);
+      const worker = requireWorker(mission, input.workerId);
+      if (worker.role !== 'supervisor') {
+        if (!input.workItemId || !input.leaseId) throw new OperatorError('TEAM_BLACKBOARD_LEASE_REQUIRED', 'Non-supervisor blackboard writes require an active work lease.');
+        const item = requireWorkItem(mission, input.workItemId);
+        requireLease(item, worker.id, input.leaseId, mission.epoch);
+      }
+      const key = boundedKey(input.key, 'blackboard key');
+      const value = cloneBoundedJson(input.value, MAX_BLACKBOARD_VALUE_BYTES, 'blackboard value');
+      const existing = mission.blackboard.find((entry) => entry.key === key);
+      if (existing) {
+        if (input.expectedRevision === undefined || input.expectedRevision !== existing.revision) {
+          throw new OperatorError('TEAM_BLACKBOARD_CONFLICT', 'Blackboard entry revision changed; refresh before updating.');
+        }
+        existing.revision += 1;
+        existing.value = value;
+        existing.workerId = worker.id;
+        existing.updatedAt = new Date().toISOString();
+      } else {
+        if (input.expectedRevision !== undefined && input.expectedRevision !== 0) throw new OperatorError('TEAM_BLACKBOARD_CONFLICT', 'New blackboard entry requires expectedRevision=0 or omission.');
+        if (mission.blackboard.length >= MAX_BLACKBOARD_ENTRIES) throw new OperatorError('TEAM_BLACKBOARD_LIMIT', 'Mission blackboard entry limit reached.');
+        mission.blackboard.push({ key, revision: 1, value, workerId: worker.id, updatedAt: new Date().toISOString() });
+        mission.blackboard.sort((a, b) => a.key.localeCompare(b.key));
+      }
+      mission.updatedAt = new Date().toISOString();
+      appendEvent(mission, 'blackboard.updated', worker.id, input.workItemId, { key, revision: mission.blackboard.find((entry) => entry.key === key)!.revision });
+      return mission;
+    });
   }
 
   async authorizeExecution(missionId: string, input: {
@@ -802,6 +853,13 @@ function validateMission(input: unknown): TeamMission {
   if (!Array.isArray(mission.workers) || mission.workers.length > MAX_WORKERS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission workers are invalid.');
   if (!Array.isArray(mission.resources) || mission.resources.length > MAX_RESOURCES) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission resources are invalid.');
   if (!Array.isArray(mission.workItems) || mission.workItems.length > MAX_WORK_ITEMS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission work items are invalid.');
+  if (!Array.isArray(mission.blackboard) || mission.blackboard.length > MAX_BLACKBOARD_ENTRIES) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission blackboard is invalid.');
+  for (const entry of mission.blackboard) {
+    boundedKey(entry.key, 'blackboard key');
+    boundedInteger(entry.revision, 1, Number.MAX_SAFE_INTEGER, 'blackboard revision');
+    validUuid(entry.workerId, 'blackboard workerId');
+    cloneBoundedJson(entry.value, MAX_BLACKBOARD_VALUE_BYTES, 'blackboard value');
+  }
   if (!Array.isArray(mission.events) || mission.events.length > MAX_EVENTS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission events are invalid.');
   return mission;
 }
@@ -907,4 +965,12 @@ function boundedInteger(input: unknown, min: number, max: number, label: string)
   const value = Number(input);
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('TEAM_INPUT_INVALID', `${label} is invalid.`);
   return value;
+}
+
+
+function cloneBoundedJson(value: unknown, maxBytes: number, label: string): unknown {
+  let text: string;
+  try { text = JSON.stringify(value); } catch { throw new OperatorError('TEAM_INPUT_INVALID', `${label} must be JSON serializable.`); }
+  if (text === undefined || Buffer.byteLength(text, 'utf8') > maxBytes) throw new OperatorError('TEAM_INPUT_INVALID', `${label} exceeds the bounded JSON size.`);
+  return JSON.parse(text);
 }
