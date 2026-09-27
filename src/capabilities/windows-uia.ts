@@ -27,6 +27,7 @@ const UIA_OPERATIONS = ['invoke', 'set_value', 'focus', 'select', 'expand', 'col
 const PHYSICAL_INPUT_OPERATIONS = ['move', 'click', 'double_click', 'drag', 'scroll', 'type_text', 'key_press', 'hotkey'] as const;
 const CAPTURE_LEASE_MS = 90_000;
 const MAX_CAPTURE_LEASES = 32;
+const AFTER_CAPTURE_SETTLE_MS = 200;
 const SCROLL_AMOUNTS = ['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment'] as const;
 
 type SidecarError = { code: string; message: string; retryable?: boolean };
@@ -382,10 +383,39 @@ export class WindowsUiaProvider implements CapabilityProvider {
       if (!Array.isArray(action.input.keys) || action.input.keys.length < 1 || action.input.keys.length > 4) throw new OperatorError('INPUT_KEYS_INVALID', 'hotkey keys must contain 1-4 entries.');
       params.keys = action.input.keys.map((value, index) => requiredCaptureText(value, `keys[${index}]`, 32));
     }
-    const before = { captureId, sha256: lease.sha256, expiresAt: new Date(lease.expiresAt).toISOString() };
+    // Re-observe immediately before dispatch. The caller's hash proves which
+    // capture it reasoned over; this fresh hash proves that capture is still current.
+    let currentRaw: Record<string, unknown>;
+    try {
+      currentRaw = asRecord(await this.#client.call('capture', lease.captureParams, signal));
+    } catch (error) {
+      this.#captureLeases.delete(captureId);
+      throw new OperatorError('INPUT_CAPTURE_REVALIDATION_FAILED', `Could not revalidate the visual capture before physical input: ${error instanceof Error ? error.message : String(error)}`, { retryable: true });
+    }
+    const currentBase64 = String(currentRaw.png_base64 ?? '');
+    const currentPng = Buffer.from(currentBase64, 'base64');
+    if (currentPng.length < 16 || currentPng.length > 8 * 1024 * 1024) {
+      this.#captureLeases.delete(captureId);
+      throw new OperatorError('INPUT_CAPTURE_INVALID', 'Fresh pre-input capture returned an invalid PNG payload.', { retryable: true });
+    }
+    const currentSha256 = crypto.createHash('sha256').update(currentPng).digest('hex');
+    const currentWindowId = typeof currentRaw.window_id === 'string' ? currentRaw.window_id : undefined;
+    if (currentSha256 !== lease.sha256 || (lease.windowId && currentWindowId !== lease.windowId)) {
+      this.#captureLeases.delete(captureId);
+      throw new OperatorError('INPUT_CAPTURE_STALE', 'Visual state changed after reasoning; capture fresh state before physical input.', { retryable: true });
+    }
+
+    const before = {
+      captureId,
+      sha256: lease.sha256,
+      revalidatedSha256: currentSha256,
+      expiresAt: new Date(lease.expiresAt).toISOString(),
+      ...(lease.windowId ? { windowId: lease.windowId } : {})
+    };
     const native = asRecord(await this.#client.call('input', params, signal));
     // A physical action consumes its BEFORE lease regardless of verification outcome.
     this.#captureLeases.delete(captureId);
+    await waitForVisualSettle(AFTER_CAPTURE_SETTLE_MS, signal);
 
     let afterRaw: Record<string, unknown>;
     try {
@@ -564,4 +594,23 @@ function boundedCaptureNumber(value: unknown, min: number, max: number, label: s
 function requiredCaptureText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value || value.length > max || value.includes('\0')) throw new OperatorError('VISUAL_INPUT_INVALID', `${label} is invalid.`);
   return value;
+}
+
+
+async function waitForVisualSettle(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Physical input verification was cancelled.', { retryable: false });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new OperatorError('EXECUTION_ABORTED', 'Physical input verification was cancelled.', { retryable: false }));
+    };
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
 }
