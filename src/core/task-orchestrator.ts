@@ -606,9 +606,13 @@ export class ProjectQualityGatePlanner implements TaskPlanner {
       if (!['lint', 'test', 'build'].includes(kind) || !commandId || !['read', 'write', 'external'].includes(risk)) {
         throw new OperatorError('TASK_QUALITY_GATE_STATE_INVALID', 'Compiled quality gate contains an invalid trusted command.');
       }
+      if (risk === 'external') {
+        throw new OperatorError('TASK_QUALITY_GATE_IRREVERSIBLE_CHECK', `Trusted ${kind} check is external and cannot be safely rolled back by the autonomous quality gate.`);
+      }
       return {
         type: 'step', key: `quality-run:${index}:${kind}`, title: `Run trusted ${kind} quality check`,
-        capability: 'project.command.run', input: { path: goal.root, commandId, expectedRisk: risk }, target: goal.root
+        capability: risk === 'write' ? 'project.transaction.run' : 'project.command.run',
+        input: { path: goal.root, commandId, expectedRisk: risk }, target: goal.root
       };
     }
     return { type: 'complete', message: 'Project quality gate satisfied its compiled trusted checks.' };
@@ -632,7 +636,10 @@ export class ProjectQualityGatePlanner implements TaskPlanner {
         const id = String(command?.id ?? '');
         const risk = String(command?.risk ?? '');
         if (!command || !id || !['read', 'write', 'external'].includes(risk)) missing.push(kind);
-        else selected.push({ kind, id, risk });
+        else if (risk === 'external') {
+          task.evidence.push(evidence('goal_compilation', 'fail', `Trusted ${kind} check is external and is not eligible for autonomous rollback-safe execution.`, { commandId: id }));
+          missing.push(kind);
+        } else selected.push({ kind, id, risk });
       }
       if (goal.requireAll && missing.length > 0) {
         task.evidence.push(evidence('goal_compilation', 'fail', 'Required trusted quality checks are unavailable.', { code: 'TASK_QUALITY_GATE_REQUIRED_CHECK_MISSING', missing }));
