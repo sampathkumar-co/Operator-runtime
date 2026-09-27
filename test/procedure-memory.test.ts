@@ -138,3 +138,30 @@ test('stage5 required capabilities filter procedure selection without granting a
     objectiveKind: 'maintenance', scopeKey: 'project:m', assumptions: [], requiredCapabilities: ['process.manage']
   })).length, 0);
 });
+
+
+test('stage5 verified procedure and outcome receipts are idempotent across retry', async (t) => {
+  const state = await tempDir(t);
+  const store = new ProcedureMemoryStore(state);
+  const input = {
+    key: 'idempotent',
+    title: 'Idempotent procedure',
+    objectiveKind: 'maintenance',
+    scopeKey: 'project:idempotent',
+    steps: [{ capability: 'file.read', risk: 'read' as const, summary: 'Inspect.' }],
+    assumptions: [],
+    verificationDigest: '7'.repeat(64),
+    verifierEvidenceDigest: '8'.repeat(64)
+  };
+  const first = await store.recordVerified(input);
+  const replay = await store.recordVerified(input);
+  assert.equal(replay.id, first.id);
+  assert.equal(replay.version, 1);
+  assert.equal(replay.verifiedRuns, 1);
+
+  const receipt = '9'.repeat(64);
+  await store.recordOutcome(first.id, 'verified', receipt);
+  const duplicated = await store.recordOutcome(first.id, 'verified', receipt);
+  assert.equal(duplicated.verifiedRuns, 2);
+  assert.deepEqual(duplicated.outcomeReceipts, [receipt]);
+});
