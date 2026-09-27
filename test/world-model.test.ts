@@ -102,3 +102,24 @@ test('stage6 entity identity cannot be reinterpreted under a different scope/typ
     (error: any) => error?.code === 'WORLD_ENTITY_IDENTITY_CONFLICT'
   );
 });
+
+
+test('stage6 rejects secret-bearing nested world values and obvious credential strings', async (t) => {
+  const store = new WorldModelStore(await tempDir(t));
+  await assert.rejects(
+    store.observe({
+      entity: { key: 'service:nested-secret', type: 'service', scopeKey: 'project:x', label: 'Nested secret' },
+      source: 'verifier', domain: 'application', evidenceDigest: '6'.repeat(64),
+      facts: { config: { endpoint: 'https://example.invalid', token: 'must-not-persist' } }
+    }),
+    (error: any) => error?.code === 'WORLD_SECRET_FACT_DENIED'
+  );
+  await assert.rejects(
+    store.observe({
+      entity: { key: 'service:bearer-secret', type: 'service', scopeKey: 'project:x', label: 'Bearer secret' },
+      source: 'verifier', domain: 'application', evidenceDigest: '7'.repeat(64),
+      facts: { statusText: 'Bearer abcdefghijklmnopqrstuvwxyz123456' }
+    }),
+    (error: any) => error?.code === 'WORLD_SECRET_FACT_DENIED'
+  );
+});
