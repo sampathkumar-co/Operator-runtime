@@ -323,15 +323,16 @@ export function createLocalAgentServer(options: {
         const id = teamRoute[1]!;
         const operation = teamRoute[2]!;
         const body = await readJson(req) as Record<string, unknown>;
+        if (operation === 'claim') {
+          const result = await options.teams.claim(id, { workerId: String(body.workerId ?? '') });
+          send(res, 200, { ok: true, mission: result.mission, ...(result.workItem ? { workItem: result.workItem } : {}) });
+          return;
+        }
         const mission = operation === 'start' ? await options.teams.start(id)
           : operation === 'pause' ? await options.teams.pause(id)
           : operation === 'resume' ? await options.teams.resume(id)
-          : operation === 'cancel' ? await options.teams.cancel(id)
-          : (await options.teams.claim(id, { workerId: String(body.workerId ?? '') })).mission;
-        const workItem = operation === 'claim'
-          ? (await options.teams.inspect(id)).workItems.find((item) => item.lease?.workerId === String(body.workerId ?? '') && item.state === 'LEASED')
-          : undefined;
-        send(res, 200, { ok: true, mission, ...(workItem ? { workItem } : {}) });
+          : await options.teams.cancel(id);
+        send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
       }
