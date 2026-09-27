@@ -59,6 +59,13 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 }
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
+const permissions = {
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
+  allowedRoots,
+  allowExternalWrites: false,
+  allowSystemChanges: false,
+  allowDestructive: false
+};
 const emergencyStop = new EmergencyStopStore(stateDir);
 const approvals = new ApprovalStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
@@ -79,7 +86,8 @@ const operations = new DigitalOperationsLayer(stateDir, {
   devices: devicePool,
   optimizer,
   teams,
-  organizations
+  organizations,
+  availableCapabilities: permissions.allowedCapabilities
 });
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
@@ -225,13 +233,6 @@ async function resetLocalDevice() {
   return await coordinator.reset();
 }
 
-const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
-  allowedRoots,
-  allowExternalWrites: false,
-  allowSystemChanges: false,
-  allowDestructive: false
-};
 const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
