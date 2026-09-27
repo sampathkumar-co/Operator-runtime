@@ -19,7 +19,7 @@ Mecord Stage 1–10 is live in production at source `3361b2f77d2b04028d514b178bd
 - private/Developer MCP surface: **32 grouped tools**;
 - Windows RDC parity: deployed;
 - Stages 3–10: deployed and CI-certified;
-- npm runtime: still `mecord-connect@1.0.1` under `latest` until the separately authenticated patch publish.
+- npm runtime: still `mecord-connect@1.0.1` under `latest` until the separately authenticated 2.0.0 publish.
 
 ## Capability comparison
 
@@ -97,4 +97,4 @@ For a user who mainly wants **fast unrestricted file/terminal/document manipulat
 
 For a user who wants **ChatGPT/agents to operate a real Windows development machine autonomously with durable state, application-aware actions, explicit authority, multi-device routing, multi-agent coordination, rollback/reconciliation and proof of completion**, the deployed Mecord Stage-1–10 runtime has the stronger architecture.
 
-The next product step is therefore not another basic parity sprint. It is to prove the deployed Stage-1–10 stack through fresh live ChatGPT/Developer workflows as the external OpenAI verification path becomes available, publish the npm patch runtime, and selectively close RDC's remaining convenience gaps without weakening Mecord's safety model.
+The next product step is therefore not another basic parity sprint. It is to prove the deployed Stage-1–10 stack through fresh live ChatGPT/Developer workflows as the external OpenAI verification path becomes available, publish the npm 2.0.0 runtime, and selectively close RDC's remaining convenience gaps without weakening Mecord's safety model.
