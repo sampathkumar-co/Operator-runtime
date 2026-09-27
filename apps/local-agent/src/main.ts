@@ -213,7 +213,7 @@ const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
   permissions,
-  executeAction: async (action, actionPermissions) => {
+  executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
         ok: false,
@@ -224,7 +224,7 @@ const taskOrchestrator = new TaskOrchestrator({
         durationMs: 0
       };
     }
-    const result = await runtime.execute(action, actionPermissions);
+    const result = await runtime.execute(action, actionPermissions, context);
     await audit.append({
       taskId: action.taskId,
       capability: action.capability,
