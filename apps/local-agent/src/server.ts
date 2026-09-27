@@ -934,7 +934,8 @@ function teamActionResourceKeys(action: ActionRequest): string[] {
   const input = action.input;
   const absolute = (value: unknown): string | undefined => {
     if (typeof value !== 'string' || !value || value.includes('\0')) return undefined;
-    return path.resolve(value).replace(/\\/g, '/').toLowerCase();
+    const normalized = path.resolve(value).replace(/\\/g, '/');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
   };
   const add = (prefix: string, value: unknown, target: Set<string>) => {
     const resolved = absolute(value);
