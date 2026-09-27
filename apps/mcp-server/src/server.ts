@@ -400,7 +400,11 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     preconditions: z.array(operationCondition).max(200).optional(),
     postconditions: z.array(operationCondition).max(200).optional(),
     execution: operationExecution.optional(),
-    maxRisk: z.enum(['read', 'write', 'external', 'system', 'destructive']).default('write'),
+    maxRisk: z.enum(['read', 'write', 'external', 'system', 'destructive']).default('read'),
+    authority: z.object({
+      capabilities: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/)).min(1).max(500),
+      resources: z.array(z.string().min(1).max(1024)).min(1).max(5000)
+    }).optional(),
     budget: operationTeamBudget.optional(),
     procedure: z.object({
       objectiveKind: z.string().min(1).max(128),
@@ -482,7 +486,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('operations', {
     title: 'Run governed digital operation',
-    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted: Mecord then decomposes objective + scope + success conditions into a bounded planner/executor/tester/verifier team using only capabilities already authorized locally and no dynamic-risk authority. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
+    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted: read-only planning uses locally authorized read capabilities, while any auto-planned mutation additionally requires an explicit authority envelope containing a requested capability subset and exact Stage-4 resource keys; this envelope can restrict but never grant local authority. Dynamic-risk capabilities are excluded from auto-planning. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
     inputSchema: operationsSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (input) => {
