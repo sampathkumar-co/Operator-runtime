@@ -200,10 +200,11 @@ export class RelayHub {
         gpu: connection.resourceProfile!.gpu,
         tags: [...connection.resourceProfile!.tags],
         activeJobs: connection.inFlightSeq === undefined ? 0 : 1,
-        // The current relay transport intentionally serializes deliveries per
-        // device. Resource scheduling therefore never claims more than one
-        // relay execution slot even when the host can run more local work.
-        maxConcurrentJobs: 1
+        // Relay delivery itself is serialized per device, but durable local
+        // operations continue independently after ACK. Long-lived capacity is
+        // therefore bounded by the signed host profile plus durable pool
+        // reservations, not by the transient one-frame relay pipeline.
+        maxConcurrentJobs: connection.resourceProfile!.maxConcurrentJobs
       }));
   }
 
