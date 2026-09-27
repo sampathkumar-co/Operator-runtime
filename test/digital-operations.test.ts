@@ -209,6 +209,10 @@ test('stage10 outcome-only submit decomposes into bounded team work without call
     scopeKey: 'project:auto',
     successConditions: ['the intended state is observable', 'independent verification passes'],
     maxRisk: 'write' as const,
+    authority: {
+      capabilities: ['project.inspect', 'file.read', 'file.write'],
+      resources: ['file:/workspace/auto.txt']
+    },
     run: false
   };
 
@@ -222,6 +226,7 @@ test('stage10 outcome-only submit decomposes into bounded team work without call
   assert.equal(mission.workItems.at(-1)?.role, 'verifier');
   assert.ok(mission.workItems.every((item) => !(item.allowedCapabilities ?? []).includes('browser.interact')));
   assert.ok(mission.workItems.every((item) => !(item.allowedCapabilities ?? []).includes('terminal.session')));
+  assert.ok(mission.workItems.every((item) => JSON.stringify(item.resources) === JSON.stringify(['file:/workspace/auto.txt'])));
 
   const replay = await ops.submit(structuredClone(request));
   assert.equal(replay.id, first.id);
@@ -428,4 +433,19 @@ test('stage10 final outcome replay after a crash does not double-learn or double
   assert.equal(procedureAfterReplay.verifiedRuns, 2);
   assert.equal(optimizerAfterReplay.verified, 1);
   assert.equal(optimizerAfterReplay.samples, 1);
+});
+
+
+test('stage10 outcome-only mutation fails closed without an explicit authority envelope', async (t) => {
+  const { ops } = await setup(t);
+  await assert.rejects(
+    ops.submit({
+      objective: 'Do not infer write authority',
+      scopeKey: 'project:no-authority',
+      successConditions: ['verified'],
+      maxRisk: 'write',
+      run: false
+    }),
+    (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
+  );
 });
