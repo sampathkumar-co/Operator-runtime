@@ -34,7 +34,9 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'browser.tab.focus': 'write',
   'browser.tab.close': 'destructive',
   'app.inspect': 'read',
-  'app.operate': 'external'
+  'app.operate': 'external',
+  'visual.capture': 'read',
+  'input.operate': 'external'
 });
 
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {
