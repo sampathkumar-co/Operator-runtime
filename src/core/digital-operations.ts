@@ -200,6 +200,17 @@ export class DigitalOperationsLayer {
 
       let teamMissionId: string | undefined;
       let organizationProgramId: string | undefined;
+      const compensateCreatedExecution = async () => {
+        if (teamMissionId) {
+          try { await this.#teams.cancel(teamMissionId); } catch {}
+        }
+        if (organizationProgramId) {
+          try { await this.#organizations.cancel(organizationProgramId); } catch {}
+        }
+        if (deviceReservationId) {
+          try { await this.#devices.release(deviceReservationId); } catch {}
+        }
+      };
       try {
         if (resolved.execution.kind === 'team') {
           const mission = await this.#teams.submit({
@@ -219,9 +230,7 @@ export class DigitalOperationsLayer {
           if (normalized.run) await this.#organizations.start(program.id);
         }
       } catch (error) {
-        if (deviceReservationId) {
-          try { await this.#devices.release(deviceReservationId); } catch {}
-        }
+        await compensateCreatedExecution();
         throw error;
       }
 
@@ -249,7 +258,13 @@ export class DigitalOperationsLayer {
         updatedAt: now
       };
       state.operations.push(operation);
-      await this.#write(state);
+      try {
+        await this.#write(state);
+      } catch (error) {
+        state.operations.pop();
+        await compensateCreatedExecution();
+        throw error;
+      }
       return structuredClone(operation);
     });
     this.#serial = run.then(() => undefined, () => undefined);
@@ -393,10 +408,30 @@ export class DigitalOperationsLayer {
       if (!operation.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Verified organization operation has no program.');
       const program = await this.#organizations.inspect(operation.organizationProgramId);
       if (program.state !== 'VERIFIED') throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Organization program is not verified.');
+      const targetVerifications: Array<Record<string, unknown>> = [];
+      for (const target of program.targets) {
+        if (target.state !== 'VERIFIED' || !target.missionId) {
+          throw new OperatorError('OPERATIONS_VERIFIER_MISSING', `Organization target ${target.key} is missing a verified mission.`);
+        }
+        const mission = await this.#teams.inspect(target.missionId);
+        if (mission.state !== 'VERIFIED') {
+          throw new OperatorError('OPERATIONS_VERIFIER_MISSING', `Organization target ${target.key} mission is not verified.`);
+        }
+        const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.state === 'COMPLETED' && item.result?.verificationPassed === true);
+        if (!verifier?.result) {
+          throw new OperatorError('OPERATIONS_VERIFIER_MISSING', `Organization target ${target.key} has no accepted verifier result.`);
+        }
+        targetVerifications.push({
+          targetKey: target.key,
+          missionId: mission.id,
+          verifierWorkItemId: verifier.id,
+          result: verifier.result
+        });
+      }
       evidence = {
         programId: program.id,
         waves: program.waves.map((wave) => ({ index: wave.index, promotionDigest: wave.promotionDigest ?? null, state: wave.state })),
-        targets: program.targets.map((target) => ({ key: target.key, missionId: target.missionId ?? null, state: target.state }))
+        targetVerifications
       };
     }
     return crypto.createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
@@ -547,6 +582,7 @@ function operationReceipt(operation: DigitalOperation): string {
     preconditions: operation.preconditions,
     postconditions: operation.postconditions,
     selectedStrategy: operation.selectedStrategy,
+    submissionDigest: operation.submissionDigest,
     planDigest: operation.planDigest ?? null,
     selectedProcedureId: operation.selectedProcedureId ?? null,
     deviceReservationId: operation.deviceReservationId ?? null,
