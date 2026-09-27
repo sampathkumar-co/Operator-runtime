@@ -97,7 +97,7 @@ export class WorldModelStore {
     confidence?: number;
     ttlMs?: number;
   }): Promise<WorldEntity> {
-    const normalized = normalizeObservation(input);
+    const normalized = validateWorldObservation(input);
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const now = this.#clock();
@@ -291,7 +291,7 @@ export class WorldModelStore {
   }
 }
 
-function normalizeObservation(input: {
+export function validateWorldObservation(input: {
   entity: { key: string; type: string; scopeKey: string; label: string };
   source: string; domain: WorldDomain; evidenceDigest: string; facts?: Record<string, unknown>;
   relations?: Array<{ type: string; toKey: string; confidence?: number }>; confidence?: number; ttlMs?: number;
