@@ -413,3 +413,96 @@ test('stage3 mutating quality check runs transactionally and rolls back false-gr
   assert.equal(status, '');
   assert.ok(failed.execution!.records.some((record) => record.capability === 'project.transaction.run' && record.state === 'FAILED'));
 });
+
+
+class Stage3AppFallbackProvider implements CapabilityProvider {
+  readonly name = 'test.stage3-app-fallback';
+  calls: string[] = [];
+  supports(action: ActionRequest): boolean {
+    return ['app.inspect', 'app.operate', 'visual.capture', 'input.operate'].includes(action.capability);
+  }
+  score(): CapabilityScore { return STAGE3_SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.calls.push(action.capability);
+    if (action.capability === 'app.inspect') {
+      return {
+        ok: false, capability: action.capability, provider: this.name, evidence: [],
+        error: { code: 'UIA_ELEMENT_NOT_FOUND', message: 'semantic target unavailable', retryable: true }, durationMs: 0
+      };
+    }
+    if (action.capability === 'visual.capture') {
+      return {
+        ok: true, capability: action.capability, provider: this.name, evidence: [],
+        output: {
+          captureId: 'capture-stage3-1', sha256: 'a'.repeat(64), source: 'screen',
+          originX: 0, originY: 0, sourceWidth: 100, sourceHeight: 100,
+          width: 100, height: 100, scaleX: 1, scaleY: 1, mimeType: 'image/png', imageBase64: 'iVBORw0KGgo='
+        },
+        durationMs: 0
+      };
+    }
+    if (action.capability === 'input.operate') {
+      return {
+        ok: true, capability: action.capability, provider: this.name, evidence: [],
+        output: {
+          operation: 'click',
+          before: { captureId: 'capture-stage3-1', sha256: 'a'.repeat(64) },
+          after: { sha256: 'b'.repeat(64), changed: true },
+          postcondition: {
+            dispatched: true, captureLeaseConsumed: true, afterCaptured: true,
+            afterSha256: 'b'.repeat(64), changed: true, windowStable: true
+          }
+        },
+        durationMs: 0
+      };
+    }
+    return {
+      ok: false, capability: action.capability, provider: this.name, evidence: [],
+      error: { code: 'UNEXPECTED_APP_OPERATION', message: 'semantic operate must not run after inspect fallback', retryable: false }, durationMs: 0
+    };
+  }
+}
+
+test('stage3 app goal falls back from failed semantic targeting to approved capture-bound physical input', async (t) => {
+  const state = await tempDir(t, 'operator-stage3-app-fallback-state-');
+  const root = await tempDir(t, 'operator-stage3-app-fallback-root-');
+  const provider = new Stage3AppFallbackProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['app.inspect', 'app.operate', 'visual.capture', 'input.operate'])
+  });
+
+  const task = await orchestrator.submit({
+    objective: 'Focus the app target, using the explicitly bounded visual fallback only if semantic targeting is unavailable.',
+    authorizedScope: [],
+    successConditions: ['semantic targeting is attempted first', 'physical fallback uses a fresh capture lease', 'AFTER capture is verified'],
+    goal: {
+      kind: 'app-operation',
+      operation: 'focus',
+      selector: { automationId: 'missing-semantic-target' },
+      physicalFallback: { source: 'screen', operation: 'click', x: 20, y: 30, maxWidth: 100, maxHeight: 100 }
+    }
+  });
+
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  const physical = blocked.execution!.records.find((record) => record.stepKey === 'operate-app-physical-fallback');
+  assert.ok(physical);
+  assert.equal(physical!.capability, 'input.operate');
+  assert.equal(physical!.state, 'BLOCKED');
+  assert.deepEqual(provider.calls, ['app.inspect', 'visual.capture']);
+
+  const completed = await orchestrator.resume(task.id, [physical!.actionId]);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(provider.calls, ['app.inspect', 'visual.capture', 'input.operate']);
+  assert.equal(completed.execution!.plannerState.phase, 'physical-complete');
+  assert.ok(completed.evidence.some((item) => item.kind === 'strategy_fallback'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
+  const captureRecord = completed.execution!.records.find((record) => record.stepKey === 'capture-app-fallback');
+  assert.equal(captureRecord?.observation?.schemaVersion, 2);
+  assert.equal(captureRecord?.observation?.channel, 'visual');
+  const physicalRecord = completed.execution!.records.find((record) => record.stepKey === 'operate-app-physical-fallback');
+  assert.equal(physicalRecord?.observation?.channel, 'visual');
+  assert.equal((physicalRecord?.observation?.importantState.postcondition as any)?.afterCaptured, true);
+});
