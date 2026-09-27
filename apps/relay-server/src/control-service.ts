@@ -379,8 +379,10 @@ function taskRequiredCapabilities(goalInput: unknown, allowWorkflow = true): str
   }
   const goal = goalInput as Record<string, unknown>;
   switch (String(goal.kind ?? '')) {
-    case 'controlled-file-change': return ['file.list', 'file.create', 'file.read', 'git.status'];
-    case 'trusted-project-command': return ['project.inspect', 'project.command.inspect', 'project.command.run'];
+    case 'controlled-file-change': return ['file.list', 'file.create', 'file.read', 'file.replace', 'git.status'];
+    case 'trusted-project-command':
+    case 'project-quality-gate':
+      return ['project.inspect', 'project.command.inspect', 'project.command.run'];
     case 'browser-navigation': return ['browser.inspect', 'browser.navigate'];
     case 'app-operation': return ['app.inspect', 'app.operate'];
     case 'docker-lifecycle': return ['docker.inspect', 'docker.manage'];
