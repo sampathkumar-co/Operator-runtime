@@ -136,35 +136,35 @@ export class TeamCoordinator {
   }): Promise<TeamMission> {
     const objective = boundedText(input.objective, 16_384, 'objective');
     if (!Array.isArray(input.workItems) || input.workItems.length < 1 || input.workItems.length > MAX_WORK_ITEMS) {
-      throw new OperatorError('TEAM_INPUT_INVALID', \`workItems must contain 1-\${MAX_WORK_ITEMS} entries.\`);
+      throw new OperatorError('TEAM_INPUT_INVALID', `workItems must contain 1-${MAX_WORK_ITEMS} entries.`);
     }
     const now = new Date().toISOString();
     const missionId = crypto.randomUUID();
     const keys = new Set<string>();
     const resources = new Set<string>();
     const workItems: TeamWorkItem[] = input.workItems.map((item, index) => {
-      const key = boundedKey(item.key, \`workItems[\${index}].key\`);
-      if (keys.has(key)) throw new OperatorError('TEAM_INPUT_INVALID', \`Duplicate work item key \${key}.\`);
+      const key = boundedKey(item.key, `workItems[${index}].key`);
+      if (keys.has(key)) throw new OperatorError('TEAM_INPUT_INVALID', `Duplicate work item key ${key}.`);
       keys.add(key);
-      const itemResources = uniqueStrings(item.resources ?? [], MAX_RESOURCES, 1024, \`workItems[\${index}].resources\`).map(normalizeResourceKey);
+      const itemResources = uniqueStrings(item.resources ?? [], MAX_RESOURCES, 1024, `workItems[${index}].resources`).map(normalizeResourceKey);
       for (const resource of itemResources) resources.add(resource);
       return {
         id: stableWorkItemId(missionId, key),
         key,
-        title: boundedText(item.title, 16_384, \`workItems[\${index}].title\`),
+        title: boundedText(item.title, 16_384, `workItems[${index}].title`),
         role: validRole(item.role),
         risk: validRisk(item.risk ?? 'read'),
-        priority: boundedInteger(item.priority ?? 0, -1000, 1000, \`workItems[\${index}].priority\`),
-        dependsOn: uniqueStrings(item.dependsOn ?? [], MAX_WORK_ITEMS, 128, \`workItems[\${index}].dependsOn\`),
+        priority: boundedInteger(item.priority ?? 0, -1000, 1000, `workItems[${index}].priority`),
+        dependsOn: uniqueStrings(item.dependsOn ?? [], MAX_WORK_ITEMS, 128, `workItems[${index}].dependsOn`),
         resources: itemResources,
-        allowedCapabilities: uniqueStrings(item.allowedCapabilities ?? [], 200, 256, \`workItems[\${index}].allowedCapabilities\`).sort(),
+        allowedCapabilities: uniqueStrings(item.allowedCapabilities ?? [], 200, 256, `workItems[${index}].allowedCapabilities`).sort(),
         state: 'PENDING',
         attempts: 0
       };
     });
     for (const item of workItems) {
       for (const dependency of item.dependsOn) if (!keys.has(dependency) || dependency === item.key) {
-        throw new OperatorError('TEAM_INPUT_INVALID', \`Work item \${item.key} has invalid dependency \${dependency}.\`);
+        throw new OperatorError('TEAM_INPUT_INVALID', `Work item ${item.key} has invalid dependency ${dependency}.`);
       }
     }
     assertAcyclic(workItems);
@@ -435,7 +435,7 @@ export class TeamCoordinator {
       for (const [resourceKey, baseRevision] of Object.entries(lease.baseResourceRevisions)) {
         const resource = requireResource(mission, resourceKey);
         if (resource.uncertain || resource.lock?.leaseId !== lease.id || resource.revision !== baseRevision) {
-          throw new OperatorError('TEAM_ARTIFACT_CONFLICT', \`Resource \${resourceKey} changed or lost lock ownership during work.\`);
+          throw new OperatorError('TEAM_ARTIFACT_CONFLICT', `Resource ${resourceKey} changed or lost lock ownership during work.`);
         }
       }
       if (item.role === 'verifier' && input.verificationPassed !== true) {
@@ -585,7 +585,7 @@ class TeamStore {
     try {
       return validateMission(JSON.parse(await readDurableStateText(this.#file(id), STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TEAM_NOT_FOUND', \`Mission \${id} was not found.\`);
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TEAM_NOT_FOUND', `Mission ${id} was not found.`);
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('TEAM_STATE_CORRUPT', 'Stored team mission could not be read.');
     }
@@ -627,10 +627,10 @@ class TeamStore {
     }
   }
 
-  #file(id: string): string { return path.join(this.#dir, \`\${validUuid(id, 'missionId')}.json\`); }
+  #file(id: string): string { return path.join(this.#dir, `${validUuid(id, 'missionId')}.json`); }
 
   async #acquire(id: string): Promise<() => Promise<void>> {
-    const file = path.join(this.#lockDir, \`\${id}.lock\`);
+    const file = path.join(this.#lockDir, `${id}.lock`);
     const owner = { id: crypto.randomUUID(), pid: process.pid, at: new Date().toISOString() };
     for (let attempt = 0; attempt < 80; attempt += 1) {
       try {
@@ -759,7 +759,7 @@ function requireLease(item: TeamWorkItem, workerId: string, leaseIdInput: string
 
 function requireResource(mission: TeamMission, key: string): TeamResource {
   const resource = mission.resources.find((candidate) => candidate.key === key);
-  if (!resource) throw new OperatorError('TEAM_RESOURCE_NOT_FOUND', \`Resource \${key} is not declared by this mission.\`);
+  if (!resource) throw new OperatorError('TEAM_RESOURCE_NOT_FOUND', `Resource ${key} is not declared by this mission.`);
   return resource;
 }
 
@@ -795,11 +795,11 @@ function validateMission(input: unknown): TeamMission {
 function validateEvidence(input: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>): Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }> {
   if (input.length > 1000) throw new OperatorError('TEAM_INPUT_INVALID', 'Evidence is limited to 1000 entries.');
   return input.map((entry, index) => {
-    if (!['pass', 'fail', 'info'].includes(entry.status)) throw new OperatorError('TEAM_INPUT_INVALID', \`Evidence \${index} status is invalid.\`);
+    if (!['pass', 'fail', 'info'].includes(entry.status)) throw new OperatorError('TEAM_INPUT_INVALID', `Evidence ${index} status is invalid.`);
     return {
-      kind: boundedKey(entry.kind, \`evidence[\${index}].kind\`),
+      kind: boundedKey(entry.kind, `evidence[${index}].kind`),
       status: entry.status,
-      message: boundedText(entry.message, 64 * 1024, \`evidence[\${index}].message\`)
+      message: boundedText(entry.message, 64 * 1024, `evidence[${index}].message`)
     };
   });
 }
@@ -816,7 +816,7 @@ function stableWorkItemId(missionId: string, key: string): string {
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
-  return \`\${hex.slice(0, 8)}-\${hex.slice(8, 12)}-\${hex.slice(12, 16)}-\${hex.slice(16, 20)}-\${hex.slice(20)}\`;
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function assertAcyclic(items: TeamWorkItem[]): void {
@@ -867,30 +867,30 @@ function validRisk(input: unknown): ActionRisk {
 
 function validUuid(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} must be a UUID.\`);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('TEAM_INPUT_INVALID', `${label} must be a UUID.`);
   return value;
 }
 
 function boundedText(input: unknown, max: number, label: string): string {
-  if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} is invalid.\`);
+  if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0')) throw new OperatorError('TEAM_INPUT_INVALID', `${label} is invalid.`);
   return input;
 }
 
 function boundedKey(input: unknown, label: string): string {
   const value = boundedText(input, 128, label);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} has invalid characters.\`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new OperatorError('TEAM_INPUT_INVALID', `${label} has invalid characters.`);
   return value;
 }
 
 function uniqueStrings(input: unknown[], maxItems: number, maxLength: number, label: string): string[] {
-  if (!Array.isArray(input) || input.length > maxItems) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} has too many entries.\`);
-  const values = input.map((value, index) => boundedText(value, maxLength, \`\${label}[\${index}]\`));
-  if (new Set(values).size !== values.length) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} contains duplicates.\`);
+  if (!Array.isArray(input) || input.length > maxItems) throw new OperatorError('TEAM_INPUT_INVALID', `${label} has too many entries.`);
+  const values = input.map((value, index) => boundedText(value, maxLength, `${label}[${index}]`));
+  if (new Set(values).size !== values.length) throw new OperatorError('TEAM_INPUT_INVALID', `${label} contains duplicates.`);
   return values;
 }
 
 function boundedInteger(input: unknown, min: number, max: number, label: string): number {
   const value = Number(input);
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('TEAM_INPUT_INVALID', \`\${label} is invalid.\`);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('TEAM_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
