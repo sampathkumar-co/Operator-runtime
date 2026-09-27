@@ -21,7 +21,7 @@ test('stage10 outcome planner expands only already-authorized static capabilitie
   assert.equal(capabilities.has('file.replace'), false);
   assert.equal(capabilities.has('browser.interact'), false);
   assert.equal(capabilities.has('terminal.session'), false);
-  assert.deepEqual(plan.excludedDynamicCapabilities, ['terminal.session']);
+  assert.deepEqual(plan.excludedDynamicCapabilities, ['file.manage', 'terminal.session']);
 });
 
 test('stage10 outcome planner creates independent tester and verifier coverage for generated work', () => {
