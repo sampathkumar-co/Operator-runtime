@@ -439,6 +439,43 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ path, content, expectedSha256 }) => invoke('file.write', 'write', { path, content, expectedSha256 }, path));
 
+  server.registerTool('file.info', {
+    title: 'Inspect file or directory metadata',
+    description: 'Inspect bounded metadata for a path inside an authorized root. Regular files include SHA-256 when within the local read bound.',
+    inputSchema: z.object({ path: z.string().min(1) }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ path }) => invoke('file.info', 'read', { path }, path));
+
+  server.registerTool('file.search', {
+    title: 'Search authorized project files',
+    description: 'Perform a bounded recursive filename search inside an authorized directory without following symlinks.',
+    inputSchema: z.object({
+      path: z.string().min(1),
+      query: z.string().min(1).max(512),
+      kind: z.enum(['all', 'file', 'directory']).default('all'),
+      maxDepth: z.number().int().min(0).max(20).default(8),
+      maxResults: z.number().int().min(1).max(1000).default(100)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ path, query, kind, maxDepth, maxResults }) => invoke('file.search', 'read', { path, query, kind, maxDepth, maxResults }, path));
+
+  server.registerTool('file.manage', {
+    title: 'Manage authorized files and directories',
+    description: 'Create directories, copy regular files without overwrite, SHA-guard move operations, or remove SHA-guarded files/empty directories. Move/remove remain destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.enum(['mkdir', 'copy', 'move', 'remove']),
+      path: z.string().min(1).optional(),
+      source: z.string().min(1).optional(),
+      destination: z.string().min(1).optional(),
+      recursive: z.boolean().default(false),
+      expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, path, source, destination, recursive, expectedSha256 }) => {
+    const risk = operation === 'mkdir' || operation === 'copy' ? 'write' : 'destructive';
+    return invoke('file.manage', risk, { operation, path, source, destination, recursive, expectedSha256 }, path ?? source);
+  });
+
   server.registerTool('git.status', {
     title: 'Git status',
     description: 'Read repository status using the Git CLI directly rather than visual UI automation.',
@@ -683,6 +720,37 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, timeoutMs }, cwd));
+
+  server.registerTool('terminal.session', {
+    title: 'Manage interactive terminal session',
+    description: 'Start an allowlisted shell-free process session, read bounded cursor-based output, write bounded stdin, list owned sessions, or terminate the owned process tree. Start/write/terminate remain destructive-policy gated.',
+    inputSchema: z.object({
+      operation: z.enum(['start', 'list', 'read', 'write', 'terminate']),
+      executable: z.string().min(1).optional(),
+      args: z.array(z.string()).max(200).default([]),
+      cwd: z.string().min(1).optional(),
+      sessionId: z.string().uuid().optional(),
+      input: z.string().max(65536).optional(),
+      afterCursor: z.number().int().min(0).optional(),
+      maxEvents: z.number().int().min(1).max(500).default(100),
+      maxBytes: z.number().int().min(1024).max(2097152).default(262144)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
+  }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
+    const risk = operation === 'list' || operation === 'read' ? 'read' : 'destructive';
+    return invoke('terminal.session', risk, { operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }, cwd);
+  });
+
+  server.registerTool('process.inspect', {
+    title: 'Inspect Windows process table',
+    description: 'Read bounded Windows process metadata using tasklist. Returns image name, PID, session identity and memory usage only; command lines, environments and process memory are not exposed.',
+    inputSchema: z.object({
+      name: z.string().min(1).max(260).optional(),
+      pid: z.number().int().positive().optional(),
+      limit: z.number().int().min(1).max(500).default(200)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ name, pid, limit }) => invoke('process.inspect', 'read', { name, pid, limit }));
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
