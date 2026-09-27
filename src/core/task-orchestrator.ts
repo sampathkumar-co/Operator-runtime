@@ -9,6 +9,8 @@ import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
+import { classifyTaskFailure } from './task-failure.ts';
+import { verifyTaskCompletion } from './task-verifier.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -218,13 +220,22 @@ export class TaskOrchestrator {
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
       const current = task.execution!;
       if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded deadline.', assertLease);
-      this.#markInterrupted(current);
+      const interrupted = this.#markInterrupted(current);
+      if (interrupted > 0) {
+        task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s) before replanning.', { count: interrupted }));
+        await this.#persistRunState(task, assertLease);
+      }
       const context = { task, goal };
       let decision: PlannerDecision;
       try { decision = planner.next(context); }
       catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       if (decision.type === 'complete') {
         task.evidence.push(evidence('task_completion', 'pass', decision.message));
+        const verification = verifyTaskCompletion(task);
+        task.evidence.push(verification.evidence);
+        if (!verification.ok) {
+          return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
+        }
         finalizeTask(task);
         await this.#persistRunState(task, assertLease);
         return task;
@@ -334,6 +345,13 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
+      const failureDecision = classifyTaskFailure(result.error);
+      task.evidence.push(evidence('failure_classification', 'info', 'Classified failed task action before choosing recovery strategy.', {
+        code: failureDecision.code,
+        class: failureDecision.class,
+        strategy: failureDecision.strategy,
+        capability: result.capability
+      }));
       if (controlState === 'CANCELLED' && latestRecord.errorCode === 'EXECUTION_ABORTED') {
         latestRecord.state = 'INTERRUPTED';
         setNodeState(task, latestNode.id, 'SKIPPED');
@@ -381,7 +399,15 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (result.error?.retryable === true && risk === 'read') { await this.#persistRunState(task, assertLease); continue; }
+      if (failureDecision.retryable && (risk === 'read' || failureDecision.strategy === 'reobserve' || failureDecision.strategy === 'retry')) {
+        task.evidence.push(evidence('strategy_retry', 'info', 'Retrying a bounded task step under the same policy and attempt budget.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
     }
   }
@@ -494,12 +520,15 @@ export class TaskOrchestrator {
     }
   }
 
-  #markInterrupted(execution: TaskExecution): void {
+  #markInterrupted(execution: TaskExecution): number {
+    let count = 0;
     for (const record of execution.records) if (record.state === 'STARTED') {
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
+      count += 1;
     }
+    return count;
   }
 
   async #fail(task: TaskCapsule, code: string, message: string, assertLease?: () => Promise<void>): Promise<TaskCapsule> {
