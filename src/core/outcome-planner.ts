@@ -41,8 +41,8 @@ export class OutcomePlanner {
       ? []
       : uniqueStrings(input.requestedCapabilities, 500, 256, 'requestedCapabilities');
     const resources = input.resources === undefined ? [] : uniqueStrings(input.resources, 5000, 1024, 'resources');
-    if (maxRiskIndex > 0 && (requestedCapabilities.length === 0 || resources.length === 0)) {
-      throw new OperatorError('OUTCOME_PLAN_AUTHORITY_REQUIRED', 'Outcome planning above read-only risk requires caller-declared capability and resource authority.');
+    if (requestedCapabilities.length === 0 || resources.length === 0) {
+      throw new OperatorError('OUTCOME_PLAN_AUTHORITY_REQUIRED', 'Outcome auto-planning requires caller-declared capability and resource authority; this envelope can restrict but never grant local authority.');
     }
     const effectiveRules = requestedCapabilities.length > 0
       ? permissionRules.filter((capability) => requestedCapabilities.includes(capability))
