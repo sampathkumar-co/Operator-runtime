@@ -386,6 +386,36 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    const teamBlackboardRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/blackboard$/i.exec(pathname);
+    if (teamBlackboardRoute && req.method === 'GET') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const mission = await options.teams.inspect(teamBlackboardRoute[1]!);
+        send(res, 200, { ok: true, blackboard: mission.blackboard, missionState: mission.state, updatedAt: mission.updatedAt });
+      } catch (error) {
+        send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+    if (teamBlackboardRoute && req.method === 'POST') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const mission = await options.teams.putBlackboard(teamBlackboardRoute[1]!, {
+          workerId: String(body.workerId ?? ''),
+          key: String(body.key ?? ''),
+          value: body.value,
+          ...(body.expectedRevision === undefined ? {} : { expectedRevision: Number(body.expectedRevision) }),
+          ...(body.workItemId === undefined ? {} : { workItemId: String(body.workItemId) }),
+          ...(body.leaseId === undefined ? {} : { leaseId: String(body.leaseId) })
+        });
+        send(res, 200, { ok: true, mission, blackboard: mission.blackboard });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_BLACKBOARD_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     const teamExecuteRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/execute$/i.exec(pathname);
     if (teamExecuteRoute && req.method === 'POST') {
       if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
