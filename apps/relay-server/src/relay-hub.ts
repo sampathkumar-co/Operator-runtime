@@ -6,6 +6,7 @@ import { AccountDeviceRegistry } from '../../../src/core/account-device-registry
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore, type DeviceRouteDecision, type OnlineDeviceDescriptor } from '../../../src/core/device-routing.ts';
+import { DevicePoolScheduler, type DevicePoolRequest, type DeviceReservation, type DeviceResourceAdvertisement } from '../../../src/core/device-pool.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
@@ -29,6 +30,13 @@ type Connection = {
   sessionId: string;
   sessionJti: string;
   capabilities: string[];
+  resourceProfile?: {
+    cpuSlots: number;
+    memoryMb: number;
+    gpu: boolean;
+    tags: string[];
+    maxConcurrentJobs: number;
+  };
   connectedAt: string;
   lastSeenAt: string;
   inFlightSeq?: number;
@@ -77,6 +85,7 @@ export class RelayHub {
   #wss: WebSocketServer | null = null;
   #connections = new Map<string, Connection>();
   #routing = new Map<string, DeviceRoutingStore>();
+  #pools = new Map<string, DevicePoolScheduler>();
   #upgradeLimiter: FixedWindowRateLimiter;
   #deviceHelloLimiter: FixedWindowRateLimiter;
   #maxLiveConnections: number;
@@ -175,6 +184,44 @@ export class RelayHub {
         connectedAt: connection.connectedAt,
         lastSeenAt: connection.lastSeenAt
       }));
+  }
+
+  async resourceAdvertisements(accountId: string): Promise<DeviceResourceAdvertisement[]> {
+    const allowed = new Set((await this.#accounts.listDevices(accountId)).filter((item) => item.status === 'active').map((item) => item.deviceId));
+    return [...this.#connections.values()]
+      .filter((connection) => allowed.has(connection.deviceId) && connection.resourceProfile)
+      .map((connection) => ({
+        deviceId: connection.deviceId,
+        sessionId: connection.sessionId,
+        capabilities: [...connection.capabilities],
+        observedAt: connection.lastSeenAt,
+        cpuSlots: connection.resourceProfile!.cpuSlots,
+        memoryMb: connection.resourceProfile!.memoryMb,
+        gpu: connection.resourceProfile!.gpu,
+        tags: [...connection.resourceProfile!.tags],
+        activeJobs: connection.inFlightSeq === undefined ? 0 : 1,
+        // The current relay transport intentionally serializes deliveries per
+        // device. Resource scheduling therefore never claims more than one
+        // relay execution slot even when the host can run more local work.
+        maxConcurrentJobs: 1
+      }));
+  }
+
+  async reserveDevice(accountId: string, request: DevicePoolRequest): Promise<DeviceReservation> {
+    const advertisements = await this.resourceAdvertisements(accountId);
+    return await this.#poolFor(accountId).reserve(request, advertisements);
+  }
+
+  async heartbeatDeviceReservation(accountId: string, reservationId: string, sessionId: string, leaseMs?: number): Promise<DeviceReservation> {
+    return await this.#poolFor(accountId).heartbeat(reservationId, sessionId, leaseMs);
+  }
+
+  async releaseDeviceReservation(accountId: string, reservationId: string): Promise<DeviceReservation> {
+    return await this.#poolFor(accountId).release(reservationId);
+  }
+
+  async listDeviceReservations(accountId: string, input: { activeOnly?: boolean; deviceId?: string; limit?: number } = {}): Promise<DeviceReservation[]> {
+    return await this.#poolFor(accountId).list(input);
   }
 
   async bindProject(accountId: string, projectKey: string, deviceId: string): Promise<void> {
@@ -291,6 +338,15 @@ export class RelayHub {
     return store;
   }
 
+  #poolFor(accountId: string): DevicePoolScheduler {
+    let pool = this.#pools.get(accountId);
+    if (!pool) {
+      pool = new DevicePoolScheduler(path.join(this.#stateDir, 'accounts', accountId), this.#devices, this.#routingFor(accountId), { clock: this.#clock });
+      this.#pools.set(accountId, pool);
+    }
+    return pool;
+  }
+
   #accept(socket: WebSocket): void {
     let authenticated = false;
     let connection: Connection | null = null;
@@ -371,6 +427,7 @@ export class RelayHub {
       throw new OperatorError('RELAY_HELLO_INVALID', 'Capability-binding negotiation requires an explicit capability list.');
     }
     const locallySupportedCapabilities = capabilityBindingRequested ? validCapabilityList(payload.capabilities) : [];
+    const resourceProfile = payload.resourceProfile === undefined ? undefined : validRelayResourceProfile(payload.resourceProfile);
     const signature = String(frame.signature ?? '');
     if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello signature is invalid.');
     const token = String(frame.sessionToken ?? '');
@@ -396,7 +453,11 @@ export class RelayHub {
     if (previous) {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
     }
-    const connection: Connection = { socket, deviceId, sessionId, sessionJti: session.jti, capabilities, connectedAt: now, lastSeenAt: now };
+    const connection: Connection = {
+      socket, deviceId, sessionId, sessionJti: session.jti, capabilities,
+      ...(resourceProfile ? { resourceProfile } : {}),
+      connectedAt: now, lastSeenAt: now
+    };
     this.#connections.set(deviceId, connection);
     send(socket, {
       type: 'welcome',
@@ -505,6 +566,25 @@ function boundedCloseReason(value: string): string {
   return (text || 'authority revoked').slice(0, 120);
 }
 
+
+function validRelayResourceProfile(input: unknown): NonNullable<Connection['resourceProfile']> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay resource profile is invalid.');
+  const raw = input as Record<string, unknown>;
+  const cpuSlots = Number(raw.cpuSlots);
+  const memoryMb = Number(raw.memoryMb);
+  const maxConcurrentJobs = Number(raw.maxConcurrentJobs);
+  if (!Number.isSafeInteger(cpuSlots) || cpuSlots < 1 || cpuSlots > 1024) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay cpuSlots is invalid.');
+  if (!Number.isSafeInteger(memoryMb) || memoryMb < 128 || memoryMb > 16 * 1024 * 1024) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay memoryMb is invalid.');
+  if (!Number.isSafeInteger(maxConcurrentJobs) || maxConcurrentJobs < 1 || maxConcurrentJobs > 1024) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay maxConcurrentJobs is invalid.');
+  if (!Array.isArray(raw.tags) || raw.tags.length > 64) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay resource tags are invalid.');
+  const tags = raw.tags.map((value, index) => {
+    const tag = String(value ?? '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tag)) throw new OperatorError('RELAY_HELLO_INVALID', `Relay resource tag ${index} is invalid.`);
+    return tag;
+  });
+  if (new Set(tags).size !== tags.length) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay resource tags contain duplicates.');
+  return { cpuSlots, memoryMb, gpu: raw.gpu === true, tags: tags.sort(), maxConcurrentJobs };
+}
 
 function validCapabilityList(input: unknown): string[] {
   if (input === undefined) return [];
