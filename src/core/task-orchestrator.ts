@@ -339,10 +339,31 @@ export class TaskOrchestrator {
           planner.accept({ task, goal }, decision, observation);
         } catch (error) {
           await this.#recordLearning(task, result, 'failed', learningContext);
+          const postconditionCode = error instanceof OperatorError ? error.code : 'TASK_POSTCONDITION_FAILED';
+          const postconditionMessage = error instanceof Error ? error.message : String(error);
+          const postconditionObservation: TaskObservation = {
+            ...observation,
+            ok: false,
+            error: { code: postconditionCode, message: postconditionMessage, retryable: false }
+          };
+          const failureDecision = classifyTaskFailure(postconditionObservation.error);
+          task.evidence.push(evidence('failure_classification', 'info', 'Classified semantic postcondition failure before repair decision.', {
+            code: failureDecision.code,
+            class: failureDecision.class,
+            strategy: failureDecision.strategy,
+            capability: result.capability
+          }));
+          if (planner.fallback?.({ task, goal }, decision, postconditionObservation)) {
+            latestRecord.state = 'FAILED';
+            latestRecord.errorCode = postconditionCode;
+            setNodeState(task, latestNode.id, 'SKIPPED');
+            await this.#persistRunState(task, assertLease);
+            continue;
+          }
           latestRecord.state = 'FAILED';
-          latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
+          latestRecord.errorCode = postconditionCode;
           setNodeState(task, latestNode.id, 'FAILED');
-          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+          return await this.#fail(task, postconditionCode, postconditionMessage, assertLease);
         }
         await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
@@ -563,6 +584,10 @@ export class SemanticTaskPlanner implements TaskPlanner {
       if (phase === 'start') return { type: 'step', key: 'list-parent', title: 'Observe target directory', capability: 'file.list', input: { path: path.dirname(goal.path) || '.' } };
       if (phase === 'create') return { type: 'step', key: 'create-file', title: 'Create requested file', capability: 'file.create', input: { path: goal.path, content: goal.content } };
       if (phase === 'read') return { type: 'step', key: 'verify-file', title: 'Verify exact file content', capability: 'file.read', input: { path: goal.path, encoding: 'utf8' } };
+      if (phase === 'repair') return {
+        type: 'step', key: 'repair-file', title: 'Repair stale file content with SHA precondition',
+        capability: 'file.replace', input: { path: goal.path, content: goal.content, expectedSha256: state.expectedSha256 }
+      };
       if (phase === 'git') return { type: 'step', key: 'inspect-git', title: 'Verify Git observes the file', capability: 'git.status', input: { cwd: goal.root } };
       return { type: 'complete', message: 'Controlled file task satisfied exact-content and Git-state postconditions.' };
     }
@@ -641,6 +666,9 @@ export class SemanticTaskPlanner implements TaskPlanner {
         const output = asRecord(result.output);
         if (output.content !== goal.content) throw new OperatorError('TASK_CONTENT_MISMATCH', 'File content did not match the requested exact content.');
         state.phase = 'git';
+      } else if (step.key === 'repair-file') {
+        state.phase = 'read';
+        delete state.expectedSha256;
       } else if (step.key === 'inspect-git') {
         const entries = Array.isArray(asRecord(result.output).entries) ? asRecord(result.output).entries as Array<Record<string, unknown>> : [];
         const wanted = path.relative(goal.root, goal.path).replace(/\\/g, '/').replace(/^\.\//, '');
@@ -748,6 +776,14 @@ export class SemanticTaskPlanner implements TaskPlanner {
     if (step.key === 'create-file' && result.error?.code === 'TARGET_EXISTS') {
       task.execution!.plannerState.phase = 'read';
       task.evidence.push(evidence('strategy_fallback', 'info', 'Target already existed; switched to exact-content verification.'));
+      return true;
+    }
+    if (step.key === 'verify-file' && result.error?.code === 'TASK_CONTENT_MISMATCH') {
+      const sha256Value = String(asRecord(result.output).sha256 ?? '');
+      if (!/^[0-9a-f]{64}$/i.test(sha256Value)) return false;
+      task.execution!.plannerState.expectedSha256 = sha256Value.toLowerCase();
+      task.execution!.plannerState.phase = 'repair';
+      task.evidence.push(evidence('strategy_repair', 'info', 'Existing file content differed; scheduled SHA-preconditioned replacement followed by fresh verification.'));
       return true;
     }
     if (step.key === 'navigate-browser' && result.error?.code === 'BROWSER_TARGET_NOT_FOUND') {
