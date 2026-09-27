@@ -9,6 +9,7 @@ import type { OperatorRuntime } from '../../../src/core/runtime.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
+import type { TeamCoordinator, TeamRole, TeamWorkInput } from '../../../src/core/team-coordinator.ts';
 import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
@@ -137,6 +138,7 @@ export function createLocalAgentServer(options: {
   audit?: AuditLog;
   tasks?: TaskStore;
   taskOrchestrator?: TaskOrchestrator;
+  teams?: TeamCoordinator;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
@@ -278,6 +280,127 @@ export function createLocalAgentServer(options: {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
       send(res, 200, { ok: true, events: options.audit ? await options.audit.tail(limit) : [], configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/teams' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, teams: options.teams ? await options.teams.list(limit) : [], configured: Boolean(options.teams) });
+      return;
+    }
+
+    if (pathname === '/v1/teams' && req.method === 'POST') {
+      if (!options.teams) {
+        send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const mission = await options.teams.submit({
+          objective: body.objective as string,
+          workItems: body.workItems as TeamWorkInput[],
+          budget: body.budget as any
+        });
+        const result = body.run === true ? await options.teams.start(mission.id) : mission;
+        send(res, body.run === true ? 200 : 202, { ok: true, mission: result });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_SUBMISSION_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const teamRoute = /^\/v1\/teams\/([0-9a-f-]{36})(?:\/(start|pause|resume|cancel|claim))?$/i.exec(pathname);
+    if (teamRoute && req.method === 'GET' && !teamRoute[2]) {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try { send(res, 200, { ok: true, mission: await options.teams.inspect(teamRoute[1]!) }); }
+      catch (error) { send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } }); }
+      return;
+    }
+    if (teamRoute && req.method === 'POST' && teamRoute[2]) {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const id = teamRoute[1]!;
+        const operation = teamRoute[2]!;
+        const body = await readJson(req) as Record<string, unknown>;
+        const mission = operation === 'start' ? await options.teams.start(id)
+          : operation === 'pause' ? await options.teams.pause(id)
+          : operation === 'resume' ? await options.teams.resume(id)
+          : operation === 'cancel' ? await options.teams.cancel(id)
+          : (await options.teams.claim(id, { workerId: String(body.workerId ?? '') })).mission;
+        const workItem = operation === 'claim'
+          ? (await options.teams.inspect(id)).workItems.find((item) => item.lease?.workerId === String(body.workerId ?? '') && item.state === 'LEASED')
+          : undefined;
+        send(res, 200, { ok: true, mission, ...(workItem ? { workItem } : {}) });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const workerRegisterRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/workers\/register$/i.exec(pathname);
+    if (workerRegisterRoute && req.method === 'POST') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const result = await options.teams.registerWorker(workerRegisterRoute[1]!, {
+          ...(body.workerId === undefined ? {} : { workerId: String(body.workerId) }),
+          role: body.role as TeamRole,
+          label: String(body.label ?? ''),
+          capabilities: Array.isArray(body.capabilities) ? body.capabilities.map(String) : []
+        });
+        send(res, 200, { ok: true, mission: result.mission, worker: result.worker });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORKER_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const workerActionRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/workers\/([0-9a-f-]{36})\/(heartbeat|revoke)$/i.exec(pathname);
+    if (workerActionRoute && req.method === 'POST') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const mission = workerActionRoute[3] === 'heartbeat'
+          ? await options.teams.heartbeat(workerActionRoute[1]!, { workerId: workerActionRoute[2]!, ...(body.leaseId === undefined ? {} : { leaseId: String(body.leaseId) }) })
+          : await options.teams.revokeWorker(workerActionRoute[1]!, { workerId: workerActionRoute[2]! });
+        send(res, 200, { ok: true, mission });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORKER_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const workRoute = /^\/v1\/teams\/([0-9a-f-]{36})\/work\/([0-9a-f-]{36})\/(complete|fail|reconcile)$/i.exec(pathname);
+    if (workRoute && req.method === 'POST') {
+      if (!options.teams) { send(res, 503, { ok: false, error: { code: 'TEAM_COORDINATOR_NOT_CONFIGURED', message: 'Stage-4 team coordination is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const id = workRoute[1]!;
+        const workItemId = workRoute[2]!;
+        const operation = workRoute[3]!;
+        const mission = operation === 'complete'
+          ? await options.teams.complete(id, {
+              workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
+              summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
+              verificationPassed: body.verificationPassed === true
+            })
+          : operation === 'fail'
+            ? await options.teams.fail(id, {
+                workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
+                code: String(body.code ?? ''), message: String(body.message ?? ''),
+                sideEffectState: body.sideEffectState as 'none' | 'known' | 'uncertain',
+                retryable: body.retryable === true
+              })
+            : await options.teams.reconcile(id, {
+                workerId: String(body.workerId ?? ''), workItemId,
+                resolution: body.resolution as 'completed' | 'retry' | 'failed',
+                summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : []
+              });
+        send(res, 200, { ok: true, mission });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_WORK_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
