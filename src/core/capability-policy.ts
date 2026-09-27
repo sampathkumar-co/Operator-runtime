@@ -31,6 +31,8 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'vscode.inspect': 'read',
   'vscode.open': 'system',
   'terminal.execute': 'destructive',
+  'terminal.session': 'dynamic',
+  'process.inspect': 'read',
   'browser.inspect': 'read',
   'browser.navigate': 'write',
   'browser.interact': 'external',
