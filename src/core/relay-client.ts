@@ -28,6 +28,14 @@ export interface RelaySocketLike {
 
 export type RelaySocketFactory = (url: string) => RelaySocketLike;
 
+export interface RelayResourceProfile {
+  cpuSlots: number;
+  memoryMb: number;
+  gpu: boolean;
+  tags: string[];
+  maxConcurrentJobs: number;
+}
+
 export interface RelayDelivery {
   seq: number;
   id: string;
@@ -99,6 +107,8 @@ export interface RelayClientOptions {
   getSessionToken: () => Promise<string>;
   supportedCapabilities?: readonly string[];
   getSupportedCapabilities?: () => Promise<readonly string[]>;
+  resourceProfile?: RelayResourceProfile;
+  getResourceProfile?: () => Promise<RelayResourceProfile>;
   onDelivery: (delivery: RelayDelivery) => Promise<void>;
   onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
@@ -119,6 +129,7 @@ export class RelayClient {
   #getSessionToken: () => Promise<string>;
   #getSupportedCapabilities: () => Promise<string[]>;
   #requireCapabilityBinding: boolean;
+  #getResourceProfile?: () => Promise<RelayResourceProfile>;
   #onDelivery: (delivery: RelayDelivery) => Promise<void>;
   #onRecovery?: (context: RelayRecoveryContext) => Promise<RelayRecoveryDecision>;
   #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
@@ -149,6 +160,14 @@ export class RelayClient {
     this.#getSupportedCapabilities = options.getSupportedCapabilities
       ? async () => validateSupportedCapabilities(await options.getSupportedCapabilities!())
       : async () => [...staticCapabilities];
+    if (options.resourceProfile !== undefined && options.getResourceProfile) {
+      throw new OperatorError('RELAY_RESOURCE_PROFILE_CONFIGURATION_INVALID', 'Configure either static or dynamic relay resource profile, not both.');
+    }
+    this.#getResourceProfile = options.getResourceProfile
+      ? async () => validateResourceProfile(await options.getResourceProfile!())
+      : options.resourceProfile
+        ? async () => validateResourceProfile(options.resourceProfile!)
+        : undefined;
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
     this.#onExpiredRecovery = options.onExpiredRecovery;
@@ -205,6 +224,7 @@ export class RelayClient {
     const state = await this.#readState();
     const token = await this.#getSessionToken();
     const supportedCapabilities = await this.#getSupportedCapabilities();
+    const resourceProfile = this.#getResourceProfile ? await this.#getResourceProfile() : undefined;
     if (!token || Buffer.byteLength(token, 'utf8') > 16 * 1024) {
       throw new OperatorError('RELAY_SESSION_TOKEN_INVALID', 'Relay session token is missing or exceeds the bounded size.');
     }
@@ -228,6 +248,7 @@ export class RelayClient {
       resumeAfterSeq: state.lastAckedServerSeq,
       pendingRecovery: state.processing ? { seq: state.processing.seq, id: state.processing.id } : null,
       ...(this.#requireCapabilityBinding ? { capabilityBinding: 1 as const, capabilities: [...supportedCapabilities] } : {}),
+      ...(resourceProfile ? { resourceProfile } : {}),
       sentAt: this.#clock().toISOString(),
       nonce: crypto.randomBytes(24).toString('base64url')
     };
@@ -451,6 +472,23 @@ export function reconnectDelay(attemptInput: number, randomInput = Math.random()
   return Math.min(Math.max(Math.round(base * jitter), MIN_BACKOFF_MS), MAX_BACKOFF_MS);
 }
 
+
+function validateResourceProfile(input: RelayResourceProfile): RelayResourceProfile {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'Relay resource profile is invalid.');
+  const cpuSlots = Number(input.cpuSlots);
+  const memoryMb = Number(input.memoryMb);
+  const maxConcurrentJobs = Number(input.maxConcurrentJobs);
+  if (!Number.isSafeInteger(cpuSlots) || cpuSlots < 1 || cpuSlots > 1024) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'cpuSlots is invalid.');
+  if (!Number.isSafeInteger(memoryMb) || memoryMb < 128 || memoryMb > 16 * 1024 * 1024) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'memoryMb is invalid.');
+  if (!Number.isSafeInteger(maxConcurrentJobs) || maxConcurrentJobs < 1 || maxConcurrentJobs > 1024) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'maxConcurrentJobs is invalid.');
+  if (!Array.isArray(input.tags) || input.tags.length > 64) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'resource tags are invalid.');
+  const tags = input.tags.map((tag, index) => {
+    if (typeof tag !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tag)) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', `resource tag ${index} is invalid.`);
+    return tag;
+  });
+  if (new Set(tags).size !== tags.length) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'resource tags contain duplicates.');
+  return { cpuSlots, memoryMb, gpu: input.gpu === true, tags: tags.sort(), maxConcurrentJobs };
+}
 
 function validateSupportedCapabilities(input: readonly string[]): string[] {
   if (!Array.isArray(input) || input.length > 128) {
