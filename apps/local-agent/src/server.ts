@@ -305,6 +305,155 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    if (pathname === '/v1/procedures' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.procedures), procedures: options.procedures ? await options.procedures.list(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/procedures/query' && req.method === 'POST') {
+      if (!options.procedures) { send(res, 503, { ok: false, error: { code: 'PROCEDURE_MEMORY_NOT_CONFIGURED', message: 'Verified procedure memory is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const candidates = await options.procedures.findReusable({
+          objectiveKind: String(body.objectiveKind ?? ''),
+          scopeKey: String(body.scopeKey ?? ''),
+          assumptions: Array.isArray(body.assumptions) ? body.assumptions as any : [],
+          requiredCapabilities: Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities.map(String) : [],
+          maxResults: body.maxResults === undefined ? undefined : Number(body.maxResults)
+        });
+        send(res, 200, { ok: true, candidates });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PROCEDURE_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/world/entities' && req.method === 'GET') {
+      if (!options.world) { send(res, 503, { ok: false, error: { code: 'WORLD_MODEL_NOT_CONFIGURED', message: 'World model is not configured.' } }); return; }
+      try {
+        const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+        const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 100;
+        const scopeKey = requestUrl.searchParams.get('scopeKey') ?? undefined;
+        const type = requestUrl.searchParams.get('type') ?? undefined;
+        send(res, 200, { ok: true, entities: await options.world.listEntities({ ...(scopeKey ? { scopeKey } : {}), ...(type ? { type } : {}), limit }) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/world/query' && req.method === 'POST') {
+      if (!options.world) { send(res, 503, { ok: false, error: { code: 'WORLD_MODEL_NOT_CONFIGURED', message: 'World model is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const operation = String(body.operation ?? '');
+        if (operation === 'fact') {
+          send(res, 200, { ok: true, fact: await options.world.resolveFact(String(body.entityKey ?? ''), String(body.factKey ?? '')) });
+          return;
+        }
+        if (operation === 'entity') {
+          send(res, 200, { ok: true, entity: await options.world.inspectEntity(String(body.entityKey ?? '')) ?? null });
+          return;
+        }
+        if (operation === 'trace') {
+          send(res, 200, { ok: true, trace: await options.world.trace({
+            fromKey: String(body.fromKey ?? ''),
+            ...(body.toKey === undefined ? {} : { toKey: String(body.toKey) }),
+            ...(body.targetType === undefined ? {} : { targetType: String(body.targetType) }),
+            ...(body.maxDepth === undefined ? {} : { maxDepth: Number(body.maxDepth) }),
+            ...(body.minConfidence === undefined ? {} : { minConfidence: Number(body.minConfidence) })
+          }) ?? null });
+          return;
+        }
+        throw new Error('world query operation must be fact, entity, or trace.');
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/device-pool/reservations' && req.method === 'GET') {
+      if (!options.devicePool) { send(res, 503, { ok: false, error: { code: 'DEVICE_POOL_NOT_CONFIGURED', message: 'Device pool is not configured.' } }); return; }
+      try {
+        const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+        const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 100;
+        const deviceId = requestUrl.searchParams.get('deviceId') ?? undefined;
+        send(res, 200, { ok: true, reservations: await options.devicePool.list({ activeOnly: requestUrl.searchParams.get('activeOnly') === '1', ...(deviceId ? { deviceId } : {}), limit }) });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_POOL_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/optimizer' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 200);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 1000) : 200;
+      send(res, 200, { ok: true, configured: Boolean(options.optimizer), entries: options.optimizer ? await options.optimizer.inspect(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/organizations' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.organizations), programs: options.organizations ? await options.organizations.list(limit) : [] });
+      return;
+    }
+
+    const organizationRoute = /^\/v1\/organizations\/([0-9a-f-]{36})$/i.exec(pathname);
+    if (organizationRoute && req.method === 'GET') {
+      if (!options.organizations) { send(res, 503, { ok: false, error: { code: 'ORGANIZATION_NOT_CONFIGURED', message: 'Organization coordinator is not configured.' } }); return; }
+      try { send(res, 200, { ok: true, program: await options.organizations.inspect(organizationRoute[1]!) }); }
+      catch (error) { send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ORGANIZATION_PROGRAM_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } }); }
+      return;
+    }
+
+    if (pathname === '/v1/operations' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, configured: Boolean(options.operations), operations: options.operations ? await options.operations.list(limit) : [] });
+      return;
+    }
+
+    if (pathname === '/v1/operations' && req.method === 'POST') {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (body.device !== undefined) throw new Error('Device advertisements are relay-authority data and cannot be supplied through the local agent operation API.');
+        const operation = await options.operations.submit(body as unknown as DigitalOperationSubmit);
+        send(res, body.run === true ? 200 : 202, { ok: true, operation });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_SUBMISSION_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const operationRoute = /^\/v1\/operations\/([0-9a-f-]{36})(?:\/(start|refresh|pause|cancel|promote))?$/i.exec(pathname);
+    if (operationRoute && req.method === 'GET' && !operationRoute[2]) {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try { send(res, 200, { ok: true, operation: await options.operations.inspect(operationRoute[1]!) }); }
+      catch (error) { send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } }); }
+      return;
+    }
+    if (operationRoute && req.method === 'POST' && operationRoute[2]) {
+      if (!options.operations) { send(res, 503, { ok: false, error: { code: 'OPERATIONS_NOT_CONFIGURED', message: 'Digital operations layer is not configured.' } }); return; }
+      try {
+        const id = operationRoute[1]!;
+        const op = operationRoute[2]!;
+        const body = await readJson(req) as Record<string, unknown>;
+        const operation = op === 'start' ? await options.operations.start(id)
+          : op === 'refresh' ? await options.operations.refresh(id)
+          : op === 'pause' ? await options.operations.pause(id)
+          : op === 'cancel' ? await options.operations.cancel(id)
+          : await options.operations.promoteOrganization(id, String(body.verificationDigest ?? ''));
+        send(res, 200, { ok: true, operation });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'OPERATIONS_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/teams' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
