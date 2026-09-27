@@ -22,7 +22,7 @@ const STATIC_EXPECTED = {
   'git.checkpoint.inspect': 'read', 'git.checkpoint.create': 'write', 'git.checkpoint.restore': 'destructive',
   'git.write': 'write', 'docker.inspect': 'read', 'docker.manage': 'system',
   'postgres.inspect': 'read', 'postgres.select': 'read', 'vscode.inspect': 'read',
-  'vscode.open': 'system', 'terminal.execute': 'destructive', 'process.inspect': 'read', 'browser.inspect': 'read',
+  'vscode.open': 'system', 'terminal.execute': 'destructive', 'process.inspect': 'read', 'process.manage': 'destructive', 'browser.inspect': 'read',
   'browser.navigate': 'write', 'browser.interact': 'external', 'browser.tab.focus': 'write',
   'browser.tab.close': 'destructive', 'app.inspect': 'read', 'app.operate': 'external',
   'visual.capture': 'read', 'input.operate': 'external'
