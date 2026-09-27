@@ -486,7 +486,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('operations', {
     title: 'Run governed digital operation',
-    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted: read-only planning uses locally authorized read capabilities, while any auto-planned mutation additionally requires an explicit authority envelope containing a requested capability subset and exact Stage-4 resource keys; this envelope can restrict but never grant local authority. Dynamic-risk capabilities are excluded from auto-planning. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
+    description: 'Submit or control a durable Stage-10 outcome contract. execution may be omitted only with an explicit authority envelope containing a requested capability subset and exact Stage-4 resource keys; the runtime intersects that subset with capabilities already authorized locally, so the envelope can restrict but never grant authority. maxRisk defaults to read, and dynamic-risk capabilities are excluded from auto-planning. Explicit work graphs remain supported. It composes verified memory, world postconditions, Stage-4 teams, Stage-8 rollouts, Stage-9 learning, and trusted Stage-7 placement; it cannot carry approval authority or raw device advertisements.',
     inputSchema: operationsSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async (input) => {
