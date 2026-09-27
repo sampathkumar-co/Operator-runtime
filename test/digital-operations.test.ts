@@ -233,3 +233,46 @@ test('stage10 outcome-only submit decomposes into bounded team work without call
     (error: any) => error?.code === 'OPERATIONS_REQUEST_CONFLICT'
   );
 });
+
+
+test('stage10 world postcondition follows the resolved value rather than any stale minority claim', async (t) => {
+  const { ops, world, teams } = await setup(t);
+  const operation = await ops.submit({
+    objective: 'Verify dominant world state',
+    scopeKey: 'project:dominant',
+    successConditions: ['resolved service state must be healthy'],
+    postconditions: [{
+      entityKey: 'service:dominant',
+      factKey: 'state',
+      expectedValueDigest: worldValueDigest('healthy')
+    }],
+    execution: { kind: 'team', workItems: work() },
+    run: true
+  });
+  await finishTeam(teams, operation.teamMissionId!);
+
+  await world.observe({
+    entity: { key: 'service:dominant', type: 'service', scopeKey: 'project:dominant', label: 'Dominant service' },
+    source: 'old-check', domain: 'application', evidenceDigest: '7'.repeat(64),
+    facts: { state: 'healthy' }, confidence: 0.55
+  });
+  await world.observe({
+    entity: { key: 'service:dominant', type: 'service', scopeKey: 'project:dominant', label: 'Dominant service' },
+    source: 'verifier-a', domain: 'application', evidenceDigest: '8'.repeat(64),
+    facts: { state: 'broken' }, confidence: 0.97
+  });
+  await world.observe({
+    entity: { key: 'service:dominant', type: 'service', scopeKey: 'project:dominant', label: 'Dominant service' },
+    source: 'verifier-b', domain: 'browser', evidenceDigest: '9'.repeat(64),
+    facts: { state: 'broken' }, confidence: 0.96
+  });
+
+  const resolved = await world.resolveFact('service:dominant', 'state');
+  assert.equal(resolved.status, 'resolved');
+  assert.equal(resolved.value, 'broken');
+  assert.ok(resolved.claims.some((claim) => claim.valueDigest === worldValueDigest('healthy')));
+
+  const checked = await ops.refresh(operation.id);
+  assert.equal(checked.state, 'BLOCKED');
+  assert.match(checked.lastBlockReason ?? '', /resolved value does not match/);
+});
