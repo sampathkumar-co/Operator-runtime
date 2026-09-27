@@ -646,3 +646,179 @@ test('relay durable task control rejects remote approval authority', async (t) =
   assert.equal((await response.json() as any).error.code, 'RELAY_CONTROL_INPUT_INVALID');
   assert.equal(dispatchCalls, 0);
 });
+
+
+test('stage10 relay operation reserves trusted capacity, persists device affinity, and routes later control to the same device', async (t) => {
+  const operationId = '99999999-9999-4999-8999-999999999999';
+  let bound: { key: string; deviceId: string } | undefined;
+  const dispatches: any[] = [];
+  const reservations: any[] = [];
+  const releases: string[] = [];
+  const hub = {
+    async boundProjectDevice(_accountId: string, key: string) {
+      if (!bound || bound.key !== key) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'missing');
+      return bound.deviceId;
+    },
+    async bindProject(_accountId: string, key: string, deviceId: string) { bound = { key, deviceId }; },
+    async reserveDevice(accountId: string, request: any) {
+      reservations.push({ accountId, request });
+      return {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        workloadKey: request.workloadKey,
+        deviceId: DEVICE_ID,
+        sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        requiredCapabilities: request.requiredCapabilities,
+        requiredTags: request.requiredTags,
+        minMemoryMb: request.minMemoryMb,
+        requireGpu: request.requireGpu,
+        slots: request.slots,
+        acquiredAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        state: 'ACTIVE'
+      };
+    },
+    async releaseDeviceReservation(_accountId: string, reservationId: string) { releases.push(reservationId); return {}; },
+    async dispatch(input: any) {
+      dispatches.push(input);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `operation-${dispatches.length}`, seq: 80 + dispatches.length } };
+    }
+  };
+  const results = {
+    async get(_deviceId: string, seq: number) {
+      return {
+        deliveryId: `operation-${seq - 80}`,
+        result: { ok: true, operation: { id: operationId, state: 'PENDING' } },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: accounts as any,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const submit = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({
+      accountId: ACCOUNT_A,
+      operation: {
+        operation: 'submit',
+        request: {
+          requestId: operationId,
+          objective: 'Run one governed remote operation',
+          scopeKey: 'project:remote',
+          successConditions: ['verified'],
+          execution: {
+            kind: 'team',
+            workItems: [
+              { key: 'inspect', title: 'Inspect', role: 'general', risk: 'read', allowedCapabilities: ['file.read'] },
+              { key: 'verify', title: 'Verify', role: 'verifier', risk: 'read', dependsOn: ['inspect'], allowedCapabilities: ['file.read'] }
+            ]
+          },
+          run: false
+        }
+      },
+      resourceRequirements: { requiredTags: ['dev'], minMemoryMb: 4096, requireGpu: false, slots: 1 },
+      waitMs: 1000
+    })
+  });
+  assert.equal(submit.status, 200, await submit.text());
+  assert.deepEqual(bound, { key: `operation:${operationId}`, deviceId: DEVICE_ID });
+  assert.equal(reservations.length, 1);
+  assert.equal(reservations[0].accountId, ACCOUNT_A);
+  assert.deepEqual(reservations[0].request.requiredCapabilities, ['file.read']);
+  assert.deepEqual(reservations[0].request.requiredTags, ['dev']);
+  assert.equal(reservations[0].request.minMemoryMb, 4096);
+  assert.equal(dispatches[0].kind, 'operation');
+  assert.equal(dispatches[0].explicitDeviceId, DEVICE_ID);
+  assert.deepEqual(dispatches[0].requiredCapabilities, ['file.read']);
+  assert.deepEqual(releases, ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']);
+
+  const inspect = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+  });
+  assert.equal(inspect.status, 200, await inspect.text());
+  assert.equal(dispatches[1].kind, 'operation');
+  assert.equal(dispatches[1].explicitDeviceId, DEVICE_ID);
+  assert.deepEqual(dispatches[1].requiredCapabilities, []);
+});
+
+test('stage5-9 relay knowledge inspection is developer-only and dispatches read-only knowledge delivery', async (t) => {
+  let dispatchCalls = 0;
+  const baseHub = {
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'knowledge-1', seq: 101 }, input };
+    }
+  };
+  const accounts = {
+    async activeMembershipForDevice() {
+      return { accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 };
+    }
+  };
+  const results = {
+    async get() {
+      return {
+        deliveryId: 'knowledge-1',
+        result: { ok: true, procedures: [] },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+
+  const denied = new RelayControlService({
+    hub: baseHub as any, results: results as any, accounts: accounts as any, token: TOKEN,
+    developerAccountIds: ACCOUNT_B
+  });
+  const deniedBound = await denied.listen('127.0.0.1', 0);
+  t.after(() => denied.close());
+  const deniedResponse = await fetch(`http://127.0.0.1:${deniedBound.port}/v1/knowledge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, query: { kind: 'procedures', limit: 10 }, waitMs: 1000 })
+  });
+  assert.equal(deniedResponse.status, 409);
+  assert.equal((await deniedResponse.json() as any).error.code, 'DEVELOPER_ACCOUNT_REQUIRED');
+  assert.equal(dispatchCalls, 0);
+
+  let dispatched: any;
+  const allowedHub = {
+    async dispatch(input: any) {
+      dispatched = input;
+      dispatchCalls += 1;
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'knowledge-1', seq: 101 } };
+    }
+  };
+  const allowed = new RelayControlService({
+    hub: allowedHub as any, results: results as any, accounts: accounts as any, token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const allowedBound = await allowed.listen('127.0.0.1', 0);
+  t.after(() => allowed.close());
+  const response = await fetch(`http://127.0.0.1:${allowedBound.port}/v1/knowledge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, query: { kind: 'procedures', limit: 10 }, waitMs: 1000 })
+  });
+  assert.equal(response.status, 200, await response.text());
+  const body = await response.json() as any;
+  assert.deepEqual(body, { ok: true, procedures: [] });
+  assert.equal(dispatchCalls, 1);
+  assert.equal(dispatched.kind, 'knowledge');
+  assert.deepEqual(dispatched.requiredCapabilities, []);
+  assert.deepEqual(dispatched.payload, { query: { kind: 'procedures', limit: 10 } });
+});
