@@ -382,9 +382,9 @@ export class TaskOrchestrator {
             continue;
           }
           latestRecord.state = 'FAILED';
-          latestRecord.errorCode = postconditionCode;
+          latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
-          return await this.#fail(task, postconditionCode, postconditionMessage, assertLease);
+          return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', postconditionMessage, assertLease);
         }
         await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
@@ -716,6 +716,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
 
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
+    if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a project quality gate envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
@@ -837,6 +838,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
 
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
+    if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a project quality gate envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
