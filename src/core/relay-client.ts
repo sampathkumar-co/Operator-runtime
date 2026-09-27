@@ -163,10 +163,11 @@ export class RelayClient {
     if (options.resourceProfile !== undefined && options.getResourceProfile) {
       throw new OperatorError('RELAY_RESOURCE_PROFILE_CONFIGURATION_INVALID', 'Configure either static or dynamic relay resource profile, not both.');
     }
+    const staticResourceProfile = options.resourceProfile === undefined ? undefined : validateResourceProfile(options.resourceProfile);
     this.#getResourceProfile = options.getResourceProfile
       ? async () => validateResourceProfile(await options.getResourceProfile!())
-      : options.resourceProfile
-        ? async () => validateResourceProfile(options.resourceProfile!)
+      : staticResourceProfile
+        ? async () => ({ ...staticResourceProfile, tags: [...staticResourceProfile.tags] })
         : undefined;
     this.#onDelivery = options.onDelivery;
     this.#onRecovery = options.onRecovery;
