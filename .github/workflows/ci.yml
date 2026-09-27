@@ -55,7 +55,13 @@ jobs:
         with:
           node-version: '22.23.2'
           package-manager-cache: false
-      - name: Filesystem, interactive process sessions, and risk boundary
+      - name: Build Windows path-authority helper
+        shell: pwsh
+        run: |
+          ./native/windows-path-lease/build.ps1
+          $helper = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$helper" >> $env:GITHUB_ENV
+      - name: Filesystem, interactive process sessions, process management, and risk boundary
         run: npm run test:windows-parity
 
   stage4-multi-agent:
