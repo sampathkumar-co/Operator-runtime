@@ -21,7 +21,10 @@ export type TaskTransportResult = {
 };
 
 export type OperationControlOperation = 'inspect' | 'start' | 'refresh' | 'pause' | 'cancel' | 'promote';
-export type OperationSubmitInput = Record<string, unknown> & { requestId: string };
+export type OperationSubmitInput = Record<string, unknown> & {
+  requestId: string;
+  resourceRequirements?: { requiredTags?: string[]; minMemoryMb?: number; requireGpu?: boolean; slots?: number };
+};
 export type OperationTransportResult = {
   ok: boolean;
   operation?: Record<string, unknown>;
