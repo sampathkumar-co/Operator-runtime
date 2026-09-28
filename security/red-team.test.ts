@@ -256,7 +256,7 @@ test('capability token cannot turn a read lease into destructive authority even 
     allowDestructive: true
   };
   const token = kernel.issueToken(permissions, {
-    capability: 'file.remove',
+    capability: 'file.replace',
     roots: [root],
     maxRisk: 'read',
     actionIds: ['remove']
@@ -264,7 +264,7 @@ test('capability token cannot turn a read lease into destructive authority even 
   await assert.rejects(
     () => kernel.authorize({
       id: 'remove',
-      capability: 'file.remove',
+      capability: 'file.replace',
       risk: 'destructive',
       input: { path: path.join(root, 'a.txt') },
       provenance: { kind: 'chatgpt' }
