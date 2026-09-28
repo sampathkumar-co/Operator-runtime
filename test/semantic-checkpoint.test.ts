@@ -50,6 +50,7 @@ test('stage15 accepts only checkpoints signed by an active paired source device'
     expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
     expectedStateDigest: envelope.checkpoint.stateDigest,
     availableCapabilities: ['file.read'],
+    verifyResourceKey: async (resourceKey) => resourceKey === 'file:/project/a.txt',
     verifyWorldAssumption: async (assumption) => assumption.valueDigest,
     verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
   });
@@ -61,6 +62,7 @@ test('stage15 accepts only checkpoints signed by an active paired source device'
     () => destinationManager.verifyAndAccept(envelope, {
       expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
       availableCapabilities: ['file.read'],
+      verifyResourceKey: async (resourceKey) => resourceKey === 'file:/project/a.txt',
       verifyWorldAssumption: async (assumption) => assumption.valueDigest,
       verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
     }),
@@ -217,5 +219,37 @@ test('stage15 requires explicit destination proofs instead of trusting source-de
       availableCapabilities: ['file.read']
     }),
     (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_WORLD_PROOF_REQUIRED'
+  );
+});
+
+
+test('stage15 rejects a signed checkpoint when destination resource scope does not authorize every resource', async (t) => {
+  const sourceDir = await temp(t, 'operator-migrate-resource-source-');
+  const destDir = await temp(t, 'operator-migrate-resource-dest-');
+  const identity = new DeviceIdentityStore(sourceDir, { platform: 'linux' });
+  const publicIdentity = await identity.loadOrCreate('source-resource');
+  const registry = new DeviceRegistryStore(destDir);
+  await registry.registerVerifiedPeer(publicIdentity);
+  const source = new SemanticCheckpointManager(sourceDir, { identity, registry: new DeviceRegistryStore(sourceDir) });
+  const destination = new SemanticCheckpointManager(destDir, {
+    identity: new DeviceIdentityStore(destDir, { platform: 'linux' }),
+    registry
+  });
+  const envelope = await source.create({
+    workloadKind: 'task',
+    workloadId: crypto.randomUUID(),
+    objectiveDigest: semanticCheckpointDigest('objective'),
+    stateDigest: semanticCheckpointDigest('state'),
+    authorityDigest: semanticCheckpointDigest('authority'),
+    resourceKeys: ['file:/project/allowed.txt', 'file:/project/denied.txt'],
+    continuation: { phase: 'resume' }
+  });
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      verifyResourceKey: async (resourceKey) => resourceKey.endsWith('/allowed.txt')
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_RESOURCE_MISMATCH'
   );
 });
