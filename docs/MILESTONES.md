@@ -294,8 +294,8 @@ The Stage-5–10 successor is repository-complete, merged to `main`, deployed at
 
 ## M9 — hardened Stage 11–20 agent operating fabric — COMPLETE AND DEPLOYED
 
-Production source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`  
-Production build timestamp: `2026-09-28T12:25:44Z`
+Production source: `b73d699f3cdca4d6e372942f626012fb4909068b`  
+Production build timestamp: `2026-09-28T14:59:30Z`
 
 - [x] Stage 1–10 common Authority Kernel / side-effect certainty / Verification Kernel / resource-leasing hardening
 - [x] versioned intent kernel and durable conversation ledger
