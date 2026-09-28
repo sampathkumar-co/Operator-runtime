@@ -50,7 +50,7 @@ const F = (id: FailureFamily['id'], name: string, hypothesis: string, invariants
 export const FAILURE_FAMILIES: readonly FailureFamily[] = Object.freeze([
   F('F01','Ambiguous objective','Two reasonable interpretations lead to materially different work.',['NEWEST_INTENT_WINS','ONE_COHERENT_USER_CONVERSATION'],['intent-versioning','graph-reconciliation']),
   F('F02','Mid-task intent reversal','The user reverses an objective while work is active.',['NEWEST_INTENT_WINS','PARALLEL_MUTATION_IS_COORDINATED'],['intent-versioning','intent-revalidation','worker-cancellation','graph-reconciliation']),
-  F('F03','Constraint addition','A new restriction arrives after planning.',['NEWEST_INTENT_WINS','WORKER_CANNOT_EXPAND_AUTHORITY'],['intent-versioning','intent-revalidation','worker-cancellation']),
+  F('F03','Constraint addition','A new restriction arrives after planning.',['NEWEST_INTENT_WINS','WORKER_CANNOT_EXPAND_AUTHORITY'],['intent-versioning','intent-revalidation','worker-cancellation','authority-non-expansion']),
   F('F04','Constraint contradiction','Two valid constraints cannot be simultaneously satisfied.',['NEWEST_INTENT_WINS','ONE_COHERENT_USER_CONVERSATION'],['graph-reconciliation','human-escalation']),
   F('F05','Scope creep','A worker invents extra objectives not requested by the user.',['WORKER_CANNOT_EXPAND_AUTHORITY','BAD_WORKER_HAS_BOUNDED_BLAST_RADIUS'],['authority-non-expansion','blast-radius']),
   F('F06','Goal substitution','A worker optimizes an easy proxy rather than the actual outcome.',['COMPLETION_REQUIRES_INDEPENDENT_VERIFICATION','REASONING_AUTHORITY_EXECUTION_VERIFICATION_ARE_SEPARATE'],['heterogeneous-verification','artifact-gating']),
