@@ -53,6 +53,8 @@ interface MigrationState {
     sourceDeviceId: string;
     acceptedAt: string;
     stateDigest: string;
+    authorityDigest: string;
+    checkpointDigest: string;
   }>;
 }
 
@@ -127,9 +129,13 @@ export class SemanticCheckpointManager {
   }
 
   async verifyAndAccept(envelopeInput: SignedSemanticCheckpoint, options: {
+    expectedAuthorityDigest: string;
     expectedWorkloadId?: string;
-    expectedAuthorityDigest?: string;
-  } = {}): Promise<SemanticCheckpoint> {
+    expectedStateDigest?: string;
+    availableCapabilities?: string[];
+    verifyWorldAssumption?: (assumption: SemanticWorldAssumption) => Promise<string | undefined>;
+    verifyArtifact?: (artifact: SemanticCheckpointArtifact) => Promise<{ digest: string; size?: number } | undefined>;
+  }): Promise<SemanticCheckpoint> {
     const envelope = normalizeEnvelope(envelopeInput);
     const checkpoint = envelope.checkpoint;
     const now = this.#clock();
@@ -141,9 +147,6 @@ export class SemanticCheckpointManager {
     }
     if (options.expectedWorkloadId && checkpoint.workloadId !== uuid(options.expectedWorkloadId, 'expectedWorkloadId')) {
       throw new OperatorError('SEMANTIC_CHECKPOINT_WORKLOAD_MISMATCH', 'Semantic checkpoint belongs to another workload.');
-    }
-    if (options.expectedAuthorityDigest && checkpoint.authorityDigest !== digest(options.expectedAuthorityDigest, 'expectedAuthorityDigest')) {
-      throw new OperatorError('SEMANTIC_CHECKPOINT_AUTHORITY_MISMATCH', 'Semantic checkpoint authority envelope does not match the destination contract.');
     }
 
     const devices = await this.#registry.listDevices();
@@ -157,11 +160,58 @@ export class SemanticCheckpointManager {
     );
     if (!verified) throw new OperatorError('SEMANTIC_CHECKPOINT_SIGNATURE_INVALID', 'Semantic checkpoint signature is invalid.');
 
+    const expectedAuthorityDigest = digest(options.expectedAuthorityDigest, 'expectedAuthorityDigest');
+    if (checkpoint.authorityDigest !== expectedAuthorityDigest) {
+      throw new OperatorError('SEMANTIC_CHECKPOINT_AUTHORITY_MISMATCH', 'Semantic checkpoint authority envelope does not match the destination contract.');
+    }
+    if (options.expectedStateDigest && checkpoint.stateDigest !== digest(options.expectedStateDigest, 'expectedStateDigest')) {
+      throw new OperatorError('SEMANTIC_CHECKPOINT_STATE_MISMATCH', 'Semantic checkpoint state digest does not match the destination continuation contract.');
+    }
+
+    if (checkpoint.requiredCapabilities.length > 0) {
+      if (!Array.isArray(options.availableCapabilities)) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_CAPABILITY_PROOF_REQUIRED', 'Destination capability proof is required before accepting this checkpoint.');
+      }
+      const available = new Set(uniqueStrings(options.availableCapabilities, 2048, 256, 'availableCapabilities'));
+      const missing = checkpoint.requiredCapabilities.filter((capability) => !available.has(capability));
+      if (missing.length > 0) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_CAPABILITY_MISMATCH', 'Destination cannot satisfy all checkpoint capability requirements.', {
+          details: { missing }
+        });
+      }
+    }
+
+    if (checkpoint.worldAssumptions.length > 0) {
+      if (!options.verifyWorldAssumption) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_WORLD_PROOF_REQUIRED', 'Destination world-assumption verification is required before accepting this checkpoint.');
+      }
+      for (const assumption of checkpoint.worldAssumptions) {
+        const actual = await options.verifyWorldAssumption(structuredClone(assumption));
+        if (!actual || digest(actual, 'world assumption verification digest') !== assumption.valueDigest) {
+          throw new OperatorError('SEMANTIC_CHECKPOINT_WORLD_MISMATCH', `World assumption ${assumption.entityKey}.${assumption.factKey} is stale or unavailable.`);
+        }
+      }
+    }
+
+    if (checkpoint.artifactDigests.length > 0) {
+      if (!options.verifyArtifact) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_ARTIFACT_PROOF_REQUIRED', 'Destination artifact verification is required before accepting this checkpoint.');
+      }
+      for (const artifact of checkpoint.artifactDigests) {
+        const actual = await options.verifyArtifact(structuredClone(artifact));
+        if (!actual || digest(actual.digest, 'artifact verification digest') !== artifact.digest
+          || (artifact.size !== undefined && actual.size !== artifact.size)) {
+          throw new OperatorError('SEMANTIC_CHECKPOINT_ARTIFACT_MISMATCH', `Artifact ${artifact.key} does not match the signed checkpoint.`);
+        }
+      }
+    }
+
+    const fullCheckpointDigest = semanticCheckpointDigest(checkpoint);
     await this.#mutate((state) => {
       const existing = state.accepted.find((item) => item.checkpointId === checkpoint.checkpointId);
       if (existing) {
-        if (existing.stateDigest !== checkpoint.stateDigest || existing.sourceDeviceId !== checkpoint.sourceDeviceId) {
-          throw new OperatorError('SEMANTIC_CHECKPOINT_REPLAY_CONFLICT', 'Checkpoint ID was previously accepted with different content.');
+        if (existing.checkpointDigest !== fullCheckpointDigest || existing.sourceDeviceId !== checkpoint.sourceDeviceId) {
+          throw new OperatorError('SEMANTIC_CHECKPOINT_REPLAY_CONFLICT', 'Checkpoint ID was previously accepted with different signed content.');
         }
         return;
       }
@@ -170,7 +220,9 @@ export class SemanticCheckpointManager {
         workloadId: checkpoint.workloadId,
         sourceDeviceId: checkpoint.sourceDeviceId,
         acceptedAt: now.toISOString(),
-        stateDigest: checkpoint.stateDigest
+        stateDigest: checkpoint.stateDigest,
+        authorityDigest: checkpoint.authorityDigest,
+        checkpointDigest: fullCheckpointDigest
       });
       if (state.accepted.length > MAX_ITEMS) state.accepted.splice(0, state.accepted.length - MAX_ITEMS);
     });
@@ -197,6 +249,8 @@ export class SemanticCheckpointManager {
         uuid(item.sourceDeviceId, 'sourceDeviceId');
         iso(item.acceptedAt, 'acceptedAt');
         digest(item.stateDigest, 'stateDigest');
+        digest(item.authorityDigest, 'authorityDigest');
+        digest(item.checkpointDigest, 'checkpointDigest');
       }
       return state;
     } catch (error) {
