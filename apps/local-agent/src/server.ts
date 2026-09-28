@@ -31,6 +31,16 @@ import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
+import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
+import {
+  assertMigrationCapabilities,
+  buildMigrationArtifacts,
+  buildMigrationWorldAssumptions,
+  hashAuthorizedMigrationArtifact,
+  migrationAuthorityDigest,
+  verifyMigrationResourceKey,
+  verifyMigrationWorldAssumption
+} from './migration-proofs.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -162,6 +172,7 @@ export function createLocalAgentServer(options: {
   perception?: PerceptionGraphStore;
   teachMode?: TeachModeStore;
   studioExecutor?: StudioWorkflowExecutor;
+  semanticMigration?: SemanticCheckpointManager;
   desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
@@ -494,6 +505,149 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+
+    if (pathname === '/v1/migration/checkpoints' && req.method === 'POST') {
+      if (!options.semanticMigration) {
+        send(res, 503, { ok: false, error: { code: 'SEMANTIC_MIGRATION_NOT_CONFIGURED', message: 'Semantic migration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (body.objective === undefined || body.state === undefined) throw Object.assign(new Error('objective and state are required.'), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+        const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities.map(String) : [];
+        const resourceKeys = Array.isArray(body.resourceKeys) ? body.resourceKeys.map(String) : [];
+        const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
+        const normalizedCapabilities = assertMigrationCapabilities({
+          requiredCapabilities,
+          permissions: options.permissions,
+          supportedCapabilities
+        });
+        for (const resourceKey of resourceKeys) {
+          if (!await verifyMigrationResourceKey(resourceKey, options.permissions, normalizedCapabilities)) {
+            throw Object.assign(new Error(`Resource ${resourceKey} is not provably authorized on this device.`), { code: 'SEMANTIC_MIGRATION_RESOURCE_MISMATCH' });
+          }
+        }
+        const artifactInputs = Array.isArray(body.artifacts)
+          ? body.artifacts.map((item) => {
+              const value = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+              return { key: String(value.key ?? ''), path: String(value.path ?? '') };
+            })
+          : [];
+        const artifacts = await buildMigrationArtifacts(artifactInputs, options.permissions);
+        const assumptionInputs = Array.isArray(body.worldAssumptions)
+          ? body.worldAssumptions.map((item) => {
+              const value = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+              return { entityKey: String(value.entityKey ?? ''), factKey: String(value.factKey ?? '') };
+            })
+          : [];
+        if (assumptionInputs.length > 0 && !options.world) {
+          throw Object.assign(new Error('World model is required to bind migration assumptions.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
+        }
+        const worldAssumptions = options.world
+          ? await buildMigrationWorldAssumptions(assumptionInputs, options.world)
+          : [];
+        const authorityDigest = migrationAuthorityDigest({
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys
+        });
+        const continuation = body.continuation && typeof body.continuation === 'object' && !Array.isArray(body.continuation)
+          ? body.continuation as Record<string, unknown>
+          : {};
+        const envelope = await options.semanticMigration.create({
+          workloadKind: String(body.workloadKind ?? '') as any,
+          workloadId: String(body.workloadId ?? ''),
+          objectiveDigest: semanticCheckpointDigest(body.objective),
+          stateDigest: semanticCheckpointDigest(body.state),
+          authorityDigest,
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys,
+          artifactDigests: artifacts,
+          worldAssumptions,
+          completedStepDigests: Array.isArray(body.completedStepDigests) ? body.completedStepDigests.map(String) : [],
+          continuation,
+          ...(body.ttlMs === undefined ? {} : { ttlMs: Number(body.ttlMs) })
+        });
+        await options.audit?.append({
+          capability: 'migration.checkpoint.create',
+          result: 'success',
+          risk: 'write',
+          details: {
+            checkpointId: envelope.checkpoint.checkpointId,
+            workloadId: envelope.checkpoint.workloadId,
+            workloadKind: envelope.checkpoint.workloadKind,
+            capabilityCount: envelope.checkpoint.requiredCapabilities.length,
+            resourceCount: envelope.checkpoint.resourceKeys.length,
+            artifactCount: envelope.checkpoint.artifactDigests.length,
+            worldAssumptionCount: envelope.checkpoint.worldAssumptions.length
+          }
+        });
+        send(res, 201, { ok: true, envelope });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SEMANTIC_MIGRATION_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/migration/checkpoints/accept' && req.method === 'POST') {
+      if (!options.semanticMigration) {
+        send(res, 503, { ok: false, error: { code: 'SEMANTIC_MIGRATION_NOT_CONFIGURED', message: 'Semantic migration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body.envelope || typeof body.envelope !== 'object' || Array.isArray(body.envelope)) {
+          throw Object.assign(new Error('envelope is required.'), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+        }
+        const envelope = body.envelope as SignedSemanticCheckpoint;
+        const checkpoint = envelope.checkpoint;
+        const requiredCapabilities = Array.isArray(checkpoint?.requiredCapabilities) ? checkpoint.requiredCapabilities.map(String) : [];
+        const resourceKeys = Array.isArray(checkpoint?.resourceKeys) ? checkpoint.resourceKeys.map(String) : [];
+        const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
+        const normalizedCapabilities = assertMigrationCapabilities({
+          requiredCapabilities,
+          permissions: options.permissions,
+          supportedCapabilities
+        });
+        const expectedAuthorityDigest = migrationAuthorityDigest({
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys
+        });
+        const artifactPaths = body.artifactPaths && typeof body.artifactPaths === 'object' && !Array.isArray(body.artifactPaths)
+          ? body.artifactPaths as Record<string, unknown>
+          : {};
+        const accepted = await options.semanticMigration.verifyAndAccept(envelope, {
+          expectedAuthorityDigest,
+          ...(body.expectedWorkloadId === undefined ? {} : { expectedWorkloadId: String(body.expectedWorkloadId) }),
+          ...(body.expectedState === undefined ? {} : { expectedStateDigest: semanticCheckpointDigest(body.expectedState) }),
+          availableCapabilities: supportedCapabilities,
+          verifyResourceKey: (resourceKey) => verifyMigrationResourceKey(resourceKey, options.permissions, normalizedCapabilities),
+          ...(options.world ? {
+            verifyWorldAssumption: (assumption) => verifyMigrationWorldAssumption(assumption, options.world!)
+          } : {}),
+          verifyArtifact: async (artifact) => {
+            const mapped = artifactPaths[artifact.key];
+            if (typeof mapped !== 'string' || !mapped) return undefined;
+            return await hashAuthorizedMigrationArtifact(mapped, options.permissions);
+          }
+        });
+        await options.audit?.append({
+          capability: 'migration.checkpoint.accept',
+          result: 'success',
+          risk: 'write',
+          details: {
+            checkpointId: accepted.checkpointId,
+            workloadId: accepted.workloadId,
+            workloadKind: accepted.workloadKind,
+            sourceDeviceId: accepted.sourceDeviceId,
+            acceptedForResume: true
+          }
+        });
+        send(res, 200, { ok: true, status: 'accepted-for-resume', checkpoint: accepted });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SEMANTIC_MIGRATION_ACCEPT_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
 
     if (pathname === '/v1/studio/teach' && req.method === 'POST') {
       if (!options.teachMode) {
