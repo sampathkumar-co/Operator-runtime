@@ -40,8 +40,15 @@
       "repository": "ServiceNow/BrowserGym",
       "observedHead": "c05d7f38f4f788d6e4ee960512c3d5c8aabc6e42",
       "attemptedPackage": "browsergym-miniwob==0.14.3",
-      "status": "bootstrap-attempted",
-      "reason": "Host Python 3.13 cannot build pinned greenlet==3.0.3 without MSVC; side-by-side Python 3.12 bootstrap was started."
+      "status": "environment-and-scorer-ready",
+      "reason": "Pinned MiniWoB++ assets reset successfully in BrowserGym 0.14.3; deterministic native reward self-test returned reward 1.0 and terminated=true on browsergym/miniwob.click-test.",
+      "harnessSelfTest": {
+        "runId": 36465396396,
+        "jobId": 109074082473,
+        "task": "browsergym/miniwob.click-test",
+        "reward": 1,
+        "terminated": true
+      }
     }
   }
 }
