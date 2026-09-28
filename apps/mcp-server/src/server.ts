@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { createMcpFastifyApp } from '@modelcontextprotocol/fastify';
 import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import {
