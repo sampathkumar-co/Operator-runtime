@@ -4,7 +4,7 @@ Operator is a semantic execution substrate for normal ChatGPT conversations to o
 
 ## Status: Stage 1–20 production live
 
-Production is live at source `0c28cf8df77369c04fc3b85ed9d16c8def490546`, with the public 9-tool review surface unchanged and the private/Developer surface remaining **32 grouped tools**. The deployed runtime includes the hardened Stage 1–10 foundation plus Stages 11–20: multimodal perception, bounded safe compute, durable events, temporal world history, semantic cross-device continuation, enterprise policy, capability SDK contracts, evaluation infrastructure, verified Studio/Teach workflows, and governed continuous desired-state operations. The npm runtime remains `mecord-connect@1.0.1` under `latest` until the owner completes the separately authenticated 2.0.0 publication. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
+Production is live at source `0c28cf8df77369c04fc3b85ed9d16c8def490546`, with the public 9-tool review surface unchanged and the private/Developer surface remaining **32 grouped tools**. The deployed runtime includes the hardened Stage 1–10 foundation plus Stages 11–20: multimodal perception, bounded safe compute, durable events, temporal world history, semantic cross-device continuation, enterprise policy, capability SDK contracts, evaluation infrastructure, verified Studio/Teach workflows, and governed continuous desired-state operations. The npm runtime remains `mecord-connect@1.0.1` under `latest` until the owner completes the separately authenticated 2.0.1 publication. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -71,7 +71,7 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 ## Remaining external gates
 
-The Stage-1–20 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The only intentionally owner-authenticated release tasks left are npm 2.0.0 publication and OpenAI/ChatGPT plugin-directory work:
+The Stage-1–20 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The only intentionally owner-authenticated release tasks left are npm 2.0.1 publication and OpenAI/ChatGPT plugin-directory work:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
