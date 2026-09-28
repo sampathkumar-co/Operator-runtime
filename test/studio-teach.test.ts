@@ -45,8 +45,14 @@ test('stage19 compiles only a stopped verified demonstration into a deterministi
     resourceKeys: ['browser:billing']
   });
   await store.stop(session.id);
+  const verificationReceipt = await store.verify(session.id, [{
+    name: 'demonstration-outcome',
+    ok: true,
+    detail: 'The demonstrated workflow outcome was independently verified.',
+    evidenceDigests: [afterFirst.steps[0]!.evidenceDigest]
+  }]);
   const workflow = await store.compile(session.id, {
-    verificationDigest: crypto.createHash('sha256').update('verified-demo').digest('hex'),
+    verificationReceipt,
     parameters: [{ name: 'invoiceUrl', stepId: sourceStepId, jsonPointer: '/url', required: true }]
   });
   assert.equal(workflow.steps.length, 2);
@@ -88,13 +94,31 @@ test('stage19 requires independent verification digest and explicit parameter pa
   });
   await store.stop(session.id);
 
+  const failedReceipt = await store.verify(session.id, [{
+    name: 'outcome',
+    ok: false,
+    detail: 'The demonstrated postcondition did not hold.'
+  }]);
   await assert.rejects(() => store.compile(session.id, {
-    verificationDigest: 'bad',
+    verificationReceipt: failedReceipt,
     parameters: []
-  }), (error: any) => error?.code === 'TEACH_INPUT_INVALID');
+  }), (error: any) => error?.code === 'TEACH_VERIFICATION_REQUIRED');
+
+  const validReceipt = await store.verify(session.id, [{
+    name: 'outcome',
+    ok: true,
+    detail: 'The demonstrated postcondition holds.',
+    evidenceDigests: [recorded.steps[0]!.evidenceDigest]
+  }]);
+  const tamperedReceipt = structuredClone(validReceipt);
+  tamperedReceipt.digest = 'a'.repeat(64);
+  await assert.rejects(() => store.compile(session.id, {
+    verificationReceipt: tamperedReceipt,
+    parameters: []
+  }), (error: any) => error?.code === 'TEACH_VERIFICATION_INVALID');
 
   await assert.rejects(() => store.compile(session.id, {
-    verificationDigest: 'a'.repeat(64),
+    verificationReceipt: validReceipt,
     parameters: [{ name: 'missing', stepId: recorded.steps[0]!.id, jsonPointer: '/does-not-exist', required: true }]
   }), (error: any) => error?.code === 'TEACH_PARAMETER_INVALID');
 });
