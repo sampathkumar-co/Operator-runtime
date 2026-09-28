@@ -63,3 +63,32 @@ test('stage17 manifest digest is stable and registry rejects duplicate identitie
   assert.match(capabilityManifestDigest(manifest), /^[0-9a-f]{64}$/);
   assert.throws(() => registry.register(manifest, new ExtensionProbe()), (error: any) => error?.code === 'CAPABILITY_EXTENSION_DUPLICATE');
 });
+
+
+test('stage17 dynamic-risk capability fails closed without provider risk resolver', async () => {
+  const registry = new CapabilityExtensionRegistry();
+  const wrapped = registry.register({
+    sdkVersion: 1,
+    id: 'example.manage',
+    version: '1.0.0',
+    displayName: 'Example Manage',
+    capabilities: [{
+      capability: 'file.manage',
+      risk: 'dynamic',
+      deterministic: true,
+      reversible: false,
+      verification: 'runtime',
+      resourceKinds: ['file']
+    }]
+  }, new ExtensionProbe());
+  await assert.rejects(
+    async () => await wrapped.resolveRisk?.({
+      id: 'manage',
+      capability: 'file.manage',
+      risk: 'write',
+      input: { operation: 'copy' },
+      provenance: { kind: 'runtime' }
+    }),
+    (error: any) => error?.code === 'CAPABILITY_EXTENSION_DYNAMIC_RISK_UNRESOLVED'
+  );
+});
