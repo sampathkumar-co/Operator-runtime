@@ -158,3 +158,23 @@ test('authority token integrity, expiry, scope and risk ceilings fail closed', a
   assert.equal(riskDenied.error?.code, 'AUTHORITY_TOKEN_RISK_EXCEEDED');
   assert.equal(provider.calls, 0);
 });
+
+
+test('capability tokens inherit parent maxRisk and cannot widen it', () => {
+  const root = path.resolve('/tmp/operator-authority-risk-ceiling');
+  const kernel = new AuthorityKernel({ secret: Buffer.alloc(32, 19) });
+  const profile: PermissionProfile = {
+    allowedCapabilities: ['file.*'],
+    allowedRoots: [root],
+    maxRisk: 'read',
+    allowDestructive: true
+  };
+
+  const inherited = kernel.issueToken(profile, { capability: 'file.read' });
+  assert.equal(inherited.claims.maxRisk, 'read');
+
+  assert.throws(
+    () => kernel.issueToken(profile, { capability: 'file.read', maxRisk: 'destructive' }),
+    (error: any) => error?.code === 'AUTHORITY_RISK_ESCALATION'
+  );
+});
