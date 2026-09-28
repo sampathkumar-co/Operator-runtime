@@ -53,6 +53,7 @@ export interface ActionResult {
 export interface PermissionProfile {
   allowedCapabilities: string[];
   allowedRoots: string[];
+  maxRisk?: ActionRisk;
   approvedActionIds?: string[];
   allowExternalWrites?: boolean;
   allowSystemChanges?: boolean;
