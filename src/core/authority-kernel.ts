@@ -145,13 +145,22 @@ export class AuthorityKernel {
       throw new PolicyError('AUTHORITY_ACTION_ID_INVALID', 'Capability token action IDs are invalid.');
     }
 
+    const parentMaxRisk = permissions.maxRisk ?? 'destructive';
+    const requestedMaxRisk = request.maxRisk ?? parentMaxRisk;
+    if (RISK_ORDER[requestedMaxRisk] > RISK_ORDER[parentMaxRisk]) {
+      throw new PolicyError('AUTHORITY_RISK_ESCALATION', 'Capability token risk ceiling exceeds the parent authority.', {
+        parentMaxRisk,
+        requestedMaxRisk
+      });
+    }
+
     const now = this.#clock();
     const claims: CapabilityTokenClaims = {
       version: 1,
       tokenId: crypto.randomUUID(),
       capability: request.capability,
       roots,
-      maxRisk: request.maxRisk ?? 'destructive',
+      maxRisk: requestedMaxRisk,
       actionIds,
       issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ttlMs).toISOString()
