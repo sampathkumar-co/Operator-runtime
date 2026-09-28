@@ -26,6 +26,7 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'git.write': 'write',
   'docker.inspect': 'read',
   'docker.manage': 'system',
+  'compute.run': 'write',
   'postgres.inspect': 'read',
   'postgres.select': 'read',
   'vscode.inspect': 'read',
