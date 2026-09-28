@@ -1,12 +1,12 @@
 # Mecord Connect — Current Release State
 
-Status date: **2026-09-27**
+Status date: **2026-09-28**
 
 This file is the canonical human-readable current-state summary. Machine-readable values live in `docs/release-state.json`. Older certification and gate documents may preserve historical evidence, but they must not override this file for current production facts.
 
 ## Production
 
-- production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
+- production source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
@@ -14,11 +14,11 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 - Developer pairing route: **404** by design
 - npm: **`mecord-connect@1.0.1`** under `latest`
 
-Live verification on 2026-09-27 confirmed both health endpoints report source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
+Live verification on 2026-09-28 confirmed both health endpoints report source `0c28cf8df77369c04fc3b85ed9d16c8def490546`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
 
-## Stage 1–10 production status
+## Stage 1–20 production status
 
-The certified Stage-1–10 successor is now **merged and deployed to production**.
+The hardened Stage-1–10 foundation and Stage-11–20 evolution successor are now **merged and deployed to production**.
 
 Production now includes:
 
@@ -33,8 +33,18 @@ Production now includes:
 - Stage 8 canary-gated organization-scale execution;
 - Stage 9 bounded authority-neutral execution optimization;
 - Stage 10 governed digital operations with explicit authority envelopes, world pre/postconditions and verifier-backed completion.
+- Stage 11 multimodal perception graph and ambiguity-safe semantic/visual grounding;
+- Stage 12 bounded sandboxed JavaScript/Python compute;
+- Stage 13 durable event waits, publication and wake/deadline handling;
+- Stage 14 temporal world-history transitions without raw sensitive-value retention;
+- Stage 15 signed semantic cross-device continuation with destination authority/capability/resource/world/artifact proofs;
+- Stage 16 enterprise policy narrowing and authenticated principal propagation;
+- Stage 17 bounded capability SDK contracts;
+- Stage 18 evaluation/reliability fabric;
+- Stage 19 verified Teach Mode, durable Studio workflow execution, reconciliation and Control Center surface;
+- Stage 20 continuous desired-state reconciliation with bounded remediation and Control Center surface.
 
-The runtime-certified Stage-5–10 code head remains `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`; the deployed merged mainline source is `3361b2f77d2b04028d514b178bd4a246fc863e6c`.
+The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `0c28cf8df77369c04fc3b85ed9d16c8def490546`, built at `2026-09-28T12:25:44Z`.
 
 The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.0 release is published.
 
@@ -49,7 +59,7 @@ The public version tracks the stable public MCP schema/review snapshot. The The 
 
 ## OpenAI-side state
 
-The currently deployed Stage-1–10 software/runtime release is complete. The remaining external limitation for directory publication is OpenAI-side:
+The currently deployed Stage-1–20 software/runtime release is complete. The remaining external limitation for directory publication is OpenAI-side:
 
 - developer verification: blocked/rejected externally;
 - app-directory submission: not submitted;
