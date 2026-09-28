@@ -11,6 +11,7 @@ export interface EnterpriseRole {
   environments: string[];
   projectPrefixes: string[];
   deviceGroups: string[];
+  deviceIds?: string[];
 }
 
 export interface EnterpriseBinding {
@@ -21,6 +22,7 @@ export interface EnterpriseBinding {
   projectPrefix?: string;
   environment?: string;
   deviceGroup?: string;
+  deviceId?: string;
   enabled: boolean;
 }
 
@@ -83,45 +85,47 @@ export class EnterprisePolicyStore {
       .filter((binding) => !binding.teamId || context.teamIds.includes(binding.teamId))
       .filter((binding) => !binding.projectPrefix || (context.projectKey?.startsWith(binding.projectPrefix) ?? false))
       .filter((binding) => !binding.environment || binding.environment === context.environment)
-      .filter((binding) => !binding.deviceGroup || context.deviceGroups.includes(binding.deviceGroup));
+      .filter((binding) => !binding.deviceGroup || context.deviceGroups.includes(binding.deviceGroup))
+      .filter((binding) => !binding.deviceId || binding.deviceId === context.deviceId);
 
     if (matches.length === 0) throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'No enterprise role binding authorizes this context.');
 
-    const roles = matches.map((binding) => state.roles.find((role) => role.id === binding.roleId))
-      .filter((role): role is EnterpriseRole => Boolean(role))
-      .filter((role) => role.environments.length === 0 || (context.environment ? role.environments.includes(context.environment) : false))
-      .filter((role) => role.projectPrefixes.length === 0 || (context.projectKey ? role.projectPrefixes.some((prefix) => context.projectKey!.startsWith(prefix)) : false))
-      .filter((role) => role.deviceGroups.length === 0 || role.deviceGroups.some((group) => context.deviceGroups.includes(group)));
+    const grants = matches.map((binding) => ({ binding, role: state.roles.find((role) => role.id === binding.roleId) }))
+      .filter((entry): entry is { binding: EnterpriseBinding; role: EnterpriseRole } => Boolean(entry.role))
+      .filter(({ role }) => role.environments.length === 0 || (context.environment ? role.environments.includes(context.environment) : false))
+      .filter(({ role }) => role.projectPrefixes.length === 0 || (context.projectKey ? role.projectPrefixes.some((prefix) => context.projectKey!.startsWith(prefix)) : false))
+      .filter(({ role }) => role.deviceGroups.length === 0 || role.deviceGroups.some((group) => context.deviceGroups.includes(group)))
+      .filter(({ role }) => (role.deviceIds ?? []).length === 0 || (context.deviceId ? role.deviceIds!.includes(context.deviceId) : false));
 
-    if (roles.length === 0) throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Enterprise role constraints do not authorize this context.');
+    if (grants.length === 0) throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Enterprise role constraints do not authorize this context.');
 
+    const roles = [...new Map(grants.map(({ role }) => [role.id, role])).values()];
     const enterpriseCapabilities = union(roles.flatMap((role) => role.capabilities));
-    const allowedCapabilities = base.allowedCapabilities.filter((capability) =>
-      enterpriseCapabilities.some((rule) => capabilityMatches(capability, rule))
-    );
+    const allowedCapabilities = intersectCapabilities(base.allowedCapabilities, enterpriseCapabilities);
     if (allowedCapabilities.length === 0) throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Enterprise policy intersection grants no capabilities.');
 
     const rootPrefixes = union(roles.flatMap((role) => role.rootPrefixes)).map((root) => path.resolve(root));
-    const allowedRoots = base.allowedRoots.filter((root) =>
-      rootPrefixes.length === 0 || rootPrefixes.some((prefix) => isWithin(path.resolve(root), prefix))
-    );
-    if (base.allowedRoots.length > 0 && allowedRoots.length === 0) {
+    const allowedRoots = intersectRoots(base.allowedRoots, rootPrefixes);
+    if (base.allowedRoots.length > 0 && rootPrefixes.length > 0 && allowedRoots.length === 0) {
       throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Enterprise policy intersection grants no filesystem roots.');
     }
 
-    const maxRisk = roles.reduce<ActionRisk>((current, role) =>
+    const roleMaxRisk = roles.reduce<ActionRisk>((current, role) =>
       RISK_ORDER[role.maxRisk] > RISK_ORDER[current] ? role.maxRisk : current, 'read');
+    const baseMaxRisk = base.maxRisk ?? 'destructive';
+    const maxRisk = RISK_ORDER[roleMaxRisk] <= RISK_ORDER[baseMaxRisk] ? roleMaxRisk : baseMaxRisk;
     const permissions: PermissionProfile = {
       ...base,
       allowedCapabilities,
       allowedRoots,
+      maxRisk,
       allowExternalWrites: base.allowExternalWrites === true && RISK_ORDER[maxRisk] >= RISK_ORDER.external,
       allowSystemChanges: base.allowSystemChanges === true && RISK_ORDER[maxRisk] >= RISK_ORDER.system,
       allowDestructive: base.allowDestructive === true && RISK_ORDER[maxRisk] >= RISK_ORDER.destructive
     };
     return {
       roleIds: roles.map((role) => role.id).sort(),
-      bindingIds: matches.map((binding) => binding.id).sort(),
+      bindingIds: grants.map(({ binding }) => binding.id).sort(),
       permissions
     };
   }
@@ -153,7 +157,8 @@ function validateState(input: EnterprisePolicyState): EnterprisePolicyState {
       maxRisk: risk(role.maxRisk),
       environments: uniqueIds(role.environments, 128, `roles[${index}].environments`),
       projectPrefixes: uniqueText(role.projectPrefixes, 512, 512, `roles[${index}].projectPrefixes`),
-      deviceGroups: uniqueIds(role.deviceGroups, 256, `roles[${index}].deviceGroups`)
+      deviceGroups: uniqueIds(role.deviceGroups, 256, `roles[${index}].deviceGroups`),
+      deviceIds: uniqueText(role.deviceIds ?? [], 512, 256, `roles[${index}].deviceIds`)
     };
   });
 
@@ -172,6 +177,7 @@ function validateState(input: EnterprisePolicyState): EnterprisePolicyState {
       ...(binding.projectPrefix ? { projectPrefix: bounded(binding.projectPrefix, 512, `bindings[${index}].projectPrefix`) } : {}),
       ...(binding.environment ? { environment: idValue(binding.environment, `bindings[${index}].environment`) } : {}),
       ...(binding.deviceGroup ? { deviceGroup: idValue(binding.deviceGroup, `bindings[${index}].deviceGroup`) } : {}),
+      ...(binding.deviceId ? { deviceId: bounded(binding.deviceId, 256, `bindings[${index}].deviceId`) } : {}),
       enabled: binding.enabled === true
     };
   });
@@ -190,9 +196,46 @@ function normalizeContext(input: EnterpriseAuthorizationContext) {
   };
 }
 
-function capabilityMatches(capability: string, rule: string): boolean {
-  return rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1)));
+function intersectCapabilities(base: string[], enterprise: string[]): string[] {
+  const result = new Set<string>();
+  for (const left of base) {
+    for (const right of enterprise) {
+      const intersection = intersectCapabilityPattern(left, right);
+      if (intersection) result.add(intersection);
+    }
+  }
+  return [...result].sort();
 }
+
+function intersectCapabilityPattern(left: string, right: string): string | undefined {
+  if (left === right) return left;
+  const leftWildcard = left.endsWith('.*');
+  const rightWildcard = right.endsWith('.*');
+  const leftPrefix = leftWildcard ? left.slice(0, -1) : left;
+  const rightPrefix = rightWildcard ? right.slice(0, -1) : right;
+  if (leftWildcard && !rightWildcard && right.startsWith(leftPrefix)) return right;
+  if (!leftWildcard && rightWildcard && left.startsWith(rightPrefix)) return left;
+  if (leftWildcard && rightWildcard) {
+    if (leftPrefix.startsWith(rightPrefix)) return left;
+    if (rightPrefix.startsWith(leftPrefix)) return right;
+  }
+  return undefined;
+}
+
+function intersectRoots(baseRoots: string[], enterpriseRoots: string[]): string[] {
+  const base = baseRoots.map((root) => path.resolve(root));
+  if (enterpriseRoots.length === 0) return union(base);
+  const result = new Set<string>();
+  for (const baseRoot of base) {
+    for (const enterpriseRoot of enterpriseRoots) {
+      const policyRoot = path.resolve(enterpriseRoot);
+      if (isWithin(baseRoot, policyRoot)) result.add(baseRoot);
+      else if (isWithin(policyRoot, baseRoot)) result.add(policyRoot);
+    }
+  }
+  return [...result].sort();
+}
+
 function isWithin(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
