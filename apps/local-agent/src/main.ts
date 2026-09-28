@@ -28,6 +28,8 @@ import { OrganizationCoordinator } from '../../../src/core/organization-coordina
 import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
 import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
+import { TeachModeStore } from '../../../src/core/studio-teach.ts';
+import { DesiredStateController } from '../../../src/core/desired-state.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -82,6 +84,7 @@ const deviceRegistry = new DeviceRegistryStore(stateDir);
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
+const teachMode = new TeachModeStore(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -131,6 +134,7 @@ const operations = new DigitalOperationsLayer(stateDir, {
   organizations,
   availableCapabilities: operationCapabilities
 });
+const desiredState = new DesiredStateController(stateDir, { world, operations });
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
@@ -290,6 +294,8 @@ const agent = createLocalAgentServer({
   optimizer,
   organizations,
   operations,
+  teachMode,
+  desiredState,
   deviceIdentity,
   deviceRegistry,
   privacy,
