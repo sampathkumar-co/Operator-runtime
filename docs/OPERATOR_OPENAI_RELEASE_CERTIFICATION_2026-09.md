@@ -2,9 +2,9 @@
 
 ## Certification status
 
-**MECORD CONNECT v1 IS LIVE; OPENAI SUBMISSION/APPROVAL IS NOT YET COMPLETE.**
+**MECORD CONNECT STAGE 1–20 IS LIVE; NPM 2.0.0 OWNER APPROVAL AND OPENAI SUBMISSION ARE NOT YET COMPLETE.**
 
-The production edge, npm runtime and real device path are released and proven. Remaining work is limited to OpenAI verification/reviewer evidence and final app-directory submission actions.
+The Stage 1–20 production edge is released and live-verified. The public npm registry still reports mecord-connect@1.0.1; the certified 2.0.0 successor is being staged for explicit owner approval. OpenAI verification/reviewer evidence and final app-directory actions remain external.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -12,7 +12,7 @@ This document is an engineering certification record, not a claim of OpenAI appr
 
 Production is live on Mecord Connect v1:
 
-- source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
+- source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public surface: exactly 9 MCP tools
@@ -27,7 +27,7 @@ Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the me
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The deployed v1 source is exact commit `3361b2f77d2b04028d514b178bd4a246fc863e6c`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
+The deployed v1 source is exact commit `0c28cf8df77369c04fc3b85ed9d16c8def490546`. Its exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
 
 This candidate includes:
 
@@ -195,11 +195,11 @@ The software/runtime release is complete. Remaining work is intentionally limite
 3. create/attach the separate Developer ChatGPT connection only when OpenAI permits it;
 4. select **Submit for Review** only if the owner explicitly decides to pursue directory publication.
 
-No npm publication, production deployment, public 9-tool runtime, Developer 32-tool endpoint or local-device runtime work remains blocked on these OpenAI-side steps.
+Production deployment, the public 9-tool runtime and the Developer 32-tool endpoint are not blocked on OpenAI-side steps. npm 2.0.0 remains a separate owner-approved registry release.
 
 ## Production deployment state
 
-Production deployment is complete at `3361b2f77d2b04028d514b178bd4a246fc863e6c`. Live verification on 2026-09-24 confirmed:
+Production deployment is complete at `0c28cf8df77369c04fc3b85ed9d16c8def490546`. Live verification on 2026-09-28 confirmed:
 
 - public health: tool surface `public`, tool count **9**;
 - Developer health: tool surface `developer`, tool count **32**;
@@ -208,7 +208,7 @@ Production deployment is complete at `3361b2f77d2b04028d514b178bd4a246fc863e6c`.
 
 ## Release verdict
 
-**PRODUCTION / NPM RELEASE COMPLETE. OPENAI APP-DIRECTORY SUBMISSION NOT COMPLETE.**
+**STAGE 1–20 PRODUCTION DEPLOYMENT COMPLETE. NPM 2.0.0 OWNER APPROVAL AND OPENAI APP-DIRECTORY SUBMISSION REMAIN EXTERNAL.**
 
 See:
 - `OPERATOR_MASTER_GATE_STATUS.md` — canonical G0–G36 verdict
