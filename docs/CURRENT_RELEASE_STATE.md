@@ -6,7 +6,7 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 
 ## Production
 
-- production source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`
+- production source: `b73d699f3cdca4d6e372942f626012fb4909068b`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
@@ -14,7 +14,7 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 - Developer pairing route: **404** by design
 - npm: **`mecord-connect@1.0.1`** under `latest`
 
-Live verification on 2026-09-28 confirmed both health endpoints report source `0c28cf8df77369c04fc3b85ed9d16c8def490546`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
+Live verification on 2026-09-28 confirmed both health endpoints report source `b73d699f3cdca4d6e372942f626012fb4909068b`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
 
 ## Stage 1–20 production status
 
@@ -44,7 +44,7 @@ Production now includes:
 - Stage 19 verified Teach Mode, durable Studio workflow execution, reconciliation and Control Center surface;
 - Stage 20 continuous desired-state reconciliation with bounded remediation and Control Center surface.
 
-The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `0c28cf8df77369c04fc3b85ed9d16c8def490546`, built at `2026-09-28T12:25:44Z`.
+The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `b73d699f3cdca4d6e372942f626012fb4909068b`, built at `2026-09-28T14:59:30Z`.
 
 The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.1 release is published.
 
