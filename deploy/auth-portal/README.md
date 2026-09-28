@@ -71,7 +71,14 @@ Device pairing intentionally continues to request only
 Developer access, and the browser pairing flow never requests
 `operator:developer`.
 
-When configuring the production OIDC client used for the private Developer
-connection, allow `operator:developer` only for that trusted connection and
-preserve PKCE S256. The relay independently enforces the resolved Mecord account
-entitlement on every Developer action/task dispatch.
+The canonical predefined client is `splcart-operator-chatgpt-developer-v1`.
+It uses the same `https://auth.splcart.in` authorization server and normal
+Mecord account login as the public connection, but it has a separate client ID,
+the Developer MCP resource audience, and the `operator:developer` scope. Keep
+the stable ChatGPT redirect, PKCE S256, public-client token authentication
+method `none`, and authorization-code plus refresh-token grants exactly as
+shown in `authelia-oidc-policy.example.yml`.
+
+Allow `operator:developer` only for this trusted Developer connection. The
+relay independently enforces the resolved Mecord account entitlement on every
+Developer action/task dispatch.

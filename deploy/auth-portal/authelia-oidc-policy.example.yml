@@ -23,6 +23,34 @@ clients:
     require_pkce: true
     pkce_challenge_method: 'S256'
 
+  - client_id: 'splcart-operator-chatgpt-developer-v1'
+    client_name: 'Mecord Connect Developer'
+    public: true
+    authorization_policy: 'chatgpt_reviewer_policy'
+    # Reuse the normal Mecord account login while keeping the privileged scope
+    # and resource isolated from the public nine-tool ChatGPT client.
+    consent_mode: 'implicit'
+    require_pkce: true
+    pkce_challenge_method: 'S256'
+    redirect_uris:
+      - 'https://chatgpt.com/connector_platform_oauth_redirect'
+    scopes:
+      - 'openid'
+      - 'offline_access'
+      - 'operator:read'
+      - 'operator:write'
+      - 'operator:developer'
+    audience:
+      - 'https://developer.operator.splcart.in/mcp'
+    requested_audience_mode: 'explicit'
+    grant_types:
+      - 'authorization_code'
+      - 'refresh_token'
+    response_types:
+      - 'code'
+    token_endpoint_auth_method: 'none'
+    access_token_signed_response_alg: 'RS256'
+
   - client_id: 'mecord-device-pairing-v1'
     client_name: 'Mecord Device Pairing'
     public: true

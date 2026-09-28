@@ -125,3 +125,23 @@ test('Mecord groups stay one-factor while unrelated accounts retain the stronger
   assert.match(policy, /client_name: 'Mecord Connect'/);
   assert.match(policy, /require_pkce: true/);
 });
+
+test('Developer ChatGPT OAuth client reuses normal login with isolated scope and audience', () => {
+  const policy = text('deploy/auth-portal/authelia-oidc-policy.example.yml');
+  const developerClient = policy.match(
+    /- client_id: 'splcart-operator-chatgpt-developer-v1'([\s\S]*?)(?=\n  - client_id:)/,
+  )?.[1] ?? '';
+
+  assert.match(developerClient, /client_name: 'Mecord Connect Developer'/);
+  assert.match(developerClient, /authorization_policy: 'chatgpt_reviewer_policy'/);
+  assert.match(developerClient, /consent_mode: 'implicit'/);
+  assert.match(developerClient, /require_pkce: true/);
+  assert.match(developerClient, /pkce_challenge_method: 'S256'/);
+  assert.match(developerClient, /https:\/\/chatgpt\.com\/connector_platform_oauth_redirect/);
+  assert.match(developerClient, /- 'operator:developer'/);
+  assert.match(developerClient, /https:\/\/developer\.operator\.splcart\.in\/mcp/);
+  assert.match(developerClient, /requested_audience_mode: 'explicit'/);
+  assert.match(developerClient, /- 'refresh_token'/);
+  assert.match(developerClient, /token_endpoint_auth_method: 'none'/);
+  assert.doesNotMatch(developerClient, /https:\/\/operator\.splcart\.in\/mcp/);
+});
