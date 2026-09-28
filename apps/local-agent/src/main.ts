@@ -31,6 +31,8 @@ import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
 import { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import { DesiredStateController } from '../../../src/core/desired-state.ts';
 import { DesiredStateReconciler } from '../../../src/core/desired-state-reconciler.ts';
+import { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
+import { DurableEventTicker } from '../../../src/core/event-ticker.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -86,6 +88,7 @@ const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
 const teachMode = new TeachModeStore(stateDir);
+const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -140,7 +143,18 @@ const desiredStateIntervalMs = Number(process.env.OPERATOR_DESIRED_STATE_INTERVA
 if (!Number.isSafeInteger(desiredStateIntervalMs) || desiredStateIntervalMs < 1_000 || desiredStateIntervalMs > 24 * 60 * 60_000) {
   throw new OperatorError('DESIRED_STATE_INTERVAL_INVALID', 'OPERATOR_DESIRED_STATE_INTERVAL_MS must be an integer from 1000 to 86400000.');
 }
-const desiredStateReconciler = new DesiredStateReconciler(desiredState, { intervalMs: desiredStateIntervalMs });
+const desiredStateReconciler = new DesiredStateReconciler(desiredState, {
+  intervalMs: desiredStateIntervalMs,
+  onError: (error) => console.error(`[operator] desired-state reconcile tick failed: ${error instanceof Error ? error.message : String(error)}`)
+});
+const eventTickIntervalMs = Number(process.env.OPERATOR_EVENT_TICK_INTERVAL_MS ?? 1_000);
+if (!Number.isSafeInteger(eventTickIntervalMs) || eventTickIntervalMs < 250 || eventTickIntervalMs > 60_000) {
+  throw new OperatorError('EVENT_TICK_INTERVAL_INVALID', 'OPERATOR_EVENT_TICK_INTERVAL_MS must be an integer from 250 to 60000.');
+}
+const eventTicker = new DurableEventTicker(events, {
+  intervalMs: eventTickIntervalMs,
+  onError: (error) => console.error(`[operator] event tick failed: ${error instanceof Error ? error.message : String(error)}`)
+});
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
@@ -157,7 +171,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
   stopRelay();
-  await Promise.allSettled([agent.close(), runtime.close()]);
+  await Promise.allSettled([desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()]);
   process.exitCode = 1;
   setImmediate(() => process.exit(1));
 }
@@ -300,6 +314,7 @@ const agent = createLocalAgentServer({
   optimizer,
   organizations,
   operations,
+  events,
   teachMode,
   desiredState,
   deviceIdentity,
@@ -323,6 +338,8 @@ const agent = createLocalAgentServer({
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
     desiredStateReconcilerConfigured: true,
     desiredStateIntervalMs,
+    eventRuntimeConfigured: true,
+    eventTickIntervalMs,
     relayConfigured: Boolean(relayUrl),
     relayResultConfigured: Boolean(relayResultUrl),
     relayTokenFileConfigured: Boolean(relayUrl),
@@ -347,7 +364,9 @@ console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabl
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
+console.error(`[operator] durable event ticker: every ${eventTickIntervalMs}ms`);
 desiredStateReconciler.start();
+eventTicker.start();
 if (relayUrl) {
   const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
@@ -374,7 +393,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     stopRelay();
-    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
+    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
     process.exit(0);
   });
 }
