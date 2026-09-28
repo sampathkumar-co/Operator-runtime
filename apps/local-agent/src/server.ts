@@ -382,7 +382,18 @@ export function createLocalAgentServer(options: {
           }) ?? null });
           return;
         }
-        throw new Error('world query operation must be fact, entity, or trace.');
+        if (operation === 'history') {
+          send(res, 200, { ok: true, history: await options.world.history({
+            entityKey: String(body.entityKey ?? ''),
+            ...(body.factKey === undefined ? {} : { factKey: String(body.factKey) }),
+            ...(body.source === undefined ? {} : { source: String(body.source) }),
+            ...(body.since === undefined ? {} : { since: String(body.since) }),
+            ...(body.until === undefined ? {} : { until: String(body.until) }),
+            ...(body.limit === undefined ? {} : { limit: Number(body.limit) })
+          }) });
+          return;
+        }
+        throw new Error('world query operation must be fact, entity, trace, or history.');
       } catch (error) {
         send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
       }
