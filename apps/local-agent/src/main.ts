@@ -33,6 +33,8 @@ import { DesiredStateController } from '../../../src/core/desired-state.ts';
 import { DesiredStateReconciler } from '../../../src/core/desired-state-reconciler.ts';
 import { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
 import { DurableEventTicker } from '../../../src/core/event-ticker.ts';
+import { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
+import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -66,7 +68,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -81,6 +83,7 @@ const resourceLeases = new ResourceLeaseStore(stateDir);
 const teams = new TeamCoordinator(stateDir);
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
+const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
@@ -126,7 +129,8 @@ const runtime = createRuntime({
   browserPath: process.env.OPERATOR_BROWSER_PATH,
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
-  windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
+  windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
+  perception
 });
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
 const operations = new DigitalOperationsLayer(stateDir, {
@@ -279,6 +283,19 @@ const taskOrchestrator = new TaskOrchestrator({
       };
     }
     const result = await runtime.execute(action, actionPermissions, context);
+    try {
+      await publishPerceptionFromActionResult(perception, action, result);
+    } catch (error) {
+      await audit.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id,
+        providerId: 'perception.graph',
+        capability: 'perception.publish',
+        result: 'failure',
+        risk: 'write',
+        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+      });
+    }
     await audit.append({
       ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
       actionId: action.id,
@@ -315,6 +332,7 @@ const agent = createLocalAgentServer({
   organizations,
   operations,
   events,
+  perception,
   teachMode,
   desiredState,
   deviceIdentity,
