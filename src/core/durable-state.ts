@@ -19,12 +19,13 @@ class DurableStateReadRace extends Error {}
 export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);
   let lastRace: DurableStateReadRace | undefined;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       return await readDurableStateBytesOnce(file, options);
     } catch (error) {
       if (!(error instanceof DurableStateReadRace)) throw error;
       lastRace = error;
+      if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 1 << attempt));
     }
   }
   throw invalid(options, lastRace?.message ?? 'State file changed while it was being read.');
@@ -32,7 +33,7 @@ export async function readDurableStateBytes(file: string, options: DurableStateO
 
 async function readDurableStateBytesOnce(file: string, options: DurableStateOptions): Promise<Buffer> {
   const initial = await fs.lstat(file);
-  assertStableRegular(initial, options);
+  assertReadableRegular(initial, options, 'State file link topology changed while it was being read.');
 
   const noFollow = process.platform === 'win32'
     ? 0
@@ -67,7 +68,7 @@ async function readDurableStateBytesOnce(file: string, options: DurableStateOpti
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new DurableStateReadRace('State file path changed while it was being read.');
       throw error;
     }
-    assertStableRegular(current, options);
+    assertReadableRegular(current, options, 'State file link topology changed while it was being read.');
     if (!sameFile(afterRead, current)) throw new DurableStateReadRace('State file path changed while it was being read.');
     return bytes;
   } finally {
@@ -270,8 +271,13 @@ async function publishDurableReplacement(temp: string, file: string, options: Du
 
 function assertOpenedRegular(stat: Stats, options: DurableStateOptions, raceMessage: string): void {
   if (!stat.isFile()) throw invalid(options, 'Opened state path must be a regular file.');
-  if (stat.nlink > 1) throw invalid(options, 'Hard-linked state files are not permitted.');
-  if (stat.nlink < 1) throw new DurableStateReadRace(raceMessage);
+  if (stat.nlink !== 1) throw new DurableStateReadRace(raceMessage);
+  if (stat.size > options.maxBytes) throw invalid(options, 'State file exceeds the bounded size.');
+}
+
+function assertReadableRegular(stat: Stats, options: DurableStateOptions, raceMessage: string): void {
+  if (stat.isSymbolicLink() || !stat.isFile()) throw invalid(options, 'State path must be a regular file, not a link or special file.');
+  if (stat.nlink !== 1) throw new DurableStateReadRace(raceMessage);
   if (stat.size > options.maxBytes) throw invalid(options, 'State file exceeds the bounded size.');
 }
 
