@@ -45,3 +45,6 @@ jobs:
 
       - name: Reset official MiniWoB task
         run: python benchmark/smoke/browsergym_miniwob.py
+
+      - name: Exercise official MiniWoB reward path
+        run: python benchmark/smoke/browsergym_reward_selftest.py
