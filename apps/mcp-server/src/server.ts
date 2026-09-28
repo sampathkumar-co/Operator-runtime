@@ -968,11 +968,34 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   const scrollAmount = z.enum(['large_decrement', 'small_decrement', 'none', 'large_increment', 'small_increment']);
 
+  const perceptionBounds = z.object({
+    x: z.number().min(-100000).max(100000),
+    y: z.number().min(-100000).max(100000),
+    width: z.number().positive().max(100000),
+    height: z.number().positive().max(100000)
+  });
+  const perceptionTarget = z.object({
+    semanticId: z.string().min(1).max(512).optional(),
+    role: z.string().min(1).max(256).optional(),
+    name: z.string().min(1).max(1024).optional(),
+    text: z.string().min(1).max(4096).optional(),
+    near: perceptionBounds.optional(),
+    minConfidence: z.number().min(0).max(1).optional()
+  }).refine((value) => Boolean(value.semanticId || value.role || value.name || value.text || value.near), 'Grounding requires at least one semantic or spatial selector.');
+  const visualPerceptionObservation = z.object({
+    semanticId: z.string().min(1).max(512).optional(),
+    role: z.string().min(1).max(256).optional(),
+    name: z.string().min(1).max(1024).optional(),
+    text: z.string().min(1).max(4096).optional(),
+    bounds: perceptionBounds,
+    confidence: z.number().min(0).max(1).default(0.8)
+  });
+
   server.registerTool('app.inspect', {
     title: 'Inspect Windows application',
-    description: 'Inspect Windows semantically through UI Automation/Win32 discovery, or explicitly request a bounded visual capture when semantic structure is insufficient. Visual mode returns a short-lived captureId + SHA-256 lease for verified physical fallback; screen/window/region captures are bounded to 1280x720 and never expose process memory, command lines, or full executable paths.',
+    description: 'Inspect Windows semantically through UI Automation/Win32 discovery, request a bounded visual capture, or ground semantic/visual observations through the Stage-11 perception graph. Visual captures return a short-lived captureId + SHA-256 lease. Ground mode may persist only bounded model observations tied to that exact capture digest; those observations never grant authority, and any later physical input still requires the fresh one-shot capture lease.',
     inputSchema: z.object({
-      mode: z.enum(['semantic', 'visual']).default('semantic'),
+      mode: z.enum(['semantic', 'visual', 'ground']).default('semantic'),
       selector: appSelector.optional(),
       maxNodes: z.number().int().min(1).max(1500).default(250),
       maxDepth: z.number().int().min(1).max(12).default(6),
@@ -988,12 +1011,63 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
         height: z.number().int().min(1).max(16384)
       }).optional(),
       maxWidth: z.number().int().min(1).max(1280).default(960),
-      maxHeight: z.number().int().min(1).max(720).default(540)
+      maxHeight: z.number().int().min(1).max(720).default(540),
+      sceneKey: z.string().min(1).max(1024).optional(),
+      captureId: z.string().min(1).max(128).optional(),
+      expectedSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+      observations: z.array(visualPerceptionObservation).max(100).optional(),
+      ground: perceptionTarget.optional()
     }),
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ mode, selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows, source, region, maxWidth, maxHeight }) => {
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ mode, selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows, source, region, maxWidth, maxHeight, sceneKey, captureId, expectedSha256, observations, ground }) => {
     if (mode === 'visual') {
       return attachActionImage(await invoke('visual.capture', 'read', { source, selector, region, maxWidth, maxHeight, waitMs }), ['output', 'imageBase64']);
+    }
+    if (mode === 'ground') {
+      const resolvedSceneKey = sceneKey ?? (captureId ? `capture:${captureId}` : undefined);
+      if (!resolvedSceneKey || !ground) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'Ground mode requires sceneKey (or captureId) and a ground selector.' }],
+          structuredContent: {
+            ok: false, capability: 'perception.ground', provider: 'mcp.validation', evidence: [],
+            error: { code: 'PERCEPTION_GROUND_INPUT_REQUIRED', message: 'sceneKey/captureId and ground are required.', retryable: false }, durationMs: 0
+          }
+        };
+      }
+      if (observations?.length) {
+        if (!captureId || !expectedSha256) {
+          return {
+            isError: true,
+            content: [{ type: 'text' as const, text: 'Visual observations require captureId and expectedSha256 from the exact app.inspect visual capture.' }],
+            structuredContent: {
+              ok: false, capability: 'perception.observe', provider: 'mcp.validation', evidence: [],
+              error: { code: 'PERCEPTION_CAPTURE_BINDING_REQUIRED', message: 'captureId and expectedSha256 are required for visual observations.', retryable: false }, durationMs: 0
+            }
+          };
+        }
+        const normalized = observations.map((observation) => ({
+          sceneKey: `capture:${captureId}`,
+          channel: 'visual',
+          source: 'chatgpt.visual',
+          ...(observation.semanticId ? { semanticId: observation.semanticId } : {}),
+          ...(observation.role ? { role: observation.role } : {}),
+          ...(observation.name ? { name: observation.name } : {}),
+          ...(observation.text ? { text: observation.text } : {}),
+          bounds: observation.bounds,
+          state: { captureId, captureSha256: expectedSha256.toLowerCase() },
+          confidence: observation.confidence,
+          ttlMs: 90_000,
+          evidenceDigest: crypto.createHash('sha256').update(JSON.stringify({
+            captureId,
+            expectedSha256: expectedSha256.toLowerCase(),
+            observation
+          })).digest('hex')
+        }));
+        const stored = await invoke('perception.observe', 'write', { observations: normalized }, resolvedSceneKey);
+        if (stored.isError) return stored;
+      }
+      return invoke('perception.ground', 'read', { sceneKey: resolvedSceneKey, ...ground }, resolvedSceneKey);
     }
     return invoke('app.inspect', 'read', { selector, maxNodes, maxDepth, observeMs, waitMs, includeWindows, maxWindows });
   });
