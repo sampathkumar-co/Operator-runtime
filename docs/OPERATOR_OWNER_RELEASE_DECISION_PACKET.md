@@ -17,7 +17,7 @@ Purpose: authoritative record of the owner decisions that previously blocked FG-
 - **Software license:** PROPRIETARY
 - **npm Dual-Use classification:** DUAL_USE
 - **npm package:** mecord-connect
-- **npm account:** **mecrod** — published `mecord-connect@1.0.1`
+- **npm account:** **mecrod** — published `mecord-connect@2.0.1` under `latest`
 - **Availability:** global wherever supported and legally/service-operationally supportable
 - **v1 public domain:** operator.splcart.in
 - **Auth issuer:** auth.splcart.in
@@ -89,7 +89,7 @@ npm release is complete:
 
 - publisher -> **mecrod**
 - npm 2FA mode -> **auth-and-writes**
-- package -> **mecord-connect@1.0.1** (unscoped)
+- package -> **mecord-connect@2.0.1** (unscoped, `latest`)
 - registry -> **public under latest**
 - clean registry installation -> **PASS**
 - installed `doctor` -> **PASS**
