@@ -30,6 +30,7 @@ import type { DesiredStateController } from '../../../src/core/desired-state.ts'
 import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
+import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -160,6 +161,7 @@ export function createLocalAgentServer(options: {
   events?: DurableEventRuntime;
   perception?: PerceptionGraphStore;
   teachMode?: TeachModeStore;
+  studioExecutor?: StudioWorkflowExecutor;
   desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
@@ -270,6 +272,63 @@ export function createLocalAgentServer(options: {
         });
       }
     }
+    return result;
+  };
+
+  const executeStudioActionWithApproval = async (
+    action: ActionRequest,
+    approvalAuthority: ApprovalAuthorityContext | undefined,
+    signal?: AbortSignal
+  ): Promise<ActionResult> => {
+    if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'policy',
+        evidence: [{ kind: 'emergency_stop', status: 'fail', message: 'Operator execution is disabled by the local emergency stop.', timestamp: new Date().toISOString() }],
+        error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.', retryable: false, sideEffectState: 'none' },
+        durationMs: 0
+      };
+    }
+
+    let result = await executeActionWithCurrentApproval(action, approvalAuthority, signal);
+    let autoResumedAfterApproval = false;
+    if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
+      const pending = await options.approvals.register(action, approvalAuthority);
+      const decision = options.recoveryToken
+        ? await waitForApprovalDecision(action.id, pending.approvalRequestId, Math.min(inlineApprovalWaitMs, 30_000))
+        : null;
+      if (decision === 'approve' || decision === 'session') {
+        result = await executeActionWithCurrentApproval(action, approvalAuthority, signal);
+        autoResumedAfterApproval = true;
+      } else if (decision === 'deny') {
+        result = {
+          ok: false,
+          capability: action.capability,
+          provider: 'policy',
+          evidence: [{ kind: 'approval', status: 'fail', message: 'The local user denied this Studio workflow action.', timestamp: new Date().toISOString() }],
+          error: { code: 'APPROVAL_DENIED', message: 'The local user denied this Studio workflow action.', retryable: false, sideEffectState: 'none' },
+          durationMs: result.durationMs
+        };
+      }
+    }
+
+    await options.audit?.append({
+      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+      actionId: action.id,
+      providerId: result.provider,
+      capability: action.capability,
+      target: action.target,
+      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
+      risk: action.risk,
+      details: {
+        studioWorkflow: true,
+        durationMs: result.durationMs,
+        errorCode: result.error?.code,
+        sideEffectState: result.error?.sideEffectState,
+        autoResumedAfterApproval
+      }
+    });
     return result;
   };
 
@@ -501,7 +560,7 @@ export function createLocalAgentServer(options: {
       }
     }
 
-    const workflowRoute = /^\/v1\/studio\/workflows\/([0-9a-f-]{36})(?:\/(instantiate))?$/i.exec(pathname);
+    const workflowRoute = /^\/v1\/studio\/workflows\/([0-9a-f-]{36})(?:\/(instantiate|run))?$/i.exec(pathname);
     if (workflowRoute) {
       if (!options.teachMode) {
         send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
@@ -520,8 +579,91 @@ export function createLocalAgentServer(options: {
           send(res, 200, { ok: true, steps: await options.teachMode.instantiate(workflowRoute[1]!, values) });
           return;
         }
+        if (workflowRoute[2] === 'run' && req.method === 'POST') {
+          if (!options.studioExecutor) {
+            send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+            return;
+          }
+          const body = await readJson(req) as Record<string, unknown>;
+          const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values)
+            ? body.values as Record<string, unknown>
+            : {};
+          const run = await options.studioExecutor.submit(
+            workflowRoute[1]!,
+            values,
+            body.runId === undefined ? undefined : String(body.runId)
+          );
+          send(res, 201, { ok: true, run });
+          return;
+        }
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_WORKFLOW_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/studio/runs' && req.method === 'GET') {
+      if (!options.studioExecutor) {
+        send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, runs: await options.studioExecutor.list(limit) });
+      return;
+    }
+
+    const studioRunRoute = /^\/v1\/studio\/runs\/([0-9a-f-]{36})(?:\/(execute|verify|reconcile|cancel))?$/i.exec(pathname);
+    if (studioRunRoute) {
+      if (!options.studioExecutor) {
+        send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+        return;
+      }
+      try {
+        const runId = studioRunRoute[1]!;
+        const operation = studioRunRoute[2];
+        if (!operation && req.method === 'GET') {
+          send(res, 200, { ok: true, run: await options.studioExecutor.inspect(runId) });
+          return;
+        }
+        if (operation === 'execute' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+          const maxSteps = body.maxSteps === undefined ? 1 : Number(body.maxSteps);
+          const signal = AbortSignal.timeout(50_000);
+          const run = await options.studioExecutor.execute(runId, {
+            maxSteps,
+            signal,
+            executeAction: (action, _permissions, actionSignal) =>
+              executeStudioActionWithApproval(action, approvalAuthority, actionSignal)
+          });
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'verify' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const run = await options.studioExecutor.verify(
+            runId,
+            Array.isArray(body.checks) ? body.checks as any : []
+          );
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'reconcile' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const run = await options.studioExecutor.reconcile(runId, String(body.stepKey ?? ''), {
+            resolution: String(body.resolution ?? '') as any,
+            checks: Array.isArray(body.checks) ? body.checks as any : []
+          });
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, run: await options.studioExecutor.cancel(runId) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'STUDIO_RUN_FAILED', message: error instanceof Error ? error.message : String(error) } });
         return;
       }
     }
