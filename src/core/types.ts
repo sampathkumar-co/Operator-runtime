@@ -1,4 +1,4 @@
-export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
+export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';\nexport type SideEffectState = 'none' | 'known' | 'uncertain';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type ProvenanceKind =
