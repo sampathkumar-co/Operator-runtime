@@ -217,7 +217,7 @@ export class TeachModeStore {
         digest: digest(workflowCore),
         createdAt: now.toISOString()
       };
-      if (state.workflows.length >= MAX_WORKFLOWS) reclaimTerminal(state.workflows, MAX_WORKFLOWS, 'TEACH_WORKFLOW_LIMIT');
+      if (state.workflows.length >= MAX_WORKFLOWS) throw new OperatorError('TEACH_WORKFLOW_LIMIT', 'Teach/Studio workflow retention limit reached.');
       state.workflows.push(workflow);
       session.state = 'COMPILED';
       session.compiledWorkflowId = workflow.id;
