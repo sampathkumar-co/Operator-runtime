@@ -19,7 +19,7 @@ Mecord Stage 1–10 is live in production at source `3361b2f77d2b04028d514b178bd
 - private/Developer MCP surface: **32 grouped tools**;
 - Windows RDC parity: deployed;
 - Stages 3–10: deployed and CI-certified;
-- npm runtime: still `mecord-connect@1.0.1` under `latest` until the separately authenticated 2.0.0 publish.
+- npm runtime: still `mecord-connect@1.0.1` under `latest` until the separately authenticated 2.0.1 publish.
 
 ## Capability comparison
 
