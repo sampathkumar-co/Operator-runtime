@@ -51,7 +51,7 @@ test('durable reads still fail closed when a hard link persists across the bound
   await assert.rejects(
     () => readDurableStateText(file, OPTIONS),
     (error: any) => error?.code === 'DURABLE_RACE_TEST_CORRUPT'
-      && /link topology changed|changed while it was being read/i.test(error?.message ?? '')
+      && /link topology changed|changed while it was being read|Hard-linked state files are not permitted/i.test(error?.message ?? '')
   );
   assert.equal((await fs.lstat(file)).nlink, 2);
 });
