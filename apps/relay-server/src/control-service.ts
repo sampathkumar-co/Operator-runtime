@@ -185,7 +185,7 @@ export class RelayControlService {
             projectKey,
             requiredCapabilities: [action.capability],
             kind: 'action',
-            payload: { action, ...(publicBoundary ? { publicBoundary: true } : {}) },
+            payload: { action, enterpriseContext: relayEnterpriseContext(accountId, projectKey), ...(publicBoundary ? { publicBoundary: true } : {}) },
             idempotencyKey
           });
           routedDeviceId = dispatched.route.deviceId;
@@ -268,7 +268,7 @@ export class RelayControlService {
       projectKey: boundDeviceId ? bindingKey : requestedProjectKey,
       requiredCapabilities: task.requiredCapabilities,
       kind: 'task',
-      payload: { task: task.payload },
+      payload: { task: task.payload, enterpriseContext: relayEnterpriseContext(accountId, requestedProjectKey) },
       idempotencyKey: freshTaskReceiptKey(accountId, task.payload)
     });
     const routedDeviceId = dispatched.route.deviceId;
@@ -312,7 +312,7 @@ export class RelayControlService {
       projectKey,
       requiredCapabilities: [],
       kind: 'knowledge',
-      payload: { query },
+      payload: { query, enterpriseContext: relayEnterpriseContext(accountId, projectKey) },
       idempotencyKey: freshKnowledgeReceiptKey(accountId, query)
     });
     const deadline = Date.now() + waitMs;
@@ -434,7 +434,7 @@ export class RelayControlService {
           explicitDeviceId: routedDeviceId,
           requiredCapabilities,
           kind: 'operation',
-          payload: { operation: operation.payload },
+          payload: { operation: operation.payload, enterpriseContext: relayEnterpriseContext(accountId, projectKey) },
           idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
         });
         delivery = dispatched.delivery;
@@ -473,7 +473,7 @@ export class RelayControlService {
         explicitDeviceId: boundDeviceId,
         requiredCapabilities: [],
         kind: 'operation',
-        payload: { operation: operation.payload },
+        payload: { operation: operation.payload, enterpriseContext: relayEnterpriseContext(accountId, projectKey) },
         idempotencyKey: operationIdempotencyKey(accountId, operation.payload)
       });
       delivery = dispatched.delivery;
@@ -525,6 +525,11 @@ export class RelayControlService {
     if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+function relayEnterpriseContext(accountId: string, projectKey?: string): { principalId: string; projectKey?: string } {
+  const principalId = `account:${validUuid(accountId, 'accountId')}`;
+  return { principalId, ...(projectKey ? { projectKey: validProjectKey(projectKey) } : {}) };
 }
 
 function safeDiagnosticCode(code: string): string {
