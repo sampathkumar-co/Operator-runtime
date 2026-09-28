@@ -28,6 +28,7 @@ export interface TaskActionRecord {
   startedAt: string;
   finishedAt?: string;
   errorCode?: string;
+  sideEffectState?: SideEffectState;
   observation?: TaskObservationSummary;
   evidence: Evidence[];
 }
