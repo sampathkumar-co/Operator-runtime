@@ -450,6 +450,15 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     z.object({ kind: z.literal('world-entity'), entityKey: z.string().min(1).max(512) }),
     z.object({ kind: z.literal('world-fact'), entityKey: z.string().min(1).max(512), factKey: z.string().min(1).max(128) }),
     z.object({
+      kind: z.literal('world-history'),
+      entityKey: z.string().min(1).max(512),
+      factKey: z.string().min(1).max(128).optional(),
+      source: z.string().min(1).max(512).optional(),
+      since: z.string().datetime().optional(),
+      until: z.string().datetime().optional(),
+      limit: z.number().int().min(1).max(1000).default(100)
+    }),
+    z.object({
       kind: z.literal('world-trace'),
       fromKey: z.string().min(1).max(512),
       toKey: z.string().min(1).max(512).optional(),
@@ -502,7 +511,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('knowledge.inspect', {
     title: 'Inspect verified agent knowledge',
-    description: 'Read verified procedural memory, evidence-backed world-model entities/facts/relations, or bounded aggregate execution-optimizer statistics. This tool is read-only and cannot promote procedures, publish world claims, widen authority, or alter policy.',
+    description: 'Read verified procedural memory, evidence-backed world-model entities/facts/relations/temporal history, or bounded aggregate execution-optimizer statistics. This tool is read-only and cannot promote procedures, publish world claims, widen authority, or alter policy.',
     inputSchema: knowledgeSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async (input) => knowledgeResultWithAgent(await agent.inspectKnowledge(input as any)));
