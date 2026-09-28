@@ -47,7 +47,7 @@ The software/runtime release is complete. Only OpenAI directory-submission work 
 3. **Serve a portal-issued challenge only if OpenAI actually issues one.**
 4. **Select Submit for Review only after the owner explicitly decides to pursue directory publication.**
 
-`mecord-connect@1.0.1` remains public under `latest`; the certified 2.0.0 successor is staged separately for explicit owner approval. Production hosting, the public 9-tool surface and the separate 32-tool Developer endpoint are not release blockers.
+`mecord-connect@1.0.1` remains public under `latest`; the certified 2.0.1 successor is staged separately for explicit owner approval. Production hosting, the public 9-tool surface and the separate 32-tool Developer endpoint are not release blockers.
 
 ## OCC-3M merge evidence
 

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "npmTag": "latest",
   "publicationMode": "stage",
   "requestedAt": "2026-09-28",
-  "purpose": "Stage the certified Stage 1-20 Mecord Connect runtime 2.0.0 after production-evidence synchronization; registry activation requires explicit owner approval on npmjs.com."
+  "purpose": "Stage the certified Stage 1-20 Mecord Connect runtime 2.0.1 with the real-Windows exact-PID process inspection hotfix; registry activation requires explicit owner approval on npmjs.com."
 }

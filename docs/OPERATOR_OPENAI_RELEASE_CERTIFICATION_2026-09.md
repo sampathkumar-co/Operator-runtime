@@ -2,9 +2,9 @@
 
 ## Certification status
 
-**MECORD CONNECT STAGE 1–20 IS LIVE; NPM 2.0.0 OWNER APPROVAL AND OPENAI SUBMISSION ARE NOT YET COMPLETE.**
+**MECORD CONNECT STAGE 1–20 IS LIVE; NPM 2.0.1 OWNER APPROVAL AND OPENAI SUBMISSION ARE NOT YET COMPLETE.**
 
-The Stage 1–20 production edge is released and live-verified. The public npm registry still reports mecord-connect@1.0.1; the certified 2.0.0 successor is being staged for explicit owner approval. OpenAI verification/reviewer evidence and final app-directory actions remain external.
+The Stage 1–20 production edge is released and live-verified. The public npm registry still reports mecord-connect@1.0.1; the certified 2.0.1 successor is being staged for explicit owner approval. OpenAI verification/reviewer evidence and final app-directory actions remain external.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -195,7 +195,7 @@ The software/runtime release is complete. Remaining work is intentionally limite
 3. create/attach the separate Developer ChatGPT connection only when OpenAI permits it;
 4. select **Submit for Review** only if the owner explicitly decides to pursue directory publication.
 
-Production deployment, the public 9-tool runtime and the Developer 32-tool endpoint are not blocked on OpenAI-side steps. npm 2.0.0 remains a separate owner-approved registry release.
+Production deployment, the public 9-tool runtime and the Developer 32-tool endpoint are not blocked on OpenAI-side steps. npm 2.0.1 remains a separate owner-approved registry release.
 
 ## Production deployment state
 
@@ -208,7 +208,7 @@ Production deployment is complete at `0c28cf8df77369c04fc3b85ed9d16c8def490546`.
 
 ## Release verdict
 
-**STAGE 1–20 PRODUCTION DEPLOYMENT COMPLETE. NPM 2.0.0 OWNER APPROVAL AND OPENAI APP-DIRECTORY SUBMISSION REMAIN EXTERNAL.**
+**STAGE 1–20 PRODUCTION DEPLOYMENT COMPLETE. NPM 2.0.1 OWNER APPROVAL AND OPENAI APP-DIRECTORY SUBMISSION REMAIN EXTERNAL.**
 
 See:
 - `OPERATOR_MASTER_GATE_STATUS.md` — canonical G0–G36 verdict

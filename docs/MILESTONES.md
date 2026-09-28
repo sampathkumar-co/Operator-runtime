@@ -289,7 +289,7 @@ Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
 All Stage-5–10 behavior remains subordinate to the existing provenance, canonical-risk, local policy, approval, emergency-stop, exact-resource, provider and verification boundaries. No stage adds an embedded LLM or permits learned state to become authority.
 
-The Stage-5–10 successor is repository-complete, merged to `main`, deployed at `3361b2f77d2b04028d514b178bd4a246fc863e6c`, and live-verified with public 9 / Developer 32 tool surfaces. The npm 2.0.0 release remains a separately authenticated publication step.
+The Stage-5–10 successor is repository-complete, merged to `main`, deployed at `3361b2f77d2b04028d514b178bd4a246fc863e6c`, and live-verified with public 9 / Developer 32 tool surfaces. The npm 2.0.1 release remains a separately authenticated publication step.
 
 
 ## M9 — hardened Stage 11–20 agent operating fabric — COMPLETE AND DEPLOYED
@@ -323,4 +323,4 @@ Production build timestamp: `2026-09-28T12:25:44Z`
 - [x] live Developer health verifies source SHA and 32-tool surface
 - [x] Developer pairing route remains 404 by design
 
-The only release actions intentionally outside repository/deployment automation are the owner-authenticated npm `mecord-connect@2.0.0` publication and OpenAI/ChatGPT plugin/app-directory portal work. Until npm publication succeeds, canonical release state continues to report the actually published registry version/tag.
+The only release actions intentionally outside repository/deployment automation are the owner-authenticated npm `mecord-connect@2.0.1` publication and OpenAI/ChatGPT plugin/app-directory portal work. Until npm publication succeeds, canonical release state continues to report the actually published registry version/tag.
