@@ -12,10 +12,12 @@ export class DurableEventTicker {
   #timer: NodeJS.Timeout | null = null;
   #active: Promise<DurableEventTickerResult> | null = null;
   #stopped = true;
+  #onError?: (error: unknown) => void;
 
-  constructor(events: DurableEventRuntime, options: { intervalMs?: number } = {}) {
+  constructor(events: DurableEventRuntime, options: { intervalMs?: number; onError?: (error: unknown) => void } = {}) {
     this.#events = events;
     this.#intervalMs = boundedInteger(options.intervalMs ?? 1_000, 250, 60_000, 'intervalMs');
+    this.#onError = options.onError;
   }
 
   start(): void {
@@ -48,6 +50,7 @@ export class DurableEventTicker {
     this.#timer = setTimeout(async () => {
       this.#timer = null;
       try { await this.runOnce(); }
+      catch (error) { this.#onError?.(error); }
       finally { this.#schedule(this.#intervalMs); }
     }, delayMs);
     this.#timer.unref?.();
