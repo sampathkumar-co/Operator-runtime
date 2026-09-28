@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
-import type { ActionRisk, SideEffectState } from './types.ts';\nimport { validSideEffectState } from './side-effect.ts';
+import type { ActionRisk, SideEffectState } from './types.ts';
+import { validSideEffectState } from './side-effect.ts';
 
 export type TeamRole = 'supervisor' | 'planner' | 'coder' | 'tester' | 'browser' | 'ui' | 'verifier' | 'general';
 export type TeamMissionState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
