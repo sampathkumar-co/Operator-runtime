@@ -10,7 +10,7 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
-import { verifyTaskCompletion } from './task-verifier.ts';
+import { verifyTaskCompletion } from './task-verifier.ts';\nimport { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -450,7 +450,7 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (failureDecision.retryable && risk === 'read' && failureDecision.strategy === 'retry') {
+      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'retry') {
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
           code: failureDecision.code,
