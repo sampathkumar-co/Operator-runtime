@@ -28,6 +28,8 @@ import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import type { DesiredStateController } from '../../../src/core/desired-state.ts';
 import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
+import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
+import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -156,6 +158,7 @@ export function createLocalAgentServer(options: {
   organizations?: OrganizationCoordinator;
   operations?: DigitalOperationsLayer;
   events?: DurableEventRuntime;
+  perception?: PerceptionGraphStore;
   teachMode?: TeachModeStore;
   desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
@@ -251,7 +254,23 @@ export function createLocalAgentServer(options: {
         }
       : sessionPermissions;
     if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-    return await options.runtime.execute(action, permissions, { signal });
+    const result = await options.runtime.execute(action, permissions, { signal });
+    if (options.perception) {
+      try {
+        await publishPerceptionFromActionResult(options.perception, action, result);
+      } catch (error) {
+        await options.audit?.append({
+          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+          actionId: action.id,
+          providerId: 'perception.graph',
+          capability: 'perception.publish',
+          result: 'failure',
+          risk: 'write',
+          details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+        });
+      }
+    }
+    return result;
   };
 
   const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
