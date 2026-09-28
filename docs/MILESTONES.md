@@ -290,3 +290,37 @@ Runtime-certified code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 All Stage-5–10 behavior remains subordinate to the existing provenance, canonical-risk, local policy, approval, emergency-stop, exact-resource, provider and verification boundaries. No stage adds an embedded LLM or permits learned state to become authority.
 
 The Stage-5–10 successor is repository-complete, merged to `main`, deployed at `3361b2f77d2b04028d514b178bd4a246fc863e6c`, and live-verified with public 9 / Developer 32 tool surfaces. The npm 2.0.0 release remains a separately authenticated publication step.
+
+
+## M9 — hardened Stage 11–20 agent operating fabric — COMPLETE AND DEPLOYED
+
+Production source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`  
+Production build timestamp: `2026-09-28T12:25:44Z`
+
+- [x] Stage 1–10 common Authority Kernel / side-effect certainty / Verification Kernel / resource-leasing hardening
+- [x] versioned intent kernel and durable conversation ledger
+- [x] deterministic 1,000-scenario resilience model
+- [x] Stage 11 multimodal perception graph, publication and ambiguity fail-closed behavior
+- [x] Stage 12 bounded JavaScript/Python safe compute
+- [x] Stage 13 durable event runtime and non-overlapping ticker
+- [x] Stage 14 temporal world history
+- [x] Stage 15 signed semantic continuation with destination trust/authority/capability/resource/world/artifact proofs
+- [x] Stage 16 enterprise policy narrowing and authenticated principal propagation
+- [x] Stage 17 bounded capability SDK contracts
+- [x] Stage 18 evaluation/reliability fabric
+- [x] Stage 19 verified Teach Mode, parameterized compilation, durable Studio workflow execution, approvals, crash recovery and uncertain-side-effect reconciliation
+- [x] Stage 20 bounded continuous desired-state reconciliation/remediation
+- [x] Control Center surfaces for Studio runs and desired-state contracts
+- [x] public MCP surface remains exactly 9 tools
+- [x] private/Developer MCP surface remains exactly 32 grouped tools
+- [x] Stage 3–20 dedicated certification gates green
+- [x] red-team, performance, relay E2E, MCP Inspector, SBOM/dependency audit green
+- [x] Ubuntu / Windows / macOS runtime matrix green
+- [x] Windows npm runtime, MSIX packaging and ephemeral sign/install smoke green
+- [x] merged to `main`
+- [x] rollback-safe VPS production activation
+- [x] live public health verifies source SHA and 9-tool surface
+- [x] live Developer health verifies source SHA and 32-tool surface
+- [x] Developer pairing route remains 404 by design
+
+The only release actions intentionally outside repository/deployment automation are the owner-authenticated npm `mecord-connect@2.0.0` publication and OpenAI/ChatGPT plugin/app-directory portal work. Until npm publication succeeds, canonical release state continues to report the actually published registry version/tag.
