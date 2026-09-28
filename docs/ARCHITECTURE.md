@@ -37,6 +37,15 @@ Local Agent
    |       +--> World pre/postconditions
    |       +--> Stage-4 / Stage-8 execution
    |       +--> Verification receipt
+   +--> Perception Graph / Publication
+   +--> Safe Compute Sandbox
+   +--> Durable Event Runtime / Ticker
+   +--> Temporal World History
+   +--> Semantic Checkpoint / Migration Proofs
+   +--> Enterprise Policy Kernel
+   +--> Capability SDK / Evaluation Fabric
+   +--> Studio Teach / Durable Workflow Executor
+   +--> Desired-State Controller / Reconciler
    +--> Computer Kernel
            +--> Filesystem search/info/manage
            +--> Process / Git
@@ -47,7 +56,7 @@ Local Agent
            +--> Windows UIA
            +--> Docker / PostgreSQL / VS Code adapters
            +--> Managed browser lifecycle
-           +--> Vision fallback (future, only where semantic providers are insufficient)
+           +--> Visual grounding fallback, only where semantic providers are insufficient
 ```
 
 ## Intelligence boundary
@@ -147,3 +156,14 @@ The Stage-1–10 successor keeps the public review-bounded 9-tool surface unchan
 - `knowledge.inspect`: read-only verified procedure/world/optimizer inspection.
 
 Stage-5–10 internals are not exposed as a collection of raw authority-bearing tools. Device placement, organization rollout mechanics, learning and world publication remain governed by their internal trust boundaries.
+
+
+## Stage-11–20 evolution layers
+
+The production Stage-11–20 successor extends the existing trust model rather than replacing it. Perception, compute, eventing, migration, Studio and desired-state automation all remain subordinate to the same authority, canonical-risk, approval, resource, side-effect-certainty and verification boundaries.
+
+Stage 11 fuses semantic and visual observations into a durable perception graph and fails closed when targets remain ambiguous. Stage 12 executes generated JavaScript/Python only inside bounded sandbox contracts. Stage 13 represents waits and external events durably rather than burning model calls on polling. Stage 14 records time-ordered world transitions using digests instead of retaining prior sensitive raw values.
+
+Stage 15 migrates semantic continuation state rather than process memory. A destination must prove source-device trust, matching authority, required capabilities, resource scope, world assumptions and artifact integrity before accepting a signed checkpoint. Stage 16 narrows authority through enterprise role/project/environment/device constraints; it never expands the local permission profile.
+
+Stage 17 formalizes extension contracts, while Stage 18 makes reliability/evaluation first-class. Stage 19 compiles only independently verified demonstrations into durable Studio workflows; replay remains authority-bound, resource-leased, approval-aware and reconciliation-aware, and execution completion still requires separate verification. Stage 20 continuously compares verified world state against desired-state contracts and may remediate only when explicitly enabled and within cooldown, daily, failure, risk, capability and resource ceilings.
