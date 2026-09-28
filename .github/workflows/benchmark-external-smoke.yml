@@ -37,5 +37,11 @@ jobs:
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
 
+      - name: Pin MiniWoB++ benchmark assets
+        run: |
+          git clone https://github.com/Farama-Foundation/miniwob-plusplus.git miniwob-plusplus
+          git -C miniwob-plusplus reset --hard 7fd85d71a4b60325c6585396ec4f48377d049838
+          echo "MINIWOB_URL=file://${GITHUB_WORKSPACE}/miniwob-plusplus/miniwob/html/miniwob/" >> "$GITHUB_ENV"
+
       - name: Reset official MiniWoB task
         run: python benchmark/smoke/browsergym_miniwob.py
