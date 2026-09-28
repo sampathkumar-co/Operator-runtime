@@ -7,6 +7,12 @@ on:
     paths:
       - "benchmark/**"
       - ".github/workflows/benchmark-external-smoke.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "benchmark/**"
+      - ".github/workflows/benchmark-external-smoke.yml"
   workflow_dispatch:
 
 permissions:
