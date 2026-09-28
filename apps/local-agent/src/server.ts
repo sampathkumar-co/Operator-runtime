@@ -723,6 +723,51 @@ export function createLocalAgentServer(options: {
     }
     const requestPermissions = requestPermissionDecision.permissions;
 
+    if (pathname === '/v1/enterprise-policy' && req.method === 'GET') {
+      if (!options.enterprisePolicy) {
+        send(res, 503, { ok: false, error: { code: 'ENTERPRISE_POLICY_NOT_CONFIGURED', message: 'Enterprise policy store is not configured.' } });
+        return;
+      }
+      send(res, 200, {
+        ok: true,
+        configured: await options.enterprisePolicy.isConfigured(),
+        policy: await options.enterprisePolicy.inspect()
+      });
+      return;
+    }
+
+    if (pathname === '/v1/enterprise-policy' && req.method === 'PUT') {
+      if (!options.enterprisePolicy || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'ENTERPRISE_POLICY_ADMIN_NOT_CONFIGURED', message: 'Enterprise policy administration requires local recovery authority.' } });
+        return;
+      }
+      if (relayRequest) {
+        send(res, 403, { ok: false, error: { code: 'ENTERPRISE_POLICY_LOCAL_ADMIN_REQUIRED', message: 'Enterprise policy changes are local-admin-only and cannot be performed through relay execution.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const roles = Array.isArray(body.roles) ? body.roles as any : [];
+        const bindings = Array.isArray(body.bindings) ? body.bindings as any : [];
+        await options.enterprisePolicy.configure({ roles, bindings });
+        await options.audit?.append({
+          capability: 'enterprise.policy.configure',
+          result: 'success',
+          risk: 'system',
+          details: { roleCount: roles.length, bindingCount: bindings.length }
+        });
+        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured() });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_POLICY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/activity' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
