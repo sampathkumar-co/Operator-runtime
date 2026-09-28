@@ -14,7 +14,6 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'file.write': 'write',
   'file.create': 'write',
   'file.replace': 'destructive',
-  'file.remove': 'destructive',
   'file.info': 'read',
   'file.search': 'read',
   'file.manage': 'dynamic',
