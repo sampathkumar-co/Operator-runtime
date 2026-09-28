@@ -20,7 +20,7 @@ const STATIC_EXPECTED = {
   'file.write': 'write', 'file.create': 'write', 'file.replace': 'destructive', 'file.info': 'read', 'file.search': 'read',
   'git.status': 'read', 'git.diff': 'read', 'git.rev-parse': 'read',
   'git.checkpoint.inspect': 'read', 'git.checkpoint.create': 'write', 'git.checkpoint.restore': 'destructive',
-  'git.write': 'write', 'docker.inspect': 'read', 'docker.manage': 'system',
+  'git.write': 'write', 'docker.inspect': 'read', 'docker.manage': 'system', 'compute.run': 'write',
   'postgres.inspect': 'read', 'postgres.select': 'read', 'vscode.inspect': 'read',
   'vscode.open': 'system', 'terminal.execute': 'destructive', 'process.inspect': 'read', 'process.manage': 'destructive', 'browser.inspect': 'read',
   'browser.navigate': 'write', 'browser.interact': 'external', 'browser.tab.focus': 'write',
