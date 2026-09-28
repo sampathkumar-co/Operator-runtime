@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { capabilityRiskRule, type CapabilityRiskRule } from './capability-policy.ts';
 import { OperatorError } from './errors.ts';
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from './types.ts';
 
 export interface CapabilityManifestEntry {
   capability: string;
@@ -81,9 +81,14 @@ class ManifestBoundProvider implements CapabilityProvider {
     return this.#provider.score(action);
   }
 
-  resolveRisk(action: ActionRequest) {
+  resolveRisk(action: ActionRequest): ActionRisk | Promise<ActionRisk> {
     if (!this.#allowed.has(action.capability)) throw new OperatorError('CAPABILITY_EXTENSION_SCOPE_DENIED', 'Extension was asked to resolve risk for an undeclared capability.');
-    return this.#provider.resolveRisk?.(action) ?? declaredRisk(this.#manifest, action.capability);
+    if (this.#provider.resolveRisk) return this.#provider.resolveRisk(action);
+    const risk = declaredRisk(this.#manifest, action.capability);
+    if (risk === 'dynamic') {
+      throw new OperatorError('CAPABILITY_EXTENSION_DYNAMIC_RISK_UNRESOLVED', 'Dynamic-risk extension capability requires a trusted provider risk resolver.');
+    }
+    return risk;
   }
 
   async execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult> {
