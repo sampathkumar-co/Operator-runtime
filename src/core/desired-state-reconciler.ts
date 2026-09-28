@@ -14,11 +14,13 @@ export class DesiredStateReconciler {
   #timer: NodeJS.Timeout | null = null;
   #active: Promise<DesiredStateReconcilerResult> | null = null;
   #stopped = true;
+  #onError?: (error: unknown) => void;
 
-  constructor(controller: DesiredStateController, options: { intervalMs?: number; maxPerTick?: number } = {}) {
+  constructor(controller: DesiredStateController, options: { intervalMs?: number; maxPerTick?: number; onError?: (error: unknown) => void } = {}) {
     this.#controller = controller;
     this.#intervalMs = boundedInteger(options.intervalMs ?? 60_000, 1_000, 24 * 60 * 60_000, 'intervalMs');
     this.#maxPerTick = boundedInteger(options.maxPerTick ?? 100, 1, 500, 'maxPerTick');
+    this.#onError = options.onError;
   }
 
   start(): void {
@@ -72,6 +74,7 @@ export class DesiredStateReconciler {
     this.#timer = setTimeout(async () => {
       this.#timer = null;
       try { await this.runOnce(); }
+      catch (error) { this.#onError?.(error); }
       finally { this.#schedule(this.#intervalMs); }
     }, delayMs);
     this.#timer.unref?.();
