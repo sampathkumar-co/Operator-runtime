@@ -23,7 +23,18 @@
     "test:stage9": "node --experimental-strip-types --test test/execution-optimizer.test.ts",
     "test:stage10": "node --experimental-strip-types --test test/outcome-planner.test.ts test/digital-operations.test.ts",
     "test:hardening": "node --experimental-strip-types --test test/authority-kernel.test.ts test/side-effect.test.ts test/verification-kernel.test.ts test/audit-correlation.test.ts test/resource-leases.test.ts",
-    "qualify": "npm run check && npm run test:red-team && npm run test:performance && npm run test:hardening"
+    "qualify": "npm run check && npm run test:red-team && npm run test:performance && npm run test:hardening && npm run test:evolution",
+    "test:stage11": "node --experimental-strip-types --test test/perception-graph.test.ts",
+    "test:stage12": "node --experimental-strip-types --test test/sandboxed-compute.test.ts",
+    "test:stage13": "node --experimental-strip-types --test test/event-runtime.test.ts",
+    "test:stage14": "node --experimental-strip-types --test test/world-history.test.ts",
+    "test:stage15": "node --experimental-strip-types --test test/semantic-checkpoint.test.ts",
+    "test:stage16": "node --experimental-strip-types --test test/enterprise-policy.test.ts",
+    "test:stage17": "node --experimental-strip-types --test test/capability-sdk.test.ts",
+    "test:stage18": "node --experimental-strip-types --test test/evaluation.test.ts",
+    "test:stage19": "node --experimental-strip-types --test test/studio-teach.test.ts",
+    "test:stage20": "node --experimental-strip-types --test test/desired-state.test.ts",
+    "test:evolution": "node --experimental-strip-types --test test/perception-graph.test.ts test/sandboxed-compute.test.ts test/event-runtime.test.ts test/world-history.test.ts test/semantic-checkpoint.test.ts test/enterprise-policy.test.ts test/capability-sdk.test.ts test/evaluation.test.ts test/studio-teach.test.ts test/desired-state.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT."
