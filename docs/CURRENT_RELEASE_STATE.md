@@ -46,14 +46,16 @@ Production now includes:
 
 The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `0c28cf8df77369c04fc3b85ed9d16c8def490546`, built at `2026-09-28T12:25:44Z`.
 
-The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.0 release is published.
+The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.1 release is published.
+
+The previously staged `mecord-connect@2.0.0` artifact was superseded before registry activation. The final owner-approval candidate is `2.0.1`, which adds the certified exact-PID Windows process-inspection latency fix without changing the public 9-tool MCP schema.
 
 ## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
 
 - public product / plugin snapshot: **1.0.0**
-- npm runtime currently published: **1.0.1**; next candidate: **2.0.0**
+- npm runtime currently published: **1.0.1**; next candidate: **2.0.1**
 
 The public version tracks the stable public MCP schema/review snapshot. The The npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged. Tests require the runtime candidate to be valid SemVer and never older than the actually published runtime.
 
