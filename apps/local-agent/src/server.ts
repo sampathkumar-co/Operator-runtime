@@ -828,9 +828,7 @@ export function createLocalAgentServer(options: {
             errorCode: result.error?.code,
             sideEffectState: result.error?.sideEffectState,
             teamLeaseId: leaseId,
-            autoResumedAfterApproval,
-            teachCaptured,
-            teachCaptureCode
+            autoResumedAfterApproval
           }
         });
         send(res, result.ok ? 200 : 409, result);
@@ -1351,7 +1349,7 @@ export function createLocalAgentServer(options: {
             teachCaptureCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CAPTURE_FAILED';
           }
         }
-                await options.audit?.append({
+        await options.audit?.append({
           ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
           actionId: action.id,
           providerId: result.provider,
@@ -1365,7 +1363,9 @@ export function createLocalAgentServer(options: {
             errorCode: result.error?.code,
             sideEffectState: result.error?.sideEffectState,
             sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
-            autoResumedAfterApproval
+            autoResumedAfterApproval,
+            teachCaptured,
+            teachCaptureCode
           }
         });
         send(res, result.ok ? 200 : 409, result);
