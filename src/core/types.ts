@@ -1,4 +1,5 @@
 export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
+export type SideEffectState = 'none' | 'known' | 'uncertain';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type ProvenanceKind =
@@ -44,6 +45,7 @@ export interface ActionResult {
     code: string;
     message: string;
     retryable?: boolean;
+    sideEffectState?: SideEffectState;
   };
   durationMs: number;
 }
@@ -51,6 +53,7 @@ export interface ActionResult {
 export interface PermissionProfile {
   allowedCapabilities: string[];
   allowedRoots: string[];
+  maxRisk?: ActionRisk;
   approvedActionIds?: string[];
   allowExternalWrites?: boolean;
   allowSystemChanges?: boolean;
@@ -67,9 +70,24 @@ export interface CapabilityScore {
   interactionCost: number;
 }
 
+export interface CapabilityAuthorityToken {
+  claims: {
+    version: 1;
+    tokenId: string;
+    capability: string;
+    roots: string[];
+    maxRisk: ActionRisk;
+    actionIds: string[];
+    issuedAt: string;
+    expiresAt: string;
+  };
+  mac: string;
+}
+
 export interface CapabilityExecutionContext {
   signal?: AbortSignal;
   learningContext?: string;
+  authorityToken?: CapabilityAuthorityToken;
 }
 
 export interface CapabilityProvider {

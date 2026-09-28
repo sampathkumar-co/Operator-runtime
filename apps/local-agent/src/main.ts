@@ -27,6 +27,17 @@ import { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.t
 import { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
 import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
+import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
+import { TeachModeStore } from '../../../src/core/studio-teach.ts';
+import { DesiredStateController } from '../../../src/core/desired-state.ts';
+import { DesiredStateReconciler } from '../../../src/core/desired-state-reconciler.ts';
+import { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
+import { DurableEventTicker } from '../../../src/core/event-ticker.ts';
+import { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
+import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
+import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
+import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
+import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -60,7 +71,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -71,15 +82,24 @@ const approvals = new ApprovalStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
+const resourceLeases = new ResourceLeaseStore(stateDir);
 const teams = new TeamCoordinator(stateDir);
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
+const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
+const semanticMigration = new SemanticCheckpointManager(stateDir, {
+  identity: deviceIdentity,
+  registry: deviceRegistry
+});
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
+const enterprisePolicy = new EnterprisePolicyStore(stateDir);
+const teachMode = new TeachModeStore(stateDir);
+const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
@@ -106,6 +126,8 @@ const runtime = createRuntime({
   terminalAllowedExecutables,
   projectCommandRegistryPath: process.env.OPERATOR_PROJECT_COMMAND_REGISTRY,
   dockerExecutable: process.env.OPERATOR_DOCKER_PATH,
+  computeJavascriptImage: process.env.OPERATOR_COMPUTE_JS_IMAGE,
+  computePythonImage: process.env.OPERATOR_COMPUTE_PY_IMAGE,
   postgresProfileRegistryPath: process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY,
   psqlExecutable: process.env.OPERATOR_PSQL_PATH,
   vscodeExecutable: process.env.OPERATOR_VSCODE_PATH,
@@ -115,8 +137,16 @@ const runtime = createRuntime({
   browserPath: process.env.OPERATOR_BROWSER_PATH,
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
-  windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
+  windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
+  perception
 });
+const studioExecutor = new StudioWorkflowExecutor(stateDir, {
+  teach: teachMode,
+  runtime,
+  leases: resourceLeases,
+  permissions
+});
+const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
 const operations = new DigitalOperationsLayer(stateDir, {
   procedures,
@@ -126,6 +156,23 @@ const operations = new DigitalOperationsLayer(stateDir, {
   teams,
   organizations,
   availableCapabilities: operationCapabilities
+});
+const desiredState = new DesiredStateController(stateDir, { world, operations });
+const desiredStateIntervalMs = Number(process.env.OPERATOR_DESIRED_STATE_INTERVAL_MS ?? 60_000);
+if (!Number.isSafeInteger(desiredStateIntervalMs) || desiredStateIntervalMs < 1_000 || desiredStateIntervalMs > 24 * 60 * 60_000) {
+  throw new OperatorError('DESIRED_STATE_INTERVAL_INVALID', 'OPERATOR_DESIRED_STATE_INTERVAL_MS must be an integer from 1000 to 86400000.');
+}
+const desiredStateReconciler = new DesiredStateReconciler(desiredState, {
+  intervalMs: desiredStateIntervalMs,
+  onError: (error) => console.error(`[operator] desired-state reconcile tick failed: ${error instanceof Error ? error.message : String(error)}`)
+});
+const eventTickIntervalMs = Number(process.env.OPERATOR_EVENT_TICK_INTERVAL_MS ?? 1_000);
+if (!Number.isSafeInteger(eventTickIntervalMs) || eventTickIntervalMs < 250 || eventTickIntervalMs > 60_000) {
+  throw new OperatorError('EVENT_TICK_INTERVAL_INVALID', 'OPERATOR_EVENT_TICK_INTERVAL_MS must be an integer from 250 to 60000.');
+}
+const eventTicker = new DurableEventTicker(events, {
+  intervalMs: eventTickIntervalMs,
+  onError: (error) => console.error(`[operator] event tick failed: ${error instanceof Error ? error.message : String(error)}`)
 });
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
@@ -143,7 +190,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
   stopRelay();
-  await Promise.allSettled([agent.close(), runtime.close()]);
+  await Promise.allSettled([desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()]);
   process.exitCode = 1;
   setImmediate(() => process.exit(1));
 }
@@ -238,6 +285,7 @@ const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
   permissions,
+  resourceLeases,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
@@ -250,13 +298,32 @@ const taskOrchestrator = new TaskOrchestrator({
       };
     }
     const result = await runtime.execute(action, actionPermissions, context);
+    try {
+      await publishPerceptionFromActionResult(perception, action, result);
+    } catch (error) {
+      await audit.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id,
+        providerId: 'perception.graph',
+        capability: 'perception.publish',
+        result: 'failure',
+        risk: 'write',
+        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+      });
+    }
     await audit.append({
-      taskId: action.taskId,
+      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+      actionId: action.id,
+      providerId: result.provider,
       capability: action.capability,
       target: action.target,
       result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
       risk: action.risk,
-      details: { actionId: action.id, provider: result.provider, durationMs: result.durationMs, errorCode: result.error?.code }
+      details: {
+        durationMs: result.durationMs,
+        errorCode: result.error?.code,
+        sideEffectState: result.error?.sideEffectState
+      }
     });
     return result;
   }
@@ -279,6 +346,13 @@ const agent = createLocalAgentServer({
   optimizer,
   organizations,
   operations,
+  events,
+  perception,
+  teachMode,
+  studioExecutor,
+  semanticMigration,
+  enterprisePolicy,
+  desiredState,
   deviceIdentity,
   deviceRegistry,
   privacy,
@@ -298,6 +372,14 @@ const agent = createLocalAgentServer({
     postgresConfigured: Boolean(process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY),
     vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
+    studioWorkflowExecutorConfigured: true,
+    semanticMigrationConfigured: true,
+    enterprisePolicyConfigured: await enterprisePolicy.isConfigured(),
+    recoveredStudioRunCount: recoveredStudioRuns,
+    desiredStateReconcilerConfigured: true,
+    desiredStateIntervalMs,
+    eventRuntimeConfigured: true,
+    eventTickIntervalMs,
     relayConfigured: Boolean(relayUrl),
     relayResultConfigured: Boolean(relayResultUrl),
     relayTokenFileConfigured: Boolean(relayUrl),
@@ -321,6 +403,11 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
+console.error(`[operator] studio workflow recovery: ${recoveredStudioRuns} interrupted run(s) reconciled`);
+console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
+console.error(`[operator] durable event ticker: every ${eventTickIntervalMs}ms`);
+desiredStateReconciler.start();
+eventTicker.start();
 if (relayUrl) {
   const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
@@ -347,7 +434,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     stopRelay();
-    await Promise.allSettled([relayRun, agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
+    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
     process.exit(0);
   });
 }

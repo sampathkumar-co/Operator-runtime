@@ -1,9 +1,11 @@
 import path from 'node:path';
-import type { ActionRequest, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionRisk, PermissionProfile } from './types.ts';
 import { PolicyError } from './errors.ts';
 import { assertInstructionAuthority } from './provenance.ts';
 import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
 import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
+
+const RISK_ORDER: Record<ActionRisk, number> = { read: 0, write: 1, external: 2, system: 3, destructive: 4 };
 
 function capabilityAllowed(capability: string, allowed: string[]): boolean {
   return allowed.some((rule) => rule === capability || (rule.endsWith('.*') && capability.startsWith(rule.slice(0, -1))));
@@ -45,6 +47,13 @@ export class PolicyEngine {
   }
 
   authorizeRisk(action: ActionRequest, permissions: PermissionProfile): void {
+    if (permissions.maxRisk !== undefined && RISK_ORDER[action.risk] > RISK_ORDER[permissions.maxRisk]) {
+      throw new PolicyError('RISK_CEILING_EXCEEDED', `Action risk ${action.risk} exceeds the permission ceiling ${permissions.maxRisk}.`, {
+        actionId: action.id,
+        actionRisk: action.risk,
+        maxRisk: permissions.maxRisk
+      });
+    }
     const approved = new Set(permissions.approvedActionIds ?? []);
     if (action.risk === 'external' && !permissions.allowExternalWrites && !approved.has(action.id)) {
       throw new PolicyError('APPROVAL_REQUIRED', 'External write requires explicit approval.', { actionId: action.id });

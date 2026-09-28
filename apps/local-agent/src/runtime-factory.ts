@@ -1,6 +1,7 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider } from '../../../src/capabilities/index.ts';
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
+import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 
 export function createRuntime(config: {
   stateDir?: string;
@@ -9,6 +10,8 @@ export function createRuntime(config: {
   terminalAllowedExecutables?: string[];
   projectCommandRegistryPath?: string;
   dockerExecutable?: string;
+  computeJavascriptImage?: string;
+  computePythonImage?: string;
   postgresProfileRegistryPath?: string;
   psqlExecutable?: string;
   vscodeExecutable?: string;
@@ -19,8 +22,9 @@ export function createRuntime(config: {
   browserDataDir?: string;
   windowsUiaPath?: string;
   windowsPathLeasePath?: string;
+  perception?: PerceptionGraphStore;
 }): OperatorRuntime {
-  return new OperatorRuntime(config.stateDir ? { learning: new ProviderLearningStore(config.stateDir) } : {})
+  const runtime = new OperatorRuntime(config.stateDir ? { learning: new ProviderLearningStore(config.stateDir) } : {})
     .register(new SystemInspectProvider())
     .register(new FilesystemProvider({ allowedRoots: config.allowedRoots, windowsPathLeaseExecutable: config.windowsPathLeasePath }))
     .register(new ProjectInspectProvider({ allowedRoots: config.allowedRoots }))
@@ -37,6 +41,13 @@ export function createRuntime(config: {
     .register(new DockerProvider({
       allowedRoots: config.allowedRoots,
       dockerExecutable: config.dockerExecutable
+    }))
+    .register(new SandboxedComputeProvider({
+      dockerExecutable: config.dockerExecutable,
+      images: {
+        ...(config.computeJavascriptImage ? { javascript: config.computeJavascriptImage } : {}),
+        ...(config.computePythonImage ? { python: config.computePythonImage } : {})
+      }
     }))
     .register(new PostgresProvider({
       allowedRoots: config.allowedRoots,
@@ -61,6 +72,7 @@ export function createRuntime(config: {
       autoLaunch: config.browserAutoLaunch,
       executablePath: config.browserPath,
       dataDir: config.browserDataDir
-    }))
-    .register(new WindowsUiaProvider({ binaryPath: config.windowsUiaPath }));
+    }));
+  if (config.perception) runtime.register(new PerceptionProvider(config.perception));
+  return runtime.register(new WindowsUiaProvider({ binaryPath: config.windowsUiaPath }));
 }

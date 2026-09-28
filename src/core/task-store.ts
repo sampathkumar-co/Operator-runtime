@@ -327,6 +327,8 @@ function validateActionRecord(input: unknown, index: number): TaskActionRecord {
   if (!/^[0-9a-f]{64}$/.test(inputHash)) throw corrupt(`Action record ${index} inputHash is invalid.`);
   const risk = String(raw.risk ?? '');
   if (!['read', 'write', 'external', 'system', 'destructive'].includes(risk)) throw corrupt(`Action record ${index} risk is invalid.`);
+  const sideEffectState = raw.sideEffectState === undefined ? undefined : String(raw.sideEffectState);
+  if (sideEffectState !== undefined && !['none', 'known', 'uncertain'].includes(sideEffectState)) throw corrupt(`Action record ${index} sideEffectState is invalid.`);
   const startedAt = validIso(raw.startedAt, `action record ${index} startedAt`);
   const finishedAt = raw.finishedAt === undefined ? undefined : validIso(raw.finishedAt, `action record ${index} finishedAt`);
   if (state === 'STARTED' && finishedAt !== undefined) throw corrupt(`Action record ${index} cannot finish while STARTED.`);
@@ -343,6 +345,7 @@ function validateActionRecord(input: unknown, index: number): TaskActionRecord {
     startedAt,
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(raw.errorCode === undefined ? {} : { errorCode: boundedText(raw.errorCode, 256, `action record ${index} errorCode`) }),
+    ...(sideEffectState === undefined ? {} : { sideEffectState: sideEffectState as TaskActionRecord['sideEffectState'] }),
     ...(raw.observation === undefined ? {} : { observation: validateObservation(raw.observation, index) }),
     evidence: validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `action record ${index} evidence`)
   };

@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
-import type { ActionRisk } from './types.ts';
+import type { ActionRisk, SideEffectState } from './types.ts';
+import { validSideEffectState } from './side-effect.ts';
 
 export type TeamRole = 'supervisor' | 'planner' | 'coder' | 'tester' | 'browser' | 'ui' | 'verifier' | 'general';
 export type TeamMissionState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
@@ -541,7 +542,7 @@ export class TeamCoordinator {
     leaseId: string;
     code: string;
     message: string;
-    sideEffectState: 'none' | 'known' | 'uncertain';
+    sideEffectState: SideEffectState;
     retryable?: boolean;
   }): Promise<TeamMission> {
     return await this.#store.update(missionId, (mission) => {
@@ -552,23 +553,23 @@ export class TeamCoordinator {
       const now = new Date().toISOString();
       const code = boundedKey(input.code, 'failure code');
       const message = boundedText(input.message, 64 * 1024, 'failure message');
-      if (!['none', 'known', 'uncertain'].includes(input.sideEffectState)) throw new OperatorError('TEAM_INPUT_INVALID', 'sideEffectState must be none, known, or uncertain.');
-      const uncertain = input.sideEffectState === 'uncertain';
+      const sideEffectState = validSideEffectState(input.sideEffectState);
+      const uncertain = sideEffectState === 'uncertain';
       for (const resourceKey of item.resources) {
         const resource = requireResource(mission, resourceKey);
         if (resource.lock?.leaseId === lease.id) delete resource.lock;
         if (uncertain) resource.uncertain = true;
-        if (input.sideEffectState === 'known' && item.risk !== 'read') resource.revision += 1;
+        if (sideEffectState === 'known' && item.risk !== 'read') resource.revision += 1;
         resource.updatedAt = now;
       }
       delete item.lease;
       item.failure = { code, message, at: now };
-      const safeRetry = input.retryable === true && input.sideEffectState === 'none' && item.attempts < mission.budget.maxAttemptsPerWorkItem;
+      const safeRetry = input.retryable === true && sideEffectState === 'none' && item.attempts < mission.budget.maxAttemptsPerWorkItem;
       item.state = uncertain ? 'NEEDS_RECONCILIATION' : safeRetry ? 'PENDING' : 'FAILED';
       if (uncertain) mission.state = 'BLOCKED';
       else if (!safeRetry) mission.state = 'FAILED';
       mission.updatedAt = now;
-      appendEvent(mission, 'work.failed', worker.id, item.id, { code, sideEffectState: input.sideEffectState, retrying: safeRetry });
+      appendEvent(mission, 'work.failed', worker.id, item.id, { code, sideEffectState, retrying: safeRetry });
       return mission;
     });
   }

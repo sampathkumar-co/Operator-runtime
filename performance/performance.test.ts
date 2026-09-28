@@ -7,6 +7,8 @@ import test from 'node:test';
 import { performance } from 'node:perf_hooks';
 import { AuditLog } from '../src/core/audit.ts';
 import { PolicyEngine } from '../src/core/policy.ts';
+import { AuthorityKernel } from '../src/core/authority-kernel.ts';
+import { VerificationKernel } from '../src/core/verification-kernel.ts';
 import { RelayDeliveryStore } from '../src/core/relay-delivery-store.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
@@ -121,4 +123,46 @@ test('authenticated local-agent inspect round trips remain responsive', async (t
   const elapsed = performance.now() - start;
   metric('local-agent-inspect', elapsed, operations);
   assert.ok(elapsed < 10_000, `Local-agent round-trip regression: ${elapsed.toFixed(1)} ms.`);
+});
+
+
+test('authority-kernel canonical authorization remains low-overhead', async () => {
+  const root = path.resolve(os.tmpdir(), 'operator-perf-authority');
+  const kernel = new AuthorityKernel({ secret: Buffer.alloc(32, 41) });
+  const permissions = { allowedCapabilities: ['file.*'], allowedRoots: [root] };
+  const action = {
+    id: 'perf-authority',
+    capability: 'file.read',
+    risk: 'read' as const,
+    input: { path: path.join(root, 'file.txt') },
+    provenance: { kind: 'runtime' as const }
+  };
+  const operations = 20_000;
+  const start = performance.now();
+  for (let i = 0; i < operations; i += 1) {
+    await kernel.authorize(action, permissions, async () => 'read');
+  }
+  const elapsed = performance.now() - start;
+  metric('authority-kernel', elapsed, operations);
+  assert.ok(elapsed < 5_000, `Authority kernel regression: ${elapsed.toFixed(1)} ms for ${operations} operations.`);
+});
+
+test('verification receipts remain cheap enough for pervasive postconditions', () => {
+  const kernel = new VerificationKernel();
+  const operations = 10_000;
+  const start = performance.now();
+  for (let i = 0; i < operations; i += 1) {
+    const receipt = kernel.verify({
+      subjectKind: 'perf',
+      subjectId: `subject-${i}`,
+      contract: { objective: 'verify', index: i },
+      checks: [
+        { name: 'postcondition', ok: true, detail: 'verified', evidenceDigests: [crypto.createHash('sha256').update(String(i)).digest('hex')] }
+      ]
+    });
+    assert.equal(receipt.verified, true);
+  }
+  const elapsed = performance.now() - start;
+  metric('verification-kernel', elapsed, operations);
+  assert.ok(elapsed < 5_000, `Verification kernel regression: ${elapsed.toFixed(1)} ms for ${operations} receipts.`);
 });

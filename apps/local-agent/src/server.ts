@@ -24,6 +24,24 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
+import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
+import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
+import type { DesiredStateController } from '../../../src/core/desired-state.ts';
+import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
+import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
+import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
+import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
+import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
+import {
+  assertMigrationCapabilities,
+  buildMigrationArtifacts,
+  buildMigrationWorldAssumptions,
+  hashAuthorizedMigrationArtifact,
+  migrationAuthorityDigest,
+  verifyMigrationResourceKey,
+  verifyMigrationWorldAssumption
+} from './migration-proofs.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -97,6 +115,50 @@ function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
   return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
 }
 
+function relayRequestMarker(input: unknown): boolean {
+  if (input === undefined) return false;
+  const value = Array.isArray(input) ? (input.length === 1 ? input[0] : undefined) : input;
+  if (value !== '1') throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Internal relay request marker is invalid.');
+  return true;
+}
+
+function decodeEnterpriseContextHeader(input: unknown, relayRequest: boolean): EnterpriseAuthorizationContext | undefined {
+  if (input === undefined) return undefined;
+  if (!relayRequest) throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context is accepted only on an internal relay request.');
+  const encoded = Array.isArray(input) ? (input.length === 1 ? input[0] : undefined) : input;
+  if (typeof encoded !== 'string' || encoded.length < 1 || encoded.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header is invalid.');
+  }
+  let bytes: Buffer;
+  try { bytes = Buffer.from(encoded, 'base64url'); }
+  catch { throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header is not valid base64url.'); }
+  if (bytes.length < 2 || bytes.length > 4096 || bytes.toString('base64url') !== encoded) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header encoding is non-canonical or oversized.');
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(bytes.toString('utf8')); }
+  catch { throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header must contain valid JSON.'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context must be an object.');
+  }
+  const raw = parsed as Record<string, unknown>;
+  const allowedKeys = new Set(['principalId', 'deviceId', 'projectKey']);
+  if (Object.keys(raw).some((key) => !allowedKeys.has(key))) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context contains fields not issued by the trusted relay identity path.');
+  }
+  const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+  const principalId = String(raw.principalId ?? '').toLowerCase();
+  const deviceId = String(raw.deviceId ?? '').toLowerCase();
+  if (!new RegExp(`^account:${uuid}$`, 'i').test(principalId) || !new RegExp(`^${uuid}$`, 'i').test(deviceId)) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context account/device identity is invalid.');
+  }
+  const projectKey = raw.projectKey === undefined ? undefined : String(raw.projectKey);
+  if (projectKey !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(projectKey) || projectKey.includes('\\'))) {
+    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise project context is invalid.');
+  }
+  return { principalId, deviceId, ...(projectKey ? { projectKey } : {}) };
+}
+
 function boundedString(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\0')) {
     throw new Error(`${field} must be a non-empty string of at most ${maxLength} characters without NUL bytes.`);
@@ -151,6 +213,13 @@ export function createLocalAgentServer(options: {
   optimizer?: ExecutionOptimizerStore;
   organizations?: OrganizationCoordinator;
   operations?: DigitalOperationsLayer;
+  events?: DurableEventRuntime;
+  perception?: PerceptionGraphStore;
+  teachMode?: TeachModeStore;
+  studioExecutor?: StudioWorkflowExecutor;
+  semanticMigration?: SemanticCheckpointManager;
+  enterprisePolicy?: EnterprisePolicyStore;
+  desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
@@ -231,12 +300,13 @@ export function createLocalAgentServer(options: {
   const executeActionWithCurrentApproval = async (
     action: ActionRequest,
     approvalAuthority: ApprovalAuthorityContext | undefined,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
     const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
     const sessionPermissions = options.sessionApprovals
-      ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
-      : options.permissions;
+      ? options.sessionApprovals.permissionsFor(approvalAuthority, basePermissions)
+      : basePermissions;
     const permissions = oneTimeApproved
       ? {
           ...sessionPermissions,
@@ -244,15 +314,88 @@ export function createLocalAgentServer(options: {
         }
       : sessionPermissions;
     if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-    return await options.runtime.execute(action, permissions, { signal });
+    const result = await options.runtime.execute(action, permissions, { signal });
+    if (options.perception) {
+      try {
+        await publishPerceptionFromActionResult(options.perception, action, result);
+      } catch (error) {
+        await options.audit?.append({
+          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+          actionId: action.id,
+          providerId: 'perception.graph',
+          capability: 'perception.publish',
+          result: 'failure',
+          risk: 'write',
+          details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+        });
+      }
+    }
+    return result;
   };
 
-  const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
+  const executeStudioActionWithApproval = async (
+    action: ActionRequest,
+    approvalAuthority: ApprovalAuthorityContext | undefined,
+    signal?: AbortSignal
+  ): Promise<ActionResult> => {
+    if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'policy',
+        evidence: [{ kind: 'emergency_stop', status: 'fail', message: 'Operator execution is disabled by the local emergency stop.', timestamp: new Date().toISOString() }],
+        error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.', retryable: false, sideEffectState: 'none' },
+        durationMs: 0
+      };
+    }
+
+    let result = await executeActionWithCurrentApproval(action, approvalAuthority, signal);
+    let autoResumedAfterApproval = false;
+    if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
+      const pending = await options.approvals.register(action, approvalAuthority);
+      const decision = options.recoveryToken
+        ? await waitForApprovalDecision(action.id, pending.approvalRequestId, Math.min(inlineApprovalWaitMs, 30_000))
+        : null;
+      if (decision === 'approve' || decision === 'session') {
+        result = await executeActionWithCurrentApproval(action, approvalAuthority, signal);
+        autoResumedAfterApproval = true;
+      } else if (decision === 'deny') {
+        result = {
+          ok: false,
+          capability: action.capability,
+          provider: 'policy',
+          evidence: [{ kind: 'approval', status: 'fail', message: 'The local user denied this Studio workflow action.', timestamp: new Date().toISOString() }],
+          error: { code: 'APPROVAL_DENIED', message: 'The local user denied this Studio workflow action.', retryable: false, sideEffectState: 'none' },
+          durationMs: result.durationMs
+        };
+      }
+    }
+
+    await options.audit?.append({
+      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+      actionId: action.id,
+      providerId: result.provider,
+      capability: action.capability,
+      target: action.target,
+      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
+      risk: action.risk,
+      details: {
+        studioWorkflow: true,
+        durationMs: result.durationMs,
+        errorCode: result.error?.code,
+        sideEffectState: result.error?.sideEffectState,
+        autoResumedAfterApproval
+      }
+    });
+    return result;
+  };
+
+  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => ({
     permissionProvider: async (action: ActionRequest) => {
       const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
       const sessionPermissions = options.sessionApprovals
-        ? options.sessionApprovals.permissionsFor(authority, options.permissions)
-        : options.permissions;
+        ? options.sessionApprovals.permissionsFor(authority, basePermissions)
+        : basePermissions;
       if (!oneTimeApproved) return sessionPermissions;
       await options.approvals!.consume(action, authority);
       return {
@@ -270,6 +413,37 @@ export function createLocalAgentServer(options: {
       return undefined;
     }
   });
+
+  const permissionsForRequest = async (
+    relayRequest: boolean,
+    enterpriseContext: EnterpriseAuthorizationContext | undefined
+  ): Promise<{ permissions: PermissionProfile; enterpriseApplied: boolean; roleIds: string[]; bindingIds: string[] }> => {
+    if (!relayRequest || !options.enterprisePolicy || !await options.enterprisePolicy.isConfigured()) {
+      return { permissions: options.permissions, enterpriseApplied: false, roleIds: [], bindingIds: [] };
+    }
+    if (!enterpriseContext) {
+      throw new OperatorError('ENTERPRISE_CONTEXT_REQUIRED', 'Configured enterprise policy requires trusted relay enterprise context.');
+    }
+    const decision = await options.enterprisePolicy.narrow(options.permissions, enterpriseContext);
+    return {
+      permissions: decision.permissions,
+      enterpriseApplied: true,
+      roleIds: decision.roleIds,
+      bindingIds: decision.bindingIds
+    };
+  };
+
+  const assertEnterpriseApprovalBinding = (
+    relayRequest: boolean,
+    enterpriseContext: EnterpriseAuthorizationContext | undefined,
+    approvalAuthority: ApprovalAuthorityContext | undefined
+  ): void => {
+    if (!relayRequest || !enterpriseContext || !approvalAuthority) return;
+    if (enterpriseContext.principalId !== `account:${approvalAuthority.accountId}`
+      || enterpriseContext.deviceId !== approvalAuthority.deviceId) {
+      throw new OperatorError('ENTERPRISE_CONTEXT_AUTHORITY_MISMATCH', 'Enterprise context does not match relay-stamped account/device authority.');
+    }
+  };
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? '/', 'http://operator.local');
@@ -298,11 +472,574 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    let relayRequest = false;
+    let requestEnterpriseContext: EnterpriseAuthorizationContext | undefined;
+    let requestPermissionDecision: { permissions: PermissionProfile; enterpriseApplied: boolean; roleIds: string[]; bindingIds: string[] };
+    try {
+      relayRequest = relayRequestMarker(req.headers['x-operator-relay-request']);
+      requestEnterpriseContext = decodeEnterpriseContextHeader(req.headers['x-operator-enterprise-context'], relayRequest);
+      requestPermissionDecision = await permissionsForRequest(relayRequest, requestEnterpriseContext);
+    } catch (error) {
+      const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_CONTEXT_INVALID';
+      send(res, code === 'ENTERPRISE_AUTHORITY_DENIED' || code === 'ENTERPRISE_CONTEXT_REQUIRED' ? 403 : 400, {
+        ok: false,
+        error: { code, message: error instanceof Error ? error.message : String(error) }
+      });
+      return;
+    }
+    const requestPermissions = requestPermissionDecision.permissions;
+
+    if (pathname === '/v1/enterprise-policy' && req.method === 'GET') {
+      if (!options.enterprisePolicy) {
+        send(res, 503, { ok: false, error: { code: 'ENTERPRISE_POLICY_NOT_CONFIGURED', message: 'Enterprise policy store is not configured.' } });
+        return;
+      }
+      send(res, 200, {
+        ok: true,
+        configured: await options.enterprisePolicy.isConfigured(),
+        policy: await options.enterprisePolicy.inspect()
+      });
+      return;
+    }
+
+    if (pathname === '/v1/enterprise-policy' && req.method === 'PUT') {
+      if (!options.enterprisePolicy || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'ENTERPRISE_POLICY_ADMIN_NOT_CONFIGURED', message: 'Enterprise policy administration requires local recovery authority.' } });
+        return;
+      }
+      if (relayRequest) {
+        send(res, 403, { ok: false, error: { code: 'ENTERPRISE_POLICY_LOCAL_ADMIN_REQUIRED', message: 'Enterprise policy changes are local-admin-only and cannot be performed through relay execution.' } });
+        return;
+      }
+      const supplied = Array.isArray(req.headers['x-operator-recovery-token']) ? req.headers['x-operator-recovery-token'][0] : req.headers['x-operator-recovery-token'];
+      if (!timingSafeSecretMatch(supplied, options.recoveryToken)) {
+        send(res, 401, { ok: false, error: { code: 'RECOVERY_UNAUTHORIZED', message: 'Valid recovery token required.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const roles = Array.isArray(body.roles) ? body.roles as any : [];
+        const bindings = Array.isArray(body.bindings) ? body.bindings as any : [];
+        await options.enterprisePolicy.configure({ roles, bindings });
+        await options.audit?.append({
+          capability: 'enterprise.policy.configure',
+          result: 'success',
+          risk: 'system',
+          details: { roleCount: roles.length, bindingCount: bindings.length }
+        });
+        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured() });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_POLICY_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/activity' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
-      send(res, 200, { ok: true, events: options.audit ? await options.audit.tail(limit) : [], configured: Boolean(options.audit) });
+      const query = {
+        limit,
+        ...(requestUrl.searchParams.get('traceId') ? { traceId: requestUrl.searchParams.get('traceId')! } : {}),
+        ...(requestUrl.searchParams.get('operationId') ? { operationId: requestUrl.searchParams.get('operationId')! } : {}),
+        ...(requestUrl.searchParams.get('taskId') ? { taskId: requestUrl.searchParams.get('taskId')! } : {}),
+        ...(requestUrl.searchParams.get('missionId') ? { missionId: requestUrl.searchParams.get('missionId')! } : {}),
+        ...(requestUrl.searchParams.get('workerId') ? { workerId: requestUrl.searchParams.get('workerId')! } : {}),
+        ...(requestUrl.searchParams.get('capability') ? { capability: requestUrl.searchParams.get('capability')! } : {})
+      };
+      send(res, 200, { ok: true, events: options.audit ? await options.audit.query(query) : [], configured: Boolean(options.audit) });
       return;
+    }
+
+    if (pathname === '/v1/activity/summary' && req.method === 'GET') {
+      send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
+      return;
+    }
+
+
+    if (pathname === '/v1/events/waits' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const wait = await options.events.wait({
+          ...(body.waitId === undefined ? {} : { waitId: String(body.waitId) }),
+          eventType: String(body.eventType ?? ''),
+          ...(body.correlationKey === undefined ? {} : { correlationKey: String(body.correlationKey) }),
+          ...(body.notBefore === undefined ? {} : { notBefore: String(body.notBefore) }),
+          ...(body.deadlineAt === undefined ? {} : { deadlineAt: String(body.deadlineAt) }),
+          ...(body.wakeAt === undefined ? {} : { wakeAt: String(body.wakeAt) })
+        });
+        send(res, 201, { ok: true, wait });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_WAIT_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const eventWaitRoute = /^\/v1\/events\/waits\/([0-9a-f-]{36})(?:\/(cancel))?$/i.exec(pathname);
+    if (eventWaitRoute) {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const waitId = eventWaitRoute[1]!;
+        if (!eventWaitRoute[2] && req.method === 'GET') {
+          send(res, 200, { ok: true, wait: await options.events.inspect(waitId) });
+          return;
+        }
+        if (eventWaitRoute[2] === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, wait: await options.events.cancel(waitId) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_WAIT_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/events/publish' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const published = await options.events.publish({
+          id: String(body.id ?? ''),
+          type: String(body.type ?? ''),
+          ...(body.correlationKey === undefined ? {} : { correlationKey: String(body.correlationKey) }),
+          payloadDigest: String(body.payloadDigest ?? ''),
+          occurredAt: String(body.occurredAt ?? '')
+        });
+        await options.audit?.append({
+          ...(body.correlationKey === undefined ? {} : { traceId: String(body.correlationKey) }),
+          capability: 'event.publish',
+          result: 'success',
+          risk: 'write',
+          details: {
+            eventId: published.event.id,
+            eventType: published.event.type,
+            satisfiedWaitCount: published.satisfiedWaitIds.length
+          }
+        });
+        send(res, 200, { ok: true, ...published });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_PUBLISH_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/events/tick' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, ...(await options.events.tick()) });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_TICK_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+
+    if (pathname === '/v1/migration/checkpoints' && req.method === 'POST') {
+      if (!options.semanticMigration) {
+        send(res, 503, { ok: false, error: { code: 'SEMANTIC_MIGRATION_NOT_CONFIGURED', message: 'Semantic migration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (body.objective === undefined || body.state === undefined) throw Object.assign(new Error('objective and state are required.'), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+        const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities.map(String) : [];
+        const resourceKeys = Array.isArray(body.resourceKeys) ? body.resourceKeys.map(String) : [];
+        const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
+        const normalizedCapabilities = assertMigrationCapabilities({
+          requiredCapabilities,
+          permissions: requestPermissions,
+          supportedCapabilities
+        });
+        for (const resourceKey of resourceKeys) {
+          if (!await verifyMigrationResourceKey(resourceKey, requestPermissions, normalizedCapabilities)) {
+            throw Object.assign(new Error(`Resource ${resourceKey} is not provably authorized on this device.`), { code: 'SEMANTIC_MIGRATION_RESOURCE_MISMATCH' });
+          }
+        }
+        const artifactInputs = Array.isArray(body.artifacts)
+          ? body.artifacts.map((item) => {
+              const value = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+              return { key: String(value.key ?? ''), path: String(value.path ?? '') };
+            })
+          : [];
+        const artifacts = await buildMigrationArtifacts(artifactInputs, requestPermissions);
+        const assumptionInputs = Array.isArray(body.worldAssumptions)
+          ? body.worldAssumptions.map((item) => {
+              const value = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+              return { entityKey: String(value.entityKey ?? ''), factKey: String(value.factKey ?? '') };
+            })
+          : [];
+        if (assumptionInputs.length > 0 && !options.world) {
+          throw Object.assign(new Error('World model is required to bind migration assumptions.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
+        }
+        const worldAssumptions = options.world
+          ? await buildMigrationWorldAssumptions(assumptionInputs, options.world)
+          : [];
+        const authorityDigest = migrationAuthorityDigest({
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys
+        });
+        const continuation = body.continuation && typeof body.continuation === 'object' && !Array.isArray(body.continuation)
+          ? body.continuation as Record<string, unknown>
+          : {};
+        const envelope = await options.semanticMigration.create({
+          workloadKind: String(body.workloadKind ?? '') as any,
+          workloadId: String(body.workloadId ?? ''),
+          objectiveDigest: semanticCheckpointDigest(body.objective),
+          stateDigest: semanticCheckpointDigest(body.state),
+          authorityDigest,
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys,
+          artifactDigests: artifacts,
+          worldAssumptions,
+          completedStepDigests: Array.isArray(body.completedStepDigests) ? body.completedStepDigests.map(String) : [],
+          continuation,
+          ...(body.ttlMs === undefined ? {} : { ttlMs: Number(body.ttlMs) })
+        });
+        await options.audit?.append({
+          capability: 'migration.checkpoint.create',
+          result: 'success',
+          risk: 'write',
+          details: {
+            checkpointId: envelope.checkpoint.checkpointId,
+            workloadId: envelope.checkpoint.workloadId,
+            workloadKind: envelope.checkpoint.workloadKind,
+            capabilityCount: envelope.checkpoint.requiredCapabilities.length,
+            resourceCount: envelope.checkpoint.resourceKeys.length,
+            artifactCount: envelope.checkpoint.artifactDigests.length,
+            worldAssumptionCount: envelope.checkpoint.worldAssumptions.length
+          }
+        });
+        send(res, 201, { ok: true, envelope });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SEMANTIC_MIGRATION_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/migration/checkpoints/accept' && req.method === 'POST') {
+      if (!options.semanticMigration) {
+        send(res, 503, { ok: false, error: { code: 'SEMANTIC_MIGRATION_NOT_CONFIGURED', message: 'Semantic migration is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        if (!body.envelope || typeof body.envelope !== 'object' || Array.isArray(body.envelope)) {
+          throw Object.assign(new Error('envelope is required.'), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+        }
+        const envelope = body.envelope as SignedSemanticCheckpoint;
+        const checkpoint = envelope.checkpoint;
+        const requiredCapabilities = Array.isArray(checkpoint?.requiredCapabilities) ? checkpoint.requiredCapabilities.map(String) : [];
+        const resourceKeys = Array.isArray(checkpoint?.resourceKeys) ? checkpoint.resourceKeys.map(String) : [];
+        const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
+        const normalizedCapabilities = assertMigrationCapabilities({
+          requiredCapabilities,
+          permissions: requestPermissions,
+          supportedCapabilities
+        });
+        const expectedAuthorityDigest = migrationAuthorityDigest({
+          requiredCapabilities: normalizedCapabilities,
+          resourceKeys
+        });
+        const resourceMap = body.resourceMap && typeof body.resourceMap === 'object' && !Array.isArray(body.resourceMap)
+          ? body.resourceMap as Record<string, unknown>
+          : {};
+        for (const key of Object.keys(resourceMap)) {
+          if (!resourceKeys.includes(key)) {
+            throw Object.assign(new Error(`resourceMap contains unknown source resource ${key}.`), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+          }
+          if (typeof resourceMap[key] !== 'string' || !resourceMap[key]) {
+            throw Object.assign(new Error(`resourceMap value for ${key} must be a non-empty destination resource key.`), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+          }
+        }
+        const artifactPaths = body.artifactPaths && typeof body.artifactPaths === 'object' && !Array.isArray(body.artifactPaths)
+          ? body.artifactPaths as Record<string, unknown>
+          : {};
+        const accepted = await options.semanticMigration.verifyAndAccept(envelope, {
+          expectedAuthorityDigest,
+          ...(body.expectedWorkloadId === undefined ? {} : { expectedWorkloadId: String(body.expectedWorkloadId) }),
+          ...(body.expectedState === undefined ? {} : { expectedStateDigest: semanticCheckpointDigest(body.expectedState) }),
+          availableCapabilities: supportedCapabilities,
+          verifyResourceKey: (resourceKey) => {
+            const mapped = resourceMap[resourceKey];
+            const destinationResource = typeof mapped === 'string' && mapped ? mapped : resourceKey;
+            return verifyMigrationResourceKey(destinationResource, requestPermissions, normalizedCapabilities);
+          },
+          ...(options.world ? {
+            verifyWorldAssumption: (assumption) => verifyMigrationWorldAssumption(assumption, options.world!)
+          } : {}),
+          verifyArtifact: async (artifact) => {
+            const mapped = artifactPaths[artifact.key];
+            if (typeof mapped !== 'string' || !mapped) return undefined;
+            return await hashAuthorizedMigrationArtifact(mapped, requestPermissions);
+          }
+        });
+        await options.audit?.append({
+          capability: 'migration.checkpoint.accept',
+          result: 'success',
+          risk: 'write',
+          details: {
+            checkpointId: accepted.checkpointId,
+            workloadId: accepted.workloadId,
+            workloadKind: accepted.workloadKind,
+            sourceDeviceId: accepted.sourceDeviceId,
+            acceptedForResume: true
+          }
+        });
+        send(res, 200, { ok: true, status: 'accepted-for-resume', checkpoint: accepted });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SEMANTIC_MIGRATION_ACCEPT_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/studio/teach' && req.method === 'POST') {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const session = await options.teachMode.start({
+          ...(body.sessionId === undefined ? {} : { sessionId: String(body.sessionId) }),
+          title: String(body.title ?? ''),
+          objective: String(body.objective ?? ''),
+          scopeKey: String(body.scopeKey ?? '')
+        });
+        send(res, 201, { ok: true, session });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_START_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const teachSessionRoute = /^\/v1\/studio\/teach\/([0-9a-f-]{36})(?:\/(stop|cancel|verify|compile))?$/i.exec(pathname);
+    if (teachSessionRoute) {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        const sessionId = teachSessionRoute[1]!;
+        const action = teachSessionRoute[2];
+        if (!action && req.method === 'GET') {
+          send(res, 200, { ok: true, session: await options.teachMode.inspectSession(sessionId) });
+          return;
+        }
+        if (action === 'stop' && req.method === 'POST') {
+          send(res, 200, { ok: true, session: await options.teachMode.stop(sessionId) });
+          return;
+        }
+        if (action === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, session: await options.teachMode.cancel(sessionId) });
+          return;
+        }
+        if (action === 'verify' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const receipt = await options.teachMode.verify(
+            sessionId,
+            Array.isArray(body.checks) ? body.checks as any : []
+          );
+          send(res, 200, { ok: true, receipt });
+          return;
+        }
+        if (action === 'compile' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const workflow = await options.teachMode.compile(sessionId, {
+            verificationReceipt: body.verificationReceipt as any,
+            parameters: Array.isArray(body.parameters) ? body.parameters as any : []
+          });
+          send(res, 200, { ok: true, workflow });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    const workflowRoute = /^\/v1\/studio\/workflows\/([0-9a-f-]{36})(?:\/(instantiate|run))?$/i.exec(pathname);
+    if (workflowRoute) {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        if (!workflowRoute[2] && req.method === 'GET') {
+          send(res, 200, { ok: true, workflow: await options.teachMode.inspectWorkflow(workflowRoute[1]!) });
+          return;
+        }
+        if (workflowRoute[2] === 'instantiate' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values)
+            ? body.values as Record<string, unknown>
+            : {};
+          send(res, 200, { ok: true, steps: await options.teachMode.instantiate(workflowRoute[1]!, values) });
+          return;
+        }
+        if (workflowRoute[2] === 'run' && req.method === 'POST') {
+          if (!options.studioExecutor) {
+            send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+            return;
+          }
+          const body = await readJson(req) as Record<string, unknown>;
+          const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values)
+            ? body.values as Record<string, unknown>
+            : {};
+          const run = await options.studioExecutor.submit(
+            workflowRoute[1]!,
+            values,
+            body.runId === undefined ? undefined : String(body.runId)
+          );
+          send(res, 201, { ok: true, run });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_WORKFLOW_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/studio/runs' && req.method === 'GET') {
+      if (!options.studioExecutor) {
+        send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, runs: await options.studioExecutor.list(limit) });
+      return;
+    }
+
+    const studioRunRoute = /^\/v1\/studio\/runs\/([0-9a-f-]{36})(?:\/(execute|verify|reconcile|cancel))?$/i.exec(pathname);
+    if (studioRunRoute) {
+      if (!options.studioExecutor) {
+        send(res, 503, { ok: false, error: { code: 'STUDIO_EXECUTOR_NOT_CONFIGURED', message: 'Studio workflow execution is not configured.' } });
+        return;
+      }
+      try {
+        const runId = studioRunRoute[1]!;
+        const operation = studioRunRoute[2];
+        if (!operation && req.method === 'GET') {
+          send(res, 200, { ok: true, run: await options.studioExecutor.inspect(runId) });
+          return;
+        }
+        if (operation === 'execute' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+          const maxSteps = body.maxSteps === undefined ? 1 : Number(body.maxSteps);
+          const signal = AbortSignal.timeout(50_000);
+          const run = await options.studioExecutor.execute(runId, {
+            maxSteps,
+            signal,
+            executeAction: (action, _permissions, actionSignal) =>
+              executeStudioActionWithApproval(action, approvalAuthority, actionSignal)
+          });
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'verify' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const run = await options.studioExecutor.verify(
+            runId,
+            Array.isArray(body.checks) ? body.checks as any : []
+          );
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'reconcile' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const run = await options.studioExecutor.reconcile(runId, String(body.stepKey ?? ''), {
+            resolution: String(body.resolution ?? '') as any,
+            checks: Array.isArray(body.checks) ? body.checks as any : []
+          });
+          send(res, 200, { ok: true, run });
+          return;
+        }
+        if (operation === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, run: await options.studioExecutor.cancel(runId) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'STUDIO_RUN_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/desired-state' && req.method === 'GET') {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, contracts: await options.desiredState.list(limit) });
+      return;
+    }
+
+    if (pathname === '/v1/desired-state' && req.method === 'POST') {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const contract = await options.desiredState.create({
+          ...(body.contractId === undefined ? {} : { contractId: String(body.contractId) }),
+          name: String(body.name ?? ''),
+          scopeKey: String(body.scopeKey ?? ''),
+          desired: Array.isArray(body.desired) ? body.desired as any : [],
+          remediation: body.remediation as any,
+          policy: body.policy && typeof body.policy === 'object' && !Array.isArray(body.policy) ? body.policy as any : undefined
+        });
+        send(res, 201, { ok: true, contract });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DESIRED_STATE_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const desiredRoute = /^\/v1\/desired-state\/([0-9a-f-]{36})(?:\/(reconcile|pause|resume))?$/i.exec(pathname);
+    if (desiredRoute) {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      try {
+        const id = desiredRoute[1]!;
+        const action = desiredRoute[2];
+        if (!action && req.method === 'GET') {
+          send(res, 200, { ok: true, contract: await options.desiredState.inspect(id) });
+          return;
+        }
+        if (action === 'reconcile' && req.method === 'POST') {
+          send(res, 200, { ok: true, contract: await options.desiredState.reconcile(id) });
+          return;
+        }
+        if (action === 'pause' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          send(res, 200, { ok: true, contract: await options.desiredState.pause(id, { cancelActive: body.cancelActive === true }) });
+          return;
+        }
+        if (action === 'resume' && req.method === 'POST') {
+          send(res, 200, { ok: true, contract: await options.desiredState.resume(id) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DESIRED_STATE_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
     }
 
     if (pathname === '/v1/procedures' && req.method === 'GET') {
@@ -367,7 +1104,18 @@ export function createLocalAgentServer(options: {
           }) ?? null });
           return;
         }
-        throw new Error('world query operation must be fact, entity, or trace.');
+        if (operation === 'history') {
+          send(res, 200, { ok: true, history: await options.world.history({
+            entityKey: String(body.entityKey ?? ''),
+            ...(body.factKey === undefined ? {} : { factKey: String(body.factKey) }),
+            ...(body.source === undefined ? {} : { source: String(body.source) }),
+            ...(body.since === undefined ? {} : { since: String(body.since) }),
+            ...(body.until === undefined ? {} : { until: String(body.until) }),
+            ...(body.limit === undefined ? {} : { limit: Number(body.limit) })
+          }) });
+          return;
+        }
+        throw new Error('world query operation must be fact, entity, trace, or history.');
       } catch (error) {
         send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'WORLD_QUERY_INVALID', message: error instanceof Error ? error.message : String(error) } });
       }
@@ -590,7 +1338,7 @@ export function createLocalAgentServer(options: {
         const leaseId = String(body.leaseId ?? '');
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        const resourceKeys = teamActionResourceKeys(action);
+        const resourceKeys = resourceKeysForAction(action);
         const authorization = await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
           workerId,
           workItemId: teamExecuteRoute[2]!,
@@ -636,18 +1384,20 @@ export function createLocalAgentServer(options: {
           }
         }
         await options.audit?.append({
-          taskId: teamExecuteRoute[1]!,
+          traceId: teamExecuteRoute[1]!,
+          missionId: teamExecuteRoute[1]!,
+          workItemId: teamExecuteRoute[2]!,
+          workerId,
+          actionId: teamAction.id,
+          providerId: result.provider,
           capability: teamAction.capability,
           target: teamAction.target,
           result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
           risk: teamAction.risk,
           details: {
-            actionId: teamAction.id,
-            provider: result.provider,
             durationMs: result.durationMs,
             errorCode: result.error?.code,
-            teamWorkItemId: teamExecuteRoute[2]!,
-            teamWorkerId: workerId,
+            sideEffectState: result.error?.sideEffectState,
             teamLeaseId: leaseId,
             autoResumedAfterApproval
           }
@@ -769,8 +1519,9 @@ export function createLocalAgentServer(options: {
       try {
         const body = await readJson(req) as Record<string, unknown>;
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         const goal = body.goal as SemanticTaskGoal;
-        const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
+        const authorizedScope = taskAuthorizedScope(goal, requestPermissions.allowedRoots);
         if (!authorizedScope) {
           send(res, 403, { ok: false, error: { code: 'TASK_SCOPE_DENIED', message: 'Task goal root is outside the authorized roots.' } });
           return;
@@ -790,7 +1541,7 @@ export function createLocalAgentServer(options: {
           maxAttemptsPerStep: body.maxAttemptsPerStep,
           timeoutMs: body.timeoutMs
         } as SubmitTaskOptions);
-        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority)) : submitted;
+        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority, requestPermissions)) : submitted;
         send(res, body.run === true ? 200 : 202, { ok: true, task });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_SUBMISSION_INVALID';
@@ -823,12 +1574,13 @@ export function createLocalAgentServer(options: {
         const operation = taskRoute[2]!;
         const body = await readJson(req) as { approvedActionId?: unknown; approvalAuthority?: unknown };
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if ((operation === 'run' || operation === 'resume') && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
           return;
         }
         let task;
-        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority));
+        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority, requestPermissions));
         else if (operation === 'pause') task = await options.taskOrchestrator.pause(taskId);
         else if (operation === 'cancel') task = await options.taskOrchestrator.cancel(taskId);
         else {
@@ -850,7 +1602,7 @@ export function createLocalAgentServer(options: {
               return;
             }
           }
-          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority));
+          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority, requestPermissions));
         }
         send(res, 200, { ok: true, task });
       } catch (error) {
@@ -1119,14 +1871,15 @@ export function createLocalAgentServer(options: {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.' } });
           return;
         }
-        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown };
+        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown; teachSessionId?: unknown };
         if (!body.action || typeof body.action !== 'object') {
           send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
           return;
         }
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        let result = await executeActionWithCurrentApproval(action, approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
@@ -1152,24 +1905,44 @@ export function createLocalAgentServer(options: {
               durationMs: result.durationMs
             };
           } else if (decision === 'approve' || decision === 'session') {
-            result = await executeActionWithCurrentApproval(action, approvalAuthority);
+            result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
             autoResumedAfterApproval = true;
           }
         }
+        let teachCaptured = false;
+        let teachCaptureCode: string | undefined;
+        if (result.ok && body.teachSessionId !== undefined && options.teachMode) {
+          try {
+            await options.teachMode.record(String(body.teachSessionId), {
+              action,
+              result,
+              resourceKeys: resourceKeysForAction(action)
+            });
+            teachCaptured = true;
+          } catch (error) {
+            teachCaptureCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CAPTURE_FAILED';
+          }
+        }
         await options.audit?.append({
-          taskId: action.taskId,
+          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+          actionId: action.id,
+          providerId: result.provider,
           capability: action.capability,
           target: action.target,
           result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
           risk: action.risk,
           details: {
-            actionId: action.id,
             provenanceKind: action.provenance.kind,
-            provider: result.provider,
             durationMs: result.durationMs,
             errorCode: result.error?.code,
-            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
-            autoResumedAfterApproval
+            sideEffectState: result.error?.sideEffectState,
+            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
+            autoResumedAfterApproval,
+            enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
+            enterpriseRoleIds: requestPermissionDecision.roleIds,
+            enterpriseBindingIds: requestPermissionDecision.bindingIds,
+            teachCaptured,
+            teachCaptureCode
           }
         });
         send(res, result.ok ? 200 : 409, result);
@@ -1261,41 +2034,6 @@ async function publishVerifierWorldObservations(
     published += 1;
   }
   return published;
-}
-
-function teamActionResourceKeys(action: ActionRequest): string[] {
-  const input = action.input;
-  const absolute = (value: unknown): string | undefined => {
-    if (typeof value !== 'string' || !value || value.includes('\0')) return undefined;
-    const normalized = path.resolve(value).replace(/\\/g, '/');
-    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-  };
-  const add = (prefix: string, value: unknown, target: Set<string>) => {
-    const resolved = absolute(value);
-    if (resolved) target.add(`${prefix}:${resolved}`);
-  };
-  const keys = new Set<string>();
-  if (action.capability.startsWith('file.')) {
-    if (action.capability === 'file.manage') {
-      add('file', input.path, keys); add('file', input.source, keys); add('file', input.destination, keys);
-    } else add('file', input.path, keys);
-  } else if (action.capability.startsWith('git.')) add('repo', input.cwd, keys);
-  else if (action.capability.startsWith('project.')) add('repo', input.path ?? input.cwd, keys);
-  else if (action.capability.startsWith('docker.')) add('docker', input.path, keys);
-  else if (action.capability.startsWith('postgres.')) {
-    const root = absolute(input.path);
-    if (root) keys.add(`database:${root}:${String(input.profileId ?? 'profiles').toLowerCase()}`);
-  } else if (action.capability.startsWith('vscode.')) {
-    add('file', input.path, keys); add('file', input.leftPath, keys); add('file', input.rightPath, keys);
-  } else if (action.capability === 'terminal.execute') add('workspace', input.cwd, keys);
-  else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') add('workspace', input.cwd, keys);
-    else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
-  } else if (action.capability === 'process.inspect') keys.add('process:windows');
-  else if (action.capability.startsWith('browser.')) keys.add(`browser:${String(input.targetId ?? 'global').toLowerCase()}`);
-  else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') keys.add('desktop:windows');
-  else keys.add(`cap:${action.capability.toLowerCase()}`);
-  return [...keys].sort();
 }
 
 function withinAuthorizedRoots(input: string, roots: string[]): boolean {

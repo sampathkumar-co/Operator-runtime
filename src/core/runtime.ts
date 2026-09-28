@@ -1,17 +1,19 @@
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, PermissionProfile } from './types.ts';
-import { PolicyEngine } from './policy.ts';
+import { AuthorityKernel } from './authority-kernel.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
-import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 
 export class OperatorRuntime {
   readonly router: CapabilityRouter;
-  readonly policy = new PolicyEngine();
+  readonly authority: AuthorityKernel;
+  readonly policy: AuthorityKernel['policy'];
 
-  constructor(options: { learning?: ProviderLearning } = {}) {
+  constructor(options: { learning?: ProviderLearning; authority?: AuthorityKernel } = {}) {
     this.router = new CapabilityRouter({ learning: options.learning });
+    this.authority = options.authority ?? new AuthorityKernel();
+    this.policy = this.authority.policy;
   }
 
   register(provider: CapabilityProvider): this {
@@ -39,12 +41,13 @@ export class OperatorRuntime {
     if (context.signal?.aborted) return abortedResult(action, start);
     let canonicalAction = action;
     try {
-      this.policy.authorizeBase(action, permissions);
-      const rule = capabilityRiskRule(action.capability);
-      const canonicalRisk = rule === 'dynamic' ? await this.router.resolveRisk(action) : rule;
-      assertCanonicalRisk(action, canonicalRisk);
-      canonicalAction = { ...action, risk: canonicalRisk };
-      this.policy.authorizeRisk(canonicalAction, permissions);
+      const decision = await this.authority.authorize(
+        action,
+        permissions,
+        (candidate) => this.router.resolveRisk(candidate),
+        context.authorityToken
+      );
+      canonicalAction = decision.canonicalAction;
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('POLICY_ERROR', String(error));
       return {
@@ -118,7 +121,6 @@ export class OperatorRuntime {
     await this.router.closeAll();
   }
 }
-
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'The operation was aborted');

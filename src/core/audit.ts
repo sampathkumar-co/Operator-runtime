@@ -45,9 +45,17 @@ function redact(value: unknown, depth = 0): unknown {
 export interface AuditEvent {
   id?: string;
   timestamp?: string;
+  traceId?: string;
+  operationId?: string;
   taskId?: string;
+  missionId?: string;
+  workItemId?: string;
+  workerId?: string;
   sessionId?: string;
   deviceId?: string;
+  actionId?: string;
+  providerId?: string;
+  procedureId?: string;
   capability: string;
   target?: string;
   result: 'allowed' | 'blocked' | 'success' | 'failure';
@@ -77,6 +85,34 @@ export interface AuditIntegrityStatus {
   valid: true;
   count: number;
   headHash: string | null;
+}
+
+
+export interface AuditQuery {
+  traceId?: string;
+  operationId?: string;
+  taskId?: string;
+  missionId?: string;
+  workItemId?: string;
+  workerId?: string;
+  deviceId?: string;
+  actionId?: string;
+  providerId?: string;
+  procedureId?: string;
+  capability?: string;
+  result?: AuditEvent['result'];
+  limit?: number;
+}
+
+export interface AuditSummary {
+  total: number;
+  success: number;
+  failure: number;
+  blocked: number;
+  allowed: number;
+  byCapability: Record<string, number>;
+  byProvider: Record<string, number>;
+  averageDurationMs?: number;
 }
 
 export class AuditLog {
@@ -126,6 +162,58 @@ export class AuditLog {
     const parsed = Number(limit);
     const bounded = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), MAX_TAIL_EVENTS) : 100;
     return verified.events.slice(-bounded);
+  }
+
+
+  async query(input: AuditQuery = {}): Promise<AuditEvent[]> {
+    await this.#queue;
+    const verified = await this.#readAndVerify(true);
+    const parsed = Number(input.limit ?? 100);
+    const limit = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), MAX_TAIL_EVENTS) : 100;
+    const keys = [
+      'traceId', 'operationId', 'taskId', 'missionId', 'workItemId', 'workerId',
+      'deviceId', 'actionId', 'providerId', 'procedureId', 'capability', 'result'
+    ] as const;
+    const filtered = verified.events.filter((event) => keys.every((key) => {
+      const expected = input[key];
+      return expected === undefined || event[key] === expected;
+    }));
+    return filtered.slice(-limit);
+  }
+
+  async summary(input: Omit<AuditQuery, 'limit'> = {}): Promise<AuditSummary> {
+    const events = await this.query({ ...input, limit: MAX_TAIL_EVENTS });
+    const byCapability: Record<string, number> = {};
+    const byProvider: Record<string, number> = {};
+    let durationTotal = 0;
+    let durationCount = 0;
+    let success = 0;
+    let failure = 0;
+    let blocked = 0;
+    let allowed = 0;
+    for (const event of events) {
+      byCapability[event.capability] = (byCapability[event.capability] ?? 0) + 1;
+      if (event.providerId) byProvider[event.providerId] = (byProvider[event.providerId] ?? 0) + 1;
+      if (event.result === 'success') success += 1;
+      else if (event.result === 'failure') failure += 1;
+      else if (event.result === 'blocked') blocked += 1;
+      else allowed += 1;
+      const duration = Number(event.details?.durationMs);
+      if (Number.isFinite(duration) && duration >= 0) {
+        durationTotal += duration;
+        durationCount += 1;
+      }
+    }
+    return {
+      total: events.length,
+      success,
+      failure,
+      blocked,
+      allowed,
+      byCapability,
+      byProvider,
+      ...(durationCount > 0 ? { averageDurationMs: durationTotal / durationCount } : {})
+    };
   }
 
   async verifyIntegrity(): Promise<AuditIntegrityStatus> {

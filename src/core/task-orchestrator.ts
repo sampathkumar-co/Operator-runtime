@@ -11,6 +11,9 @@ import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
 import { verifyTaskCompletion } from './task-verifier.ts';
+import { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
+import type { ResourceLeaseStore } from './resource-leases.ts';
+import { resourceKeysForAction } from './resource-identity.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -113,6 +116,7 @@ export class TaskOrchestrator {
   #controlRequests = new Map<string, 'PAUSED' | 'CANCELLED'>();
   #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
+  #resourceLeases?: ResourceLeaseStore;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -120,6 +124,7 @@ export class TaskOrchestrator {
     permissions: PermissionProfile;
     planners?: TaskPlanner[];
     executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
+    resourceLeases?: ResourceLeaseStore;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -127,6 +132,7 @@ export class TaskOrchestrator {
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
+    this.#resourceLeases = options.resourceLeases;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -311,6 +317,7 @@ export class TaskOrchestrator {
         record.state = 'INTERRUPTED';
         record.finishedAt = new Date().toISOString();
         record.errorCode = 'EXECUTION_ABORTED';
+        record.sideEffectState = 'none';
         setNodeState(task, node.id, 'SKIPPED');
         task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
         await this.#persistRunState(task, assertLease);
@@ -331,12 +338,51 @@ export class TaskOrchestrator {
       };
       const learningContext = semanticLearningContext(goal, task);
       let result: ActionResult;
-      try { result = await this.#executeAction(action, permissions, { signal, learningContext }); }
-      catch (error) {
+      let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
+      try {
+        if (this.#resourceLeases) {
+          resourceLease = await this.#resourceLeases.acquire(
+            task.id,
+            resourceKeysForAction(action),
+            risk === 'read' ? 'shared' : 'exclusive'
+          );
+        }
+        result = await this.#executeAction(action, permissions, { signal, learningContext });
+      } catch (error) {
+        const code = error instanceof OperatorError ? error.code : 'TASK_EXECUTOR_EXCEPTION';
         result = {
-          ok: false, capability: action.capability, provider: 'task-executor', evidence: [], durationMs: 0,
-          error: { code: 'TASK_EXECUTOR_EXCEPTION', message: error instanceof Error ? error.message : String(error), retryable: false }
+          ok: false,
+          capability: action.capability,
+          provider: code === 'RESOURCE_BUSY' ? 'scheduler' : 'task-executor',
+          evidence: [],
+          durationMs: 0,
+          error: {
+            code,
+            message: error instanceof Error ? error.message : String(error),
+            retryable: error instanceof OperatorError ? error.retryable : false,
+            sideEffectState: 'none'
+          }
         };
+      } finally {
+        if (resourceLease) {
+          try {
+            await resourceLease.release();
+          } catch (error) {
+            result = {
+              ok: false,
+              capability: action.capability,
+              provider: 'scheduler',
+              evidence: result!?.evidence ?? [],
+              durationMs: result!?.durationMs ?? 0,
+              error: {
+                code: 'RESOURCE_LEASE_RELEASE_FAILED',
+                message: error instanceof Error ? error.message : String(error),
+                retryable: false,
+                sideEffectState: risk === 'read' ? 'none' : result!?.ok ? 'known' : (result!?.error?.sideEffectState ?? 'uncertain')
+              }
+            };
+          }
+        }
       }
       const latest = await this.#store.get(task.id);
       await assertLease();
@@ -352,6 +398,7 @@ export class TaskOrchestrator {
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
+      latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
@@ -450,7 +497,7 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (failureDecision.retryable && risk === 'read' && failureDecision.strategy === 'retry') {
+      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'retry') {
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
           code: failureDecision.code,
@@ -461,12 +508,13 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         continue;
       }
-      if (failureDecision.retryable && risk !== 'read') {
-        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry of a failed mutating action; recovery requires an explicit planner re-observation or repair strategy.', {
+      if (failureDecision.retryable && !retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain')) {
+        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry because side effects are known or uncertain; recovery requires explicit re-observation/reconciliation.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
-          risk
+          risk,
+          sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
         }));
       }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
@@ -593,6 +641,7 @@ export class TaskOrchestrator {
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
+      record.sideEffectState = record.risk === 'read' ? 'none' : 'uncertain';
       const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
       if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
         node.state = 'SKIPPED';

@@ -1,8 +1,7 @@
-import crypto from 'node:crypto';
-import { canonicalJson } from './action-identity.ts';
 import { evidence } from './evidence.ts';
 import type { Evidence } from './types.ts';
 import type { TaskCapsule } from './task.ts';
+import { VerificationKernel } from './verification-kernel.ts';
 
 export interface TaskVerificationBundle {
   version: 1;
@@ -104,9 +103,16 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
     stateVersions,
     checks
   };
-  const digest = crypto.createHash('sha256').update(canonicalJson(base)).digest('hex');
+  const { checks: _contractChecks, ...contract } = base;
+  const receipt = new VerificationKernel().verify({
+    subjectKind: 'task',
+    subjectId: task.id,
+    contract,
+    checks
+  });
+  const digest = receipt.digest;
   const bundle: TaskVerificationBundle = { ...base, digest };
-  const ok = checks.every((check) => check.ok);
+  const ok = receipt.verified;
   return {
     ok,
     bundle,

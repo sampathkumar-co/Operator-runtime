@@ -48,6 +48,7 @@ export type KnowledgeInspectInput =
     }
   | { kind: 'world-entity'; entityKey: string }
   | { kind: 'world-fact'; entityKey: string; factKey: string }
+  | { kind: 'world-history'; entityKey: string; factKey?: string; source?: string; since?: string; until?: string; limit?: number }
   | { kind: 'world-trace'; fromKey: string; toKey?: string; targetType?: string; maxDepth?: number; minConfidence?: number }
   | { kind: 'world-list'; scopeKey?: string; type?: string; limit?: number }
   | { kind: 'optimizer'; limit?: number };
@@ -202,14 +203,24 @@ class DirectLocalAgentClient implements Executor {
       ? { operation: 'entity', entityKey: input.entityKey }
       : input.kind === 'world-fact'
         ? { operation: 'fact', entityKey: input.entityKey, factKey: input.factKey }
-        : {
-            operation: 'trace',
-            fromKey: input.fromKey,
-            toKey: input.toKey,
-            targetType: input.targetType,
-            maxDepth: input.maxDepth,
-            minConfidence: input.minConfidence
-          };
+        : input.kind === 'world-history'
+          ? {
+              operation: 'history',
+              entityKey: input.entityKey,
+              factKey: input.factKey,
+              source: input.source,
+              since: input.since,
+              until: input.until,
+              limit: input.limit
+            }
+          : {
+              operation: 'trace',
+              fromKey: input.fromKey,
+              toKey: input.toKey,
+              targetType: input.targetType,
+              maxDepth: input.maxDepth,
+              minConfidence: input.minConfidence
+            };
     return await this.#jsonRequest(new URL('/v1/world/query', this.#baseUrl), 'POST', payload);
   }
 

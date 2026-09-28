@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ActionRisk, Evidence, TaskState } from './types.ts';
+import type { ActionRisk, Evidence, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 export interface TaskNode {
@@ -28,6 +28,7 @@ export interface TaskActionRecord {
   startedAt: string;
   finishedAt?: string;
   errorCode?: string;
+  sideEffectState?: SideEffectState;
   observation?: TaskObservationSummary;
   evidence: Evidence[];
 }
