@@ -366,14 +366,62 @@ function validateState(input: unknown): DesiredStateFile {
     bounded(contract.name, 4096, 'contract.name');
     contextKey(contract.scopeKey, 'contract.scopeKey');
     normalizeConditions(contract.desired);
-    validRisk(contract.remediation.authority.maxRisk);
+    bounded(contract.remediation?.objective, 16_384, 'contract.remediation.objective');
+    uniqueStrings(contract.remediation?.successConditions, 100, 4096, 'contract.remediation.successConditions');
+    validRisk(contract.remediation?.authority?.maxRisk);
+    uniqueStrings(contract.remediation?.authority?.capabilities, 500, 256, 'contract.remediation.authority.capabilities');
+    uniqueStrings(contract.remediation?.authority?.resources, 5000, 1024, 'contract.remediation.authority.resources');
+    if (!contract.policy || typeof contract.policy.autoRemediate !== 'boolean') throw new OperatorError('DESIRED_STATE_CORRUPT', 'Desired-state policy is invalid.');
+    integer(contract.policy.minRemediationIntervalMs, 0, 24 * 60 * 60_000, 'contract.policy.minRemediationIntervalMs');
+    integer(contract.policy.maxConsecutiveFailures, 1, 20, 'contract.policy.maxConsecutiveFailures');
+    integer(contract.policy.maxRemediationsPerDay, 1, 1000, 'contract.policy.maxRemediationsPerDay');
     if (!['PAUSED', 'HEALTHY', 'DRIFTED', 'REMEDIATING', 'BLOCKED'].includes(contract.status)) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Desired-state status is invalid.');
-    sha(contract.contractDigest, 'contract.contractDigest');
+    const storedDigest = sha(contract.contractDigest, 'contract.contractDigest');
+    const expectedDigest = crypto.createHash('sha256').update(canonicalJson({
+      name: contract.name,
+      scopeKey: contract.scopeKey,
+      desired: contract.desired,
+      remediation: contract.remediation,
+      policy: contract.policy
+    })).digest('hex');
+    if (storedDigest !== expectedDigest) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Desired-state contract digest does not match the persisted authority contract.');
     integer(contract.consecutiveFailures, 0, 1_000_000, 'contract.consecutiveFailures');
     if (!Array.isArray(contract.remediationHistory) || contract.remediationHistory.length > MAX_HISTORY) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Desired-state remediation history is invalid.');
-    if (contract.activeOperationId) uuid(contract.activeOperationId, 'contract.activeOperationId');
+    let unfinished = 0;
+    for (const [index, item] of contract.remediationHistory.entries()) {
+      uuid(item.operationId, `contract.remediationHistory[${index}].operationId`);
+      const startedAt = iso(item.startedAt, `contract.remediationHistory[${index}].startedAt`);
+      if (item.finishedAt === undefined) {
+        if (item.outcome !== undefined) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Unfinished remediation history cannot have an outcome.');
+        unfinished += 1;
+      } else {
+        const finishedAt = iso(item.finishedAt, `contract.remediationHistory[${index}].finishedAt`);
+        if (Date.parse(finishedAt) < Date.parse(startedAt)) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Remediation history finish cannot precede start.');
+        if (!['verified', 'failed', 'cancelled'].includes(String(item.outcome ?? ''))) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Finished remediation history requires a valid outcome.');
+      }
+    }
+    if (unfinished > 1) throw new OperatorError('DESIRED_STATE_CORRUPT', 'At most one remediation operation may be unfinished.');
+    if (contract.activeOperationId) {
+      uuid(contract.activeOperationId, 'contract.activeOperationId');
+      const activeHistory = contract.remediationHistory.find((item) => item.operationId === contract.activeOperationId && item.finishedAt === undefined);
+      if (!activeHistory) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Active remediation operation must have one unfinished history record.');
+    } else if (unfinished !== 0) {
+      throw new OperatorError('DESIRED_STATE_CORRUPT', 'Unfinished remediation history requires an active operation id.');
+    }
+    const createdAt = iso(contract.createdAt, 'contract.createdAt');
+    const updatedAt = iso(contract.updatedAt, 'contract.updatedAt');
+    if (Date.parse(updatedAt) < Date.parse(createdAt)) throw new OperatorError('DESIRED_STATE_CORRUPT', 'Desired-state updatedAt cannot precede createdAt.');
   }
   return state;
+}
+
+function iso(input: unknown, label: string): string {
+  const value = String(input ?? '');
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new OperatorError('DESIRED_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
+  }
+  return value;
 }
 
 function isTerminal(operation: DigitalOperation): boolean {
