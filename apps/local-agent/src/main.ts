@@ -30,6 +30,7 @@ import { evidence } from '../../../src/core/evidence.ts';
 import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
 import { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import { DesiredStateController } from '../../../src/core/desired-state.ts';
+import { DesiredStateReconciler } from '../../../src/core/desired-state-reconciler.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -135,6 +136,11 @@ const operations = new DigitalOperationsLayer(stateDir, {
   availableCapabilities: operationCapabilities
 });
 const desiredState = new DesiredStateController(stateDir, { world, operations });
+const desiredStateIntervalMs = Number(process.env.OPERATOR_DESIRED_STATE_INTERVAL_MS ?? 60_000);
+if (!Number.isSafeInteger(desiredStateIntervalMs) || desiredStateIntervalMs < 1_000 || desiredStateIntervalMs > 24 * 60 * 60_000) {
+  throw new OperatorError('DESIRED_STATE_INTERVAL_INVALID', 'OPERATOR_DESIRED_STATE_INTERVAL_MS must be an integer from 1000 to 86400000.');
+}
+const desiredStateReconciler = new DesiredStateReconciler(desiredState, { intervalMs: desiredStateIntervalMs });
 let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
@@ -315,6 +321,8 @@ const agent = createLocalAgentServer({
     postgresConfigured: Boolean(process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY),
     vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
+    desiredStateReconcilerConfigured: true,
+    desiredStateIntervalMs,
     relayConfigured: Boolean(relayUrl),
     relayResultConfigured: Boolean(relayResultUrl),
     relayTokenFileConfigured: Boolean(relayUrl),
@@ -338,6 +346,8 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
+console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
+desiredStateReconciler.start();
 if (relayUrl) {
   const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
@@ -364,7 +374,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     stopRelay();
-    await Promise.allSettled([relayRun, agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
+    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
     process.exit(0);
   });
 }
