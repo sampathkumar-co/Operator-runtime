@@ -386,7 +386,7 @@ export function createLocalAgentServer(options: {
           occurredAt: String(body.occurredAt ?? '')
         });
         await options.audit?.append({
-          traceId: body.correlationKey === undefined ? undefined : String(body.correlationKey),
+          ...(body.correlationKey === undefined ? {} : { traceId: String(body.correlationKey) }),
           capability: 'event.publish',
           result: 'success',
           risk: 'write',
