@@ -133,6 +133,7 @@ export class StudioWorkflowExecutor {
   async execute(runIdInput: string, options: {
     signal?: AbortSignal;
     executeAction?: ExecuteAction;
+    maxSteps?: number;
   } = {}): Promise<StudioWorkflowRun> {
     const runId = uuid(runIdInput, 'runId');
     const runLease = await this.#leases.acquire(`studio-run:${runId}:${crypto.randomUUID()}`, [`studio-run:${runId}`], 'exclusive');
@@ -143,8 +144,14 @@ export class StudioWorkflowExecutor {
       if (run.state === 'BLOCKED') throw new OperatorError('STUDIO_RUN_RECONCILIATION_REQUIRED', 'Studio workflow run is blocked on uncertain side effects.');
       if (run.state === 'AWAITING_VERIFICATION') return run;
 
+      const maxSteps = integer(options.maxSteps ?? 20, 1, 50, 'maxSteps');
+      let executedThisCall = 0;
       run = await this.#update(runId, (current) => { current.state = 'RUNNING'; });
       for (const step of run.steps) {
+        if (step.state === 'PENDING' && executedThisCall >= maxSteps) {
+          run = await this.#update(runId, (current) => { current.state = 'PENDING'; });
+          return run;
+        }
         if (options.signal?.aborted) {
           run = await this.#update(runId, (current) => {
             current.state = 'CANCELLED';
@@ -211,6 +218,7 @@ export class StudioWorkflowExecutor {
               mutable.state = 'FAILED';
             }
           });
+          executedThisCall += 1;
           if (!result.ok) return run;
         } finally {
           await stepLease.release();
