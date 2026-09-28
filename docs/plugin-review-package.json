@@ -107,7 +107,7 @@
     }
   },
   "externalGates": {
-    "productionMcpUrl": "PASS_LIVE: https://operator.splcart.in/mcp is deployed from source 3361b2f77d2b04028d514b178bd4a246fc863e6c; post-deploy health reports exactly the canonical 9-tool public surface.",
+    "productionMcpUrl": "PASS_LIVE: https://operator.splcart.in/mcp is deployed from source 0c28cf8df77369c04fc3b85ed9d16c8def490546; post-deploy health reports exactly the canonical 9-tool public surface.",
     "website": "PASS_LIVE: final Mecord Connect production pages are deployed and post-deploy health/routing/security verification passed.",
     "privacy": "PASS_LIVE: final Mecord Connect Privacy notice is deployed from the current source-controlled notice set.",
     "terms": "PASS_LIVE: final Mecord Connect Terms notice is deployed from the current source-controlled notice set.",
@@ -121,7 +121,7 @@
     "hostedPluginRefresh": "PASS_LIVE: the production With MCP connection was refreshed through real OAuth; a fresh ChatGPT conversation exposes exactly the canonical 9 tools and no device.claim.",
     "toolScan": "BLOCKED_OPENAI_VERIFICATION: the fresh public ChatGPT connection exposes exactly 9 tools, but formal portal Scan Tools / separate Developer ChatGPT attachment cannot be completed until OpenAI verification allows it.",
     "demoRecording": "BLOCKED_OPENAI_VERIFICATION: record reviewer-facing directory-submission material only after OpenAI verification becomes available; runtime/production release is already complete.",
-    "npmRuntimePublication": "PASS_LIVE: mecord-connect@1.0.1 is public under latest from source 10914835e5ce4d8b1d2bf9952e8789efc8feb306. Clean registry install, installed doctor, remote --help, package/runtime checks and vulnerability scan passed.",
+    "npmRuntimePublication": "PASS_CURRENT_REGISTRY: mecord-connect@1.0.1 remains public under latest. The certified 2.0.0 Stage 1-20 successor is staged separately for explicit owner approval before the registry tag changes.",
     "reviewerFixture": "LOCAL_SEMANTICS_AND_PUBLIC_DEVICE_WRITE_PASS: local 5 positive + 3 negative fixture semantics are certified, and the deployed 9-tool connection now proves real physical-device reads/Git/file.create/read-back plus TARGET_EXISTS and APPROVAL_REQUIRED/no-mutation boundaries. Dedicated reviewer credential/fixture execution still remains.",
     "npmRuntimeLicense": "RESOLVED_LIVE: the public mecord-connect@1.0.1 registry package carries SEE LICENSE IN LICENSE and the proprietary LICENSE.",
     "evidenceBranchCi": "DYNAMIC_EXTERNAL_EVIDENCE: GitHub exact-head CI, Platform Matrix, NPM Remote Runtime and Windows Signing Smoke status for the active release-candidate branch is authoritative immediately before merge/submission. Do not copy stale run numbers into this static review package; every required run must be terminal success on the then-current exact head.",
@@ -129,12 +129,12 @@
     "occ3nPackageHardening": "HISTORICAL_INTEGRATED: PR #22 established the policy-neutral npm hardening machinery that is integrated into the merged PR #28 hardening baseline and retained by current main. FG-013 and FG-015 are resolved in current source as PROPRIETARY + DUAL_USE; do not treat PR #22 as a current release candidate or current owner-decision blocker.",
     "occ3oPublicNoticeReproducibility": "PASS_ENGINEERING_DRAFT: PR #24 head 6edd3ee8eca2f5b8096424bac8750f0c945cec94 source-controls the exact live Privacy/Terms/Support notice bytes previously hidden by an ignore rule; CI #710, Platform Matrix #480 and Windows Signing Smoke #481 pass. A disposable merge preview with PR #22 is conflict-free, passes 24/24 focused tests and the full Windows-aware suite at 367 tests / 351 pass / 16 expected skips / 0 fail. FG-017 legal identity wording remains intentionally unresolved.",
     "occ3rIntegratedSuccessor": "HISTORICAL_INTEGRATED: PR #27 established the Mecord Connect rebrand, unscoped mecord-connect package, exact public MCP identity and release packaging that were integrated into the merged PR #28 hardening baseline and retained through the PR #29 baseline d51a3b2ee4746e1a29f9cf2ec87cef603ac76edf. It is provenance, not the current release candidate.",
-    "publicBrandingDeployment": "PASS_LIVE: final Mecord Connect production source 3361b2f77d2b04028d514b178bd4a246fc863e6c is deployed; public pages and the canonical 9-tool surface are live.",
-    "developerMcpEndpoint": "PASS_LIVE: https://developer.operator.splcart.in/mcp reports exactly 32 grouped tools from source 3361b2f77d2b04028d514b178bd4a246fc863e6c; operator:developer plus explicit account entitlement are required and the Developer pairing route returns 404."
+    "publicBrandingDeployment": "PASS_LIVE: final Mecord Connect production source 0c28cf8df77369c04fc3b85ed9d16c8def490546 is deployed; public pages and the canonical 9-tool surface are live.",
+    "developerMcpEndpoint": "PASS_LIVE: https://developer.operator.splcart.in/mcp reports exactly 32 grouped tools from source 0c28cf8df77369c04fc3b85ed9d16c8def490546; operator:developer plus explicit account entitlement are required and the Developer pairing route returns 404."
   },
   "releaseCandidate": {
     "name": "Mecord Connect 1.0.0",
-    "sourceCommit": "3361b2f77d2b04028d514b178bd4a246fc863e6c",
+    "sourceCommit": "0c28cf8df77369c04fc3b85ed9d16c8def490546",
     "productionMcp": "https://operator.splcart.in/mcp",
     "npmPackage": "mecord-connect@1.0.1",
     "status": "PRODUCTION_LIVE_OPENAI_DIRECTORY_NOT_SUBMITTED"
@@ -143,7 +143,7 @@
     "name": "Mecord Connect post-release source line",
     "pullRequest": null,
     "branch": "main",
-    "productionBaseCommit": "3361b2f77d2b04028d514b178bd4a246fc863e6c",
+    "productionBaseCommit": "0c28cf8df77369c04fc3b85ed9d16c8def490546",
     "sourceCommit": null,
     "sourceCommitPolicy": "dynamic-main-head-not-a-production-claim",
     "engineeringBaseline": "71b7c122a04b97637d17e4ae296437d64ad20620",
