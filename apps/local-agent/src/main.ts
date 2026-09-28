@@ -37,6 +37,7 @@ import { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
+import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -96,6 +97,7 @@ const semanticMigration = new SemanticCheckpointManager(stateDir, {
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
+const enterprisePolicy = new EnterprisePolicyStore(stateDir);
 const teachMode = new TeachModeStore(stateDir);
 const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
@@ -349,6 +351,7 @@ const agent = createLocalAgentServer({
   teachMode,
   studioExecutor,
   semanticMigration,
+  enterprisePolicy,
   desiredState,
   deviceIdentity,
   deviceRegistry,
@@ -371,6 +374,7 @@ const agent = createLocalAgentServer({
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
     studioWorkflowExecutorConfigured: true,
     semanticMigrationConfigured: true,
+    enterprisePolicyConfigured: await enterprisePolicy.isConfigured(),
     recoveredStudioRunCount: recoveredStudioRuns,
     desiredStateReconcilerConfigured: true,
     desiredStateIntervalMs,
