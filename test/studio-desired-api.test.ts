@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -116,9 +115,24 @@ test('Stage19/20 private APIs require auth and Teach captures only the actual ex
   assert.equal(inspected.session.steps[0].capability, 'file.read');
 
   assert.equal((await fetch(`${base}/v1/studio/teach/${started.session.id}/stop`, { method: 'POST', headers })).status, 200);
+  const verificationResponse = await fetch(`${base}/v1/studio/teach/${started.session.id}/verify`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      checks: [{
+        name: 'demonstrated-read',
+        ok: true,
+        detail: 'The demonstrated read outcome was independently confirmed.',
+        evidenceDigests: [inspected.session.steps[0].evidenceDigest]
+      }]
+    })
+  });
+  assert.equal(verificationResponse.status, 200);
+  const verification = await verificationResponse.json() as any;
+  assert.equal(verification.receipt.verified, true);
+
   const compiledResponse = await fetch(`${base}/v1/studio/teach/${started.session.id}/compile`, {
     method: 'POST', headers,
-    body: JSON.stringify({ verificationDigest: crypto.createHash('sha256').update('verified').digest('hex') })
+    body: JSON.stringify({ verificationReceipt: verification.receipt })
   });
   assert.equal(compiledResponse.status, 200);
   const compiled = await compiledResponse.json() as any;
