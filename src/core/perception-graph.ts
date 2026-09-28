@@ -241,11 +241,18 @@ function resolveNode(state: PerceptionState, observation: ReturnType<typeof norm
   }
   const candidates = state.nodes.filter((node) => node.sceneKey === observation.sceneKey).map((node) => {
     const recent = node.claims[0];
+    const overlap = recent?.bounds && observation.bounds
+      ? intersectionOverUnion(recent.bounds, observation.bounds)
+      : undefined;
+    // Repeated labels are common ("OK", "Save", icon-only buttons). Without a
+    // stable semantic id, spatially disjoint observations must remain distinct
+    // objects instead of being fused from text similarity alone.
+    if (overlap !== undefined && overlap < 0.1) return { node, score: 0 };
     let score = 0;
     if (recent?.role && observation.role && sameText(recent.role, observation.role)) score += 0.25;
     if (recent?.name && observation.name && sameText(recent.name, observation.name)) score += 0.35;
     if (recent?.text && observation.text && sameText(recent.text, observation.text)) score += 0.2;
-    if (recent?.bounds && observation.bounds) score += 0.4 * intersectionOverUnion(recent.bounds, observation.bounds);
+    if (overlap !== undefined) score += 0.4 * overlap;
     return { node, score };
   }).filter((item) => item.score >= 0.55).sort((a, b) => b.score - a.score);
   if (candidates.length === 1 || (candidates[0] && candidates[1] && candidates[0].score - candidates[1].score >= 0.15)) return candidates[0]?.node;
