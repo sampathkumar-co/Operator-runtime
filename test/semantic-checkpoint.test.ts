@@ -47,14 +47,23 @@ test('stage15 accepts only checkpoints signed by an active paired source device'
   });
   const accepted = await destinationManager.verifyAndAccept(envelope, {
     expectedWorkloadId: workloadId,
-    expectedAuthorityDigest: envelope.checkpoint.authorityDigest
+    expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+    expectedStateDigest: envelope.checkpoint.stateDigest,
+    availableCapabilities: ['file.read'],
+    verifyWorldAssumption: async (assumption) => assumption.valueDigest,
+    verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
   });
   assert.equal(accepted.sourceDeviceId, sourcePublic.deviceId);
   assert.equal(accepted.continuation.nextPhase, 'verify');
 
   await registry.revokeDevice(sourcePublic.deviceId, 'test revocation');
   await assert.rejects(
-    () => destinationManager.verifyAndAccept(envelope),
+    () => destinationManager.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      availableCapabilities: ['file.read'],
+      verifyWorldAssumption: async (assumption) => assumption.valueDigest,
+      verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
+    }),
     (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_SOURCE_REVOKED'
   );
 });
@@ -97,7 +106,116 @@ test('stage15 rejects tampering and secret-bearing continuation state', async (t
     registry
   });
   await assert.rejects(
-    () => destination.verifyAndAccept(tampered),
+    () => destination.verifyAndAccept(tampered, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest
+    }),
     (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_SIGNATURE_INVALID'
+  );
+});
+
+
+test('stage15 refuses migration when destination authority, capabilities, world state or artifacts do not match', async (t) => {
+  const sourceDir = await temp(t, 'operator-migrate-proof-source-');
+  const destDir = await temp(t, 'operator-migrate-proof-dest-');
+  const sourceIdentity = new DeviceIdentityStore(sourceDir, { platform: 'linux' });
+  const sourcePublic = await sourceIdentity.loadOrCreate('source-proof');
+  const registry = new DeviceRegistryStore(destDir);
+  await registry.registerVerifiedPeer(sourcePublic);
+  const source = new SemanticCheckpointManager(sourceDir, {
+    identity: sourceIdentity,
+    registry: new DeviceRegistryStore(sourceDir)
+  });
+  const destination = new SemanticCheckpointManager(destDir, {
+    identity: new DeviceIdentityStore(destDir, { platform: 'linux' }),
+    registry
+  });
+
+  const envelope = await source.create({
+    workloadKind: 'operation',
+    workloadId: crypto.randomUUID(),
+    objectiveDigest: semanticCheckpointDigest('objective'),
+    stateDigest: semanticCheckpointDigest('state'),
+    authorityDigest: semanticCheckpointDigest({ maxRisk: 'write', capabilities: ['file.read'] }),
+    requiredCapabilities: ['file.read', 'git.status'],
+    artifactDigests: [{ key: 'repo.tar', digest: semanticCheckpointDigest('artifact'), size: 8 }],
+    worldAssumptions: [{ entityKey: 'project:app', factKey: 'revision', valueDigest: semanticCheckpointDigest('rev-1') }],
+    continuation: { phase: 'resume' }
+  });
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: semanticCheckpointDigest({ maxRisk: 'read' }),
+      availableCapabilities: ['file.read', 'git.status'],
+      verifyWorldAssumption: async (assumption) => assumption.valueDigest,
+      verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_AUTHORITY_MISMATCH'
+  );
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      availableCapabilities: ['file.read'],
+      verifyWorldAssumption: async (assumption) => assumption.valueDigest,
+      verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_CAPABILITY_MISMATCH'
+  );
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      availableCapabilities: ['file.read', 'git.status'],
+      verifyWorldAssumption: async () => semanticCheckpointDigest('stale-revision'),
+      verifyArtifact: async (artifact) => ({ digest: artifact.digest, size: artifact.size })
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_WORLD_MISMATCH'
+  );
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      availableCapabilities: ['file.read', 'git.status'],
+      verifyWorldAssumption: async (assumption) => assumption.valueDigest,
+      verifyArtifact: async () => ({ digest: semanticCheckpointDigest('wrong-artifact'), size: 8 })
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_ARTIFACT_MISMATCH'
+  );
+});
+
+test('stage15 requires explicit destination proofs instead of trusting source-declared requirements', async (t) => {
+  const sourceDir = await temp(t, 'operator-migrate-required-source-');
+  const destDir = await temp(t, 'operator-migrate-required-dest-');
+  const identity = new DeviceIdentityStore(sourceDir, { platform: 'linux' });
+  const publicIdentity = await identity.loadOrCreate('source-required');
+  const registry = new DeviceRegistryStore(destDir);
+  await registry.registerVerifiedPeer(publicIdentity);
+  const source = new SemanticCheckpointManager(sourceDir, { identity, registry: new DeviceRegistryStore(sourceDir) });
+  const destination = new SemanticCheckpointManager(destDir, {
+    identity: new DeviceIdentityStore(destDir, { platform: 'linux' }),
+    registry
+  });
+  const envelope = await source.create({
+    workloadKind: 'task',
+    workloadId: crypto.randomUUID(),
+    objectiveDigest: semanticCheckpointDigest('objective'),
+    stateDigest: semanticCheckpointDigest('state'),
+    authorityDigest: semanticCheckpointDigest('authority'),
+    requiredCapabilities: ['file.read'],
+    worldAssumptions: [{ entityKey: 'project:x', factKey: 'revision', valueDigest: semanticCheckpointDigest('r1') }],
+    continuation: { phase: 'resume' }
+  });
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, { expectedAuthorityDigest: envelope.checkpoint.authorityDigest }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_CAPABILITY_PROOF_REQUIRED'
+  );
+
+  await assert.rejects(
+    () => destination.verifyAndAccept(envelope, {
+      expectedAuthorityDigest: envelope.checkpoint.authorityDigest,
+      availableCapabilities: ['file.read']
+    }),
+    (error: any) => error?.code === 'SEMANTIC_CHECKPOINT_WORLD_PROOF_REQUIRED'
   );
 });
