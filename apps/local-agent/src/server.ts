@@ -848,11 +848,11 @@ export function createLocalAgentServer(options: {
         const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
         const normalizedCapabilities = assertMigrationCapabilities({
           requiredCapabilities,
-          permissions: options.permissions,
+          permissions: requestPermissions,
           supportedCapabilities
         });
         for (const resourceKey of resourceKeys) {
-          if (!await verifyMigrationResourceKey(resourceKey, options.permissions, normalizedCapabilities)) {
+          if (!await verifyMigrationResourceKey(resourceKey, requestPermissions, normalizedCapabilities)) {
             throw Object.assign(new Error(`Resource ${resourceKey} is not provably authorized on this device.`), { code: 'SEMANTIC_MIGRATION_RESOURCE_MISMATCH' });
           }
         }
@@ -862,7 +862,7 @@ export function createLocalAgentServer(options: {
               return { key: String(value.key ?? ''), path: String(value.path ?? '') };
             })
           : [];
-        const artifacts = await buildMigrationArtifacts(artifactInputs, options.permissions);
+        const artifacts = await buildMigrationArtifacts(artifactInputs, requestPermissions);
         const assumptionInputs = Array.isArray(body.worldAssumptions)
           ? body.worldAssumptions.map((item) => {
               const value = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
@@ -934,7 +934,7 @@ export function createLocalAgentServer(options: {
         const supportedCapabilities = await options.runtime.supportedCapabilities(options.permissions.allowedCapabilities);
         const normalizedCapabilities = assertMigrationCapabilities({
           requiredCapabilities,
-          permissions: options.permissions,
+          permissions: requestPermissions,
           supportedCapabilities
         });
         const expectedAuthorityDigest = migrationAuthorityDigest({
@@ -963,7 +963,7 @@ export function createLocalAgentServer(options: {
           verifyResourceKey: (resourceKey) => {
             const mapped = resourceMap[resourceKey];
             const destinationResource = typeof mapped === 'string' && mapped ? mapped : resourceKey;
-            return verifyMigrationResourceKey(destinationResource, options.permissions, normalizedCapabilities);
+            return verifyMigrationResourceKey(destinationResource, requestPermissions, normalizedCapabilities);
           },
           ...(options.world ? {
             verifyWorldAssumption: (assumption) => verifyMigrationWorldAssumption(assumption, options.world!)
@@ -971,7 +971,7 @@ export function createLocalAgentServer(options: {
           verifyArtifact: async (artifact) => {
             const mapped = artifactPaths[artifact.key];
             if (typeof mapped !== 'string' || !mapped) return undefined;
-            return await hashAuthorizedMigrationArtifact(mapped, options.permissions);
+            return await hashAuthorizedMigrationArtifact(mapped, requestPermissions);
           }
         });
         await options.audit?.append({
@@ -1708,8 +1708,9 @@ export function createLocalAgentServer(options: {
       try {
         const body = await readJson(req) as Record<string, unknown>;
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         const goal = body.goal as SemanticTaskGoal;
-        const authorizedScope = taskAuthorizedScope(goal, options.permissions.allowedRoots);
+        const authorizedScope = taskAuthorizedScope(goal, requestPermissions.allowedRoots);
         if (!authorizedScope) {
           send(res, 403, { ok: false, error: { code: 'TASK_SCOPE_DENIED', message: 'Task goal root is outside the authorized roots.' } });
           return;
@@ -1729,7 +1730,7 @@ export function createLocalAgentServer(options: {
           maxAttemptsPerStep: body.maxAttemptsPerStep,
           timeoutMs: body.timeoutMs
         } as SubmitTaskOptions);
-        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority)) : submitted;
+        const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority, requestPermissions)) : submitted;
         send(res, body.run === true ? 200 : 202, { ok: true, task });
       } catch (error) {
         const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_SUBMISSION_INVALID';
@@ -1762,12 +1763,13 @@ export function createLocalAgentServer(options: {
         const operation = taskRoute[2]!;
         const body = await readJson(req) as { approvedActionId?: unknown; approvalAuthority?: unknown };
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if ((operation === 'run' || operation === 'resume') && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator task execution is disabled by the local emergency stop.' } });
           return;
         }
         let task;
-        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority));
+        if (operation === 'run') task = await options.taskOrchestrator.run(taskId, [], taskAuthorization(approvalAuthority, requestPermissions));
         else if (operation === 'pause') task = await options.taskOrchestrator.pause(taskId);
         else if (operation === 'cancel') task = await options.taskOrchestrator.cancel(taskId);
         else {
@@ -1789,7 +1791,7 @@ export function createLocalAgentServer(options: {
               return;
             }
           }
-          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority));
+          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority, requestPermissions));
         }
         send(res, 200, { ok: true, task });
       } catch (error) {
@@ -2065,7 +2067,8 @@ export function createLocalAgentServer(options: {
         }
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        let result = await executeActionWithCurrentApproval(action, approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
@@ -2091,7 +2094,7 @@ export function createLocalAgentServer(options: {
               durationMs: result.durationMs
             };
           } else if (decision === 'approve' || decision === 'session') {
-            result = await executeActionWithCurrentApproval(action, approvalAuthority);
+            result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
             autoResumedAfterApproval = true;
           }
         }
@@ -2122,8 +2125,11 @@ export function createLocalAgentServer(options: {
             durationMs: result.durationMs,
             errorCode: result.error?.code,
             sideEffectState: result.error?.sideEffectState,
-            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
+            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
             autoResumedAfterApproval,
+            enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
+            enterpriseRoleIds: requestPermissionDecision.roleIds,
+            enterpriseBindingIds: requestPermissionDecision.bindingIds,
             teachCaptured,
             teachCaptureCode
           }
