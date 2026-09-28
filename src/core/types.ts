@@ -67,9 +67,24 @@ export interface CapabilityScore {
   interactionCost: number;
 }
 
+export interface CapabilityAuthorityToken {
+  claims: {
+    version: 1;
+    tokenId: string;
+    capability: string;
+    roots: string[];
+    maxRisk: ActionRisk;
+    actionIds: string[];
+    issuedAt: string;
+    expiresAt: string;
+  };
+  mac: string;
+}
+
 export interface CapabilityExecutionContext {
   signal?: AbortSignal;
   learningContext?: string;
+  authorityToken?: CapabilityAuthorityToken;
 }
 
 export interface CapabilityProvider {
