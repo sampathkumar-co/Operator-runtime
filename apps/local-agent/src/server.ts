@@ -345,7 +345,7 @@ export function createLocalAgentServer(options: {
       return;
     }
 
-    const teachSessionRoute = /^\/v1\/studio\/teach\/([0-9a-f-]{36})(?:\/(stop|cancel|compile))?$/i.exec(pathname);
+    const teachSessionRoute = /^\/v1\/studio\/teach\/([0-9a-f-]{36})(?:\/(stop|cancel|verify|compile))?$/i.exec(pathname);
     if (teachSessionRoute) {
       if (!options.teachMode) {
         send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
@@ -366,10 +366,19 @@ export function createLocalAgentServer(options: {
           send(res, 200, { ok: true, session: await options.teachMode.cancel(sessionId) });
           return;
         }
+        if (action === 'verify' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const receipt = await options.teachMode.verify(
+            sessionId,
+            Array.isArray(body.checks) ? body.checks as any : []
+          );
+          send(res, 200, { ok: true, receipt });
+          return;
+        }
         if (action === 'compile' && req.method === 'POST') {
           const body = await readJson(req) as Record<string, unknown>;
           const workflow = await options.teachMode.compile(sessionId, {
-            verificationDigest: String(body.verificationDigest ?? ''),
+            verificationReceipt: body.verificationReceipt as any,
             parameters: Array.isArray(body.parameters) ? body.parameters as any : []
           });
           send(res, 200, { ok: true, workflow });
