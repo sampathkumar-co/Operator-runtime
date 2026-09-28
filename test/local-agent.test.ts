@@ -172,7 +172,8 @@ test('activity feed records bounded execution metadata without echoing action in
   assert.equal(activityBody.events.length, 1);
   assert.equal(activityBody.events[0].capability, 'computer.inspect');
   assert.equal(activityBody.events[0].taskId, 'task-activity');
-  assert.equal(activityBody.events[0].details.actionId, 'activity-1');
+  assert.equal(activityBody.events[0].actionId, 'activity-1');
+  assert.equal(activityBody.events[0].providerId, 'system.inspect');
   assert.equal(JSON.stringify(activityBody).includes(secretValue), false);
 
   const persisted = await fs.readFile(path.join(state, 'audit.ndjson'), 'utf8');
