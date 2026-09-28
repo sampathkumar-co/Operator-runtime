@@ -150,3 +150,26 @@ test('stage20 contract ids are idempotent and conflicting reuse is rejected', as
     (error: any) => error?.code === 'DESIRED_STATE_CONFLICT'
   );
 });
+
+
+test('stage20 persisted contract tampering cannot widen remediation authority', async (t) => {
+  const state = await temp(t);
+  const world = new FakeWorld();
+  const operations = new FakeOperations();
+  const controller = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  const contract = await controller.create(createInput({
+    policy: { autoRemediate: true, minRemediationIntervalMs: 0, maxConsecutiveFailures: 3, maxRemediationsPerDay: 10 }
+  }));
+
+  const file = path.join(state, 'desired-state.json');
+  const raw = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  raw.contracts[0].remediation.authority.maxRisk = 'destructive';
+  raw.contracts[0].remediation.authority.capabilities.push('terminal.execute');
+  await fs.writeFile(file, JSON.stringify(raw, null, 2), 'utf8');
+
+  const reloaded = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  await assert.rejects(
+    () => reloaded.inspect(contract.id),
+    (error: any) => error?.code === 'DESIRED_STATE_CORRUPT'
+  );
+});
