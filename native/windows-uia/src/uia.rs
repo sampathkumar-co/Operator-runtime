@@ -38,6 +38,14 @@ pub struct ScrollState {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct ElementBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct ElementSummary {
     pub name: String,
     pub automation_id: String,
@@ -45,6 +53,8 @@ pub struct ElementSummary {
     pub control_type: String,
     pub process_id: u32,
     pub depth: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<ElementBounds>,
     pub patterns: PatternSupport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
@@ -537,6 +547,20 @@ impl UiaEngine {
                 vertical_percent: pattern.get_vertical_scroll_percent().ok()?,
             })
         });
+        let bounds = element.get_bounding_rectangle().ok().and_then(|rect| {
+            let width = rect.get_width();
+            let height = rect.get_height();
+            if width <= 0 || height <= 0 {
+                None
+            } else {
+                Some(ElementBounds {
+                    x: rect.get_left(),
+                    y: rect.get_top(),
+                    width,
+                    height,
+                })
+            }
+        });
         ElementSummary {
             name: truncate(element.get_name().unwrap_or_default(), 512),
             automation_id: truncate(element.get_automation_id().unwrap_or_default(), 512),
@@ -544,6 +568,7 @@ impl UiaEngine {
             control_type: element.get_control_type().map(|value| format!("{value:?}")).unwrap_or_else(|_| "Unknown".into()),
             process_id: element.get_process_id().unwrap_or_default(),
             depth,
+            bounds,
             patterns: PatternSupport {
                 invoke,
                 value: value_pattern.is_some(),
