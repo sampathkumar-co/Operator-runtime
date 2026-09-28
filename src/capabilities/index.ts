@@ -15,3 +15,4 @@ export * from './browser-cdp.ts';
 export * from './browser-managed.ts';
 export * from './windows-uia.ts';
 export * from './sandboxed-compute.ts';
+export * from './perception.ts';
