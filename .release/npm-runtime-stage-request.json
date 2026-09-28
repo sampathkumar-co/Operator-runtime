@@ -4,6 +4,6 @@
   "version": "2.0.0",
   "npmTag": "latest",
   "publicationMode": "stage",
-  "requestedAt": "2026-09-27",
-  "purpose": "Publish the certified Stage 1-10 Mecord Connect runtime major release."
+  "requestedAt": "2026-09-28",
+  "purpose": "Stage the certified hardened Stage 1-10 foundation plus Stage 11-20 Mecord Connect runtime 2.0.0 release for owner approval on npmjs.com."
 }
