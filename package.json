@@ -28,13 +28,13 @@
     "test:stage12": "node --experimental-strip-types --test test/sandboxed-compute.test.ts",
     "test:stage13": "node --experimental-strip-types --test test/event-runtime.test.ts test/event-ticker.test.ts test/event-api.test.ts",
     "test:stage14": "node --experimental-strip-types --test test/world-history.test.ts",
-    "test:stage15": "node --experimental-strip-types --test test/semantic-checkpoint.test.ts test/migration-proofs.test.ts",
+    "test:stage15": "node --experimental-strip-types --test test/semantic-checkpoint.test.ts test/migration-proofs.test.ts test/semantic-migration-api.test.ts",
     "test:stage16": "node --experimental-strip-types --test test/enterprise-policy.test.ts",
     "test:stage17": "node --experimental-strip-types --test test/capability-sdk.test.ts",
     "test:stage18": "node --experimental-strip-types --test test/evaluation.test.ts",
     "test:stage19": "node --experimental-strip-types --test test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/studio-desired-api.test.ts",
     "test:stage20": "node --experimental-strip-types --test test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts",
-    "test:evolution": "node --experimental-strip-types --test test/perception-graph.test.ts test/perception-provider.test.ts test/perception-publication.test.ts test/perception-api.test.ts test/sandboxed-compute.test.ts test/event-runtime.test.ts test/event-ticker.test.ts test/event-api.test.ts test/world-history.test.ts test/semantic-checkpoint.test.ts test/migration-proofs.test.ts test/enterprise-policy.test.ts test/capability-sdk.test.ts test/evaluation.test.ts test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts"
+    "test:evolution": "node --experimental-strip-types --test test/perception-graph.test.ts test/perception-provider.test.ts test/perception-publication.test.ts test/perception-api.test.ts test/sandboxed-compute.test.ts test/event-runtime.test.ts test/event-ticker.test.ts test/event-api.test.ts test/world-history.test.ts test/semantic-checkpoint.test.ts test/migration-proofs.test.ts test/semantic-migration-api.test.ts test/enterprise-policy.test.ts test/capability-sdk.test.ts test/evaluation.test.ts test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT."
