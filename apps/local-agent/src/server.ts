@@ -24,6 +24,7 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -604,7 +605,7 @@ export function createLocalAgentServer(options: {
         const leaseId = String(body.leaseId ?? '');
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
-        const resourceKeys = teamActionResourceKeys(action);
+        const resourceKeys = resourceKeysForAction(action);
         const authorization = await options.teams.authorizeExecution(teamExecuteRoute[1]!, {
           workerId,
           workItemId: teamExecuteRoute[2]!,
@@ -1278,41 +1279,6 @@ async function publishVerifierWorldObservations(
     published += 1;
   }
   return published;
-}
-
-function teamActionResourceKeys(action: ActionRequest): string[] {
-  const input = action.input;
-  const absolute = (value: unknown): string | undefined => {
-    if (typeof value !== 'string' || !value || value.includes('\0')) return undefined;
-    const normalized = path.resolve(value).replace(/\\/g, '/');
-    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-  };
-  const add = (prefix: string, value: unknown, target: Set<string>) => {
-    const resolved = absolute(value);
-    if (resolved) target.add(`${prefix}:${resolved}`);
-  };
-  const keys = new Set<string>();
-  if (action.capability.startsWith('file.')) {
-    if (action.capability === 'file.manage') {
-      add('file', input.path, keys); add('file', input.source, keys); add('file', input.destination, keys);
-    } else add('file', input.path, keys);
-  } else if (action.capability.startsWith('git.')) add('repo', input.cwd, keys);
-  else if (action.capability.startsWith('project.')) add('repo', input.path ?? input.cwd, keys);
-  else if (action.capability.startsWith('docker.')) add('docker', input.path, keys);
-  else if (action.capability.startsWith('postgres.')) {
-    const root = absolute(input.path);
-    if (root) keys.add(`database:${root}:${String(input.profileId ?? 'profiles').toLowerCase()}`);
-  } else if (action.capability.startsWith('vscode.')) {
-    add('file', input.path, keys); add('file', input.leftPath, keys); add('file', input.rightPath, keys);
-  } else if (action.capability === 'terminal.execute') add('workspace', input.cwd, keys);
-  else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') add('workspace', input.cwd, keys);
-    else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
-  } else if (action.capability === 'process.inspect') keys.add('process:windows');
-  else if (action.capability.startsWith('browser.')) keys.add(`browser:${String(input.targetId ?? 'global').toLowerCase()}`);
-  else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') keys.add('desktop:windows');
-  else keys.add(`cap:${action.capability.toLowerCase()}`);
-  return [...keys].sort();
 }
 
 function withinAuthorizedRoots(input: string, roots: string[]): boolean {
