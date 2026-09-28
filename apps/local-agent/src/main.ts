@@ -36,6 +36,7 @@ import { DurableEventTicker } from '../../../src/core/event-ticker.ts';
 import { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
+import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -88,6 +89,10 @@ const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
+const semanticMigration = new SemanticCheckpointManager(stateDir, {
+  identity: deviceIdentity,
+  registry: deviceRegistry
+});
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
@@ -343,6 +348,7 @@ const agent = createLocalAgentServer({
   perception,
   teachMode,
   studioExecutor,
+  semanticMigration,
   desiredState,
   deviceIdentity,
   deviceRegistry,
@@ -364,6 +370,7 @@ const agent = createLocalAgentServer({
     vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
     studioWorkflowExecutorConfigured: true,
+    semanticMigrationConfigured: true,
     recoveredStudioRunCount: recoveredStudioRuns,
     desiredStateReconcilerConfigured: true,
     desiredStateIntervalMs,
