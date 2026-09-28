@@ -7,7 +7,7 @@ Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sh
 
 This file maps the canonical G0–G36 master plan to the current evidence. It does **not** replace `OPERATOR_RELEASE_GATE.md`; that file is the compact 26-gate submission view. A gate is PASS only where current evidence supports the master-plan scope. External/owner steps remain BLOCKED rather than being inferred from local tests.
 
-Current canonical count: **32 PASS / 5 BLOCKED / 0 NOT APPLICABLE**. Stage 1–20 production deployment is complete; the remaining BLOCKED gates are OpenAI submission/reviewer evidence only. npm 2.0.0 registry approval is tracked separately from these OpenAI gates.
+Current canonical count: **32 PASS / 5 BLOCKED / 0 NOT APPLICABLE**. Stage 1–20 production deployment is complete; the remaining BLOCKED gates are OpenAI submission/reviewer evidence only. npm 2.0.1 registry approval is tracked separately from these OpenAI gates.
 
 | Gate | Status | Current evidence / blocker |
 |---|---|---|
