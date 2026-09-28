@@ -48,15 +48,15 @@ const FAMILY_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
   F33: ['approval-replay','missing-causal-trace'],
   F34: ['verification-false-positive','unverified-completion'],
   F35: ['correlated-verification','unverified-completion'],
-  F36: ['budget-overrun','unbounded-blast-radius'],
-  F37: ['deadline-overrun','lost-durable-state'],
+  F36: ['budget-overrun','graph-unbounded'],
+  F37: ['deadline-overrun','graph-unbounded'],
   F38: ['learning-poison','learning-authority-escalation'],
   F39: ['missing-causal-trace','internal-chatter-leak'],
   F40: ['provider-unavailable','lost-durable-state','uncertain-side-effect']
 };
 
 const MODIFIER_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
-  M01: ['missing-critical-context'],
+  M01: [],
   M02: ['context-overexposure','budget-overrun'],
   M03: ['stale-intent'],
   M04: ['stale-intent'],
