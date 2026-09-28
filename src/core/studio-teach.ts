@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
 import type { ActionRequest, ActionResult, ActionRisk } from './types.ts';
 
 export type TeachSessionState = 'RECORDING' | 'STOPPED' | 'COMPILED' | 'CANCELLED';
@@ -62,6 +63,7 @@ export interface TeachWorkflow {
   steps: TeachWorkflowStep[];
   parameters: TeachWorkflowParameter[];
   verificationDigest: string;
+  verificationContractDigest: string;
   digest: string;
   createdAt: string;
 }
@@ -182,15 +184,29 @@ export class TeachModeStore {
     });
   }
 
+  async verify(sessionIdInput: string, checks: VerificationCheck[]): Promise<VerificationReceipt> {
+    await this.#serial;
+    const session = requireSession(await this.#read(), sessionIdInput);
+    if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before verification.');
+    return new VerificationKernel().verify({
+      subjectKind: 'teach-session',
+      subjectId: session.id,
+      contract: teachVerificationContract(session),
+      checks
+    });
+  }
+
   async compile(sessionIdInput: string, input: {
-    verificationDigest: string;
+    verificationReceipt: VerificationReceipt;
     parameters?: TeachWorkflowParameter[];
   }): Promise<TeachWorkflow> {
     return await this.#mutate((state, now) => {
       const session = requireSession(state, sessionIdInput);
       if (session.state === 'COMPILED' && session.compiledWorkflowId) return requireWorkflow(state, session.compiledWorkflowId);
       if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before compilation.');
-      const verificationDigest = sha(input.verificationDigest, 'verificationDigest');
+      const verification = validateTeachVerificationReceipt(session, input.verificationReceipt);
+      const verificationDigest = verification.digest;
+      const verificationContractDigest = verification.contractDigest;
       const parameters = normalizeParameters(input.parameters ?? [], session);
       const steps: TeachWorkflowStep[] = session.steps.map((step, index) => ({
         key: `step-${String(index + 1).padStart(3, '0')}`,
@@ -209,7 +225,8 @@ export class TeachModeStore {
         scopeKey: session.scopeKey,
         steps,
         parameters,
-        verificationDigest
+        verificationDigest,
+        verificationContractDigest
       };
       const workflow: TeachWorkflow = {
         ...workflowCore,
@@ -277,6 +294,47 @@ export class TeachModeStore {
       throw new OperatorError('TEACH_STATE_CORRUPT', 'Teach/Studio state could not be read.');
     }
   }
+}
+
+function teachVerificationContract(session: TeachSession): Record<string, unknown> {
+  return {
+    version: 1,
+    sessionId: session.id,
+    title: session.title,
+    objective: session.objective,
+    scopeKey: session.scopeKey,
+    steps: session.steps.map((step) => ({
+      id: step.id,
+      seq: step.seq,
+      capability: step.capability,
+      risk: step.risk,
+      target: step.target ?? null,
+      inputDigest: step.inputDigest,
+      resourceKeys: [...step.resourceKeys],
+      provider: step.provider,
+      evidenceDigest: step.evidenceDigest
+    }))
+  };
+}
+
+function validateTeachVerificationReceipt(session: TeachSession, receipt: VerificationReceipt): VerificationReceipt {
+  if (!receipt || typeof receipt !== 'object') throw new OperatorError('TEACH_VERIFICATION_INVALID', 'A verification receipt is required.');
+  if (receipt.subjectKind !== 'teach-session' || receipt.subjectId !== session.id) {
+    throw new OperatorError('TEACH_VERIFICATION_INVALID', 'Verification receipt is bound to a different teaching session.');
+  }
+  const expected = new VerificationKernel().verify({
+    subjectKind: 'teach-session',
+    subjectId: session.id,
+    contract: teachVerificationContract(session),
+    checks: receipt.checks
+  });
+  if (expected.digest !== receipt.digest || expected.contractDigest !== receipt.contractDigest) {
+    throw new OperatorError('TEACH_VERIFICATION_INVALID', 'Verification receipt does not match the captured demonstration contract.');
+  }
+  if (!receipt.verified || !expected.verified) {
+    throw new OperatorError('TEACH_VERIFICATION_REQUIRED', 'Teaching workflow cannot compile until all verification checks pass.');
+  }
+  return expected;
 }
 
 function normalizeParameters(input: TeachWorkflowParameter[], session: TeachSession): TeachWorkflowParameter[] {
@@ -383,7 +441,7 @@ function validateState(input: unknown): TeachState {
   }
   for (const workflow of state.workflows) {
     uuid(workflow.id, 'workflow.id'); uuid(workflow.sourceSessionId, 'workflow.sourceSessionId');
-    sha(workflow.verificationDigest, 'workflow.verificationDigest'); sha(workflow.digest, 'workflow.digest');
+    sha(workflow.verificationDigest, 'workflow.verificationDigest'); sha(workflow.verificationContractDigest, 'workflow.verificationContractDigest'); sha(workflow.digest, 'workflow.digest');
   }
   return state;
 }
