@@ -155,6 +155,36 @@ jobs:
       - name: Outcome contracts, independent verification, world postconditions and idempotent identity
         run: npm run test:stage10
 
+  hardening-certification:
+    name: Stage 1-10 hardening certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Authority, side-effect, verification, audit and resource-lease hardening
+        run: npm run test:hardening
+
+  stage11-20-evolution:
+    name: Stage ${{ matrix.stage }} evolution certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Stage ${{ matrix.stage }} dedicated certification
+        run: npm run test:stage${{ matrix.stage }}
+
   security-red-team:
     name: Security red-team suite
     runs-on: ubuntu-latest
