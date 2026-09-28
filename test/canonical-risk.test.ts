@@ -25,7 +25,7 @@ const STATIC_EXPECTED = {
   'vscode.open': 'system', 'terminal.execute': 'destructive', 'process.inspect': 'read', 'process.manage': 'destructive', 'browser.inspect': 'read',
   'browser.navigate': 'write', 'browser.interact': 'external', 'browser.tab.focus': 'write',
   'browser.tab.close': 'destructive', 'app.inspect': 'read', 'app.operate': 'external',
-  'visual.capture': 'read', 'input.operate': 'external'
+  'visual.capture': 'read', 'input.operate': 'external', 'perception.observe': 'write', 'perception.ground': 'read'
 } as const;
 test('canonical risk registry covers every known static capability exactly', () => {
   const dynamic = { 'project.command.run': 'dynamic', 'file.manage': 'dynamic', 'terminal.session': 'dynamic' } as const;
