@@ -28,6 +28,15 @@ export async function readDurableStateBytes(file: string, options: DurableStateO
       if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 1 << attempt));
     }
   }
+  try {
+    const persistent = await fs.lstat(file);
+    if (persistent.isSymbolicLink() || !persistent.isFile()) {
+      throw invalid(options, 'State path must be a regular file, not a link or special file.');
+    }
+    if (persistent.nlink > 1) throw invalid(options, 'Hard-linked state files are not permitted.');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   throw invalid(options, lastRace?.message ?? 'State file changed while it was being read.');
 }
 
