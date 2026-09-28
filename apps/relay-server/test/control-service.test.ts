@@ -849,7 +849,10 @@ test('stage5-9 relay knowledge inspection is developer-only and dispatches read-
   assert.equal(dispatchCalls, 1);
   assert.equal(dispatched.kind, 'knowledge');
   assert.deepEqual(dispatched.requiredCapabilities, []);
-  assert.deepEqual(dispatched.payload, { query: { kind: 'procedures', limit: 10 } });
+  assert.deepEqual(dispatched.payload, {
+    query: { kind: 'procedures', limit: 10 },
+    enterpriseContext: { principalId: `account:${ACCOUNT_A}` }
+  });
 });
 
 
