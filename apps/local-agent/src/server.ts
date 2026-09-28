@@ -301,7 +301,21 @@ export function createLocalAgentServer(options: {
     if (pathname === '/v1/activity' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
-      send(res, 200, { ok: true, events: options.audit ? await options.audit.tail(limit) : [], configured: Boolean(options.audit) });
+      const query = {
+        limit,
+        ...(requestUrl.searchParams.get('traceId') ? { traceId: requestUrl.searchParams.get('traceId')! } : {}),
+        ...(requestUrl.searchParams.get('operationId') ? { operationId: requestUrl.searchParams.get('operationId')! } : {}),
+        ...(requestUrl.searchParams.get('taskId') ? { taskId: requestUrl.searchParams.get('taskId')! } : {}),
+        ...(requestUrl.searchParams.get('missionId') ? { missionId: requestUrl.searchParams.get('missionId')! } : {}),
+        ...(requestUrl.searchParams.get('workerId') ? { workerId: requestUrl.searchParams.get('workerId')! } : {}),
+        ...(requestUrl.searchParams.get('capability') ? { capability: requestUrl.searchParams.get('capability')! } : {})
+      };
+      send(res, 200, { ok: true, events: options.audit ? await options.audit.query(query) : [], configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/activity/summary' && req.method === 'GET') {
+      send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
       return;
     }
 
@@ -636,18 +650,20 @@ export function createLocalAgentServer(options: {
           }
         }
         await options.audit?.append({
-          taskId: teamExecuteRoute[1]!,
+          traceId: teamExecuteRoute[1]!,
+          missionId: teamExecuteRoute[1]!,
+          workItemId: teamExecuteRoute[2]!,
+          workerId,
+          actionId: teamAction.id,
+          providerId: result.provider,
           capability: teamAction.capability,
           target: teamAction.target,
           result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
           risk: teamAction.risk,
           details: {
-            actionId: teamAction.id,
-            provider: result.provider,
             durationMs: result.durationMs,
             errorCode: result.error?.code,
-            teamWorkItemId: teamExecuteRoute[2]!,
-            teamWorkerId: workerId,
+            sideEffectState: result.error?.sideEffectState,
             teamLeaseId: leaseId,
             autoResumedAfterApproval
           }
@@ -1157,17 +1173,18 @@ export function createLocalAgentServer(options: {
           }
         }
         await options.audit?.append({
-          taskId: action.taskId,
+          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+          actionId: action.id,
+          providerId: result.provider,
           capability: action.capability,
           target: action.target,
           result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
           risk: action.risk,
           details: {
-            actionId: action.id,
             provenanceKind: action.provenance.kind,
-            provider: result.provider,
             durationMs: result.durationMs,
             errorCode: result.error?.code,
+            sideEffectState: result.error?.sideEffectState,
             sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, options.permissions)),
             autoResumedAfterApproval
           }
