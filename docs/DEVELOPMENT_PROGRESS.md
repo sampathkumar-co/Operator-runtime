@@ -131,3 +131,143 @@ The deployed runtime is gated together with the predecessor runtime: Stage 3 aut
 3. continue the external OpenAI verification/app-directory process separately.
 
 There is no known Stage-1–10 repository or production-edge implementation blocker.
+
+
+## Evolution successor: hardening + Stage 11–20
+
+Branch: `evolution/stage1-20-hardening`
+
+This successor is intentionally not described as production until it is merged, deployed, and `CURRENT_RELEASE_STATE.md` is updated. The implementation currently preserves the deployed public 9-tool / Developer 32-tool MCP split while extending the private runtime.
+
+### Stage 1–10 hardening
+
+The successor adds a common authority/verification/resilience foundation around the existing Stage 1–10 runtime:
+
+- canonical Authority Kernel with attenuating capability tokens;
+- fail-closed side-effect certainty and reconciliation semantics;
+- reusable Verification Kernel;
+- canonical resource identities and shared/exclusive resource leases;
+- correlated audit/observability identifiers;
+- durable-state link/race hardening;
+- Intent Kernel plus durable conversation ledger;
+- deterministic 1,000-scenario resilience model and red-team coverage.
+
+### Stage 11 — Multimodal perception
+
+Implemented and certified on the evolution branch:
+
+- durable perception graph;
+- semantic/visual/provider observation fusion;
+- ambiguity fail-closed behavior;
+- perception provider and publication path;
+- authenticated local-agent perception API.
+
+### Stage 12 — Safe compute
+
+Implemented and certified:
+
+- bounded JavaScript/Python sandbox provider;
+- container isolation and image validation;
+- CPU, memory, timeout and input bounds;
+- no unrestricted host-shell authority.
+
+### Stage 13 — Durable event runtime
+
+Implemented and certified:
+
+- durable waits;
+- external event publication;
+- wake/deadline/timeout semantics;
+- non-overlapping event ticker;
+- authenticated local-agent event API.
+
+### Stage 14 — Temporal world history
+
+Implemented and certified:
+
+- digest-backed fact transition history;
+- source-aware temporal queries;
+- same-value re-observation does not fabricate transitions;
+- old raw sensitive values are not retained as history payloads.
+
+### Stage 15 — Semantic cross-device continuity
+
+Implemented and certified:
+
+- signed semantic checkpoints;
+- source device trust/revocation checks;
+- workload, state and authority binding;
+- destination capability proof;
+- destination resource-scope proof;
+- world-assumption proof;
+- artifact digest/size proof;
+- replay binding to the full signed checkpoint;
+- authenticated migration API helpers.
+
+This is semantic continuation, not arbitrary process-memory migration.
+
+### Stage 16 — Enterprise policy kernel
+
+Implemented and certified:
+
+- role/binding policy store;
+- capability/root/risk intersection with local authority;
+- project/environment/device constraints;
+- relay-authenticated enterprise principal propagation;
+- fail-closed authority narrowing.
+
+### Stage 17 — Capability SDK
+
+Implemented and certified:
+
+- bounded capability/provider registration contract;
+- declared schemas/risk/verification integration hooks;
+- extension validation designed to avoid ambient authority.
+
+### Stage 18 — Evaluation fabric
+
+Implemented and certified:
+
+- evaluation scenario/results model;
+- reliability and regression measurements;
+- basis for measurable success/false-success/recovery reporting.
+
+### Stage 19 — Studio / Teach Mode
+
+Implemented and certified:
+
+- capture only actions actually executed successfully;
+- secret-bearing input rejection;
+- independent verification before workflow compilation;
+- parameterized workflow templates;
+- durable workflow runs;
+- chunked execution;
+- current runtime authority enforcement;
+- resource leases;
+- approval-aware execution;
+- crash recovery;
+- uncertain-mutation reconciliation;
+- separate final verification;
+- persisted verification-receipt tamper detection;
+- authenticated private Studio APIs;
+- Control Center Studio surface.
+
+### Stage 20 — Governed desired-state operations
+
+Implemented and certified:
+
+- durable desired-state contracts;
+- world-model drift detection;
+- explicit opt-in automatic remediation;
+- cooldown, daily and consecutive-failure bounds;
+- remediation only through the existing Digital Operations authority/verification layer;
+- non-overlapping continuous reconciler;
+- pause/resume and active-operation tracking;
+- persisted authority-contract digest validation;
+- Control Center desired-state surface.
+
+### Evolution certification
+
+The evolution CI contains dedicated Stage 11 through Stage 20 jobs in addition to the existing Stage 3–10, hardening, red-team, performance, relay, MCP/Inspector, Windows packaging/UIA/path-authority, npm runtime, and cross-platform matrix gates.
+
+Do not update production source/version claims in `CURRENT_RELEASE_STATE.md` until this successor is merged and deployed.
