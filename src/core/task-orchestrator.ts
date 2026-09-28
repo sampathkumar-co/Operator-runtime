@@ -311,6 +311,7 @@ export class TaskOrchestrator {
         record.state = 'INTERRUPTED';
         record.finishedAt = new Date().toISOString();
         record.errorCode = 'EXECUTION_ABORTED';
+        record.sideEffectState = 'none';
         setNodeState(task, node.id, 'SKIPPED');
         task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
         await this.#persistRunState(task, assertLease);
@@ -352,6 +353,7 @@ export class TaskOrchestrator {
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
+      latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
@@ -461,12 +463,13 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         continue;
       }
-      if (failureDecision.retryable && risk !== 'read') {
-        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry of a failed mutating action; recovery requires an explicit planner re-observation or repair strategy.', {
+      if (failureDecision.retryable && !retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain')) {
+        task.evidence.push(evidence('strategy_fail_closed', 'info', 'Refused blind retry because side effects are known or uncertain; recovery requires explicit re-observation/reconciliation.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
-          risk
+          risk,
+          sideEffectState: latestRecord.sideEffectState ?? 'uncertain'
         }));
       }
       return await this.#fail(task, latestRecord.errorCode, result.error?.message ?? 'Task action failed.', assertLease);
@@ -593,6 +596,7 @@ export class TaskOrchestrator {
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
+      record.sideEffectState = record.risk === 'read' ? 'none' : 'uncertain';
       const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
       if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
         node.state = 'SKIPPED';
