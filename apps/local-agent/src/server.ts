@@ -25,6 +25,8 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
+import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
+import type { DesiredStateController } from '../../../src/core/desired-state.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -152,6 +154,8 @@ export function createLocalAgentServer(options: {
   optimizer?: ExecutionOptimizerStore;
   organizations?: OrganizationCoordinator;
   operations?: DigitalOperationsLayer;
+  teachMode?: TeachModeStore;
+  desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
@@ -318,6 +322,153 @@ export function createLocalAgentServer(options: {
     if (pathname === '/v1/activity/summary' && req.method === 'GET') {
       send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
       return;
+    }
+
+
+    if (pathname === '/v1/studio/teach' && req.method === 'POST') {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const session = await options.teachMode.start({
+          ...(body.sessionId === undefined ? {} : { sessionId: String(body.sessionId) }),
+          title: String(body.title ?? ''),
+          objective: String(body.objective ?? ''),
+          scopeKey: String(body.scopeKey ?? '')
+        });
+        send(res, 201, { ok: true, session });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_START_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const teachSessionRoute = /^\/v1\/studio\/teach\/([0-9a-f-]{36})(?:\/(stop|cancel|compile))?$/i.exec(pathname);
+    if (teachSessionRoute) {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        const sessionId = teachSessionRoute[1]!;
+        const action = teachSessionRoute[2];
+        if (!action && req.method === 'GET') {
+          send(res, 200, { ok: true, session: await options.teachMode.inspectSession(sessionId) });
+          return;
+        }
+        if (action === 'stop' && req.method === 'POST') {
+          send(res, 200, { ok: true, session: await options.teachMode.stop(sessionId) });
+          return;
+        }
+        if (action === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, session: await options.teachMode.cancel(sessionId) });
+          return;
+        }
+        if (action === 'compile' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const workflow = await options.teachMode.compile(sessionId, {
+            verificationDigest: String(body.verificationDigest ?? ''),
+            parameters: Array.isArray(body.parameters) ? body.parameters as any : []
+          });
+          send(res, 200, { ok: true, workflow });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    const workflowRoute = /^\/v1\/studio\/workflows\/([0-9a-f-]{36})(?:\/(instantiate))?$/i.exec(pathname);
+    if (workflowRoute) {
+      if (!options.teachMode) {
+        send(res, 503, { ok: false, error: { code: 'TEACH_MODE_NOT_CONFIGURED', message: 'Teach Mode is not configured.' } });
+        return;
+      }
+      try {
+        if (!workflowRoute[2] && req.method === 'GET') {
+          send(res, 200, { ok: true, workflow: await options.teachMode.inspectWorkflow(workflowRoute[1]!) });
+          return;
+        }
+        if (workflowRoute[2] === 'instantiate' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values)
+            ? body.values as Record<string, unknown>
+            : {};
+          send(res, 200, { ok: true, steps: await options.teachMode.instantiate(workflowRoute[1]!, values) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_WORKFLOW_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/desired-state' && req.method === 'GET') {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, contracts: await options.desiredState.list(limit) });
+      return;
+    }
+
+    if (pathname === '/v1/desired-state' && req.method === 'POST') {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const contract = await options.desiredState.create({
+          ...(body.contractId === undefined ? {} : { contractId: String(body.contractId) }),
+          name: String(body.name ?? ''),
+          scopeKey: String(body.scopeKey ?? ''),
+          desired: Array.isArray(body.desired) ? body.desired as any : [],
+          remediation: body.remediation as any,
+          policy: body.policy && typeof body.policy === 'object' && !Array.isArray(body.policy) ? body.policy as any : undefined
+        });
+        send(res, 201, { ok: true, contract });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DESIRED_STATE_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const desiredRoute = /^\/v1\/desired-state\/([0-9a-f-]{36})(?:\/(reconcile|pause|resume))?$/i.exec(pathname);
+    if (desiredRoute) {
+      if (!options.desiredState) {
+        send(res, 503, { ok: false, error: { code: 'DESIRED_STATE_NOT_CONFIGURED', message: 'Desired-state operations are not configured.' } });
+        return;
+      }
+      try {
+        const id = desiredRoute[1]!;
+        const action = desiredRoute[2];
+        if (!action && req.method === 'GET') {
+          send(res, 200, { ok: true, contract: await options.desiredState.inspect(id) });
+          return;
+        }
+        if (action === 'reconcile' && req.method === 'POST') {
+          send(res, 200, { ok: true, contract: await options.desiredState.reconcile(id) });
+          return;
+        }
+        if (action === 'pause' && req.method === 'POST') {
+          const body = await readJson(req) as Record<string, unknown>;
+          send(res, 200, { ok: true, contract: await options.desiredState.pause(id, { cancelActive: body.cancelActive === true }) });
+          return;
+        }
+        if (action === 'resume' && req.method === 'POST') {
+          send(res, 200, { ok: true, contract: await options.desiredState.resume(id) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'DESIRED_STATE_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
     }
 
     if (pathname === '/v1/procedures' && req.method === 'GET') {
@@ -677,7 +828,9 @@ export function createLocalAgentServer(options: {
             errorCode: result.error?.code,
             sideEffectState: result.error?.sideEffectState,
             teamLeaseId: leaseId,
-            autoResumedAfterApproval
+            autoResumedAfterApproval,
+            teachCaptured,
+            teachCaptureCode
           }
         });
         send(res, result.ok ? 200 : 409, result);
@@ -1147,7 +1300,7 @@ export function createLocalAgentServer(options: {
           send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Operator execution is disabled by the local emergency stop.' } });
           return;
         }
-        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown };
+        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown; teachSessionId?: unknown };
         if (!body.action || typeof body.action !== 'object') {
           send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
           return;
@@ -1184,7 +1337,21 @@ export function createLocalAgentServer(options: {
             autoResumedAfterApproval = true;
           }
         }
-        await options.audit?.append({
+        let teachCaptured = false;
+        let teachCaptureCode: string | undefined;
+        if (result.ok && body.teachSessionId !== undefined && options.teachMode) {
+          try {
+            await options.teachMode.record(String(body.teachSessionId), {
+              action,
+              result,
+              resourceKeys: resourceKeysForAction(action)
+            });
+            teachCaptured = true;
+          } catch (error) {
+            teachCaptureCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CAPTURE_FAILED';
+          }
+        }
+                await options.audit?.append({
           ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
           actionId: action.id,
           providerId: result.provider,
