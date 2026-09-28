@@ -10,7 +10,8 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
-import { verifyTaskCompletion } from './task-verifier.ts';\nimport { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
+import { verifyTaskCompletion } from './task-verifier.ts';
+import { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
