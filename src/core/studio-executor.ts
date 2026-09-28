@@ -477,7 +477,18 @@ function validateState(input: unknown): StudioRunStateFile {
     if (run.verificationReceipt) {
       const receipt = run.verificationReceipt;
       if (receipt.subjectKind !== 'studio-workflow-run' || receipt.subjectId !== run.id) throw corrupt('Run verification receipt is bound to a different subject.');
-      sha(receipt.digest, 'run.verificationReceipt.digest');
+      const expected = new VerificationKernel().verify({
+        subjectKind: 'studio-workflow-run',
+        subjectId: run.id,
+        contract: runVerificationContract(run),
+        checks: receipt.checks
+      });
+      if (expected.digest !== receipt.digest || expected.contractDigest !== receipt.contractDigest || expected.verified !== receipt.verified) {
+        throw corrupt('Run verification receipt does not match the persisted execution contract.');
+      }
+      if (run.state === 'VERIFIED' && !receipt.verified) throw corrupt('Verified Studio run requires a passing verification receipt.');
+    } else if (run.state === 'VERIFIED') {
+      throw corrupt('Verified Studio run is missing its verification receipt.');
     }
     iso(run.createdAt, 'run.createdAt');
     iso(run.updatedAt, 'run.updatedAt');
