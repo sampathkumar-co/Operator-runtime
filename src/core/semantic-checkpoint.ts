@@ -133,6 +133,7 @@ export class SemanticCheckpointManager {
     expectedWorkloadId?: string;
     expectedStateDigest?: string;
     availableCapabilities?: string[];
+    verifyResourceKey?: (resourceKey: string) => Promise<boolean>;
     verifyWorldAssumption?: (assumption: SemanticWorldAssumption) => Promise<string | undefined>;
     verifyArtifact?: (artifact: SemanticCheckpointArtifact) => Promise<{ digest: string; size?: number } | undefined>;
   }): Promise<SemanticCheckpoint> {
@@ -177,6 +178,21 @@ export class SemanticCheckpointManager {
       if (missing.length > 0) {
         throw new OperatorError('SEMANTIC_CHECKPOINT_CAPABILITY_MISMATCH', 'Destination cannot satisfy all checkpoint capability requirements.', {
           details: { missing }
+        });
+      }
+    }
+
+    if (checkpoint.resourceKeys.length > 0) {
+      if (!options.verifyResourceKey) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_RESOURCE_PROOF_REQUIRED', 'Destination resource-scope proof is required before accepting this checkpoint.');
+      }
+      const denied: string[] = [];
+      for (const resourceKey of checkpoint.resourceKeys) {
+        if (!await options.verifyResourceKey(resourceKey)) denied.push(resourceKey);
+      }
+      if (denied.length > 0) {
+        throw new OperatorError('SEMANTIC_CHECKPOINT_RESOURCE_MISMATCH', 'Destination authority does not cover all checkpoint resources.', {
+          details: { denied: denied.slice(0, 100) }
         });
       }
     }
