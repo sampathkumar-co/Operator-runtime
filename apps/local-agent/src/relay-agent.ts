@@ -107,6 +107,7 @@ export class LocalAgentRelayRunner {
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {
     const action = validateRemoteAction(payload.action);
     const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
     const publicBoundary = payload.publicBoundary === true;
     if (publicBoundary && containsRestrictedData(action.input)) return restrictedDataBlockedResult(action.capability);
     const response = await fetch(this.#localExecuteUrl, {
@@ -114,7 +115,8 @@ export class LocalAgentRelayRunner {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${this.#agentToken}`
+        authorization: `Bearer ${this.#agentToken}`,
+        ...relayRequestHeaders(enterpriseContext)
       },
       body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
     });
@@ -131,45 +133,48 @@ export class LocalAgentRelayRunner {
   async #executeTaskPayload(payload: JsonObject): Promise<JsonObject> {
     const task = validateRelayTaskRequest(payload.task);
     const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
     if (task.operation === 'submit') {
-      return await this.#callTaskApi('/v1/tasks', 'POST', { ...task.request, approvalAuthority });
+      return await this.#callTaskApi('/v1/tasks', 'POST', { ...task.request, approvalAuthority }, enterpriseContext);
     }
 
     const path = `/v1/tasks/${task.taskId}`;
-    const current = await this.#callTaskApi(path, 'GET');
+    const current = await this.#callTaskApi(path, 'GET', undefined, enterpriseContext);
     if (!current.ok || task.operation === 'inspect') return current;
     const state = current.task && typeof current.task === 'object' ? String((current.task as Record<string, unknown>).state ?? '') : '';
     if (task.operation === 'pause' && state === 'PAUSED') return current;
     if (task.operation === 'cancel' && state === 'CANCELLED') return current;
     if (task.operation === 'run' && ['VERIFIED', 'FAILED', 'CANCELLED'].includes(state)) return current;
     if (task.operation === 'resume' && ['VERIFIED', 'FAILED'].includes(state)) return current;
-    return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', { approvalAuthority });
+    return await this.#callTaskApi(`${path}/${task.operation}`, 'POST', { approvalAuthority }, enterpriseContext);
   }
 
   async #executeKnowledgePayload(payload: JsonObject): Promise<JsonObject> {
+    const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
     const query = validateRelayKnowledgeQuery(payload.query);
-    if (query.kind === 'procedures') return await this.#callOperationApi(`/v1/procedures?limit=${query.limit}`, 'GET');
-    if (query.kind === 'procedure-query') return await this.#callOperationApi('/v1/procedures/query', 'POST', query);
-    if (query.kind === 'optimizer') return await this.#callOperationApi(`/v1/optimizer?limit=${query.limit}`, 'GET');
+    if (query.kind === 'procedures') return await this.#callOperationApi(`/v1/procedures?limit=${query.limit}`, 'GET', undefined, enterpriseContext);
+    if (query.kind === 'procedure-query') return await this.#callOperationApi('/v1/procedures/query', 'POST', query, enterpriseContext);
+    if (query.kind === 'optimizer') return await this.#callOperationApi(`/v1/optimizer?limit=${query.limit}`, 'GET', undefined, enterpriseContext);
     if (query.kind === 'world-list') {
       const url = new URL('/v1/world/entities', this.#localAgentBaseUrl);
       if (query.scopeKey) url.searchParams.set('scopeKey', query.scopeKey);
       if (query.type) url.searchParams.set('type', query.type);
       url.searchParams.set('limit', String(query.limit));
-      return await this.#callAbsoluteOperationApi(url, 'GET');
+      return await this.#callAbsoluteOperationApi(url, 'GET', undefined, enterpriseContext);
     }
-    if (query.kind === 'world-entity') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'entity', entityKey: query.entityKey });
-    if (query.kind === 'world-fact') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'fact', entityKey: query.entityKey, factKey: query.factKey });
+    if (query.kind === 'world-entity') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'entity', entityKey: query.entityKey }, enterpriseContext);
+    if (query.kind === 'world-fact') return await this.#callOperationApi('/v1/world/query', 'POST', { operation: 'fact', entityKey: query.entityKey, factKey: query.factKey }, enterpriseContext);
     return await this.#callOperationApi('/v1/world/query', 'POST', {
       operation: 'trace', fromKey: query.fromKey, toKey: query.toKey, targetType: query.targetType,
       maxDepth: query.maxDepth, minConfidence: query.minConfidence
-    });
+    }, enterpriseContext);
   }
 
-  async #callAbsoluteOperationApi(url: URL, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
+  async #callAbsoluteOperationApi(url: URL, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
     const response = await fetch(url, {
       redirect: 'error', method,
-      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
     });
     let bodyValue: unknown;
@@ -185,24 +190,26 @@ export class LocalAgentRelayRunner {
   }
 
   async #executeOperationPayload(payload: JsonObject): Promise<JsonObject> {
+    const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
     const request = validateRelayOperationRequest(payload.operation);
     if (request.operation === 'submit') {
-      return await this.#callOperationApi('/v1/operations', 'POST', request.request);
+      return await this.#callOperationApi('/v1/operations', 'POST', request.request, enterpriseContext);
     }
     const pathname = `/v1/operations/${request.operationId}`;
-    if (request.operation === 'inspect') return await this.#callOperationApi(pathname, 'GET');
+    if (request.operation === 'inspect') return await this.#callOperationApi(pathname, 'GET', undefined, enterpriseContext);
     const body = request.operation === 'promote' ? { verificationDigest: request.verificationDigest } : {};
-    return await this.#callOperationApi(`${pathname}/${request.operation}`, 'POST', body);
+    return await this.#callOperationApi(`${pathname}/${request.operation}`, 'POST', body, enterpriseContext);
   }
 
-  async #callOperationApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
-    return await this.#callAbsoluteOperationApi(new URL(pathname, this.#localAgentBaseUrl), method, body);
+  async #callOperationApi(pathname: string, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
+    return await this.#callAbsoluteOperationApi(new URL(pathname, this.#localAgentBaseUrl), method, body, enterpriseContext);
   }
 
-  async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown): Promise<JsonObject> {
+  async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
     const response = await fetch(new URL(pathname, this.#localAgentBaseUrl), {
       redirect: 'error', method,
-      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}` },
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
     });
     let bodyValue: unknown;
@@ -409,6 +416,40 @@ function validateRemoteAction(input: unknown): ActionRequest {
     provenance: { kind: 'chatgpt', source: (raw.provenance as any).source === undefined ? undefined : boundedText((raw.provenance as any).source, 'provenance source', 512) },
     taskId,
     target
+  };
+}
+
+type RelayEnterpriseContext = {
+  principalId: string;
+  deviceId: string;
+  projectKey?: string;
+};
+
+function validateRelayEnterpriseContext(input: unknown, authority: ApprovalAuthorityContext): RelayEnterpriseContext | undefined {
+  if (input === undefined) return undefined;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('RELAY_ENTERPRISE_CONTEXT_INVALID', 'Relay enterprise context is invalid.');
+  }
+  const raw = input as Record<string, unknown>;
+  const expectedPrincipal = `account:${authority.accountId}`;
+  const principalId = String(raw.principalId ?? '').toLowerCase();
+  if (principalId !== expectedPrincipal) {
+    throw new OperatorError('RELAY_ENTERPRISE_CONTEXT_INVALID', 'Relay enterprise principal does not match the stamped account authority.');
+  }
+  if (raw.deviceId !== undefined || raw.teamIds !== undefined || raw.environment !== undefined || raw.deviceGroups !== undefined) {
+    throw new OperatorError('RELAY_ENTERPRISE_CONTEXT_INVALID', 'Relay enterprise context contains fields that must be derived locally or by trusted identity infrastructure.');
+  }
+  const projectKey = raw.projectKey === undefined ? undefined : String(raw.projectKey);
+  if (projectKey !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(projectKey) || projectKey.includes('\\'))) {
+    throw new OperatorError('RELAY_ENTERPRISE_CONTEXT_INVALID', 'Relay enterprise project key is invalid.');
+  }
+  return { principalId, deviceId: authority.deviceId, ...(projectKey ? { projectKey } : {}) };
+}
+
+function relayRequestHeaders(context?: RelayEnterpriseContext): Record<string, string> {
+  return {
+    'x-operator-relay-request': '1',
+    ...(context ? { 'x-operator-enterprise-context': Buffer.from(JSON.stringify(context), 'utf8').toString('base64url') } : {})
   };
 }
 
