@@ -76,6 +76,12 @@ export class EnterprisePolicyStore {
     return structuredClone(await this.#read());
   }
 
+  async isConfigured(): Promise<boolean> {
+    await this.#serial;
+    const state = await this.#read();
+    return state.roles.length > 0 || state.bindings.length > 0;
+  }
+
   async narrow(base: PermissionProfile, contextInput: EnterpriseAuthorizationContext): Promise<EnterprisePermissionDecision> {
     await this.#serial;
     const state = await this.#read();
