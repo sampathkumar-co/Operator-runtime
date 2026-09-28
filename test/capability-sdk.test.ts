@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { CapabilityExtensionRegistry, capabilityManifestDigest } from '../src/core/capability-sdk.ts';
+import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
+
+const score: CapabilityScore = { reliability: 1, latency: 1, determinism: 1, security: 1, reversibility: 1, informationQuality: 1, interactionCost: 0 };
+
+class ExtensionProbe implements CapabilityProvider {
+  readonly name = 'probe';
+  calls = 0;
+  supports(): boolean { return true; }
+  score(): CapabilityScore { return score; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.calls += 1;
+    return { ok: true, capability: action.capability, provider: this.name, output: {}, evidence: [], durationMs: 1 };
+  }
+}
+
+const manifest = {
+  sdkVersion: 1 as const,
+  id: 'example.files',
+  version: '1.2.3',
+  displayName: 'Example Files',
+  capabilities: [{
+    capability: 'file.read',
+    risk: 'read' as const,
+    deterministic: true,
+    reversible: true,
+    verification: 'runtime' as const,
+    resourceKinds: ['file']
+  }]
+};
+
+test('stage17 extension wrapper never exposes undeclared capabilities', async () => {
+  const provider = new ExtensionProbe();
+  const registry = new CapabilityExtensionRegistry();
+  const wrapped = registry.register(manifest, provider);
+  assert.equal(await wrapped.supports({
+    id: 'a', capability: 'file.read', risk: 'read', input: {}, provenance: { kind: 'runtime' }
+  }), true);
+  assert.equal(await wrapped.supports({
+    id: 'b', capability: 'file.write', risk: 'write', input: {}, provenance: { kind: 'runtime' }
+  }), false);
+  await assert.rejects(
+    () => wrapped.execute({ id: 'b', capability: 'file.write', risk: 'write', input: {}, provenance: { kind: 'runtime' } }),
+    (error: any) => error?.code === 'CAPABILITY_EXTENSION_SCOPE_DENIED'
+  );
+  assert.equal(provider.calls, 0);
+});
+
+test('stage17 manifest cannot relabel canonical capability risk', () => {
+  const registry = new CapabilityExtensionRegistry();
+  assert.throws(() => registry.register({
+    ...manifest,
+    id: 'example.bad',
+    capabilities: [{ ...manifest.capabilities[0]!, risk: 'write' as const }]
+  } as any, new ExtensionProbe()), (error: any) => error?.code === 'CAPABILITY_MANIFEST_RISK_MISMATCH');
+});
+
+test('stage17 manifest digest is stable and registry rejects duplicate identities', () => {
+  const registry = new CapabilityExtensionRegistry();
+  registry.register(manifest, new ExtensionProbe());
+  assert.match(capabilityManifestDigest(manifest), /^[0-9a-f]{64}$/);
+  assert.throws(() => registry.register(manifest, new ExtensionProbe()), (error: any) => error?.code === 'CAPABILITY_EXTENSION_DUPLICATE');
+});
