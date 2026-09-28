@@ -27,6 +27,7 @@ import { ExecutionOptimizerStore } from '../../../src/core/execution-optimizer.t
 import { OrganizationCoordinator } from '../../../src/core/organization-coordinator.ts';
 import { DigitalOperationsLayer } from '../../../src/core/digital-operations.ts';
 import { evidence } from '../../../src/core/evidence.ts';
+import { ResourceLeaseStore } from '../../../src/core/resource-leases.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -71,6 +72,7 @@ const approvals = new ApprovalStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
+const resourceLeases = new ResourceLeaseStore(stateDir);
 const teams = new TeamCoordinator(stateDir);
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
@@ -238,6 +240,7 @@ const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
   permissions,
+  resourceLeases,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
@@ -251,12 +254,18 @@ const taskOrchestrator = new TaskOrchestrator({
     }
     const result = await runtime.execute(action, actionPermissions, context);
     await audit.append({
-      taskId: action.taskId,
+      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+      actionId: action.id,
+      providerId: result.provider,
       capability: action.capability,
       target: action.target,
       result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
       risk: action.risk,
-      details: { actionId: action.id, provider: result.provider, durationMs: result.durationMs, errorCode: result.error?.code }
+      details: {
+        durationMs: result.durationMs,
+        errorCode: result.error?.code,
+        sideEffectState: result.error?.sideEffectState
+      }
     });
     return result;
   }
