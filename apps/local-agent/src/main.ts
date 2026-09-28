@@ -35,6 +35,7 @@ import { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
 import { DurableEventTicker } from '../../../src/core/event-ticker.ts';
 import { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
+import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -132,6 +133,13 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+const studioExecutor = new StudioWorkflowExecutor(stateDir, {
+  teach: teachMode,
+  runtime,
+  leases: resourceLeases,
+  permissions
+});
+const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
 const operations = new DigitalOperationsLayer(stateDir, {
   procedures,
@@ -334,6 +342,7 @@ const agent = createLocalAgentServer({
   events,
   perception,
   teachMode,
+  studioExecutor,
   desiredState,
   deviceIdentity,
   deviceRegistry,
@@ -354,6 +363,8 @@ const agent = createLocalAgentServer({
     postgresConfigured: Boolean(process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY),
     vscodeConfigured: Boolean(process.env.OPERATOR_VSCODE_PATH),
     windowsUiaConfigured: Boolean(process.env.OPERATOR_WINDOWS_UIA_PATH),
+    studioWorkflowExecutorConfigured: true,
+    recoveredStudioRunCount: recoveredStudioRuns,
     desiredStateReconcilerConfigured: true,
     desiredStateIntervalMs,
     eventRuntimeConfigured: true,
@@ -381,6 +392,7 @@ console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
 console.error(`[operator] generic terminal: ${terminalAllowedExecutables.length ? 'explicit allowlist configured' : 'disabled by default'}`);
 console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
+console.error(`[operator] studio workflow recovery: ${recoveredStudioRuns} interrupted run(s) reconciled`);
 console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
 console.error(`[operator] durable event ticker: every ${eventTickIntervalMs}ms`);
 desiredStateReconciler.start();
