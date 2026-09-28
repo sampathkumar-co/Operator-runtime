@@ -1,5 +1,5 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider } from '../../../src/capabilities/index.ts';
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
 
 export function createRuntime(config: {
@@ -9,6 +9,8 @@ export function createRuntime(config: {
   terminalAllowedExecutables?: string[];
   projectCommandRegistryPath?: string;
   dockerExecutable?: string;
+  computeJavascriptImage?: string;
+  computePythonImage?: string;
   postgresProfileRegistryPath?: string;
   psqlExecutable?: string;
   vscodeExecutable?: string;
@@ -37,6 +39,13 @@ export function createRuntime(config: {
     .register(new DockerProvider({
       allowedRoots: config.allowedRoots,
       dockerExecutable: config.dockerExecutable
+    }))
+    .register(new SandboxedComputeProvider({
+      dockerExecutable: config.dockerExecutable,
+      images: {
+        ...(config.computeJavascriptImage ? { javascript: config.computeJavascriptImage } : {}),
+        ...(config.computePythonImage ? { python: config.computePythonImage } : {})
+      }
     }))
     .register(new PostgresProvider({
       allowedRoots: config.allowedRoots,
