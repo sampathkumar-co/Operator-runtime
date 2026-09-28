@@ -612,6 +612,17 @@ export function createLocalAgentServer(options: {
           requiredCapabilities: normalizedCapabilities,
           resourceKeys
         });
+        const resourceMap = body.resourceMap && typeof body.resourceMap === 'object' && !Array.isArray(body.resourceMap)
+          ? body.resourceMap as Record<string, unknown>
+          : {};
+        for (const key of Object.keys(resourceMap)) {
+          if (!resourceKeys.includes(key)) {
+            throw Object.assign(new Error(`resourceMap contains unknown source resource ${key}.`), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+          }
+          if (typeof resourceMap[key] !== 'string' || !resourceMap[key]) {
+            throw Object.assign(new Error(`resourceMap value for ${key} must be a non-empty destination resource key.`), { code: 'SEMANTIC_MIGRATION_INPUT_INVALID' });
+          }
+        }
         const artifactPaths = body.artifactPaths && typeof body.artifactPaths === 'object' && !Array.isArray(body.artifactPaths)
           ? body.artifactPaths as Record<string, unknown>
           : {};
@@ -620,7 +631,11 @@ export function createLocalAgentServer(options: {
           ...(body.expectedWorkloadId === undefined ? {} : { expectedWorkloadId: String(body.expectedWorkloadId) }),
           ...(body.expectedState === undefined ? {} : { expectedStateDigest: semanticCheckpointDigest(body.expectedState) }),
           availableCapabilities: supportedCapabilities,
-          verifyResourceKey: (resourceKey) => verifyMigrationResourceKey(resourceKey, options.permissions, normalizedCapabilities),
+          verifyResourceKey: (resourceKey) => {
+            const mapped = resourceMap[resourceKey];
+            const destinationResource = typeof mapped === 'string' && mapped ? mapped : resourceKey;
+            return verifyMigrationResourceKey(destinationResource, options.permissions, normalizedCapabilities);
+          },
           ...(options.world ? {
             verifyWorldAssumption: (assumption) => verifyMigrationWorldAssumption(assumption, options.world!)
           } : {}),
