@@ -1,0 +1,36 @@
+name: Benchmark External Smoke
+
+on:
+  push:
+    branches:
+      - benchmark/stage21-baseline
+    paths:
+      - "benchmark/**"
+      - ".github/workflows/benchmark-external-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browsergym-miniwob-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install BrowserGym MiniWoB
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "browsergym-miniwob==0.14.3"
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Reset official MiniWoB task
+        run: python benchmark/smoke/browsergym_miniwob.py
