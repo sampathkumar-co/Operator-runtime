@@ -2,9 +2,9 @@
 
 Operator is a semantic execution substrate for normal ChatGPT conversations to operate computers explicitly authorized by the user. The architecture prefers native APIs, structured protocols, application adapters, DOM/CDP and Windows UI Automation before pixels, and treats policy, verification, recovery, privacy and auditability as first-class execution requirements.
 
-## Status: Stage 1–10 production live
+## Status: Stage 1–20 production live
 
-Production is live at source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, with the public 9-tool review surface unchanged and the private/Developer surface expanded to **32 grouped tools**. The deployed runtime includes Windows RDC parity plus Stages 3–10: bounded autonomous tasks, shared-state multi-agent execution, verified procedural memory, an evidence-backed cross-application world model, trusted paired-device resource scheduling, canary-gated organization execution, bounded authority-neutral self-optimization, and governed digital operations. The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated 2.0.0 publication is completed. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
+Production is live at source `0c28cf8df77369c04fc3b85ed9d16c8def490546`, with the public 9-tool review surface unchanged and the private/Developer surface remaining **32 grouped tools**. The deployed runtime includes the hardened Stage 1–10 foundation plus Stages 11–20: multimodal perception, bounded safe compute, durable events, temporal world history, semantic cross-device continuation, enterprise policy, capability SDK contracts, evaluation infrastructure, verified Studio/Teach workflows, and governed continuous desired-state operations. The npm runtime remains `mecord-connect@1.0.1` under `latest` until the owner completes the separately authenticated 2.0.0 publication. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -55,12 +55,23 @@ Production is live at source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, with th
 - Stage 9 bounded execution optimizer that may tune strategy/concurrency only inside pre-authorized policy ceilings and cannot change authority/risk/approval
 - Stage 10 governed digital operations layer with outcome contracts, explicit authority envelopes, world pre/postconditions, idempotent operation identity, verified-procedure reuse/capture, Stage-4/8 execution and final verification receipts
 - grouped private MCP `operations` + `knowledge.inspect` surfaces, bringing the certified private/Developer source surface to **32 tools** while the public 9-tool surface remains unchanged
+- Stage 11 multimodal perception graph with semantic/visual fusion and ambiguity fail-closed behavior
+- Stage 12 bounded sandboxed JavaScript/Python compute with CPU/memory/time/image constraints
+- Stage 13 durable event runtime with waits, publication, wakeups, deadlines and ticker recovery
+- Stage 14 temporal world history with digest-backed transitions
+- Stage 15 signed semantic continuation with destination authority/capability/resource/world/artifact proofs
+- Stage 16 enterprise authority narrowing and authenticated principal propagation
+- Stage 17 capability SDK contracts without ambient authority
+- Stage 18 evaluation/reliability fabric
+- Stage 19 verified Teach Mode plus durable, approval-aware, reconciliation-aware Studio workflow runs
+- Stage 20 bounded continuous desired-state reconciliation and remediation
+- local Control Center surfaces for Stage 19 Studio runs and Stage 20 desired-state contracts
 
 The full root runtime/import suite is CI-gated alongside independent MCP transport, relay WebSocket, native Windows, MSIX packaging/sign-install, red-team, performance and cross-platform matrix checks. Exact test counts are intentionally not frozen in documentation because the suite grows with each hardened boundary.
 
 ## Remaining external gates
 
-The Stage-1–10 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The remaining local release task is the separately authenticated npm patch publication; OpenAI directory work remains external:
+The Stage-1–20 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The only intentionally owner-authenticated release tasks left are npm 2.0.0 publication and OpenAI/ChatGPT plugin-directory work:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
