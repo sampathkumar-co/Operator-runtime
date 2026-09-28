@@ -27,6 +27,7 @@ import { renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import type { DesiredStateController } from '../../../src/core/desired-state.ts';
+import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
@@ -154,6 +155,7 @@ export function createLocalAgentServer(options: {
   optimizer?: ExecutionOptimizerStore;
   organizations?: OrganizationCoordinator;
   operations?: DigitalOperationsLayer;
+  events?: DurableEventRuntime;
   teachMode?: TeachModeStore;
   desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
@@ -321,6 +323,96 @@ export function createLocalAgentServer(options: {
 
     if (pathname === '/v1/activity/summary' && req.method === 'GET') {
       send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
+      return;
+    }
+
+
+    if (pathname === '/v1/events/waits' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const wait = await options.events.wait({
+          ...(body.waitId === undefined ? {} : { waitId: String(body.waitId) }),
+          eventType: String(body.eventType ?? ''),
+          ...(body.correlationKey === undefined ? {} : { correlationKey: String(body.correlationKey) }),
+          ...(body.notBefore === undefined ? {} : { notBefore: String(body.notBefore) }),
+          ...(body.deadlineAt === undefined ? {} : { deadlineAt: String(body.deadlineAt) }),
+          ...(body.wakeAt === undefined ? {} : { wakeAt: String(body.wakeAt) })
+        });
+        send(res, 201, { ok: true, wait });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_WAIT_CREATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const eventWaitRoute = /^\/v1\/events\/waits\/([0-9a-f-]{36})(?:\/(cancel))?$/i.exec(pathname);
+    if (eventWaitRoute) {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const waitId = eventWaitRoute[1]!;
+        if (!eventWaitRoute[2] && req.method === 'GET') {
+          send(res, 200, { ok: true, wait: await options.events.inspect(waitId) });
+          return;
+        }
+        if (eventWaitRoute[2] === 'cancel' && req.method === 'POST') {
+          send(res, 200, { ok: true, wait: await options.events.cancel(waitId) });
+          return;
+        }
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_WAIT_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
+        return;
+      }
+    }
+
+    if (pathname === '/v1/events/publish' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const published = await options.events.publish({
+          id: String(body.id ?? ''),
+          type: String(body.type ?? ''),
+          ...(body.correlationKey === undefined ? {} : { correlationKey: String(body.correlationKey) }),
+          payloadDigest: String(body.payloadDigest ?? ''),
+          occurredAt: String(body.occurredAt ?? '')
+        });
+        await options.audit?.append({
+          traceId: body.correlationKey === undefined ? undefined : String(body.correlationKey),
+          capability: 'event.publish',
+          result: 'success',
+          risk: 'write',
+          details: {
+            eventId: published.event.id,
+            eventType: published.event.type,
+            satisfiedWaitCount: published.satisfiedWaitIds.length
+          }
+        });
+        send(res, 200, { ok: true, ...published });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_PUBLISH_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/events/tick' && req.method === 'POST') {
+      if (!options.events) {
+        send(res, 503, { ok: false, error: { code: 'EVENT_RUNTIME_NOT_CONFIGURED', message: 'Durable event runtime is not configured.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, ...(await options.events.tick()) });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'EVENT_TICK_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
       return;
     }
 
