@@ -1,6 +1,6 @@
 # Mecord Connect OpenAI Submission Gate — public product v1.0.0 / deployed Stage 1–20 runtime
 
-Current production source: `0c28cf8df77369c04fc3b85ed9d16c8def490546`
+Current production source: `b73d699f3cdca4d6e372942f626012fb4909068b`
 Current public package: `mecord-connect@1.0.1` (`latest`)
 Deployment evidence: exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health/OAuth/routing/security checks passed; fresh ChatGPT connection imported exactly 9 tools with no `device.claim`.
 Rollback baseline: OCC-3M `405be7a03270c6c7ced78cd0d0d58314048a1af7` / image `sha256:7f1114f7f78843db9bf1f8ea7d94baf1a9914bbe42f07d2fbea67db980aaec18`
@@ -11,7 +11,7 @@ Status is deliberately binary: **PASS** means the current Mecord Connect v1 rele
 
 | Gate | Status | Evidence / reason |
 |---|---|---|
-| G1 Source integrity | PASS | Production is deployed from exact source `0c28cf8df77369c04fc3b85ed9d16c8def490546`; the production health/provenance endpoint and post-deploy verification bind the live edge to the final v1 source candidate. |
+| G1 Source integrity | PASS | Production is deployed from exact source `b73d699f3cdca4d6e372942f626012fb4909068b`; the production health/provenance endpoint and post-deploy verification bind the live edge to the final v1 source candidate. |
 | G2 Runtime functionality | PASS | Exact-head CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke passed; the Windows-aware runtime suite reported 452 passed / 17 expected skips / 0 failures; production health and routing checks passed after deployment. |
 | G3 Filesystem safety | PASS | Windows junction path-authority job passed; full Windows-aware suite passed 361 tests with 0 failures; public file tools enforce authorized roots and restricted-data guards. |
 | G4 Command execution | PASS | Security red-team and core runtime suites passed. Public MCP exposes command *listing* only; raw terminal execution is not published. |
