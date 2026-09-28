@@ -7,6 +7,7 @@ import { AccountDeviceRegistry } from '../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { DeviceRegistryStore, answerPairingChallenge } from '../src/core/device-registry.ts';
 import { PolicyEngine } from '../src/core/policy.ts';
+import { AuthorityKernel } from '../src/core/authority-kernel.ts';
 import { DeviceSessionTokenStore } from '../src/core/session-token.ts';
 import { EmergencyStopStore } from '../apps/local-agent/src/emergency-stop.ts';
 import { LocalPrivacyDataStore } from '../apps/local-agent/src/privacy-data.ts';
@@ -209,4 +210,65 @@ test('account authority persists a hash of upstream identity rather than the raw
   const stored = await fs.readFile(path.join(state, 'account-devices.json'), 'utf8');
   assert.equal(stored.includes(principal.issuer), false);
   assert.equal(stored.includes(principal.subject), false);
+});
+
+
+test('captured capability tokens cannot be widened or replayed into another authority kernel', () => {
+  const root = path.resolve(os.tmpdir(), 'operator-redteam-token-root');
+  const permissions = {
+    allowedCapabilities: ['file.*'],
+    allowedRoots: [root],
+    allowExternalWrites: false,
+    allowSystemChanges: false,
+    allowDestructive: false
+  };
+  const issuer = new AuthorityKernel({ secret: Buffer.alloc(32, 31) });
+  const otherProcess = new AuthorityKernel({ secret: Buffer.alloc(32, 32) });
+  const token = issuer.issueToken(permissions, {
+    capability: 'file.read',
+    roots: [path.join(root, 'safe')],
+    maxRisk: 'read',
+    actionIds: ['read-safe']
+  });
+  const action = {
+    id: 'read-safe',
+    capability: 'file.read',
+    risk: 'read' as const,
+    input: { path: path.join(root, 'safe', 'a.txt') },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  assert.doesNotThrow(() => issuer.verifyToken(token, action, permissions));
+  assert.throws(() => otherProcess.verifyToken(token, action, permissions), (error: any) => error?.code === 'AUTHORITY_TOKEN_TAMPERED');
+
+  const widened = structuredClone(token);
+  widened.claims.roots = [root];
+  assert.throws(() => issuer.verifyToken(widened, action, permissions), (error: any) => error?.code === 'AUTHORITY_TOKEN_TAMPERED');
+});
+
+test('capability token cannot turn a read lease into destructive authority even when action id matches', async () => {
+  const root = path.resolve(os.tmpdir(), 'operator-redteam-token-risk');
+  const kernel = new AuthorityKernel({ secret: Buffer.alloc(32, 33) });
+  const permissions = {
+    allowedCapabilities: ['file.*'],
+    allowedRoots: [root],
+    allowExternalWrites: true,
+    allowSystemChanges: true,
+    allowDestructive: true
+  };
+  const token = kernel.issueToken(permissions, {
+    capability: 'file.remove',
+    roots: [root],
+    maxRisk: 'read',
+    actionIds: ['remove']
+  });
+  await assert.rejects(
+    () => kernel.authorize({
+      id: 'remove',
+      capability: 'file.remove',
+      risk: 'destructive',
+      input: { path: path.join(root, 'a.txt') },
+      provenance: { kind: 'chatgpt' }
+    }, permissions, async () => 'destructive', token),
+    (error: any) => error?.code === 'AUTHORITY_TOKEN_RISK_EXCEEDED'
+  );
 });
