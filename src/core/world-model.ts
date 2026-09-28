@@ -56,10 +56,23 @@ export interface WorldRelation {
   expiresAt: string;
 }
 
+export interface WorldTransition {
+  id: string;
+  entityKey: string;
+  factKey: string;
+  source: string;
+  domain: WorldDomain;
+  fromValueDigest?: string;
+  toValueDigest: string;
+  evidenceDigest: string;
+  observedAt: string;
+}
+
 interface WorldModelState {
   version: 1;
   entities: WorldEntity[];
   relations: WorldRelation[];
+  history: WorldTransition[];
 }
 
 export interface ResolvedWorldFact {
@@ -70,6 +83,8 @@ export interface ResolvedWorldFact {
   confidence?: number;
   claims: WorldClaim[];
 }
+
+const MAX_WORLD_HISTORY = 20_000;
 
 const STORE_OPTIONS = {
   maxBytes: MAX_STATE_BYTES,
@@ -134,6 +149,20 @@ export class WorldModelStore {
         }
         const valueDigest = worldValueDigest(value);
         const sameSource = fact.claims.find((claim) => claim.source === normalized.source && claim.domain === normalized.domain);
+        if (!sameSource || sameSource.valueDigest !== valueDigest) {
+          state.history.push({
+            id: crypto.randomUUID(),
+            entityKey: entity.key,
+            factKey,
+            source: normalized.source,
+            domain: normalized.domain,
+            ...(sameSource ? { fromValueDigest: sameSource.valueDigest } : {}),
+            toValueDigest: valueDigest,
+            evidenceDigest: normalized.evidenceDigest,
+            observedAt: nowIso
+          });
+          if (state.history.length > MAX_WORLD_HISTORY) state.history.splice(0, state.history.length - MAX_WORLD_HISTORY);
+        }
         const claim: WorldClaim = {
           id: sameSource?.id ?? crypto.randomUUID(),
           source: normalized.source,
@@ -275,11 +304,40 @@ export class WorldModelStore {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map((item) => structuredClone(item));
   }
 
+
+  async history(input: {
+    entityKey: string;
+    factKey?: string;
+    source?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+  }): Promise<WorldTransition[]> {
+    await this.#serial;
+    const state = await this.#read();
+    const entityKey = boundedContext(input.entityKey, 'entityKey');
+    const factKey = input.factKey === undefined ? undefined : boundedKey(input.factKey, 'factKey');
+    const source = input.source === undefined ? undefined : boundedContext(input.source, 'source');
+    const since = input.since === undefined ? undefined : validIso(input.since, 'since');
+    const until = input.until === undefined ? undefined : validIso(input.until, 'until');
+    if (since && until && Date.parse(since) > Date.parse(until)) throw new OperatorError('WORLD_QUERY_INVALID', 'since cannot be after until.');
+    const limit = boundedInteger(input.limit ?? 100, 1, 1000, 'limit');
+    return state.history
+      .filter((item) => item.entityKey === entityKey)
+      .filter((item) => !factKey || item.factKey === factKey)
+      .filter((item) => !source || item.source === source)
+      .filter((item) => !since || Date.parse(item.observedAt) >= Date.parse(since))
+      .filter((item) => !until || Date.parse(item.observedAt) <= Date.parse(until))
+      .sort((a, b) => b.observedAt.localeCompare(a.observedAt) || b.id.localeCompare(a.id))
+      .slice(0, limit)
+      .map((item) => structuredClone(item));
+  }
+
   async #read(): Promise<WorldModelState> {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entities: [], relations: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entities: [], relations: [], history: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('WORLD_MODEL_CORRUPT', 'World model could not be read.');
     }
@@ -340,6 +398,19 @@ function validateState(input: unknown): WorldModelState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
   const raw = input as WorldModelState;
   if (raw.version !== 1 || !Array.isArray(raw.entities) || raw.entities.length > MAX_ENTITIES || !Array.isArray(raw.relations) || raw.relations.length > MAX_RELATIONS) throw corrupt('State shape is invalid.');
+  if ((raw as WorldModelState & { history?: WorldTransition[] }).history === undefined) raw.history = [];
+  if (!Array.isArray(raw.history) || raw.history.length > MAX_WORLD_HISTORY) throw corrupt('World history is invalid.');
+  for (const transition of raw.history) {
+    validUuid(transition.id, 'transition id');
+    boundedContext(transition.entityKey, 'transition entityKey');
+    boundedKey(transition.factKey, 'transition factKey');
+    boundedContext(transition.source, 'transition source');
+    validDomain(transition.domain);
+    if (transition.fromValueDigest !== undefined) shaDigest(transition.fromValueDigest, 'transition from digest');
+    shaDigest(transition.toValueDigest, 'transition to digest');
+    shaDigest(transition.evidenceDigest, 'transition evidence');
+    validIso(transition.observedAt, 'transition observedAt');
+  }
   const entityKeys = new Set<string>();
   for (const entity of raw.entities) {
     validUuid(entity.id, 'entity id'); boundedContext(entity.key, 'entity key'); boundedKey(entity.type, 'entity type'); boundedContext(entity.scopeKey, 'entity scope'); boundedText(entity.label, 4096, 'entity label');
