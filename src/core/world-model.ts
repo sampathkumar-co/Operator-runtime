@@ -117,7 +117,10 @@ export class WorldModelStore {
       const state = await this.#read();
       const now = this.#clock();
       const nowIso = now.toISOString();
-      pruneExpired(state, now.getTime());
+      // Preserve the immediately previous source claim while applying a new
+      // observation so temporal history can record the transition even when the
+      // old claim expires at this exact instant. Expired claims are pruned after
+      // the replacement observation has been committed.
       let entity = state.entities.find((item) => item.key === normalized.entity.key);
       if (!entity) {
         if (state.entities.length >= MAX_ENTITIES) throw new OperatorError('WORLD_MODEL_LIMIT', 'World entity limit reached.');
@@ -214,6 +217,7 @@ export class WorldModelStore {
         }
       }
 
+      pruneExpired(state, now.getTime());
       state.entities.sort((a, b) => a.key.localeCompare(b.key));
       state.relations.sort((a, b) => relationIdentity(a).localeCompare(relationIdentity(b)));
       await this.#write(state);
