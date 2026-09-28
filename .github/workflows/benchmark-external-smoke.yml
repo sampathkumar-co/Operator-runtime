@@ -48,3 +48,6 @@ jobs:
 
       - name: Exercise official MiniWoB reward path
         run: python benchmark/smoke/browsergym_reward_selftest.py
+
+      - name: Exercise MiniWoB through Mecord browser provider
+        run: python benchmark/smoke/miniwob_mecord_toolpath.py
