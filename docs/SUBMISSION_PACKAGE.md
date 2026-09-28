@@ -12,7 +12,7 @@ This document is the reviewer-facing source of truth for the public ChatGPT plug
 - Manifest: `.codex-plugin/plugin.json`
 - Machine-readable review materials: `docs/plugin-review-package.json`
 
-Production is live on Mecord Connect source `3361b2f77d2b04028d514b178bd4a246fc863e6c`, and `mecord-connect@1.0.1` is public under `latest`. The previously refreshed ChatGPT OAuth connection imports exactly the canonical nine tools with no `device.claim`; the successor deployment preserves that public boundary and passed post-deploy health, routing and exact tool-count verification. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked on OpenAI developer verification and the portal/reviewer evidence that cannot proceed until that external account gate is resolved. The npm/runtime/production release itself is complete.
+Production is live on Mecord Connect source `b73d699f3cdca4d6e372942f626012fb4909068b`, and `mecord-connect@2.0.1` is public under `latest`. The refreshed ChatGPT OAuth connection imports exactly the canonical nine public tools with no `device.claim`; the separate Developer edge continues to expose 32 grouped tools and passed post-deploy health, routing and exact tool-count verification. Source/legal/package metadata identifies **Kinthala Samuel Sampath Kumar**, proprietary licensing and DUAL_USE. Submission remains blocked on OpenAI developer verification and the portal/reviewer evidence that cannot proceed until that external account gate is resolved. The npm/runtime/production release itself is complete.
 
 ## What the public plugin does
 
@@ -113,7 +113,7 @@ Do not claim any of the following until the external gate is actually complete:
 - OpenAI marketplace/plugin approval;
 - successful production Scan Tools snapshot;
 - production OAuth reviewer account is ready;
-- OpenAI reviewer-specific execution has completed; this is separate from the already-proven runtime/device path and from `mecord-connect@1.0.1` publication.
+- OpenAI reviewer-specific execution has completed; this is separate from the already-proven runtime/device path and from `mecord-connect@2.0.1` publication.
 - the selected individual publisher identity has been verified by OpenAI and the exact verified spelling/order matches the deployed website/support/privacy/terms;
 - all countries/regions are supported;
 - zero risk, perfect security, or guaranteed execution.

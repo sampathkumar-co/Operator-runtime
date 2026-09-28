@@ -117,7 +117,7 @@ The deployed runtime is gated together with the predecessor runtime: Stage 3 aut
 - production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
 - public tools: **9**;
 - Developer tools: **32 grouped tools**;
-- npm: `mecord-connect@1.0.1` currently published; `2.0.1` is the certified Stage-1–20 runtime candidate until registry publication completes.
+- npm: `mecord-connect@2.0.1` is published under `latest` from the certified Stage-1–20 runtime source and passed clean-registry verification.
 
 ### Certified runtime lineage
 - Stage-5–10 runtime certification head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;

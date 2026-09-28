@@ -12,7 +12,7 @@ The npm publication gate is resolved:
 
 - npm user: **mecrod**
 - npm 2FA mode: **auth-and-writes**
-- release package: **mecord-connect@1.0.1**
+- release package: **mecord-connect@2.0.1** under `latest`
 - npm organization/scope: **not required** for the unscoped package
 - registry state: **public under latest**
 - clean registry install, installed doctor and remote --help: **PASS**

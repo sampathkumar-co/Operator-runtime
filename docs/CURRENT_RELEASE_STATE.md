@@ -12,7 +12,7 @@ This file is the canonical human-readable current-state summary. Machine-readabl
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
 - Developer surface: exactly **32** grouped tools
 - Developer pairing route: **404** by design
-- npm: **`mecord-connect@1.0.1`** under `latest`
+- npm: **`mecord-connect@2.0.1`** under `latest`
 
 Live verification on 2026-09-28 confirmed both health endpoints report source `b73d699f3cdca4d6e372942f626012fb4909068b`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
 
@@ -46,18 +46,18 @@ Production now includes:
 
 The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `b73d699f3cdca4d6e372942f626012fb4909068b`, built at `2026-09-28T14:59:30Z`.
 
-The npm runtime remains `mecord-connect@1.0.1` under `latest` until the separately authenticated npm 2.0.1 release is published.
+The npm runtime is `mecord-connect@2.0.1` under `latest`. Clean registry installation, `doctor`, `remote --help`, all 111 runtime-manifest hashes, all three Windows-native helpers, the fail-closed launcher guard and a zero-vulnerability production audit were verified after publication.
 
-The previously staged `mecord-connect@2.0.0` artifact was superseded before registry activation. The final owner-approval candidate is `2.0.1`, which adds the certified exact-PID Windows process-inspection latency fix without changing the public 9-tool MCP schema.
+`mecord-connect@2.0.0` exists in registry history but is superseded and is not the `latest` tag. The released `2.0.1` runtime adds the certified exact-PID Windows process-inspection latency fix without changing the public 9-tool MCP schema.
 
 ## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
 
 - public product / plugin snapshot: **1.0.0**
-- npm runtime currently published: **1.0.1**; next candidate: **2.0.1**
+- npm runtime currently published: **2.0.1** under `latest`
 
-The public version tracks the stable public MCP schema/review snapshot. The The npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged. Tests require the runtime candidate to be valid SemVer and never older than the actually published runtime.
+The public version tracks the stable public MCP schema/review snapshot. The npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged. Tests require the runtime candidate to be valid SemVer and never older than the actually published runtime.
 
 ## OpenAI-side state
 

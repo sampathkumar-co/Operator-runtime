@@ -2,9 +2,9 @@
 
 ## Certification status
 
-**MECORD CONNECT STAGE 1–20 IS LIVE; NPM 2.0.1 OWNER APPROVAL AND OPENAI SUBMISSION ARE NOT YET COMPLETE.**
+**MECORD CONNECT STAGE 1–20 AND NPM 2.0.1 ARE LIVE; OPENAI SUBMISSION IS NOT YET COMPLETE.**
 
-The Stage 1–20 production edge is released and live-verified. The public npm registry still reports mecord-connect@1.0.1; the certified 2.0.1 successor is being staged for explicit owner approval. OpenAI verification/reviewer evidence and final app-directory actions remain external.
+The Stage 1–20 production edge is released and live-verified. The public npm registry reports `mecord-connect@2.0.1` under `latest`, and clean-registry verification passed. OpenAI verification/reviewer evidence and final app-directory actions remain external.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -97,7 +97,7 @@ Release guards fail closed if the package name, proprietary license, dual-use de
 
 GitHub NPM Runtime certification builds the native helpers, builds the exact-source runtime payload, packs the tarball, verifies required policy/runtime files, installs the tarball, runs the direct runtime doctor, and runs the installed `mecord-connect.cmd` doctor.
 
-The package is public as **`mecord-connect@1.0.1`** under the **`latest`** tag, published by npm user **mecrod** from source `10914835e5ce4d8b1d2bf9952e8789efc8feb306`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, package/runtime file checks and vulnerability scan; 0 vulnerabilities were reported.
+The package is public as **`mecord-connect@2.0.1`** under the **`latest`** tag, approved by npm user **mecrod** from trusted-publisher source `b73d699f3cdca4d6e372942f626012fb4909068b`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, all 111 runtime-manifest hashes, all three Windows-native helpers, fail-closed launcher behavior and vulnerability scan; 0 vulnerabilities were reported. Version `2.0.0` exists in registry history but is superseded and is not `latest`.
 
 ## Public MCP surface
 
@@ -204,7 +204,7 @@ Production deployment is complete at `b73d699f3cdca4d6e372942f626012fb4909068b`.
 - public health: tool surface `public`, tool count **9**;
 - Developer health: tool surface `developer`, tool count **32**;
 - Developer pairing route: **404** by design;
-- npm `latest`: **mecord-connect@1.0.1**.
+- npm `latest`: **mecord-connect@2.0.1**.
 
 ## Release verdict
 
