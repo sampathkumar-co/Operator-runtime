@@ -552,8 +552,8 @@ export class TeamCoordinator {
       const now = new Date().toISOString();
       const code = boundedKey(input.code, 'failure code');
       const message = boundedText(input.message, 64 * 1024, 'failure message');
-      if (!['none', 'known', 'uncertain'].includes(input.sideEffectState)) throw new OperatorError('TEAM_INPUT_INVALID', 'sideEffectState must be none, known, or uncertain.');
-      const uncertain = input.sideEffectState === 'uncertain';
+      const sideEffectState = validSideEffectState(input.sideEffectState);
+      const uncertain = sideEffectState === 'uncertain';
       for (const resourceKey of item.resources) {
         const resource = requireResource(mission, resourceKey);
         if (resource.lock?.leaseId === lease.id) delete resource.lock;
