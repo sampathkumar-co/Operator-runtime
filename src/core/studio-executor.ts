@@ -210,7 +210,10 @@ export class StudioWorkflowExecutor {
               return;
             }
             record.errorCode = result.error?.code ?? 'STUDIO_STEP_FAILED';
-            if (sideEffectState === 'uncertain' && freshStep.risk !== 'read') {
+            if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED') {
+              record.state = 'PENDING';
+              mutable.state = 'PENDING';
+            } else if (sideEffectState === 'uncertain' && freshStep.risk !== 'read') {
               record.state = 'NEEDS_RECONCILIATION';
               mutable.state = 'BLOCKED';
             } else {
