@@ -44,6 +44,7 @@ export interface ActionResult {
     code: string;
     message: string;
     retryable?: boolean;
+    sideEffectState?: SideEffectState;
   };
   durationMs: number;
 }
