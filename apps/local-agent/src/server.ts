@@ -25,6 +25,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
+import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import type { DesiredStateController } from '../../../src/core/desired-state.ts';
 import type { DurableEventRuntime } from '../../../src/core/event-runtime.ts';
@@ -173,6 +174,7 @@ export function createLocalAgentServer(options: {
   teachMode?: TeachModeStore;
   studioExecutor?: StudioWorkflowExecutor;
   semanticMigration?: SemanticCheckpointManager;
+  enterprisePolicy?: EnterprisePolicyStore;
   desiredState?: DesiredStateController;
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
@@ -254,12 +256,13 @@ export function createLocalAgentServer(options: {
   const executeActionWithCurrentApproval = async (
     action: ActionRequest,
     approvalAuthority: ApprovalAuthorityContext | undefined,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
     const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
     const sessionPermissions = options.sessionApprovals
-      ? options.sessionApprovals.permissionsFor(approvalAuthority, options.permissions)
-      : options.permissions;
+      ? options.sessionApprovals.permissionsFor(approvalAuthority, basePermissions)
+      : basePermissions;
     const permissions = oneTimeApproved
       ? {
           ...sessionPermissions,
@@ -343,12 +346,12 @@ export function createLocalAgentServer(options: {
     return result;
   };
 
-  const taskAuthorization = (authority?: ApprovalAuthorityContext) => ({
+  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => ({
     permissionProvider: async (action: ActionRequest) => {
       const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
       const sessionPermissions = options.sessionApprovals
-        ? options.sessionApprovals.permissionsFor(authority, options.permissions)
-        : options.permissions;
+        ? options.sessionApprovals.permissionsFor(authority, basePermissions)
+        : basePermissions;
       if (!oneTimeApproved) return sessionPermissions;
       await options.approvals!.consume(action, authority);
       return {
@@ -366,6 +369,37 @@ export function createLocalAgentServer(options: {
       return undefined;
     }
   });
+
+  const permissionsForRequest = async (
+    relayRequest: boolean,
+    enterpriseContext: EnterpriseAuthorizationContext | undefined
+  ): Promise<{ permissions: PermissionProfile; enterpriseApplied: boolean; roleIds: string[]; bindingIds: string[] }> => {
+    if (!relayRequest || !options.enterprisePolicy || !await options.enterprisePolicy.isConfigured()) {
+      return { permissions: options.permissions, enterpriseApplied: false, roleIds: [], bindingIds: [] };
+    }
+    if (!enterpriseContext) {
+      throw new OperatorError('ENTERPRISE_CONTEXT_REQUIRED', 'Configured enterprise policy requires trusted relay enterprise context.');
+    }
+    const decision = await options.enterprisePolicy.narrow(options.permissions, enterpriseContext);
+    return {
+      permissions: decision.permissions,
+      enterpriseApplied: true,
+      roleIds: decision.roleIds,
+      bindingIds: decision.bindingIds
+    };
+  };
+
+  const assertEnterpriseApprovalBinding = (
+    relayRequest: boolean,
+    enterpriseContext: EnterpriseAuthorizationContext | undefined,
+    approvalAuthority: ApprovalAuthorityContext | undefined
+  ): void => {
+    if (!relayRequest || !enterpriseContext || !approvalAuthority) return;
+    if (enterpriseContext.principalId !== `account:${approvalAuthority.accountId}`
+      || enterpriseContext.deviceId !== approvalAuthority.deviceId) {
+      throw new OperatorError('ENTERPRISE_CONTEXT_AUTHORITY_MISMATCH', 'Enterprise context does not match relay-stamped account/device authority.');
+    }
+  };
 
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url ?? '/', 'http://operator.local');
@@ -393,6 +427,23 @@ export function createLocalAgentServer(options: {
       send(res, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Valid agent bearer token required.' } });
       return;
     }
+
+    let relayRequest = false;
+    let requestEnterpriseContext: EnterpriseAuthorizationContext | undefined;
+    let requestPermissionDecision: { permissions: PermissionProfile; enterpriseApplied: boolean; roleIds: string[]; bindingIds: string[] };
+    try {
+      relayRequest = relayRequestMarker(req.headers['x-operator-relay-request']);
+      requestEnterpriseContext = decodeEnterpriseContextHeader(req.headers['x-operator-enterprise-context'], relayRequest);
+      requestPermissionDecision = await permissionsForRequest(relayRequest, requestEnterpriseContext);
+    } catch (error) {
+      const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_CONTEXT_INVALID';
+      send(res, code === 'ENTERPRISE_AUTHORITY_DENIED' || code === 'ENTERPRISE_CONTEXT_REQUIRED' ? 403 : 400, {
+        ok: false,
+        error: { code, message: error instanceof Error ? error.message : String(error) }
+      });
+      return;
+    }
+    const requestPermissions = requestPermissionDecision.permissions;
 
     if (pathname === '/v1/activity' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
