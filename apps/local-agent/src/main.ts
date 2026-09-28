@@ -61,7 +61,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -108,6 +108,8 @@ const runtime = createRuntime({
   terminalAllowedExecutables,
   projectCommandRegistryPath: process.env.OPERATOR_PROJECT_COMMAND_REGISTRY,
   dockerExecutable: process.env.OPERATOR_DOCKER_PATH,
+  computeJavascriptImage: process.env.OPERATOR_COMPUTE_JS_IMAGE,
+  computePythonImage: process.env.OPERATOR_COMPUTE_PY_IMAGE,
   postgresProfileRegistryPath: process.env.OPERATOR_POSTGRES_PROFILE_REGISTRY,
   psqlExecutable: process.env.OPERATOR_PSQL_PATH,
   vscodeExecutable: process.env.OPERATOR_VSCODE_PATH,
