@@ -38,6 +38,7 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
+import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -70,6 +71,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 }
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
+const stateInstanceLock = await acquireLocalAgentStateInstanceLock(stateDir);
 const permissions = {
   allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
   allowedRoots,
@@ -434,7 +436,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     stopRelay();
-    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()].filter(Boolean) as Array<Promise<unknown>>);
+    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close(), stateInstanceLock.release()].filter(Boolean) as Array<Promise<unknown>>);
     process.exit(0);
   });
 }
