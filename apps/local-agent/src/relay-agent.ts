@@ -77,16 +77,21 @@ export class LocalAgentRelayRunner {
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
     const identity = await this.#identity.loadOrCreate();
-    const result = delivery.kind === 'action'
-      ? await this.#executeActionPayload(delivery.payload)
-      : delivery.kind === 'task'
-        ? await this.#executeTaskPayload(delivery.payload)
-        : delivery.kind === 'operation'
-          ? await this.#executeOperationPayload(delivery.payload)
-          : delivery.kind === 'knowledge'
-            ? await this.#executeKnowledgePayload(delivery.payload)
-            : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
-    const safe = boundedResult(result);
+    let safe: JsonObject;
+    try {
+      const result = delivery.kind === 'action'
+        ? await this.#executeActionPayload(delivery.payload)
+        : delivery.kind === 'task'
+          ? await this.#executeTaskPayload(delivery.payload)
+          : delivery.kind === 'operation'
+            ? await this.#executeOperationPayload(delivery.payload)
+            : delivery.kind === 'knowledge'
+              ? await this.#executeKnowledgePayload(delivery.payload)
+              : { ok: false, error: { code: 'RELAY_DELIVERY_KIND_UNSUPPORTED', message: `Unsupported relay delivery kind ${delivery.kind}.` } };
+      safe = boundedResult(result);
+    } catch (error) {
+      safe = oversizedRelayResultFallback(error, delivery);
+    }
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
     await this.#submitResult(delivery.seq, delivery.id, safe);
   }
@@ -478,6 +483,33 @@ function restrictedDataBlockedResult(capability: string): JsonObject {
       message: 'The public plugin refused content that may contain restricted data.'
     },
     evidence: [],
+    durationMs: 0
+  };
+}
+
+function oversizedRelayResultFallback(error: unknown, delivery: RelayDelivery): JsonObject {
+  if (!(error instanceof OperatorError) || error.code !== 'RELAY_LOCAL_RESULT_TOO_LARGE') throw error;
+  const capability = delivery.kind === 'action'
+    && delivery.payload.action
+    && typeof delivery.payload.action === 'object'
+    && !Array.isArray(delivery.payload.action)
+    ? String((delivery.payload.action as Record<string, unknown>).capability ?? '')
+    : '';
+  return {
+    ok: false,
+    ...(capability ? { capability } : {}),
+    provider: 'relay.boundary',
+    error: {
+      code: 'RELAY_LOCAL_RESULT_TOO_LARGE',
+      message: 'Local execution completed, but its result exceeded the relay size limit and was omitted. Do not retry automatically.',
+      retryable: false
+    },
+    evidence: [{
+      kind: 'relay_result_boundary',
+      status: 'fail',
+      message: 'Oversized local result was replaced with a bounded non-retryable relay error.',
+      data: { maxResultBytes: MAX_RESULT_BYTES }
+    }],
     durationMs: 0
   };
 }
