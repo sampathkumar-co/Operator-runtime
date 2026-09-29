@@ -14,6 +14,8 @@ const DEFAULT_HEARTBEAT_MS = 20_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const MIN_CONNECT_TIMEOUT_MS = 100;
 const MAX_CONNECT_TIMEOUT_MS = 60_000;
+const DEFAULT_CONCURRENT_READS = 4;
+const MAX_CONCURRENT_READS = 16;
 
 type JsonObject = Record<string, unknown>;
 
@@ -85,6 +87,7 @@ interface WelcomeFrame {
   heartbeatMs?: number;
   capabilityBinding?: 1;
   capabilities?: string[];
+  readConcurrency?: number;
 }
 
 interface DeliveryFrame {
@@ -119,6 +122,7 @@ export interface RelayClientOptions {
   clock?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   connectTimeoutMs?: number;
+  maxConcurrentReadDeliveries?: number;
 }
 
 export class RelayClient {
@@ -139,6 +143,7 @@ export class RelayClient {
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
   #connectTimeoutMs: number;
+  #maxConcurrentReadDeliveries: number;
   #stopped = false;
   #socket: RelaySocketLike | null = null;
   #attempt = 0;
@@ -178,6 +183,7 @@ export class RelayClient {
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#connectTimeoutMs = boundedConnectTimeout(options.connectTimeoutMs);
+    this.#maxConcurrentReadDeliveries = boundedReadConcurrency(options.maxConcurrentReadDeliveries ?? DEFAULT_CONCURRENT_READS);
   }
 
   async run(): Promise<void> {
@@ -250,6 +256,7 @@ export class RelayClient {
       pendingRecovery: state.processing ? { seq: state.processing.seq, id: state.processing.id } : null,
       ...(this.#requireCapabilityBinding ? { capabilityBinding: 1 as const, capabilities: [...supportedCapabilities] } : {}),
       ...(resourceProfile ? { resourceProfile } : {}),
+      readConcurrency: this.#maxConcurrentReadDeliveries,
       sentAt: this.#clock().toISOString(),
       nonce: crypto.randomBytes(24).toString('base64url')
     };
@@ -260,6 +267,12 @@ export class RelayClient {
       let settled = false;
       let messageQueue: Promise<void> = Promise.resolve();
       let interrupt: (() => void) | null = null;
+      let readConcurrency = 1;
+      let nextReceiveSeq = state.lastAckedServerSeq + 1;
+      let nextAckSeq = state.lastAckedServerSeq + 1;
+      const activeReads = new Set<number>();
+      const completedReads = new Map<number, RelayDelivery>();
+      let readAckQueue: Promise<void> = Promise.resolve();
 
       const cleanup = () => {
         socket.removeEventListener?.('message', onMessage);
@@ -292,12 +305,15 @@ export class RelayClient {
         const frame = parseServerFrame(event?.data);
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          const effectiveCapabilities = await this.#validateWelcome(frame, state, supportedCapabilities);
+          const negotiated = await this.#validateWelcome(frame, state, supportedCapabilities);
+          readConcurrency = negotiated.readConcurrency;
+          nextReceiveSeq = frame.resumeFromSeq + 1;
+          nextAckSeq = frame.resumeFromSeq + 1;
           welcomed = true;
           this.#attempt = 0;
           this.#lastPongAt = Date.now();
           this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
-          this.#emitStatus({ state: 'authenticated-ready', capabilityCount: effectiveCapabilities.length });
+          this.#emitStatus({ state: 'authenticated-ready', capabilityCount: negotiated.capabilities.length });
           return;
         }
         if (frame.type === 'pong') {
@@ -305,7 +321,53 @@ export class RelayClient {
           return;
         }
         if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
+        const delivery = validateDelivery(frame);
+        if (readConcurrency > 1 && isConcurrentReadDelivery(delivery)) {
+          const durable = await this.#readState();
+          if (delivery.seq <= durable.lastAckedServerSeq) {
+            await this.#notifyAcknowledged(delivery);
+            sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
+            return;
+          }
+          if (delivery.seq !== nextReceiveSeq) {
+            throw new OperatorError('RELAY_SEQUENCE_GAP', `Expected relay sequence ${nextReceiveSeq} but received ${delivery.seq}.`, { retryable: true });
+          }
+          if (activeReads.size >= readConcurrency) {
+            throw new OperatorError('RELAY_READ_WINDOW_EXCEEDED', 'Relay exceeded the negotiated concurrent read window.', { retryable: true });
+          }
+          nextReceiveSeq += 1;
+          activeReads.add(delivery.seq);
+          void this.#onDelivery(delivery).then(() => {
+            completedReads.set(delivery.seq, delivery);
+            readAckQueue = readAckQueue.then(async () => {
+              while (completedReads.has(nextAckSeq)) {
+                const completed = completedReads.get(nextAckSeq)!;
+                const current = await this.#readState();
+                if (current.processing) {
+                  throw new OperatorError('RELAY_RECOVERY_CONFLICT', 'Concurrent read ACK cannot advance while a durable non-read delivery is processing.', { retryable: false });
+                }
+                if (current.lastAckedServerSeq !== completed.seq - 1) {
+                  throw new OperatorError('RELAY_SEQUENCE_GAP', 'Concurrent read ACK cursor is not contiguous.', { retryable: true });
+                }
+                await this.#writeState({ version: 1, lastAckedServerSeq: completed.seq });
+                await this.#notifyAcknowledged(completed);
+                sendFrame(socket, { type: 'ack', seq: completed.seq, id: completed.id });
+                completedReads.delete(completed.seq);
+                activeReads.delete(completed.seq);
+                nextAckSeq = completed.seq + 1;
+              }
+            });
+            return readAckQueue;
+          }).catch(fail);
+          return;
+        }
+        if (activeReads.size > 0) {
+          throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a serialization-barrier delivery before concurrent reads were acknowledged.', { retryable: true });
+        }
         await this.#handleDelivery(socket, frame);
+        const durable = await this.#readState();
+        nextReceiveSeq = durable.lastAckedServerSeq + 1;
+        nextAckSeq = durable.lastAckedServerSeq + 1;
       };
       const onMessage = (event: any) => {
         messageQueue = messageQueue.then(() => processMessage(event));
@@ -323,7 +385,7 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<string[]> {
+  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<{ capabilities: string[]; readConcurrency: number }> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
     let effectiveCapabilities = [...supportedCapabilities];
     if (this.#requireCapabilityBinding) {
@@ -346,9 +408,13 @@ export class RelayClient {
     if (expiredThroughSeq !== undefined && (!Number.isSafeInteger(expiredThroughSeq) || expiredThroughSeq < 1 || expiredThroughSeq !== frame.resumeFromSeq)) {
       throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay expired-history reconciliation proof is invalid.');
     }
+    const readConcurrency = frame.readConcurrency === undefined ? 1 : boundedReadConcurrency(frame.readConcurrency);
+    if (readConcurrency > this.#maxConcurrentReadDeliveries) {
+      throw new OperatorError('RELAY_READ_CONCURRENCY_INVALID', 'Relay acknowledged a read concurrency higher than the client advertised.', { retryable: false });
+    }
     if (frame.resumeFromSeq === state.lastAckedServerSeq) {
       if (expiredThroughSeq !== undefined) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay supplied an unnecessary expired-history reconciliation proof.');
-      return effectiveCapabilities;
+      return { capabilities: effectiveCapabilities, readConcurrency };
     }
     if (frame.resumeFromSeq < state.lastAckedServerSeq || expiredThroughSeq !== frame.resumeFromSeq) {
       throw new OperatorError('RELAY_RESUME_MISMATCH', 'Relay resume cursor does not match the durable local acknowledgement cursor.', { retryable: true });
@@ -366,7 +432,7 @@ export class RelayClient {
     if (state.processing && state.processing.seq <= frame.resumeFromSeq) {
       await this.#notifyAcknowledged(state.processing);
     }
-    return effectiveCapabilities;
+    return { capabilities: effectiveCapabilities, readConcurrency };
   }
 
   #emitStatus(status: RelayClientStatus): void {
@@ -473,6 +539,20 @@ export function reconnectDelay(attemptInput: number, randomInput = Math.random()
   return Math.min(Math.max(Math.round(base * jitter), MIN_BACKOFF_MS), MAX_BACKOFF_MS);
 }
 
+
+function boundedReadConcurrency(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_CONCURRENT_READS) {
+    throw new OperatorError('RELAY_READ_CONCURRENCY_INVALID', `Relay read concurrency must be an integer between 1 and ${MAX_CONCURRENT_READS}.`);
+  }
+  return parsed;
+}
+
+function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
+  if (delivery.kind !== 'action') return false;
+  const action = delivery.payload.action;
+  return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
+}
 
 function validateResourceProfile(input: RelayResourceProfile): RelayResourceProfile {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_RESOURCE_PROFILE_INVALID', 'Relay resource profile is invalid.');
