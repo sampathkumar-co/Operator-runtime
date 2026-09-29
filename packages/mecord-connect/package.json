@@ -1,6 +1,6 @@
 {
   "name": "mecord-connect",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Secure one-command Mecord Connect runtime for connecting ChatGPT to a user-authorized Windows computer.",
   "type": "module",
   "bin": {
