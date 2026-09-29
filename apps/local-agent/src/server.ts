@@ -1541,6 +1541,25 @@ export function createLocalAgentServer(options: {
           maxAttemptsPerStep: body.maxAttemptsPerStep,
           timeoutMs: body.timeoutMs
         } as SubmitTaskOptions);
+        if (body.run === true && relayRequest) {
+          const authorization = taskAuthorization(approvalAuthority, requestPermissions);
+          void options.taskOrchestrator.run(submitted.id, [], authorization).catch(async (error) => {
+            try {
+              await options.audit?.append({
+                traceId: submitted.id,
+                taskId: submitted.id,
+                capability: 'task.background.run',
+                result: 'failure',
+                risk: 'read',
+                details: {
+                  code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_BACKGROUND_RUN_FAILED'
+                }
+              });
+            } catch { /* task state remains the source of truth */ }
+          });
+          send(res, 202, { ok: true, task: submitted, accepted: true, executionStarted: true });
+          return;
+        }
         const task = body.run === true ? await options.taskOrchestrator.run(submitted.id, [], taskAuthorization(approvalAuthority, requestPermissions)) : submitted;
         send(res, body.run === true ? 200 : 202, { ok: true, task });
       } catch (error) {
