@@ -20,6 +20,7 @@ const MAX_BODY_BYTES = 256 * 1024;
 const DEFAULT_GC_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_REQUEST_LIMIT_PER_MINUTE = 120;
 const DEFAULT_DEVICE_LIMIT_PER_MINUTE = 180;
+const MAX_CONCURRENT_READ_RESULT_WINDOW = 16;
 
 type JsonObject = Record<string, unknown>;
 
@@ -206,14 +207,21 @@ export class RelayResultService {
         const seq = positiveSeq(body.seq);
         const deliveryId = uuid(String(body.deliveryId ?? ''), 'deliveryId');
         if (!body.result || typeof body.result !== 'object' || Array.isArray(body.result)) throw new OperatorError('RELAY_RESULT_INVALID', 'Result body must be a JSON object.');
-        const pending = await this.#deliveries.pending(session.subjectDeviceId, 1);
+        const pending = await this.#deliveries.pending(session.subjectDeviceId, MAX_CONCURRENT_READ_RESULT_WINDOW);
         let expected = pending[0];
         if (!expected || expected.seq !== seq || expected.id !== deliveryId) {
-          const retained = await this.#deliveries.retained(session.subjectDeviceId, seq);
-          if (!retained || retained.id !== deliveryId || retained.status !== 'expired' || !retained.idempotencyKey) {
-            throw new OperatorError('RELAY_RESULT_DELIVERY_MISMATCH', 'Result does not match the device first pending or retained expired idempotent delivery.');
+          const matchIndex = pending.findIndex((delivery) => delivery.seq === seq && delivery.id === deliveryId);
+          const concurrentRead = matchIndex >= 0
+            && pending.slice(0, matchIndex + 1).every((delivery) => isPendingReadDelivery(delivery));
+          if (concurrentRead) {
+            expected = pending[matchIndex];
+          } else {
+            const retained = await this.#deliveries.retained(session.subjectDeviceId, seq);
+            if (!retained || retained.id !== deliveryId || retained.status !== 'expired' || !retained.idempotencyKey) {
+              throw new OperatorError('RELAY_RESULT_DELIVERY_MISMATCH', 'Result does not match the device first pending, a bounded pending read prefix, or retained expired idempotent delivery.');
+            }
+            expected = retained;
           }
-          expected = retained;
         }
         const replayAuthority = expected.idempotencyKey ? (expected.authority ?? expected.replayAuthority) : undefined;
         if (expected.idempotencyKey && !replayAuthority) throw new OperatorError('RELAY_RESULT_AUTHORITY_REVOKED', 'Replayable delivery no longer has account authority.');
@@ -289,6 +297,12 @@ export class RelayResultService {
     if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+function isPendingReadDelivery(delivery: Awaited<ReturnType<RelayDeliveryStore['pending']>>[number]): boolean {
+  if (delivery.status !== 'pending' || delivery.kind !== 'action') return false;
+  const action = delivery.payload.action;
+  return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
 }
 
 function pairingResponse(input: unknown): PairingResponse {
