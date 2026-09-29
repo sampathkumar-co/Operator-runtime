@@ -41,7 +41,7 @@ type Connection = {
   connectedAt: string;
   lastSeenAt: string;
   readConcurrency: number;
-  inFlight: Map<number, { readOnly: boolean }>;
+  inFlight: Map<number, { readOnly: boolean; heavy: boolean }>;
 };
 
 export interface RelayHubOptions {
@@ -528,8 +528,10 @@ export class RelayHub {
     for (const next of pending) {
       if (connection.inFlight.has(next.seq)) continue;
       const readOnly = isConcurrentReadDelivery(next);
+      const heavy = readOnly && isHeavyReadDelivery(next);
       if (!readOnly && connection.inFlight.size > 0) return;
       if (readOnly && connection.inFlight.size >= connection.readConcurrency) return;
+      if (heavy && [...connection.inFlight.values()].some((item) => item.heavy)) return;
 
       const requiredCapabilities = next.requiredCapabilities;
       const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
@@ -558,7 +560,7 @@ export class RelayHub {
       }
 
       await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
-      connection.inFlight.set(next.seq, { readOnly });
+      connection.inFlight.set(next.seq, { readOnly, heavy });
       try {
         send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
       } catch (error) {
@@ -583,6 +585,20 @@ function isConcurrentReadDelivery(delivery: StoredRelayDelivery): boolean {
   if (delivery.kind !== 'action') return false;
   const action = delivery.payload.action;
   return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
+}
+
+function isHeavyReadDelivery(delivery: StoredRelayDelivery): boolean {
+  if (delivery.kind !== 'action') return false;
+  const action = delivery.payload.action;
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
+  const capability = String((action as Record<string, unknown>).capability ?? '');
+  return [
+    'project.command.run',
+    'terminal.execute',
+    'terminal.session',
+    'compute.run',
+    'project.transaction.run'
+  ].includes(capability);
 }
 
 function parseFrame(text: string): any {
