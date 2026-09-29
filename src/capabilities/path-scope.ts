@@ -60,7 +60,7 @@ export class PathScope {
     const parentPath = path.dirname(absolute);
     try {
       const parentStat = await fs.lstat(parentPath);
-      if (!parentStat.isDirectory()) {
+      if (!parentStat.isDirectory() && !parentStat.isSymbolicLink()) {
         throw new OperatorError('PARENT_NOT_DIRECTORY', 'Write target parent exists but is not a directory.', { details: { inputPath, parentPath } });
       }
     } catch (error) {
