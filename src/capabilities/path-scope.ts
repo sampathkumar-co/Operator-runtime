@@ -57,6 +57,21 @@ export class PathScope {
   async withForWrite<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
     const absolute = this.#absolute(inputPath);
     const root = this.#lexicalRoot(absolute);
+    const parentPath = path.dirname(absolute);
+    try {
+      const parentStat = await fs.lstat(parentPath);
+      if (!parentStat.isDirectory()) {
+        throw new OperatorError('PARENT_NOT_DIRECTORY', 'Write target parent exists but is not a directory.', { details: { inputPath, parentPath } });
+      }
+    } catch (error) {
+      if (error instanceof OperatorError) throw error;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new OperatorError('PARENT_DIRECTORY_MISSING', 'Write target parent directory does not exist. Create it explicitly with file.manage mkdir before writing.', {
+          details: { inputPath, parentPath }
+        });
+      }
+      throw error;
+    }
     return await withWindowsPathLease({
       root,
       target: absolute,
