@@ -543,6 +543,117 @@ test('stale downgraded session cannot retire work after a restored-capability se
   await Promise.all([lowRun, highRun]);
 });
 
+
+test('read window keeps lightweight control traffic responsive beside one heavy read', { timeout: 20_000 }, async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-read-window-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-read-window-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'read-window-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:project.command.run', 'cap:computer.inspect'],
+    ttlMs: 60_000
+  })).token;
+
+  let heavyOneStarted!: () => void;
+  let releaseHeavyOne!: () => void;
+  let lightStarted!: () => void;
+  let heavyTwoStarted!: () => void;
+  const heavyOneSeen = new Promise<void>((resolve) => { heavyOneStarted = resolve; });
+  const heavyOneGate = new Promise<void>((resolve) => { releaseHeavyOne = resolve; });
+  const lightSeen = new Promise<void>((resolve) => { lightStarted = resolve; });
+  const heavyTwoSeen = new Promise<void>((resolve) => { heavyTwoStarted = resolve; });
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => token,
+    supportedCapabilities: ['project.command.run', 'computer.inspect'],
+    maxConcurrentReadDeliveries: 3,
+    onDelivery: async (delivery) => {
+      const action = delivery.payload.action as any;
+      if (action?.id === 'heavy-one') {
+        heavyOneStarted();
+        await heavyOneGate;
+        return;
+      }
+      if (action?.id === 'light-inspect') {
+        lightStarted();
+        return;
+      }
+      if (action?.id === 'heavy-two') {
+        heavyTwoStarted();
+        return;
+      }
+      throw new Error(`unexpected delivery ${delivery.id}`);
+    },
+    sleep: async () => undefined
+  });
+  const run = client.run();
+  t.after(() => { releaseHeavyOne(); client.stop(); });
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).some((entry) => entry.deviceId === device.deviceId));
+
+  const heavyOne = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['project.command.run'],
+    kind: 'action',
+    payload: { action: { id: 'heavy-one', capability: 'project.command.run', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+  });
+  assert.equal(heavyOne.delivery.seq, 1);
+  await heavyOneSeen;
+
+  const light = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['computer.inspect'],
+    kind: 'action',
+    payload: { action: { id: 'light-inspect', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+  });
+  assert.equal(light.delivery.seq, 2);
+  await Promise.race([
+    lightSeen,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('lightweight read was starved behind heavy read')), 1_000))
+  ]);
+
+  const heavyTwo = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['project.command.run'],
+    kind: 'action',
+    payload: { action: { id: 'heavy-two', capability: 'project.command.run', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+  });
+  assert.equal(heavyTwo.delivery.seq, 3);
+  const heavyTwoBeforeRelease = await Promise.race([
+    heavyTwoSeen.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
+  ]);
+  assert.equal(heavyTwoBeforeRelease, false, 'a second heavy read must not start beside the first heavy read');
+
+  releaseHeavyOne();
+  await Promise.race([
+    heavyTwoSeen,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('second heavy read did not start after heavy slot cleared')), 2_000))
+  ]);
+  await waitFor(async () => (await hub.deliveryCursor(device.deviceId)).lastAckedSeq === 3);
+  client.stop();
+  await run;
+});
+
 test('legacy unroutable queue head is terminalized and the device reconnects for compatible work', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-legacy-head-authority-');
   const deviceState = await tempDir(t, 'operator-relay-legacy-head-device-');
