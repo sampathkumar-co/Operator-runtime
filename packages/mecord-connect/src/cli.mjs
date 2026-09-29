@@ -322,7 +322,8 @@ export async function registerBenchmark({ root, python, script }) {
 }
 
 async function canonicalBenchmarkFile(root, input, expectedSuffix) {
-  const absolute = path.resolve(String(input ?? ''));
+  const supplied = String(input ?? '');
+  const absolute = path.isAbsolute(supplied) ? path.resolve(supplied) : path.resolve(root, supplied);
   const stat = await fs.lstat(absolute);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > 512 * 1024 * 1024) {
     throw new Error('Benchmark registration accepts only bounded regular files.');
@@ -386,6 +387,10 @@ async function readProjectCommandRegistry(registryPath) {
     if (error?.code === 'ENOENT') return { version: 1, projects: [] };
     throw error;
   }
+}
+
+function sameWindowsPath(left, right) {
+  return path.win32.resolve(String(left ?? '')).toLowerCase() === path.win32.resolve(String(right ?? '')).toLowerCase();
 }
 
 async function writeProjectCommandRegistry(registryPath, registry) {
