@@ -260,3 +260,73 @@ test('public relay blocks restricted action input before local execution', async
   assert.doesNotMatch(outbox, /hunter2-public-input-test/);
   assert.deepEqual(JSON.parse(outbox).streams, []);
 });
+
+
+test('oversized local relay result is converted to a bounded non-retryable failure and ACKed', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-oversize-result-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Oversize Result PC');
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      capability: 'visual.capture',
+      provider: 'windows.uia',
+      output: { captureId: crypto.randomUUID(), imageBase64: 'A'.repeat(300 * 1024) },
+      evidence: [],
+      durationMs: 1
+    }));
+  });
+  const resultBodies: string[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    resultBodies.push(await readBody(req));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: crypto.randomUUID(), kind: 'action',
+    payload: {
+      publicBoundary: false,
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'visual.capture', risk: 'read',
+        input: { source: 'screen', maxWidth: 1280, maxHeight: 720 }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65434/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: 'd'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+
+  assert.equal(localHits, 1);
+  assert.equal(resultBodies.length, 1);
+  assert.ok(Buffer.byteLength(resultBodies[0]!, 'utf8') < 256 * 1024);
+  const submitted = JSON.parse(resultBodies[0]!);
+  assert.equal(submitted.result?.ok, false);
+  assert.equal(submitted.result?.capability, 'visual.capture');
+  assert.equal(submitted.result?.provider, 'relay.boundary');
+  assert.equal(submitted.result?.error?.code, 'RELAY_LOCAL_RESULT_TOO_LARGE');
+  assert.equal(submitted.result?.error?.retryable, false);
+  assert.match(submitted.result?.error?.message ?? '', /Do not retry automatically/);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
