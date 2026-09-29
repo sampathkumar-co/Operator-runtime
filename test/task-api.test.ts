@@ -139,6 +139,81 @@ test('authenticated task API submits, executes, and reads a durable multi-action
   assert.equal(persisted.task.state, 'VERIFIED');
 });
 
+
+test('relay-started durable task returns accepted before slow execution completes', async (t) => {
+  const state = await tempDir(t, 'operator-task-relay-async-state-');
+  let releaseNavigate!: () => void;
+  const navigateGate = new Promise<void>((resolve) => { releaseNavigate = resolve; });
+  let url = 'https://example.test/start';
+  const provider: CapabilityProvider = {
+    name: 'test.browser.slow-relay',
+    supports: (action) => ['browser.inspect', 'browser.navigate'].includes(action.capability),
+    score: () => BROWSER_SCORE,
+    execute: async (action) => {
+      if (action.capability === 'browser.navigate') {
+        await navigateGate;
+        url = String(action.input.url);
+        return { ok: true, capability: action.capability, provider: 'test.browser.slow-relay', output: { targetId: 'tab-slow', url }, evidence: [], durationMs: 0 };
+      }
+      return {
+        ok: true, capability: action.capability, provider: 'test.browser.slow-relay',
+        output: action.input.targetId
+          ? { target: { id: 'tab-slow', type: 'page', url } }
+          : { tabs: [{ id: 'tab-slow', type: 'page', url }] },
+        evidence: [], durationMs: 0
+      };
+    }
+  };
+  const runtime = new OperatorRuntime().register(provider);
+  const tasks = new TaskStore(state);
+  const permissions = {
+    allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+    allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'z'.repeat(64);
+  const agent = createLocalAgentServer({ runtime, token, permissions, tasks, taskOrchestrator });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const request = fetch(`http://127.0.0.1:${port}/v1/tasks`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'x-operator-relay-request': '1'
+    },
+    body: JSON.stringify({
+      objective: 'Navigate slowly without blocking the relay.',
+      run: true,
+      successConditions: ['destination re-observed'],
+      goal: { kind: 'browser-navigation', url: 'https://example.test/slow-destination' }
+    })
+  });
+  const response = await Promise.race([
+    request,
+    delay(500).then(() => { throw new Error('relay task submission remained blocked on execution'); })
+  ]);
+  assert.equal(response.status, 202);
+  const accepted = await response.json() as any;
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.executionStarted, true);
+  assert.equal(accepted.task.state, 'PENDING');
+
+  releaseNavigate();
+  const deadline = Date.now() + 5_000;
+  let final: any;
+  while (Date.now() < deadline) {
+    const current = await fetch(`http://127.0.0.1:${port}/v1/tasks/${accepted.task.id}`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    final = await current.json();
+    if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(final.task?.state)) break;
+    await delay(20);
+  }
+  assert.equal(final.task.state, 'VERIFIED');
+});
+
 test('task API requires separate recovery authority for the exact blocked action', async (t) => {
   const root = await tempDir(t, 'operator-task-api-approval-root-');
   const authority = await tempDir(t, 'operator-task-api-approval-authority-');
