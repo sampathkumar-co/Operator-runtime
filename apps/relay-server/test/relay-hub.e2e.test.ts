@@ -843,7 +843,19 @@ test('dispatch success is bound to the exact routed session after the final asyn
   const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'final-session-user' });
   await accounts.bindDevice(account.accountId, device.deviceId);
 
-  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  let holdFinalCheck = false;
+  let enteredFinalCheck!: () => void;
+  let releaseFinalCheck!: () => void;
+  const finalCheckEntered = new Promise<void>((resolve) => { enteredFinalCheck = resolve; });
+  const finalCheckGate = new Promise<void>((resolve) => { releaseFinalCheck = resolve; });
+  const hub = new RelayHub({
+    stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries,
+    beforeFinalDispatchCheck: async () => {
+      if (!holdFinalCheck) return;
+      enteredFinalCheck();
+      await finalCheckGate;
+    }
+  });
   t.after(() => hub.close());
   t.after(() => cleanupTempDirs(t));
   const { port } = await hub.listen('127.0.0.1', 0);
@@ -883,21 +895,8 @@ test('dispatch success is bound to the exact routed session after the final asyn
   await highStarted;
   assert.equal(first.delivery.seq, 1);
 
-  const originalIsActive = sessions.isActive.bind(sessions);
-  let activeChecks = 0;
-  let enteredFinalCheck!: () => void;
-  let releaseFinalCheck!: () => void;
-  const finalCheckEntered = new Promise<void>((resolve) => { enteredFinalCheck = resolve; });
-  const finalCheckGate = new Promise<void>((resolve) => { releaseFinalCheck = resolve; });
+  holdFinalCheck = true;
   t.after(() => releaseFinalCheck());
-  (sessions as any).isActive = async (...args: any[]) => {
-    activeChecks += 1;
-    if (activeChecks === 3) {
-      enteredFinalCheck();
-      await finalCheckGate;
-    }
-    return await (originalIsActive as any)(...args);
-  };
 
   const delayed = hub.dispatch({
     accountId: account.accountId,
@@ -938,7 +937,6 @@ test('dispatch success is bound to the exact routed session after the final asyn
 
   releaseFinalCheck();
   await rejected;
-  assert.ok(activeChecks >= 3);
   assert.equal((await deliveries.retained(device.deviceId, 2))?.status, 'pending');
 
   releaseLowDelivery();
