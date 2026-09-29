@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "npmTag": "latest",
   "publicationMode": "stage",
-  "requestedAt": "2026-09-28",
-  "purpose": "Stage the certified Stage 1-20 Mecord Connect runtime 2.0.1 with the real-Windows exact-PID process inspection hotfix; registry activation requires explicit owner approval on npmjs.com."
+  "requestedAt": "2026-09-29",
+  "purpose": "Stage Mecord Connect runtime 2.0.2 with benchmark-driven relay read concurrency, durable-task detachment, protected hash-bound benchmark execution, Windows write-parent diagnostics, and duplicate-runtime state protection; final npm registry activation requires explicit owner approval on npmjs.com."
 }
