@@ -21,6 +21,7 @@ const DEFAULT_UPGRADE_LIMIT_PER_MINUTE = 120;
 const DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES = 60;
 const DEFAULT_MAX_LIVE_CONNECTIONS = 5_000;
 const DEFAULT_MAX_LIVE_CONNECTIONS_PER_CLIENT = 64;
+const MAX_NEGOTIATED_CONCURRENT_READS = 16;
 
 type JsonObject = Record<string, unknown>;
 
@@ -39,7 +40,8 @@ type Connection = {
   };
   connectedAt: string;
   lastSeenAt: string;
-  inFlightSeq?: number;
+  readConcurrency: number;
+  inFlight: Map<number, { readOnly: boolean; heavy: boolean }>;
 };
 
 export interface RelayHubOptions {
@@ -51,6 +53,7 @@ export interface RelayHubOptions {
   deliveries?: RelayDeliveryStore;
   clock?: () => Date;
   beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
+  beforeFinalDispatchCheck?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
   upgradeLimitPerMinute?: number;
   deviceHelloLimitPerFiveMinutes?: number;
   maxLiveConnections?: number;
@@ -81,6 +84,7 @@ export class RelayHub {
   #deliveries: RelayDeliveryStore;
   #clock: () => Date;
   #beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
+  #beforeFinalDispatchCheck?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
   #server: http.Server | null = null;
   #wss: WebSocketServer | null = null;
   #connections = new Map<string, Connection>();
@@ -102,6 +106,7 @@ export class RelayHub {
     this.#deliveries = options.deliveries ?? new RelayDeliveryStore(this.#stateDir);
     this.#clock = options.clock ?? (() => new Date());
     this.#beforeEnqueue = options.beforeEnqueue;
+    this.#beforeFinalDispatchCheck = options.beforeFinalDispatchCheck;
     const upgradeLimit = boundedPositiveInt(options.upgradeLimitPerMinute, DEFAULT_UPGRADE_LIMIT_PER_MINUTE, 100_000, 'upgradeLimitPerMinute');
     const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
     this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
@@ -199,7 +204,7 @@ export class RelayHub {
         memoryMb: connection.resourceProfile!.memoryMb,
         gpu: connection.resourceProfile!.gpu,
         tags: [...connection.resourceProfile!.tags],
-        activeJobs: connection.inFlightSeq === undefined ? 0 : 1,
+        activeJobs: connection.inFlight.size,
         // Relay delivery itself is serialized per device, but durable local
         // operations continue independently after ACK. Long-lived capacity is
         // therefore bounded by the signed host profile plus durable pool
@@ -297,6 +302,7 @@ export class RelayHub {
       throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
     }
     if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
+    await this.#beforeFinalDispatchCheck?.({ ...authority });
     const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
     this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
     return { route, delivery };
@@ -315,7 +321,7 @@ export class RelayHub {
     const connection = this.#connections.get(deviceId);
     if (!connection) return false;
     this.#connections.delete(deviceId);
-    connection.inFlightSeq = undefined;
+    connection.inFlight.clear();
     try { connection.socket.close(4004, boundedCloseReason(reason)); } catch { /* authority is already removed locally */ }
     return true;
   }
@@ -385,7 +391,7 @@ export class RelayHub {
           const seq = Number(frame.seq);
           const id = String(frame.id ?? '');
           await this.#deliveries.acknowledge(connection.deviceId, seq, id);
-          connection.inFlightSeq = undefined;
+          connection.inFlight.delete(seq);
           await this.#pump(connection.deviceId);
           return;
         }
@@ -429,6 +435,7 @@ export class RelayHub {
     }
     const locallySupportedCapabilities = capabilityBindingRequested ? validCapabilityList(payload.capabilities) : [];
     const resourceProfile = payload.resourceProfile === undefined ? undefined : validRelayResourceProfile(payload.resourceProfile);
+    const readConcurrency = payload.readConcurrency === undefined ? 1 : boundedReadConcurrency(payload.readConcurrency);
     const signature = String(frame.signature ?? '');
     if (!/^[A-Za-z0-9_-]{40,256}$/.test(signature)) throw new OperatorError('RELAY_HELLO_INVALID', 'Relay hello signature is invalid.');
     const token = String(frame.sessionToken ?? '');
@@ -457,7 +464,9 @@ export class RelayHub {
     const connection: Connection = {
       socket, deviceId, sessionId, sessionJti: session.jti, capabilities,
       ...(resourceProfile ? { resourceProfile } : {}),
-      connectedAt: now, lastSeenAt: now
+      connectedAt: now, lastSeenAt: now,
+      readConcurrency,
+      inFlight: new Map()
     };
     this.#connections.set(deviceId, connection);
     send(socket, {
@@ -467,6 +476,7 @@ export class RelayHub {
       resumeFromSeq: reconciled.lastAckedSeq,
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
       heartbeatMs: HEARTBEAT_MS,
+      readConcurrency,
       ...(capabilityBindingRequested ? { capabilityBinding: 1, capabilities: [...capabilities] } : {})
     });
     return connection;
@@ -512,40 +522,87 @@ export class RelayHub {
 
   async #pump(deviceId: string): Promise<void> {
     const connection = this.#connections.get(deviceId);
-    if (!connection || connection.socket.readyState !== WebSocket.OPEN || connection.inFlightSeq !== undefined) return;
-    const [next] = await this.#deliveries.pending(deviceId, 1);
-    if (!next) return;
-    const requiredCapabilities = next.requiredCapabilities;
-    const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
-    const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
-    if (unroutable) {
-      if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
-      const capabilitySnapshot = [...connection.capabilities];
-      const isCurrentSnapshot = () => {
-        const active = this.#connections.get(deviceId);
-        return active?.sessionId === connection.sessionId
-          && active.socket === connection.socket
-          && active.socket.readyState === WebSocket.OPEN
-          && active.capabilities.length === capabilitySnapshot.length
-          && active.capabilities.every((capability, index) => capability === capabilitySnapshot[index]);
-      };
-      const retired = await this.#deliveries.expireUnroutableHeads(deviceId, capabilitySnapshot, isCurrentSnapshot);
-      if (retired > 0 && isCurrentSnapshot()) {
-        this.#connections.delete(deviceId);
-        connection.inFlightSeq = undefined;
-        try { connection.socket.close(4009, 'capability queue reconciliation'); } catch { /* reconnect will reconcile the durable cursor */ }
+    if (!connection || connection.socket.readyState !== WebSocket.OPEN) return;
+    if ([...connection.inFlight.values()].some((item) => !item.readOnly)) return;
+
+    const limit = Math.min(500, Math.max(1, connection.readConcurrency + connection.inFlight.size + 1));
+    const pending = await this.#deliveries.pending(deviceId, limit);
+    if (pending.length === 0) return;
+
+    for (const next of pending) {
+      if (connection.inFlight.has(next.seq)) continue;
+      const readOnly = isConcurrentReadDelivery(next);
+      const heavy = readOnly && isHeavyReadDelivery(next);
+      if (!readOnly && connection.inFlight.size > 0) return;
+      if (readOnly && connection.inFlight.size >= connection.readConcurrency) return;
+      if (heavy && [...connection.inFlight.values()].some((item) => item.heavy)) return;
+
+      const requiredCapabilities = next.requiredCapabilities;
+      const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
+      const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
+      if (unroutable) {
+        // Never retire a delivery behind an in-flight prefix. Wait until it
+        // becomes the durable head so expiry remains contiguous.
+        if (connection.inFlight.size > 0) return;
+        if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+        const capabilitySnapshot = [...connection.capabilities];
+        const isCurrentSnapshot = () => {
+          const active = this.#connections.get(deviceId);
+          return active?.sessionId === connection.sessionId
+            && active.socket === connection.socket
+            && active.socket.readyState === WebSocket.OPEN
+            && active.capabilities.length === capabilitySnapshot.length
+            && active.capabilities.every((capability, index) => capability === capabilitySnapshot[index]);
+        };
+        const retired = await this.#deliveries.expireUnroutableHeads(deviceId, capabilitySnapshot, isCurrentSnapshot);
+        if (retired > 0 && isCurrentSnapshot()) {
+          this.#connections.delete(deviceId);
+          connection.inFlight.clear();
+          try { connection.socket.close(4009, 'capability queue reconciliation'); } catch { /* reconnect will reconcile the durable cursor */ }
+        }
+        return;
       }
-      return;
-    }
-    await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
-    connection.inFlightSeq = next.seq;
-    try {
-      send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
-    } catch (error) {
-      connection.inFlightSeq = undefined;
-      throw error;
+
+      await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
+      connection.inFlight.set(next.seq, { readOnly, heavy });
+      try {
+        send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
+      } catch (error) {
+        connection.inFlight.delete(next.seq);
+        throw error;
+      }
+      if (!readOnly) return;
     }
   }
+
+}
+
+function boundedReadConcurrency(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_NEGOTIATED_CONCURRENT_READS) {
+    throw new OperatorError('RELAY_READ_CONCURRENCY_INVALID', `Relay read concurrency must be an integer between 1 and ${MAX_NEGOTIATED_CONCURRENT_READS}.`);
+  }
+  return parsed;
+}
+
+function isConcurrentReadDelivery(delivery: StoredRelayDelivery): boolean {
+  if (delivery.kind !== 'action') return false;
+  const action = delivery.payload.action;
+  return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
+}
+
+function isHeavyReadDelivery(delivery: StoredRelayDelivery): boolean {
+  if (delivery.kind !== 'action') return false;
+  const action = delivery.payload.action;
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
+  const capability = String((action as Record<string, unknown>).capability ?? '');
+  return [
+    'project.command.run',
+    'terminal.execute',
+    'terminal.session',
+    'compute.run',
+    'project.transaction.run'
+  ].includes(capability);
 }
 
 function parseFrame(text: string): any {

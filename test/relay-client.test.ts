@@ -128,6 +128,74 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
 });
 
 
+
+test('negotiated read window executes read deliveries concurrently but ACKs them contiguously', async (t) => {
+  const state = await stateDir(t, 'operator-relay-concurrent-reads-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Concurrent Read PC');
+  const socket = new FakeSocket();
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let firstStarted = false;
+  let secondStarted = false;
+  const ackOrder: number[] = [];
+  let client!: RelayClient;
+
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      assert.equal(frame.payload.readConcurrency, 2);
+      socket.server({
+        type: 'welcome', protocol: 1, connectionId: 'concurrent-read-1',
+        resumeFromSeq: 0, heartbeatMs: 60_000, readConcurrency: 2
+      });
+      socket.server({
+        type: 'delivery', seq: 1, id: 'read-delivery-1', kind: 'action',
+        payload: { action: { id: 'read-action-1', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+      });
+      socket.server({
+        type: 'delivery', seq: 2, id: 'read-delivery-2', kind: 'action',
+        payload: { action: { id: 'read-action-2', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } }
+      });
+      return;
+    }
+    if (frame.type === 'ack') {
+      ackOrder.push(frame.seq);
+      if (frame.seq === 2) {
+        client.stop();
+        socket.close();
+      }
+    }
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    maxConcurrentReadDeliveries: 2,
+    onDelivery: async (delivery) => {
+      if (delivery.seq === 1) {
+        firstStarted = true;
+        await firstGate;
+        return;
+      }
+      assert.equal(delivery.seq, 2);
+      secondStarted = true;
+      assert.equal(firstStarted, true);
+      releaseFirst();
+    },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(secondStarted, true);
+  assert.deepEqual(ackOrder, [1, 2]);
+  assert.equal((await client.state()).lastAckedServerSeq, 2);
+  assert.equal((await client.state()).processing, undefined);
+});
+
 test('relay recomputes signed capabilities before every reconnect hello', async (t) => {
   const state = await stateDir(t, 'operator-relay-dynamic-capabilities-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });

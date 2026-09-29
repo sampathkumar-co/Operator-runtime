@@ -18,6 +18,7 @@ import {
 function manifest(overrides: Record<string, unknown> = {}) {
   const required = [
     'app/apps/local-agent/src/remote.js',
+    'app/apps/local-agent/src/benchmark-runner.js',
     'native/operator-windows-dpapi.exe',
     'native/operator-windows-uia.exe',
     'native/operator-windows-path-lease.exe'
@@ -62,6 +63,12 @@ test('remote CLI is explicit and bounded', () => {
   assert.deepEqual(parseArgs(['remote', '--help']), { command: 'help' });
   assert.deepEqual(parseArgs(['remote', '-h']), { command: 'help' });
   assert.deepEqual(parseArgs(['doctor']), { command: 'doctor' });
+  assert.deepEqual(parseArgs(['benchmark-register', '--root', 'C:\\bench', '--python', 'C:\\bench\\.venv\\Scripts\\python.exe', '--script', 'C:\\bench\\controller.py']), {
+    command: 'benchmark-register',
+    root: 'C:\\bench',
+    python: 'C:\\bench\\.venv\\Scripts\\python.exe',
+    script: 'C:\\bench\\controller.py'
+  });
   assert.deepEqual(parseApprovalConsoleCommand('approvals'), { kind: 'list' });
   assert.deepEqual(parseApprovalConsoleCommand('approve'), { kind: 'decision', decision: 'approve', selector: undefined });
   assert.deepEqual(parseApprovalConsoleCommand('deny abc123'), { kind: 'decision', decision: 'deny', selector: 'abc123' });
@@ -100,11 +107,32 @@ test('remote CLI is explicit and bounded', () => {
   }), null);
   assert.throws(() => parseArgs(['remote', '--relay', 'wss://evil.example/device']), /Unknown remote option/);
   assert.throws(() => parseArgs(['doctor', '--root', '.']), /does not accept arguments/);
+  assert.throws(() => parseArgs(['benchmark-register', '--root', 'C:\\bench']), /requires exactly/);
+  assert.throws(() => parseArgs(['benchmark-register', '--root', 'C:\\bench', '--python', 'python.exe', '--script', 'controller.py', '--extra', 'x']), /requires exactly/);
   assert.equal(assertSerializableAuthorizedRoot('C:\\work\\repo'), 'C:\\work\\repo');
   assert.throws(
     () => assertSerializableAuthorizedRoot('C:\\projects;\\repo'),
     /cannot contain the Windows path-list delimiter/
   );
+});
+
+test('benchmark registration stays local, hash-bound, and outside generic terminal authority', async () => {
+  const source = await fs.readFile(path.resolve('packages/mecord-connect/src/cli.mjs'), 'utf8');
+  assert.match(source, /benchmark-register/);
+  assert.match(source, /benchmarkRunnerEntrypoint/);
+  assert.match(source, /pythonSha256/);
+  assert.match(source, /scriptSha256/);
+  assert.match(source, /project-commands\.json/);
+  assert.match(source, /risk:\s*'external'/);
+  assert.match(source, /executable:\s*'node'/);
+  assert.doesNotMatch(source, /OPERATOR_TERMINAL_ALLOWED_EXECUTABLES\s*=\s*['"][^'"]*python/i);
+
+  const runner = await fs.readFile(path.resolve('apps/local-agent/src/benchmark-runner.ts'), 'utf8');
+  assert.match(runner, /Registered benchmark Python SHA-256 no longer matches/);
+  assert.match(runner, /Registered benchmark controller SHA-256 no longer matches/);
+  assert.match(runner, /spawn\(binding\.python, \[binding\.script\]/);
+  assert.match(runner, /shell:\s*false/);
+  assert.doesNotMatch(runner, /eval\(|exec\(|shell:\s*true/);
 });
 
 test('remote launcher binds its local agent to an ephemeral loopback port', async () => {
@@ -280,12 +308,12 @@ test('runtime payload builder copies only tracked clean sources bound to HEAD', 
 
 test('runtime manifest requires the complete hardened native boundary', () => {
   const parsed = validateRuntimeManifest(manifest());
-  assert.equal(parsed.files.length, 4);
-  assert.throws(() => validateRuntimeManifest(manifest({ files: (manifest().files as any[]).slice(0, 3) })), /file list|missing/);
+  assert.equal(parsed.files.length, 5);
+  assert.throws(() => validateRuntimeManifest(manifest({ files: (manifest().files as any[]).slice(0, 4) })), /file list|missing/);
   assert.throws(() => validateRuntimeManifest(manifest({ sourceCommit: 'bad' })), /source commit/);
   assert.throws(() => validateRuntimeManifest(manifest({
     files: [
-      ...(manifest().files as any[]).slice(0, 3),
+      ...(manifest().files as any[]).slice(0, 4),
       { path: '../operator-windows-path-lease.exe', sizeBytes: 1, sha256: 'b'.repeat(64) }
     ]
   })), /unsafe file path|missing/);

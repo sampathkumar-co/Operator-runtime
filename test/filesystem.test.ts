@@ -26,6 +26,19 @@ test('filesystem provider performs atomic write/read with SHA postcondition', as
   assert.equal((read.output as { sha256: string }).sha256, (write.output as { afterSha256: string }).afterSha256);
 });
 
+
+test('write reports a missing parent explicitly instead of a generic path-lease failure', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-missing-parent-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const target = path.join(root, 'missing', 'nested.txt');
+
+  const result = await provider.execute(action('file.write', { path: target, content: 'x' }));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'PARENT_DIRECTORY_MISSING');
+  await assert.rejects(fs.access(target));
+});
+
 test('expected SHA prevents lost update and accepts hexadecimal case differences', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
