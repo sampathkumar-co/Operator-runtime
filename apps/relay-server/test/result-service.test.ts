@@ -113,6 +113,83 @@ test('relay result service accepts only scoped results matching the first pendin
 });
 
 
+
+test('result service accepts out-of-order persistence within a bounded pending read prefix', async (t) => {
+  const authorityState = await tempDir(t, 'operator-result-read-window-authority-');
+  const deviceState = await tempDir(t, 'operator-result-read-window-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const first = await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'read-1', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } }
+  });
+  const second = await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'read-2', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } }
+  });
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries });
+  cleanupAfter(t, service);
+  const { port } = await service.listen('127.0.0.1', 0);
+  const url = `http://127.0.0.1:${port}/v1/device-result`;
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'relay:result'],
+    ttlMs: 60_000
+  })).token;
+
+  const secondResponse = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ seq: second.seq, deliveryId: second.id, result: { ok: true, output: { order: 2 } } })
+  });
+  assert.equal(secondResponse.status, 200, await secondResponse.text());
+  assert.deepEqual((await service.getResult(device.deviceId, second.seq))?.result, { ok: true, output: { order: 2 } });
+
+  const firstResponse = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ seq: first.seq, deliveryId: first.id, result: { ok: true, output: { order: 1 } } })
+  });
+  assert.equal(firstResponse.status, 200, await firstResponse.text());
+  assert.deepEqual((await service.getResult(device.deviceId, first.seq))?.result, { ok: true, output: { order: 1 } });
+});
+
+test('result service rejects out-of-order read persistence across a pending write barrier', async (t) => {
+  const authorityState = await tempDir(t, 'operator-result-read-barrier-authority-');
+  const deviceState = await tempDir(t, 'operator-result-read-barrier-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const deliveries = new RelayDeliveryStore(authorityState);
+  await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'write-1', capability: 'file.write', risk: 'write', input: {}, provenance: { kind: 'chatgpt' } }
+  });
+  const second = await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'read-2', capability: 'computer.inspect', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } }
+  });
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, deliveries });
+  cleanupAfter(t, service);
+  const { port } = await service.listen('127.0.0.1', 0);
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'relay:result'],
+    ttlMs: 60_000
+  })).token;
+  const response = await fetch(`http://127.0.0.1:${port}/v1/device-result`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ seq: second.seq, deliveryId: second.id, result: { ok: true } })
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESULT_DELIVERY_MISMATCH');
+});
+
 test('device session rotation revokes the old JTI and stops after ownership removal or transfer', async (t) => {
   const authorityState = await tempDir(t, 'operator-session-rotate-authority-');
   const deviceState = await tempDir(t, 'operator-session-rotate-device-');

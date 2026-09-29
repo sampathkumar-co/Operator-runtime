@@ -77,6 +77,14 @@ export class LocalAgentRelayRunner {
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
     const identity = await this.#identity.loadOrCreate();
+    const stored = await this.#outbox.get(identity.deviceId, delivery.seq);
+    if (stored) {
+      if (stored.deliveryId !== delivery.id || !stored.result) {
+        throw new OperatorError('RELAY_RESULT_CONFLICT', 'A durable relay result exists for this sequence but does not match the replayed delivery.');
+      }
+      await this.#submitResult(delivery.seq, delivery.id, stored.result);
+      return;
+    }
     let safe: JsonObject;
     try {
       const result = delivery.kind === 'action'

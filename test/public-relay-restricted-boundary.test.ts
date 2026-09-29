@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { canRetryUncertainRelayDelivery, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
+import { RelayResultStore } from '../src/core/relay-result-store.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
 
 async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
@@ -134,6 +135,85 @@ test('missing crash-window result replays a read through the normal bounded exec
   runner.stop();
   await running;
   assert.equal(localHits, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
+test('replayed delivery resubmits its durable outbox result without re-executing local action', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-durable-replay-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  const device = await identity.loadOrCreate('Durable Replay PC');
+  const deliveryId = crypto.randomUUID();
+  const storedResult = {
+    ok: true,
+    capability: 'computer.inspect',
+    provider: 'system.native',
+    output: { hostname: 'durable-before-reconnect' },
+    evidence: [],
+    durationMs: 2
+  };
+  const outbox = new RelayResultStore(path.join(stateDir, 'relay-outbox'));
+  await outbox.put(device.deviceId, 1, deliveryId, storedResult);
+
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      capability: 'computer.inspect',
+      provider: 'system.native',
+      output: { hostname: 'different-after-reexecution' },
+      evidence: [],
+      durationMs: 1
+    }));
+  });
+  const resultBodies: string[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    resultBodies.push(await readBody(req));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: false,
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: device.deviceId, generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'computer.inspect', risk: 'read',
+        input: {}, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65435/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: 'e'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+
+  assert.equal(localHits, 0);
+  assert.equal(resultBodies.length, 1);
+  const submitted = JSON.parse(resultBodies[0]!);
+  assert.deepEqual(submitted.result, storedResult);
+  const remaining = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-outbox', 'relay-results.json'), 'utf8'));
+  assert.deepEqual(remaining.streams, []);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
 });
 
