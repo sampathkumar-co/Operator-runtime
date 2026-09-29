@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -14,6 +14,7 @@ const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const runtimeRoot = path.join(packageRoot, 'runtime');
 const manifestPath = path.join(runtimeRoot, 'runtime-manifest.json');
 const remoteEntrypoint = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'remote.js');
+const benchmarkRunnerEntrypoint = path.join(runtimeRoot, 'app', 'apps', 'local-agent', 'src', 'benchmark-runner.js');
 const helperPath = (name) => path.join(runtimeRoot, 'native', name);
 
 const DESKTOP_ENV_KEYS = [
@@ -30,6 +31,7 @@ const WINDOWS_NATIVE_ENV_KEYS = [
 ];
 const REQUIRED_RUNTIME_FILES = [
   'app/apps/local-agent/src/remote.js',
+  'app/apps/local-agent/src/benchmark-runner.js',
   'native/operator-windows-dpapi.exe',
   'native/operator-windows-uia.exe',
   'native/operator-windows-path-lease.exe'
@@ -40,10 +42,13 @@ function usage() {
 
 Usage:
   npx mecord-connect@latest remote [--root <folder>] [--no-browser]
+  npx mecord-connect@latest benchmark-register --root <folder> --python <python.exe> --script <controller.py>
   npx mecord-connect@latest doctor
   npx mecord-connect@latest --help
 
 remote starts the local policy/runtime agent and its secure relay connection only.
+benchmark-register locally binds one exact benchmark Python + controller by SHA-256
+into the protected trusted-command registry; it does not enable generic terminal access.
 ChatGPT connects to the hosted MCP service; no local MCP server or MSIX install is required.
 When an action needs approval, Mecord opens a local Windows card with Deny, Approve Once, and Allow Session.
 Approval stays local and is never exposed to ChatGPT; terminal approval commands remain available as a fallback.
@@ -58,6 +63,19 @@ export function parseArgs(argv) {
   if (argv[0] === 'doctor') {
     if (argv.length !== 1) throw new Error('doctor does not accept arguments.');
     return { command: 'doctor' };
+  }
+  if (argv[0] === 'benchmark-register') {
+    const values = new Map();
+    for (let index = 1; index < argv.length; index += 2) {
+      const key = argv[index];
+      const value = argv[index + 1];
+      if (!['--root', '--python', '--script'].includes(key) || !value || values.has(key)) {
+        throw new Error('benchmark-register requires exactly --root, --python, and --script.');
+      }
+      values.set(key, value);
+    }
+    if (values.size !== 3) throw new Error('benchmark-register requires exactly --root, --python, and --script.');
+    return { command: 'benchmark-register', root: values.get('--root'), python: values.get('--python'), script: values.get('--script') };
   }
   if (argv[0] !== 'remote') throw new Error(`Unknown command '${argv[0]}'. Use --help.`);
   if (argv.length === 2 && (argv[1] === '--help' || argv[1] === '-h')) return { command: 'help' };
@@ -256,6 +274,132 @@ async function canonicalDirectory(input) {
   return assertSerializableAuthorizedRoot(await fs.realpath(resolved));
 }
 
+export async function registerBenchmark({ root, python, script }) {
+  assertSupportedRuntime();
+  await verifyRuntimePayload();
+  const benchmarkRoot = await canonicalDirectory(root);
+  const pythonFile = await canonicalBenchmarkFile(benchmarkRoot, python, 'python.exe');
+  const controllerFile = await canonicalBenchmarkFile(benchmarkRoot, script, '.py');
+  const [pythonSha256, scriptSha256] = await Promise.all([sha256(pythonFile), sha256(controllerFile)]);
+  const profile = trustedUserProfile(helperPath('operator-windows-path-lease.exe'));
+  const stateDir = path.join(profile, '.operator');
+  await ensureProtectedStateDirectory(stateDir);
+  const registryPath = path.join(stateDir, 'project-commands.json');
+  const registry = await readProjectCommandRegistry(registryPath);
+  const command = {
+    id: 'mecord-benchmark',
+    title: 'Registered Mecord benchmark controller',
+    kind: 'custom',
+    executable: 'node',
+    args: [
+      benchmarkRunnerEntrypoint,
+      '--root', benchmarkRoot,
+      '--python', pythonFile,
+      '--python-sha256', pythonSha256,
+      '--script', controllerFile,
+      '--script-sha256', scriptSha256
+    ],
+    cwd: '.',
+    timeoutMs: 600000,
+    risk: 'external',
+    artifacts: []
+  };
+  const existing = registry.projects.find((entry) => sameWindowsPath(entry.root, benchmarkRoot));
+  if (existing) {
+    existing.root = benchmarkRoot;
+    existing.commands = existing.commands.filter((item) => item?.id !== command.id);
+    existing.commands.push(command);
+  } else {
+    registry.projects.push({ root: benchmarkRoot, commands: [command] });
+  }
+  registry.projects.sort((left, right) => String(left.root).localeCompare(String(right.root), 'en', { sensitivity: 'base' }));
+  await writeProjectCommandRegistry(registryPath, registry);
+  console.log('[mecord-connect] benchmark command registered locally');
+  console.log(`[mecord-connect] benchmark root: ${benchmarkRoot}`);
+  console.log('[mecord-connect] command id: mecord-benchmark');
+  console.log('[mecord-connect] risk: external (local approval remains required)');
+  return { root: benchmarkRoot, commandId: 'mecord-benchmark', pythonSha256, scriptSha256 };
+}
+
+async function canonicalBenchmarkFile(root, input, expectedSuffix) {
+  const absolute = path.resolve(String(input ?? ''));
+  const stat = await fs.lstat(absolute);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > 512 * 1024 * 1024) {
+    throw new Error('Benchmark registration accepts only bounded regular files.');
+  }
+  const real = await fs.realpath(absolute);
+  const relative = path.relative(root, real);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('Benchmark Python and controller must remain inside the benchmark root.');
+  }
+  if (expectedSuffix === 'python.exe' && path.basename(real).toLowerCase() !== 'python.exe') {
+    throw new Error('Benchmark Python must be a python.exe inside the benchmark root.');
+  }
+  if (expectedSuffix === '.py' && path.extname(real).toLowerCase() !== '.py') {
+    throw new Error('Benchmark controller must be a .py file inside the benchmark root.');
+  }
+  return real;
+}
+
+function trustedUserProfile(helper) {
+  let output;
+  try {
+    output = execFileSync(helper, ['system-roots'], {
+      encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 32 * 1024, env: {}
+    });
+  } catch {
+    throw new Error('Mecord could not derive the trusted Windows user profile.');
+  }
+  const line = output.split(/\r?\n/).find((item) => item.startsWith('USERPROFILE='));
+  const value = line?.slice('USERPROFILE='.length) ?? '';
+  if (!path.win32.isAbsolute(value) || /[\0\r\n;]/.test(value)) throw new Error('Trusted Windows user profile is invalid.');
+  return path.win32.normalize(value);
+}
+
+async function ensureProtectedStateDirectory(stateDir) {
+  try {
+    const stat = await fs.lstat(stateDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Protected Mecord state path is not a real directory.');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    await fs.mkdir(stateDir, { recursive: false, mode: 0o700 });
+  }
+}
+
+async function readProjectCommandRegistry(registryPath) {
+  try {
+    const stat = await fs.lstat(registryPath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 || stat.size > 512 * 1024) {
+      throw new Error('Protected project-command registry is invalid.');
+    }
+    const parsed = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+    if (parsed?.version !== 1 || !Array.isArray(parsed.projects) || parsed.projects.length > 100) {
+      throw new Error('Protected project-command registry is invalid.');
+    }
+    for (const project of parsed.projects) {
+      if (!project || typeof project !== 'object' || !path.isAbsolute(String(project.root ?? '')) || !Array.isArray(project.commands) || project.commands.length > 100) {
+        throw new Error('Protected project-command registry is invalid.');
+      }
+    }
+    return parsed;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { version: 1, projects: [] };
+    throw error;
+  }
+}
+
+async function writeProjectCommandRegistry(registryPath, registry) {
+  const text = JSON.stringify(registry, null, 2) + '\n';
+  if (Buffer.byteLength(text, 'utf8') > 512 * 1024) throw new Error('Protected project-command registry exceeds its bounded size.');
+  const temp = `${registryPath}.mecord-${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temp, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    await fs.rename(temp, registryPath);
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => undefined);
+  }
+}
+
 function randomSecret() {
   return crypto.randomBytes(32).toString('base64url');
 }
@@ -419,6 +563,10 @@ export async function main(argv) {
   }
   if (args.command === 'doctor') {
     await doctor();
+    return;
+  }
+  if (args.command === 'benchmark-register') {
+    await registerBenchmark({ root: args.root, python: args.python, script: args.script });
     return;
   }
   await runRemote({ root: args.root, browser: args.browser });
