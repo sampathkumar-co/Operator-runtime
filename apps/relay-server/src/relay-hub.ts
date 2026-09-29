@@ -53,6 +53,7 @@ export interface RelayHubOptions {
   deliveries?: RelayDeliveryStore;
   clock?: () => Date;
   beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
+  beforeFinalDispatchCheck?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
   upgradeLimitPerMinute?: number;
   deviceHelloLimitPerFiveMinutes?: number;
   maxLiveConnections?: number;
@@ -83,6 +84,7 @@ export class RelayHub {
   #deliveries: RelayDeliveryStore;
   #clock: () => Date;
   #beforeEnqueue?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
+  #beforeFinalDispatchCheck?: (authority: RelayDeliveryAuthority) => Promise<void> | void;
   #server: http.Server | null = null;
   #wss: WebSocketServer | null = null;
   #connections = new Map<string, Connection>();
@@ -104,6 +106,7 @@ export class RelayHub {
     this.#deliveries = options.deliveries ?? new RelayDeliveryStore(this.#stateDir);
     this.#clock = options.clock ?? (() => new Date());
     this.#beforeEnqueue = options.beforeEnqueue;
+    this.#beforeFinalDispatchCheck = options.beforeFinalDispatchCheck;
     const upgradeLimit = boundedPositiveInt(options.upgradeLimitPerMinute, DEFAULT_UPGRADE_LIMIT_PER_MINUTE, 100_000, 'upgradeLimitPerMinute');
     const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
     this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
@@ -299,6 +302,7 @@ export class RelayHub {
       throw new OperatorError('RELAY_DELIVERY_CAPABILITY_RETIRED', 'Relay delivery became incompatible with the active device capabilities before execution.', { retryable: true });
     }
     if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
+    await this.#beforeFinalDispatchCheck?.({ ...authority });
     const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
     this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
     return { route, delivery };
