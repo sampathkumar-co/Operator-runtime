@@ -5,7 +5,8 @@ import { semanticLocatorFunction } from '../src/capabilities/browser-cdp-frames.
 
 class FakeEvent {
   readonly type: string;
-  constructor(type: string) { this.type = type; }
+  readonly key?: string;
+  constructor(type: string, init?: any) { this.type = type; this.key = init?.key; }
 }
 
 class FakeRoot {
@@ -15,6 +16,7 @@ class FakeRoot {
     getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
     Event: FakeEvent,
     InputEvent: FakeEvent,
+    KeyboardEvent: FakeEvent,
     HTMLInputElement: undefined,
     HTMLTextAreaElement: undefined
   };
@@ -35,11 +37,19 @@ class FakeElement {
   textContent = '';
   id = '';
   value = '';
+  min = '';
+  max = '';
+  step = '';
   disabled = false;
   isContentEditable = false;
   clicked = false;
   shadowRoot?: FakeRoot;
   contentDocument?: FakeRoot;
+  child?: FakeElement;
+  parentElement?: FakeElement;
+  children: FakeElement[] = [];
+  tabIndex = -1;
+  onKey?: (key: string) => void;
   ownerDocument!: FakeRoot;
   #attrs = new Map<string, string>();
 
@@ -55,7 +65,23 @@ class FakeElement {
   getBoundingClientRect(): any { return { width: 20, height: 20 }; }
   focus(): void { /* semantic focus only */ }
   click(): void { this.clicked = true; }
-  dispatchEvent(): boolean { return true; }
+  querySelector(): FakeElement | null { return this.child ?? null; }
+  closest(): FakeElement | null {
+    if (this.hasAttribute('id') || this.hasAttribute('aria-label') || this.hasAttribute('title')) return this;
+    return this.parentElement ?? null;
+  }
+  dispatchEvent(event?: FakeEvent): boolean {
+    if (event?.type === 'keydown' && event.key) this.onKey?.(event.key);
+    if (this.getAttribute('role') === 'slider' && event?.type === 'keydown' && event.key?.startsWith('Arrow')) {
+      const current = Number(this.getAttribute('aria-valuenow'));
+      const min = Number(this.getAttribute('aria-valuemin') ?? '0');
+      const max = Number(this.getAttribute('aria-valuemax') ?? '100');
+      const step = Number(this.getAttribute('aria-valuestep') ?? this.getAttribute('step') ?? '1');
+      const up = event.key === 'ArrowRight' || event.key === 'ArrowUp';
+      this.setAttribute('aria-valuenow', String(Math.max(min, Math.min(max, current + (up ? step : -step)))));
+    }
+    return true;
+  }
 
   matches(selector: string): boolean {
     return selector.split(',').some((raw) => {
@@ -63,6 +89,7 @@ class FakeElement {
       if (token === this.tagName.toLowerCase()) return true;
       if (token === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       if (token === '[role]') return this.hasAttribute('role');
+      if (token === '[tabindex]') return this.hasAttribute('tabindex');
       if (token === '[contenteditable="true"]') return this.getAttribute('contenteditable') === 'true';
       if (token === '[role="heading"]') return this.getAttribute('role') === 'heading';
       return false;
@@ -178,4 +205,94 @@ test('cross-origin frame locator uses native button text instead of element id',
   const located = semanticLocatorFunction({ role: 'button', name: 'Increment' }) as any;
   assert.equal(located.count, 1);
   assert.equal(located.matches[0].name, 'Increment');
+});
+
+test('semantic snapshot exposes bounded native range slider metadata', (t) => {
+  const root = new FakeRoot();
+  const slider = new FakeElement('input');
+  slider.setAttribute('type', 'range');
+  slider.setAttribute('aria-label', 'Volume');
+  slider.min = '0'; slider.max = '10'; slider.step = '2'; slider.value = '4';
+  attach(root, slider);
+  installDocument(t, root);
+  const control = (semanticSnapshotFunction() as any).controls[0];
+  assert.deepEqual({ role: control.role, name: control.name, min: control.min, max: control.max, step: control.step, value: control.value },
+    { role: 'slider', name: 'Volume', min: '0', max: '10', step: '2', value: '4' });
+});
+
+test('semantic set_value enforces slider bounds and step, then verifies the value', (t) => {
+  const root = new FakeRoot();
+  const slider = new FakeElement('input');
+  slider.setAttribute('type', 'range'); slider.setAttribute('aria-label', 'Volume');
+  slider.min = '0'; slider.max = '10'; slider.step = '2'; slider.value = '0';
+  attach(root, slider); installDocument(t, root);
+  const success = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'Volume' }, value: 6 }) as any;
+  assert.equal(success.ok, true); assert.equal(slider.value, '6'); assert.equal(success.after.value, '6');
+  for (const value of [-2, 12, 3, Number.NaN]) {
+    const rejected = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'Volume' }, value }) as any;
+    assert.equal(rejected.ok, false);
+  }
+});
+
+test('semantic tab activation clicks its native interactive descendant', (t) => {
+  const root = new FakeRoot();
+  const tab = new FakeElement('div', 'Tab #2'); tab.setAttribute('role', 'tab');
+  const anchor = new FakeElement('a', 'Tab #2'); anchor.setAttribute('href', '#panel-2'); tab.child = anchor;
+  attach(root, tab); installDocument(t, root);
+  const result = interactionFunction({ operation: 'click', target: { role: 'tab', name: 'Tab #2' }, value: null }) as any;
+  assert.equal(result.ok, true); assert.equal(tab.clicked, false); assert.equal(anchor.clicked, true);
+});
+
+test('semantic snapshot names an ARIA slider from its widget container and exposes its value bounds', (t) => {
+  const root = new FakeRoot();
+  const widget = new FakeElement('div'); widget.id = 'volume-control'; widget.setAttribute('id', widget.id);
+  const handle = new FakeElement('span');
+  handle.setAttribute('role', 'slider'); handle.setAttribute('aria-valuemin', '-10');
+  handle.setAttribute('aria-valuemax', '10'); handle.setAttribute('aria-valuenow', '2');
+  handle.setAttribute('aria-valuestep', '2'); handle.parentElement = widget;
+  attach(root, widget, handle); installDocument(t, root);
+  const control = (semanticSnapshotFunction() as any).controls.find((item: any) => item.role === 'slider');
+  assert.deepEqual({ role: control.role, name: control.name, min: control.min, max: control.max, step: control.step, value: control.value },
+    { role: 'slider', name: 'volume-control', min: '-10', max: '10', step: '2', value: '2' });
+});
+
+test('ARIA slider set_value uses bounded keyboard steps and verifies the resulting value', (t) => {
+  const root = new FakeRoot();
+  const widget = new FakeElement('div'); widget.id = 'volume-control'; widget.setAttribute('id', widget.id);
+  const handle = new FakeElement('span');
+  handle.setAttribute('role', 'slider'); handle.setAttribute('aria-valuemin', '-10');
+  handle.setAttribute('aria-valuemax', '10'); handle.setAttribute('aria-valuenow', '2');
+  handle.setAttribute('aria-valuestep', '2'); handle.parentElement = widget;
+  attach(root, widget, handle); installDocument(t, root);
+  const result = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'volume-control' }, value: 8 }) as any;
+  assert.equal(result.ok, true); assert.deepEqual(result.pendingKeys, Array(3).fill('ArrowRight'));
+  handle.setAttribute('aria-valuenow', '8');
+  const verified = interactionFunction({ operation: 'verify_value', target: { role: 'slider', name: 'volume-control' }, value: 8 }) as any;
+  assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
+  const rejected = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'volume-control' }, value: 20 }) as any;
+  assert.equal(rejected.ok, false);
+});
+
+test('focusable slider widgets expose their container name and use keyboard activation with value readback', (t) => {
+  const root = new FakeRoot();
+  const group = new FakeElement('div');
+  const track = new FakeElement('div'); track.setAttribute('class', 'ui-slider'); track.setAttribute('id', 'volume-widget');
+  track.parentElement = group;
+  const output = new FakeElement('div', '2'); output.parentElement = group;
+  group.children = [track, output];
+  const handle = new FakeElement('span'); handle.setAttribute('class', 'ui-slider-handle');
+  handle.setAttribute('tabindex', '0'); handle.tabIndex = 0; handle.parentElement = track;
+  handle.onKey = (key) => {
+    if (key === 'ArrowRight') output.textContent = String(Number(output.textContent) + 1);
+    if (key === 'ArrowLeft') output.textContent = String(Number(output.textContent) - 1);
+  };
+  track.children = [handle];
+  attach(root, group, track, output, handle); installDocument(t, root);
+  const control = (semanticSnapshotFunction() as any).controls.find((item: any) => item.role === 'slider');
+  assert.equal(control.name, 'volume-widget'); assert.equal(control.value, '2');
+  const result = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'volume-widget' }, value: 8 }) as any;
+  assert.equal(result.ok, true); assert.deepEqual(result.pendingKeys, Array(6).fill('ArrowRight'));
+  handle.setAttribute('aria-valuenow', '8');
+  const verified = interactionFunction({ operation: 'verify_value', target: { role: 'slider', name: 'volume-widget' }, value: 8 }) as any;
+  assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
 });

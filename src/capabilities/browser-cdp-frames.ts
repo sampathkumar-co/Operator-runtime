@@ -104,6 +104,18 @@ async function evaluate(
 
 export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string }) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const legacySliderRoot = (element: Element) => {
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+      const className = current.getAttribute('class') ?? '';
+      if (/slider[-_]?handle/i.test(className)) continue;
+      if (/(?:^|\s)(?:[\w-]*slider[\w-]*)(?:\s|$)/i.test(className)) return current;
+    }
+    return null;
+  };
+  const isLegacySliderHandle = (element: Element) => (element as HTMLElement).tabIndex >= 0
+    && /slider/i.test(element.getAttribute('class') ?? '')
+    && Boolean(legacySliderRoot(element.parentElement ?? element));
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
     const seenScopes = new Set<unknown>();
@@ -140,6 +152,11 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     }
     const control = element as Element & { labels?: ArrayLike<Element> | null };
     if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
+    if (roleOf(element) === 'slider') {
+      const labelledAncestor = element.parentElement?.closest('[aria-label],[title],[id]');
+      const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
+      if (ancestorName) return trim(ancestorName);
+    }
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
@@ -153,6 +170,9 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   const roleOf = (element: Element) => {
     const explicit = trim(element.getAttribute('role')).toLowerCase();
     if (explicit) return explicit;
+    if (element.hasAttribute('aria-valuenow')) return 'slider';
+    if (element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range') return 'slider';
+    if (isLegacySliderHandle(element)) return 'slider';
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
@@ -163,6 +183,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
       const type = trim(element.getAttribute('type') || 'text').toLowerCase();
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
       if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
       if (type === 'search') return 'searchbox';
       return 'textbox';
@@ -176,7 +197,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
     return !rect || (rect.width > 0 && rect.height > 0);
   };
-  const selector = target.css || 'button,a[href],input,textarea,select,option,summary,[role],[contenteditable="true"]';
+  const selector = target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
   const matches = deepQuery(selector, 1000).filter(({ element }) => {
     if (!visible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
@@ -274,9 +295,29 @@ export async function performSemanticInteraction(
 
     const chosen = matches[0]!.context;
     const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)})`;
-    const value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true));
+    let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
+    }
+    const result = value as JsonMap;
+    if (Array.isArray(result.pendingKeys)) {
+      for (const inputKey of result.pendingKeys) {
+        const key = String(inputKey);
+        const virtualKey = key === 'ArrowLeft' ? 37 : key === 'ArrowRight' ? 39 : key === 'ArrowUp' ? 38 : key === 'ArrowDown' ? 40 : 0;
+        if (!virtualKey) throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Slider requested an unsupported keyboard input.', { retryable: false });
+        await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey });
+        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey });
+      }
+      const verifyExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'verify_value' })})`;
+      const verified = unwrapRuntimeValue(await evaluate(session, chosen, verifyExpression, true));
+      if (!verified || typeof verified !== 'object' || (verified as JsonMap).ok !== true) {
+        const error = verified && typeof verified === 'object' && typeof (verified as JsonMap).error === 'string'
+          ? String((verified as JsonMap).error)
+          : 'Slider value postcondition failed.';
+        throw new OperatorError('BROWSER_POSTCONDITION_FAILED', error, { retryable: false, details: { target: input.target, expected: result.expected, actual: (verified as JsonMap | undefined)?.actual } });
+      }
+      value = { ...result, after: (verified as JsonMap).after };
+      delete (value as JsonMap).pendingKeys;
     }
     return {
       value: value as JsonMap,

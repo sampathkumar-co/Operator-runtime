@@ -217,7 +217,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'type', 'select'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation must be click, type, or select.');
+    if (!['click', 'type', 'select', 'set_value'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation must be click, type, select, or set_value.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
     if (!targetSpec.css && !targetSpec.text && !(targetSpec.role && targetSpec.name)) {

@@ -119,7 +119,7 @@ function extractCdpValue(input: unknown): string {
 }
 
 function isUsefulRole(role: string): boolean {
-  return new Set(['button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'heading', 'navigation', 'main', 'form', 'dialog', 'alert', 'treeitem', 'option']).has(role.toLowerCase());
+  return new Set(['button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'tab', 'menuitem', 'heading', 'navigation', 'main', 'form', 'dialog', 'alert', 'treeitem', 'option']).has(role.toLowerCase());
 }
 
 export function normalizeTargetSpec(input: unknown): { css?: string; text?: string; role?: string; name?: string } {
@@ -199,6 +199,31 @@ function abortError(): OperatorError {
 
 export function semanticSnapshotFunction() {
   const trim = (value: unknown, max = 180) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const legacySliderRoot = (element: Element) => {
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+      const className = current.getAttribute('class') ?? '';
+      if (/slider[-_]?handle/i.test(className)) continue;
+      if (/(?:^|\s)(?:[\w-]*slider[\w-]*)(?:\s|$)/i.test(className)) return current;
+    }
+    return null;
+  };
+  const isLegacySliderHandle = (element: Element) => {
+    const tabIndex = (element as HTMLElement).tabIndex;
+    const classes = element.getAttribute('class') ?? '';
+    return tabIndex >= 0 && /slider/i.test(classes) && Boolean(legacySliderRoot(element.parentElement ?? element));
+  };
+  const displayedSliderValue = (element: Element) => {
+    const root = legacySliderRoot(element);
+    const parent = root?.parentElement;
+    const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
+    for (const sibling of Array.from(parent?.children ?? [])) {
+      if (sibling === root) continue;
+      const candidate = trim(sibling.textContent, 80);
+      if (numeric.test(candidate)) return candidate;
+    }
+    return '';
+  };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
     const seenScopes = new Set<unknown>();
@@ -243,6 +268,11 @@ export function semanticSnapshotFunction() {
     }
     const control = element as Element & { labels?: ArrayLike<Element> | null; placeholder?: string; name?: string; id?: string };
     if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
+    if (roleOf(element) === 'slider') {
+      const labelledAncestor = element.parentElement?.closest('[aria-label],[title],[id]');
+      const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
+      if (ancestorName) return trim(ancestorName);
+    }
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
@@ -256,6 +286,9 @@ export function semanticSnapshotFunction() {
   const roleOf = (element: Element) => {
     const explicit = trim(element.getAttribute('role')).toLowerCase();
     if (explicit) return explicit;
+    if (element.hasAttribute('aria-valuenow')) return 'slider';
+    if (element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range') return 'slider';
+    if (isLegacySliderHandle(element)) return 'slider';
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
@@ -266,23 +299,30 @@ export function semanticSnapshotFunction() {
       const type = trim(element.getAttribute('type') || 'text').toLowerCase();
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
       if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
       if (type === 'search') return 'searchbox';
       return 'textbox';
     }
     return '';
   };
-  const controls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[contenteditable="true"]', 160)
+  const controls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 160)
     .filter(({ element }) => visible(element))
     .map(({ element, context }) => ({
       tag: element.tagName.toLowerCase(),
       role: roleOf(element),
       name: accessibleName(element),
       type: element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text') : '',
+      ...(roleOf(element) === 'slider' ? {
+        min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
+        max: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).max || element.getAttribute('aria-valuemax') || '' : element.getAttribute('aria-valuemax') || ''),
+        step: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).step || element.getAttribute('aria-valuestep') || '1' : element.getAttribute('aria-valuestep') || element.getAttribute('step') || '1'),
+        value: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).value : element.getAttribute('aria-valuenow') || displayedSliderValue(element))
+      } : {}),
       href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
       context
     }))
-    .filter((item) => item.name || item.href)
+    .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
     .slice(0, 120);
   const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => trim(element.textContent)).filter(Boolean).slice(0, 60);
   const forms = deepQuery('form', 30).map(({ element: form, context }) => {
@@ -299,6 +339,28 @@ export function semanticSnapshotFunction() {
 
 export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string }; value: unknown }) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const legacySliderRoot = (element: Element) => {
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+      const className = current.getAttribute('class') ?? '';
+      if (/slider[-_]?handle/i.test(className)) continue;
+      if (/(?:^|\s)(?:[\w-]*slider[\w-]*)(?:\s|$)/i.test(className)) return current;
+    }
+    return null;
+  };
+  const isLegacySliderHandle = (element: Element) => (element as HTMLElement).tabIndex >= 0
+    && /slider/i.test(element.getAttribute('class') ?? '')
+    && Boolean(legacySliderRoot(element.parentElement ?? element));
+  const displayedSliderValue = (element: Element) => {
+    const root = legacySliderRoot(element);
+    const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
+    for (const sibling of Array.from(root?.parentElement?.children ?? [])) {
+      if (sibling === root) continue;
+      const candidate = trim(sibling.textContent);
+      if (numeric.test(candidate)) return candidate;
+    }
+    return '';
+  };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
     const seenScopes = new Set<unknown>();
@@ -335,6 +397,11 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     }
     const control = element as Element & { labels?: ArrayLike<Element> | null };
     if (control.labels?.length) return trim(Array.from(control.labels).map((label) => label.textContent).join(' '));
+    if (roleOf(element) === 'slider') {
+      const labelledAncestor = element.parentElement?.closest('[aria-label],[title],[id]');
+      const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
+      if (ancestorName) return trim(ancestorName);
+    }
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
@@ -348,6 +415,9 @@ export function interactionFunction(input: { operation: string; target: { css?: 
   const roleOf = (element: Element) => {
     const explicit = trim(element.getAttribute('role')).toLowerCase();
     if (explicit) return explicit;
+    if (element.hasAttribute('aria-valuenow')) return 'slider';
+    if (element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range') return 'slider';
+    if (isLegacySliderHandle(element)) return 'slider';
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
@@ -358,6 +428,7 @@ export function interactionFunction(input: { operation: string; target: { css?: 
       const type = trim(element.getAttribute('type') || 'text').toLowerCase();
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
       if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
       if (type === 'search') return 'searchbox';
       return 'textbox';
@@ -371,15 +442,17 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
     return !rect || (rect.width > 0 && rect.height > 0);
   };
-  const selector = input.target.css || 'button,a[href],input,textarea,select,option,summary,[role],[contenteditable="true"]';
+  const selector = input.target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
   const candidates = deepQuery(selector, 1000);
-  const match = candidates.find(({ element }) => {
+  const matching = candidates.filter(({ element }) => {
     if (!visible(element)) return false;
     if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
     if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
     if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
     return true;
   });
+  if (matching.length > 1) return { ok: false, error: 'Semantic browser target matched multiple elements.', matches: matching.length };
+  const match = matching[0];
   if (!match) return { ok: false, error: 'No matching semantic element was found.' };
   const { element, context } = match;
   const control = element as Element & {
@@ -394,10 +467,24 @@ export function interactionFunction(input: { operation: string; target: { css?: 
   const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };
   const view = element.ownerDocument?.defaultView ?? window;
 
+  if (input.operation === 'verify_value') {
+    const actual = element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range'
+      ? Number((element as HTMLInputElement).value)
+      : Number(element.getAttribute('aria-valuenow') || displayedSliderValue(element));
+    const expected = Number(input.value);
+    return actual === expected
+      ? { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, value: String(actual) } }
+      : { ok: false, error: 'Slider value postcondition failed.', expected, actual };
+  }
+
   if (input.operation === 'click') {
-    control.focus?.();
-    if (typeof control.click !== 'function') return { ok: false, error: 'Matched element is not clickable.' };
-    control.click();
+    // Some accessible tab wrappers delegate activation to a nested anchor. Click
+    // that native interactive descendant so browser default behavior is preserved.
+    const activation = roleOf(element) === 'tab' ? element.querySelector('a[href],button,[role="tab"]') ?? element : element;
+    const activationControl = activation as Element & { focus?: () => void; click?: () => void };
+    activationControl.focus?.();
+    if (typeof activationControl.click !== 'function') return { ok: false, error: 'Matched element is not clickable.' };
+    activationControl.click();
   } else if (input.operation === 'type') {
     const value = String(input.value ?? '');
     const tag = element.tagName;
@@ -423,6 +510,38 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     control.dispatchEvent?.(new view.Event('input', { bubbles: true }));
     control.dispatchEvent?.(new view.Event('change', { bubbles: true }));
     if (String(control.value ?? '') !== value) return { ok: false, error: 'Select postcondition failed.', expected: value, actual: String(control.value ?? '') };
+  } else if (input.operation === 'set_value') {
+    if (roleOf(element) !== 'slider') return { ok: false, error: 'Matched element is not a slider.' };
+    const nativeRange = element.tagName === 'INPUT' && trim(element.getAttribute('type') || '').toLowerCase() === 'range';
+    const legacyWidget = isLegacySliderHandle(element);
+    const ariaSlider = element.getAttribute('role') === 'slider' || element.hasAttribute('aria-valuenow') || element.hasAttribute('aria-valuemin') || element.hasAttribute('aria-valuemax');
+    const slider = element as HTMLInputElement;
+    const requested = Number(input.value);
+    const current = Number(nativeRange ? slider.value : element.getAttribute('aria-valuenow') || (legacyWidget ? displayedSliderValue(element) : ''));
+    const minRaw = nativeRange ? (slider.min || element.getAttribute('aria-valuemin') || '0') : (element.getAttribute('aria-valuemin') || (ariaSlider ? '0' : ''));
+    const maxRaw = nativeRange ? (slider.max || element.getAttribute('aria-valuemax') || '100') : (element.getAttribute('aria-valuemax') || (ariaSlider ? '100' : ''));
+    const min = minRaw === '' ? undefined : Number(minRaw);
+    const max = maxRaw === '' ? undefined : Number(maxRaw);
+    const rawStep = nativeRange ? (slider.step || element.getAttribute('aria-valuestep') || '1') : (element.getAttribute('aria-valuestep') || element.getAttribute('step') || '1');
+    const step = rawStep === 'any' ? undefined : Number(rawStep);
+    if (!Number.isFinite(requested) || !Number.isFinite(current) || (min !== undefined && !Number.isFinite(min)) || (max !== undefined && !Number.isFinite(max)) || (step !== undefined && (!Number.isFinite(step) || step <= 0)) || (min !== undefined && max !== undefined && min > max) || (min !== undefined && requested < min) || (max !== undefined && requested > max)) return { ok: false, error: 'Slider value must be finite, within available bounds, and use a valid step.', min, max, step: rawStep, requested: input.value };
+    if (step !== undefined && min !== undefined && Math.abs((requested - min) / step - Math.round((requested - min) / step)) > 1e-8) return { ok: false, error: 'Slider value does not align with the control step.', min, max, step, requested };
+    slider.focus();
+    if (nativeRange) {
+      const descriptor = view.HTMLInputElement ? Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value') : undefined;
+      if (descriptor?.set) descriptor.set.call(slider, String(requested)); else slider.value = String(requested);
+      slider.dispatchEvent(new view.Event('input', { bubbles: true }));
+      slider.dispatchEvent(new view.Event('change', { bubbles: true }));
+      if (Number(slider.value) !== requested) return { ok: false, error: 'Slider value postcondition failed.', expected: requested, actual: slider.value };
+    } else {
+      if (!step || (!ariaSlider && !legacyWidget)) return { ok: false, error: 'Custom slider must expose a discrete value step.' };
+      const deltaSteps = Math.abs((requested - current) / step);
+      if (!Number.isInteger(Math.round(deltaSteps)) || Math.abs(deltaSteps - Math.round(deltaSteps)) > 1e-8 || deltaSteps > 500) return { ok: false, error: 'Requested slider change exceeds the bounded step limit or does not align with its step.', current, requested, step, maxSteps: 500 };
+      const vertical = element.getAttribute('aria-orientation') === 'vertical';
+      const key = requested === current ? '' : requested > current ? (vertical ? 'ArrowUp' : 'ArrowRight') : (vertical ? 'ArrowDown' : 'ArrowLeft');
+      const pendingKeys = key ? Array.from({ length: Math.round(deltaSteps) }, () => key) : [];
+      return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: before, pendingKeys, expected: requested };
+    }
   }
 
   const after = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };

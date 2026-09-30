@@ -539,6 +539,62 @@ test('precondition-guarded public file writes re-evaluate reused stateless invoc
   assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
 });
 
+test('trusted command execution retries recover the same invocation while a fresh identical invocation executes again', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  const completedByKey = new Map<string, any>();
+  let dispatchCalls = 0;
+  let trustedRegistrationVersion = 'trusted-registration-v1';
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `trusted-command-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey(key: string) { return completedByKey.get(key) ?? null; },
+    async get(_deviceId: string, seq: number) {
+      const key = keyBySeq.get(seq)!;
+      const result = {
+        deliveryId: `trusted-command-${seq}`,
+        result: { ok: true, capability: 'project.command.run', provider: trustedRegistrationVersion, evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+      completedByKey.set(key, { deviceId: DEVICE_ID, result: { seq, ...result } });
+      return result;
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any, results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const command = {
+    id: 'stable-command-action', capability: 'project.command.run', risk: 'write',
+    input: { commandId: 'benchmark-command', args: ['inspect'] }, provenance: { kind: 'chatgpt' }
+  };
+  const first = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-a' }, waitMs: 1000 });
+  const firstResult = await first.json() as any;
+  assert.equal(firstResult.provider, 'trusted-registration-v1');
+
+  // A retry with the same request identity recovers the durable result.
+  const retry = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-a' }, waitMs: 1000 });
+  assert.equal((await retry.json() as any).provider, 'trusted-registration-v1');
+  assert.equal(dispatchCalls, 1);
+
+  // The trusted registration changes, but payload/action content remains identical.
+  // A new MCP invocation identity must dispatch and execute under the new binding.
+  trustedRegistrationVersion = 'trusted-registration-v2';
+  const fresh = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-b' }, waitMs: 1000 });
+  assert.equal((await fresh.json() as any).provider, 'trusted-registration-v2');
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+});
+
 
 test('relay control preserves retryable routing failures for the public boundary', async (t) => {
   const service = new RelayControlService({
