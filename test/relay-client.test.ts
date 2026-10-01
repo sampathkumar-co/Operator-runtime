@@ -196,6 +196,60 @@ test('negotiated read window executes read deliveries concurrently but ACKs them
   assert.equal((await client.state()).processing, undefined);
 });
 
+test('serialization barrier drains active concurrent reads without reconnecting', async (t) => {
+  const state = await stateDir(t, 'operator-relay-read-barrier-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Read Barrier PC');
+  const socket = new FakeSocket();
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const ackOrder: number[] = [];
+  const deliveryOrder: string[] = [];
+  let connectionCount = 0;
+  let client!: RelayClient;
+
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'barrier-1', resumeFromSeq: 0, heartbeatMs: 60_000, readConcurrency: 2 });
+      socket.server({ type: 'delivery', seq: 1, id: 'read-1', kind: 'action', payload: { action: { risk: 'read' } } });
+      socket.server({ type: 'delivery', seq: 2, id: 'write-2', kind: 'action', payload: { action: { risk: 'write' } } });
+      setTimeout(releaseRead, 25);
+      return;
+    }
+    if (frame.type === 'ack') {
+      ackOrder.push(frame.seq);
+      if (frame.seq === 2) { client.stop(); socket.close(); }
+    }
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { connectionCount += 1; queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    maxConcurrentReadDeliveries: 2,
+    onDelivery: async (delivery) => {
+      deliveryOrder.push(`start-${delivery.seq}`);
+      if (delivery.seq === 1) {
+        await readGate;
+        deliveryOrder.push('done-1');
+        return;
+      }
+      assert.equal(delivery.seq, 2);
+      assert.equal(deliveryOrder.includes('done-1'), true);
+      deliveryOrder.push('done-2');
+    },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(connectionCount, 1);
+  assert.deepEqual(ackOrder, [1, 2]);
+  assert.deepEqual(deliveryOrder, ['start-1', 'done-1', 'start-2', 'done-2']);
+});
+
 test('relay recomputes signed capabilities before every reconnect hello', async (t) => {
   const state = await stateDir(t, 'operator-relay-dynamic-capabilities-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });

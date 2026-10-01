@@ -271,6 +271,7 @@ export class RelayClient {
       let nextReceiveSeq = state.lastAckedServerSeq + 1;
       let nextAckSeq = state.lastAckedServerSeq + 1;
       const activeReads = new Set<number>();
+      const activeReadTasks = new Map<number, Promise<void>>();
       const completedReads = new Map<number, RelayDelivery>();
       let readAckQueue: Promise<void> = Promise.resolve();
 
@@ -337,7 +338,7 @@ export class RelayClient {
           }
           nextReceiveSeq += 1;
           activeReads.add(delivery.seq);
-          void this.#onDelivery(delivery).then(() => {
+          const readTask = this.#onDelivery(delivery).then(() => {
             completedReads.set(delivery.seq, delivery);
             readAckQueue = readAckQueue.then(async () => {
               while (completedReads.has(nextAckSeq)) {
@@ -358,11 +359,16 @@ export class RelayClient {
               }
             });
             return readAckQueue;
-          }).catch(fail);
+          });
+          activeReadTasks.set(delivery.seq, readTask);
+          void readTask.finally(() => activeReadTasks.delete(delivery.seq)).catch(fail);
           return;
         }
         if (activeReads.size > 0) {
-          throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a serialization-barrier delivery before concurrent reads were acknowledged.', { retryable: true });
+          await Promise.all([...activeReadTasks.values()]);
+          if (activeReads.size > 0) {
+            throw new OperatorError('RELAY_READ_BARRIER_STALLED', 'Concurrent reads did not drain before a serialization-barrier delivery.', { retryable: true });
+          }
         }
         await this.#handleDelivery(socket, frame);
         const durable = await this.#readState();
