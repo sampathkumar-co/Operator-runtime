@@ -273,10 +273,13 @@ export function semanticSnapshotFunction() {
       const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
       if (ancestorName) return trim(ancestorName);
     }
+    const explicitRole = trim(element.getAttribute('role')).toLowerCase();
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
+    const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
       || nativeText
+      || roleText
       || element.getAttribute('title')
       || element.getAttribute('name')
       || element.id
@@ -306,22 +309,35 @@ export function semanticSnapshotFunction() {
     }
     return '';
   };
-  const controls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 160)
+  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 160);
+  const seenControls = new Set(semanticControls.map(({ element }) => element));
+  const pointerControls = deepQuery('*', 240)
+    .filter(({ element }) => {
+      if (seenControls.has(element) || !visible(element)) return false;
+      const style = viewOf(element)?.getComputedStyle?.(element);
+      return style?.cursor === 'pointer' && Boolean(accessibleName(element));
+    })
+    .slice(0, 60);
+  const controls = [...semanticControls, ...pointerControls]
     .filter(({ element }) => visible(element))
-    .map(({ element, context }) => ({
-      tag: element.tagName.toLowerCase(),
-      role: roleOf(element),
-      name: accessibleName(element),
-      type: element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text') : '',
-      ...(roleOf(element) === 'slider' ? {
-        min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
-        max: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).max || element.getAttribute('aria-valuemax') || '' : element.getAttribute('aria-valuemax') || ''),
-        step: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).step || element.getAttribute('aria-valuestep') || '1' : element.getAttribute('aria-valuestep') || element.getAttribute('step') || '1'),
-        value: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).value : element.getAttribute('aria-valuenow') || displayedSliderValue(element))
-      } : {}),
-      href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
-      context
-    }))
+    .map(({ element, context }) => {
+      const semanticRole = roleOf(element);
+      const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      return {
+        tag: element.tagName.toLowerCase(),
+        role,
+        name: accessibleName(element),
+        type: element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text') : '',
+        ...(semanticRole === 'slider' ? {
+          min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
+          max: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).max || element.getAttribute('aria-valuemax') || '' : element.getAttribute('aria-valuemax') || ''),
+          step: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).step || element.getAttribute('aria-valuestep') || '1' : element.getAttribute('aria-valuestep') || element.getAttribute('step') || '1'),
+          value: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).value : element.getAttribute('aria-valuenow') || displayedSliderValue(element))
+        } : {}),
+        href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
+        context
+      };
+    })
     .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
     .slice(0, 120);
   const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => trim(element.textContent)).filter(Boolean).slice(0, 60);
@@ -402,10 +418,13 @@ export function interactionFunction(input: { operation: string; target: { css?: 
       const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
       if (ancestorName) return trim(ancestorName);
     }
+    const explicitRole = trim(element.getAttribute('role')).toLowerCase();
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
+    const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
       || nativeText
+      || roleText
       || element.getAttribute('title')
       || element.getAttribute('name')
       || element.id
@@ -444,13 +463,27 @@ export function interactionFunction(input: { operation: string; target: { css?: 
   };
   const selector = input.target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
   const candidates = deepQuery(selector, 1000);
-  const matching = candidates.filter(({ element }) => {
+  let matching = candidates.filter(({ element }) => {
     if (!visible(element)) return false;
     if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
     if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
     if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
     return true;
   });
+  if (!matching.length && !input.target.css && !input.target.role && (input.target.text || input.target.name)) {
+    const desired = (input.target.name || input.target.text || '').toLowerCase();
+    matching = deepQuery('*', 1000).filter(({ element }) => {
+      if (!visible(element)) return false;
+      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
+      if (style?.cursor !== 'pointer') return false;
+      const name = nameOf(element).toLowerCase();
+      return input.target.name ? name === desired : (name === desired || trim(element.textContent).toLowerCase().includes(desired));
+    });
+  }
+  if (matching.length > 1) {
+    const exact = matching.filter(({ element }) => nameOf(element).toLowerCase() === (input.target.name || input.target.text || '').toLowerCase());
+    if (exact.length === 1) matching = exact;
+  }
   if (matching.length > 1) return { ok: false, error: 'Semantic browser target matched multiple elements.', matches: matching.length };
   const match = matching[0];
   if (!match) return { ok: false, error: 'No matching semantic element was found.' };
@@ -485,6 +518,13 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     activationControl.focus?.();
     if (typeof activationControl.click !== 'function') return { ok: false, error: 'Matched element is not clickable.' };
     activationControl.click();
+  } else if (input.operation === 'hover') {
+    const rect = element.getBoundingClientRect();
+    const clientX = rect.left + rect.width / 2;
+    const clientY = rect.top + rect.height / 2;
+    for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
+      element.dispatchEvent(new view.MouseEvent(type, { bubbles: type !== 'mouseenter', cancelable: true, clientX, clientY, view }));
+    }
   } else if (input.operation === 'type') {
     const value = String(input.value ?? '');
     const tag = element.tagName;

@@ -157,10 +157,13 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
       const ancestorName = labelledAncestor?.getAttribute('aria-label') || labelledAncestor?.getAttribute('title') || labelledAncestor?.getAttribute('id');
       if (ancestorName) return trim(ancestorName);
     }
+    const explicitRole = trim(element.getAttribute('role')).toLowerCase();
     const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
+    const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? trim(element.textContent) : '';
     return trim(
       element.getAttribute('placeholder')
       || nativeText
+      || roleText
       || element.getAttribute('title')
       || element.getAttribute('name')
       || element.id
@@ -198,18 +201,33 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     return !rect || (rect.width > 0 && rect.height > 0);
   };
   const selector = target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
-  const matches = deepQuery(selector, 1000).filter(({ element }) => {
+  let matches = deepQuery(selector, 1000).filter(({ element }) => {
     if (!visible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
     if (target.role && roleOf(element) !== target.role.toLowerCase()) return false;
     if (target.name && nameOf(element).toLowerCase() !== target.name.toLowerCase()) return false;
     return true;
   });
+  if (!matches.length && !target.css && !target.role && (target.text || target.name)) {
+    const desired = (target.name || target.text || '').toLowerCase();
+    matches = deepQuery('*', 1000).filter(({ element }) => {
+      if (!visible(element)) return false;
+      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
+      if (style?.cursor !== 'pointer') return false;
+      const name = nameOf(element).toLowerCase();
+      return target.name ? name === desired : (name === desired || trim(element.textContent).toLowerCase().includes(desired));
+    });
+  }
+  if (matches.length > 1) {
+    const desired = (target.name || target.text || '').toLowerCase();
+    const exact = matches.filter(({ element }) => nameOf(element).toLowerCase() === desired);
+    if (exact.length === 1) matches = exact;
+  }
   return {
     count: matches.length,
     matches: matches.slice(0, 3).map(({ element, context }) => ({
       tag: element.tagName.toLowerCase(),
-      role: roleOf(element),
+      role: roleOf(element) || (element.ownerDocument?.defaultView?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : ''),
       name: nameOf(element),
       context
     }))
