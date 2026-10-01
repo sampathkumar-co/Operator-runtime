@@ -150,15 +150,22 @@ test('interactive terminal session supports start, stdin, cursor output, list an
   });
   assert.equal(write.ok, true, write.error?.message);
 
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const read = await provider.execute({
-    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
-    input: { operation: 'read', sessionId, afterCursor: 0, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
-  });
-  assert.equal(read.ok, true, read.error?.message);
-  const events = (read.output as any).events as Array<{ stream: string; text: string; cursor: number }>;
+  let read: Awaited<ReturnType<ProcessProvider['execute']>> | undefined;
+  let events: Array<{ stream: string; text: string; cursor: number }> = [];
+  let cursor = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    read = await provider.execute({
+      id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
+      input: { operation: 'read', sessionId, afterCursor: cursor, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
+    });
+    assert.equal(read.ok, true, read.error?.message);
+    const batch = (read.output as any).events as Array<{ stream: string; text: string; cursor: number }>;
+    events.push(...batch);
+    cursor = (read.output as any).cursor as number;
+    if (events.some((event) => event.stream === 'stdout' && event.text.includes('echo:hello'))) break;
+  }
   assert.ok(events.some((event) => event.stream === 'stdout' && event.text.includes('echo:hello')));
-  const cursor = (read.output as any).cursor as number;
 
   const emptyRead = await provider.execute({
     id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
