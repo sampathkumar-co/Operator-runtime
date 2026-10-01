@@ -102,7 +102,7 @@ async function evaluate(
     : session.send('Runtime.evaluate', params);
 }
 
-export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string }) {
+export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -197,18 +197,34 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     const view = element.ownerDocument?.defaultView;
     const style = view?.getComputedStyle?.(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
+    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none')) return false;
     return !rect || (rect.width > 0 && rect.height > 0);
   };
-  const selector = target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
+  const normalizeColor = (raw: string) => {
+    const probe = document.createElement?.('span');
+    if (!probe) return trim(raw).toLowerCase();
+    probe.style.color = ''; probe.style.color = trim(raw);
+    if (!probe.style.color) return trim(raw).toLowerCase();
+    (document.body || document.documentElement)?.appendChild?.(probe);
+    const normalized = probe.ownerDocument?.defaultView?.getComputedStyle?.(probe).color || probe.style.color;
+    probe.remove?.();
+    return trim(normalized).toLowerCase();
+  };
+  const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
+  const selector = target.css || (desiredColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   let matches = deepQuery(selector, 1000).filter(({ element }) => {
     if (!visible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
     if (target.role && roleOf(element) !== target.role.toLowerCase()) return false;
     if (target.name && nameOf(element).toLowerCase() !== target.name.toLowerCase()) return false;
+    if (desiredColor) {
+      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
+      const colors = [style?.backgroundColor, style?.fill, style?.stroke].map((value) => trim(value).toLowerCase());
+      if (!colors.includes(desiredColor)) return false;
+    }
     return true;
   });
-  if (!matches.length && !target.css && !target.role && (target.text || target.name)) {
+  if (!matches.length && !target.css && !target.role && !target.renderedColor && (target.text || target.name)) {
     const desired = (target.name || target.text || '').toLowerCase();
     matches = deepQuery('*', 1000).filter(({ element }) => {
       if (!visible(element)) return false;
@@ -282,7 +298,7 @@ export async function inspectOopifFrames(session: CdpConnection): Promise<Array<
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string }; value: unknown }
+  input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session);
   try {

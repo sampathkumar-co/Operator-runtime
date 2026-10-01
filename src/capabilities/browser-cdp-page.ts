@@ -78,6 +78,35 @@ export async function waitForReadyState(session: CdpConnection, timeoutMs: numbe
   throw new OperatorError('BROWSER_READY_TIMEOUT', 'Timed out waiting for the page to become ready.', { retryable: true });
 }
 
+export async function waitForDestinationReady(
+  session: CdpConnection,
+  expectedUrl: string,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<{ state: { url: string; title: string; readyState: string }; firstObservedUrl: string; polls: number; elapsedMs: number }> {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  let firstObservedUrl = '';
+  let polls = 0;
+  let lastState = { url: '', title: '', readyState: '' };
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    lastState = await pageIdentity(session);
+    polls += 1;
+    firstObservedUrl ||= lastState.url;
+    throwIfAborted(signal);
+    if (sameDestination(lastState.url, expectedUrl)
+      && (lastState.readyState === 'interactive' || lastState.readyState === 'complete')) {
+      return { state: lastState, firstObservedUrl, polls, elapsedMs: Date.now() - started };
+    }
+    await delay(75, signal);
+  }
+  throw new OperatorError('BROWSER_READY_TIMEOUT', 'Timed out waiting for the requested browser destination to become ready.', {
+    retryable: true,
+    details: { expectedUrl, firstObservedUrl, finalUrl: lastState.url, readyState: lastState.readyState, polls, elapsedMs: Date.now() - started }
+  });
+}
+
 export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal): Promise<void> {
   await delay(50, signal);
   try { await waitForReadyState(session, 2_000, signal); } catch (error) {
@@ -122,10 +151,10 @@ function isUsefulRole(role: string): boolean {
   return new Set(['button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'tab', 'menuitem', 'heading', 'navigation', 'main', 'form', 'dialog', 'alert', 'treeitem', 'option']).has(role.toLowerCase());
 }
 
-export function normalizeTargetSpec(input: unknown): { css?: string; text?: string; role?: string; name?: string } {
+export function normalizeTargetSpec(input: unknown): { css?: string; text?: string; role?: string; name?: string; renderedColor?: string } {
   const raw = input && typeof input === 'object' ? input as JsonMap : {};
   const clean = (key: string) => typeof raw[key] === 'string' && String(raw[key]).trim() ? String(raw[key]).trim().slice(0, 500) : undefined;
-  return { css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name') };
+  return { css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name'), renderedColor: clean('renderedColor') };
 }
 
 export async function collectDiagnostics(session: CdpConnection): Promise<{
@@ -315,7 +344,9 @@ export function semanticSnapshotFunction() {
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
       const style = viewOf(element)?.getComputedStyle?.(element);
-      return style?.cursor === 'pointer' && Boolean(accessibleName(element));
+      return style?.cursor === 'pointer' && style.pointerEvents !== 'none'
+        && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true'
+        && Boolean(accessibleName(element));
     })
     .slice(0, 60);
   const controls = [...semanticControls, ...pointerControls]
@@ -350,10 +381,26 @@ export function semanticSnapshotFunction() {
       context
     };
   });
-  return { headings, controls, forms, textExcerpt: trim(document.body?.innerText, 1600) };
+  const visuals = deepQuery('*', 600).flatMap(({ element, context }) => {
+    if (!visible(element)) return [];
+    const style = viewOf(element)?.getComputedStyle?.(element);
+    const colors = {
+      background: trim(style?.backgroundColor, 64).toLowerCase(),
+      fill: trim(style?.fill, 64).toLowerCase(),
+      stroke: trim(style?.stroke, 64).toLowerCase()
+    };
+    const meaningful = Object.values(colors).some((color) => color && color !== 'none' && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)');
+    if (!meaningful) return [];
+    const rect = element.getBoundingClientRect();
+    if (rect.width * rect.height < 16) return [];
+    const role = roleOf(element);
+    const pointer = style?.cursor === 'pointer' && style.pointerEvents !== 'none';
+    return [{ tag: element.tagName.toLowerCase(), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName)), context }];
+  }).slice(0, 120);
+  return { headings, controls, forms, visuals, textExcerpt: trim(document.body?.innerText, 1600) };
 }
 
-export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string }; value: unknown }) {
+export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -458,19 +505,36 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     const view = element.ownerDocument?.defaultView;
     const style = view?.getComputedStyle?.(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
+    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none')) return false;
     return !rect || (rect.width > 0 && rect.height > 0);
   };
-  const selector = input.target.css || 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]';
+  const normalizeColor = (raw: string) => {
+    const probe = document.createElement?.('span');
+    if (!probe) return trim(raw).toLowerCase();
+    probe.style.color = '';
+    probe.style.color = trim(raw);
+    if (!probe.style.color) return trim(raw).toLowerCase();
+    (document.body || document.documentElement)?.appendChild?.(probe);
+    const normalized = probe.ownerDocument?.defaultView?.getComputedStyle?.(probe).color || probe.style.color;
+    probe.remove?.();
+    return trim(normalized).toLowerCase();
+  };
+  const renderedColors = (element: Element) => {
+    const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
+    return [style?.backgroundColor, style?.fill, style?.stroke].map((value) => trim(value).toLowerCase()).filter((value) => value && value !== 'none' && value !== 'transparent' && value !== 'rgba(0, 0, 0, 0)');
+  };
+  const selector = input.target.css || (input.target.renderedColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   const candidates = deepQuery(selector, 1000);
+  const desiredColor = input.target.renderedColor ? normalizeColor(input.target.renderedColor) : '';
   let matching = candidates.filter(({ element }) => {
     if (!visible(element)) return false;
     if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
     if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
     if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
+    if (desiredColor && !renderedColors(element).includes(desiredColor)) return false;
     return true;
   });
-  if (!matching.length && !input.target.css && !input.target.role && (input.target.text || input.target.name)) {
+  if (!matching.length && !input.target.css && !input.target.role && !input.target.renderedColor && (input.target.text || input.target.name)) {
     const desired = (input.target.name || input.target.text || '').toLowerCase();
     matching = deepQuery('*', 1000).filter(({ element }) => {
       if (!visible(element)) return false;
@@ -497,8 +561,20 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     dispatchEvent?: (event: Event) => boolean;
   };
   if (control.disabled === true || element.getAttribute('aria-disabled') === 'true') return { ok: false, error: 'Matched element is disabled.' };
-  const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };
+  const initialRect = element.getBoundingClientRect();
+  const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '', geometry: { x: initialRect.x, y: initialRect.y, width: initialRect.width, height: initialRect.height } };
   const view = element.ownerDocument?.defaultView ?? window;
+
+  const pointerPoint = (targetElement: Element) => {
+    (targetElement as HTMLElement).scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
+    const rect = targetElement.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
+  };
+  const dispatchPointer = (targetElement: Element, type: string, x: number, y: number, buttons: number) => {
+    const init = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, buttons, pointerId: 1, pointerType: 'mouse', isPrimary: true, view };
+    if (view.PointerEvent) targetElement.dispatchEvent(new view.PointerEvent(type.replace(/^mouse/, 'pointer'), init));
+    targetElement.dispatchEvent(new view.MouseEvent(type, init));
+  };
 
   if (input.operation === 'verify_value') {
     const actual = element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range'
@@ -516,15 +592,39 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     const activation = roleOf(element) === 'tab' ? element.querySelector('a[href],button,[role="tab"]') ?? element : element;
     const activationControl = activation as Element & { focus?: () => void; click?: () => void };
     activationControl.focus?.();
+    const point = pointerPoint(activation);
+    const hit = activation.ownerDocument?.elementFromPoint?.(point.x, point.y);
+    if (hit && hit !== activation && !activation.contains(hit) && !hit.contains(activation)) return { ok: false, error: 'Matched element is obscured at its pointer target.', geometry: point };
+    dispatchPointer(activation, 'mousemove', point.x, point.y, 0);
+    dispatchPointer(activation, 'mouseover', point.x, point.y, 0);
+    dispatchPointer(activation, 'mousedown', point.x, point.y, 1);
+    dispatchPointer(activation, 'mouseup', point.x, point.y, 0);
     if (typeof activationControl.click !== 'function') return { ok: false, error: 'Matched element is not clickable.' };
     activationControl.click();
   } else if (input.operation === 'hover') {
-    const rect = element.getBoundingClientRect();
-    const clientX = rect.left + rect.width / 2;
-    const clientY = rect.top + rect.height / 2;
-    for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
-      element.dispatchEvent(new view.MouseEvent(type, { bubbles: type !== 'mouseenter', cancelable: true, clientX, clientY, view }));
+    const point = pointerPoint(element);
+    dispatchPointer(element, 'mouseover', point.x, point.y, 0);
+    dispatchPointer(element, 'mouseenter', point.x, point.y, 0);
+    dispatchPointer(element, 'mousemove', point.x, point.y, 0);
+  } else if (input.operation === 'drag') {
+    const deltaX = Number(input.deltaX);
+    const deltaY = Number(input.deltaY);
+    if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX) > 2000 || Math.abs(deltaY) > 2000 || (deltaX === 0 && deltaY === 0)) return { ok: false, error: 'Drag requires non-zero finite deltaX/deltaY within 2000 CSS pixels.' };
+    const start = pointerPoint(element);
+    const hit = element.ownerDocument?.elementFromPoint?.(start.x, start.y);
+    if (hit && hit !== element && !element.contains(hit) && !hit.contains(element)) return { ok: false, error: 'Drag source is obscured.', geometry: start };
+    dispatchPointer(element, 'mousemove', start.x, start.y, 0);
+    dispatchPointer(element, 'mousedown', start.x, start.y, 1);
+    const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(deltaX, deltaY) / 20)));
+    for (let step = 1; step <= steps; step += 1) {
+      const x = start.x + deltaX * step / steps;
+      const y = start.y + deltaY * step / steps;
+      const receiver = element.ownerDocument?.elementFromPoint?.(x, y) || element;
+      dispatchPointer(receiver, 'mousemove', x, y, 1);
     }
+    const endX = start.x + deltaX;
+    const endY = start.y + deltaY;
+    dispatchPointer(element.ownerDocument?.elementFromPoint?.(endX, endY) || element, 'mouseup', endX, endY, 0);
   } else if (input.operation === 'type') {
     const value = String(input.value ?? '');
     const tag = element.tagName;
@@ -609,6 +709,16 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     }
   }
 
-  const after = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '' };
+  const finalRect = element.getBoundingClientRect();
+  const after = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '', geometry: { x: finalRect.x, y: finalRect.y, width: finalRect.width, height: finalRect.height } };
+  if (input.operation === 'drag') {
+    const movedX = finalRect.x - initialRect.x;
+    const movedY = finalRect.y - initialRect.y;
+    const xMatches = !input.deltaX || Math.sign(movedX) === Math.sign(input.deltaX);
+    const yMatches = !input.deltaY || Math.sign(movedY) === Math.sign(input.deltaY);
+    if ((!input.deltaX || Math.abs(movedX) < 1) && (!input.deltaY || Math.abs(movedY) < 1) || !xMatches || !yMatches) {
+      return { ok: false, error: 'Drag displacement postcondition failed.', expected: { deltaX: input.deltaX, deltaY: input.deltaY }, actual: { deltaX: movedX, deltaY: movedY }, matched: { tag: element.tagName.toLowerCase(), ...before, context } };
+    }
+  }
   return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after };
 }

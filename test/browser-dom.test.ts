@@ -6,21 +6,27 @@ import { semanticLocatorFunction } from '../src/capabilities/browser-cdp-frames.
 class FakeEvent {
   readonly type: string;
   readonly key?: string;
-  constructor(type: string, init?: any) { this.type = type; this.key = init?.key; }
+  readonly clientX?: number;
+  readonly clientY?: number;
+  readonly buttons?: number;
+  constructor(type: string, init?: any) { this.type = type; this.key = init?.key; this.clientX = init?.clientX; this.clientY = init?.clientY; this.buttons = init?.buttons; }
 }
 
 class FakeRoot {
   elements: FakeElement[] = [];
   documentElement = {};
   defaultView: any = {
-    getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
+    getComputedStyle: (element: FakeElement) => ({ visibility: element.visibility, display: element.display, cursor: element.cursor, pointerEvents: element.pointerEvents, backgroundColor: element.backgroundColor, fill: element.fill, stroke: element.stroke, color: element.style.color === 'olive' ? 'rgb(128, 128, 0)' : element.style.color }),
     Event: FakeEvent,
     InputEvent: FakeEvent,
+    MouseEvent: FakeEvent,
     KeyboardEvent: FakeEvent,
     HTMLInputElement: undefined,
     HTMLTextAreaElement: undefined
   };
-  body = { innerText: '' };
+  body = { innerText: '', appendChild: () => undefined };
+
+  createElement(tagName: string): FakeElement { const element = new FakeElement(tagName); element.ownerDocument = this; return element; }
 
   querySelectorAll(selector: string): FakeElement[] {
     if (selector === '*') return [...this.elements];
@@ -43,6 +49,14 @@ class FakeElement {
   disabled = false;
   isContentEditable = false;
   clicked = false;
+  cursor = 'auto';
+  pointerEvents = 'auto';
+  visibility = 'visible';
+  display = 'block';
+  backgroundColor = 'rgba(0, 0, 0, 0)';
+  fill = 'none';
+  stroke = 'none';
+  style: any = {};
   shadowRoot?: FakeRoot;
   contentDocument?: FakeRoot;
   child?: FakeElement;
@@ -53,6 +67,9 @@ class FakeElement {
   selected = false;
   options: FakeElement[] = [];
   onKey?: (key: string) => void;
+  onEvent?: (event: FakeEvent) => void;
+  x = 0;
+  y = 0;
   ownerDocument!: FakeRoot;
   #attrs = new Map<string, string>();
 
@@ -65,15 +82,18 @@ class FakeElement {
   getAttribute(name: string): string | null { return this.#attrs.get(name) ?? null; }
   hasAttribute(name: string): boolean { return this.#attrs.has(name); }
   getRootNode(): FakeRoot { return this.ownerDocument; }
-  getBoundingClientRect(): any { return { width: 20, height: 20 }; }
+  getBoundingClientRect(): any { return { x: this.x, y: this.y, left: this.x, top: this.y, width: 20, height: 20 }; }
   focus(): void { /* semantic focus only */ }
-  click(): void { this.clicked = true; }
+  click(): void { this.clicked = true; this.onEvent?.(new FakeEvent('click')); }
+  remove(): void { /* synthetic style probe */ }
+  contains(element: FakeElement): boolean { return this === element || this.children.includes(element); }
   querySelector(): FakeElement | null { return this.child ?? null; }
   closest(): FakeElement | null {
     if (this.hasAttribute('id') || this.hasAttribute('aria-label') || this.hasAttribute('title')) return this;
     return this.parentElement ?? null;
   }
   dispatchEvent(event?: FakeEvent): boolean {
+    if (event) this.onEvent?.(event);
     if (event?.type === 'keydown' && event.key) this.onKey?.(event.key);
     if (this.getAttribute('role') === 'slider' && event?.type === 'keydown' && event.key?.startsWith('Arrow')) {
       const current = Number(this.getAttribute('aria-valuenow'));
@@ -89,6 +109,7 @@ class FakeElement {
   matches(selector: string): boolean {
     return selector.split(',').some((raw) => {
       const token = raw.trim().toLowerCase();
+      if (token === '*') return true;
       if (token === this.tagName.toLowerCase()) return true;
       if (token === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       if (token === '[role]') return this.hasAttribute('role');
@@ -208,6 +229,88 @@ test('cross-origin frame locator uses native button text instead of element id',
   const located = semanticLocatorFunction({ role: 'button', name: 'Increment' }) as any;
   assert.equal(located.count, 1);
   assert.equal(located.matches[0].name, 'Increment');
+});
+
+test('explicit ARIA role text supplies the semantic name', (t) => {
+  const root = new FakeRoot();
+  const item = new FakeElement('div', 'Lyssa'); item.setAttribute('role', 'menuitem');
+  attach(root, item); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.deepEqual(snapshot.controls.map((control: any) => [control.role, control.name]), [['menuitem', 'Lyssa']]);
+  assert.equal((semanticLocatorFunction({ role: 'menuitem', name: 'Lyssa' }) as any).count, 1);
+});
+
+test('pointer-style custom controls are discoverable through shadow roots and same-origin frames', (t) => {
+  const root = new FakeRoot();
+  const shadow = new FakeRoot(); shadow.defaultView = root.defaultView;
+  const frame = new FakeRoot(); frame.defaultView = root.defaultView;
+  const host = new FakeElement('agent-panel'); host.shadowRoot = shadow;
+  const iframe = new FakeElement('iframe'); iframe.contentDocument = frame;
+  const shadowControl = new FakeElement('div', 'Shadow action'); shadowControl.cursor = 'pointer';
+  const frameControl = new FakeElement('span', 'Frame action'); frameControl.cursor = 'pointer';
+  attach(root, host, iframe); attach(shadow, shadowControl); attach(frame, frameControl);
+  shadowControl.ownerDocument = root; frameControl.ownerDocument = root;
+  installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.equal(snapshot.controls.find((control: any) => control.name === 'Shadow action').context.shadowDepth, 1);
+  assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
+});
+
+test('exact custom-control name disambiguates a containing partial match', (t) => {
+  const root = new FakeRoot();
+  const exact = new FakeElement('div', 'Save'); exact.cursor = 'pointer';
+  const partial = new FakeElement('div', 'Save all'); partial.cursor = 'pointer';
+  attach(root, exact, partial); installDocument(t, root);
+  const result = interactionFunction({ operation: 'click', target: { text: 'Save' }, value: null }) as any;
+  assert.equal(result.ok, true); assert.equal(exact.clicked, true); assert.equal(partial.clicked, false);
+});
+
+test('ambiguous, hidden, disabled, and pointer-events-none custom controls fail closed', (t) => {
+  const root = new FakeRoot();
+  const first = new FakeElement('div', 'Duplicate'); first.cursor = 'pointer';
+  const second = new FakeElement('div', 'Duplicate'); second.cursor = 'pointer';
+  const hidden = new FakeElement('div', 'Hidden'); hidden.cursor = 'pointer'; hidden.display = 'none';
+  const disabled = new FakeElement('div', 'Disabled'); disabled.cursor = 'pointer'; disabled.setAttribute('aria-disabled', 'true');
+  const inert = new FakeElement('div', 'Inert'); inert.cursor = 'pointer'; inert.pointerEvents = 'none';
+  attach(root, first, second, hidden, disabled, inert); installDocument(t, root);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Duplicate' }, value: null }) as any).error, /multiple/);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Hidden' }, value: null }) as any).error, /No matching/);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Disabled' }, value: null }) as any).error, /disabled/);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Inert' }, value: null }) as any).error, /No matching/);
+});
+
+test('click uses a coherent pointer sequence so delegated menu state activates the exact child', (t) => {
+  const root = new FakeRoot();
+  const child = new FakeElement('div', 'Lyssa'); child.setAttribute('role', 'menuitem');
+  let active = false; let selected = false;
+  child.onEvent = (event) => { if (event.type === 'mouseover' || event.type === 'mousemove') active = true; if (event.type === 'click') selected = active; };
+  attach(root, child); installDocument(t, root);
+  const result = interactionFunction({ operation: 'click', target: { role: 'menuitem', name: 'Lyssa' }, value: null }) as any;
+  assert.equal(result.ok, true); assert.equal(selected, true);
+});
+
+test('drag emits bounded intermediate pointer motion and verifies changed geometry', (t) => {
+  const root = new FakeRoot();
+  const shape = new FakeElement('svg', 'Shape'); shape.setAttribute('role', 'graphics-symbol');
+  shape.onEvent = (event) => { if (event.type === 'mousemove' && event.buttons === 1) { shape.x = Number(event.clientX) - 10; shape.y = Number(event.clientY) - 10; } };
+  attach(root, shape); installDocument(t, root);
+  const result = interactionFunction({ operation: 'drag', target: { role: 'graphics-symbol', name: 'Shape' }, value: null, deltaX: 80, deltaY: -40 }) as any;
+  assert.equal(result.ok, true); assert.equal(result.after.geometry.x, 80); assert.equal(result.after.geometry.y, -40);
+  assert.equal((interactionFunction({ operation: 'drag', target: { role: 'graphics-symbol', name: 'Shape' }, value: null, deltaX: 3000, deltaY: 0 }) as any).ok, false);
+});
+
+test('rendered visual colors are bounded, normalized, and uniquely actionable', (t) => {
+  const root = new FakeRoot();
+  const olive = new FakeElement('div'); olive.cursor = 'pointer'; olive.backgroundColor = 'rgb(128, 128, 0)';
+  const blue = new FakeElement('div'); blue.cursor = 'pointer'; blue.backgroundColor = 'rgb(0, 0, 255)';
+  attach(root, olive, blue); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.equal(snapshot.visuals.length, 2);
+  assert.equal(snapshot.visuals[0].colors.background, 'rgb(128, 128, 0)');
+  const clicked = interactionFunction({ operation: 'click', target: { renderedColor: 'olive' }, value: null }) as any;
+  assert.equal(clicked.ok, true); assert.equal(olive.clicked, true); assert.equal(blue.clicked, false);
+  blue.backgroundColor = 'rgb(128, 128, 0)';
+  assert.match((interactionFunction({ operation: 'click', target: { renderedColor: 'olive' }, value: null }) as any).error, /multiple/);
 });
 
 test('semantic select preserves bounded native multi-select values', (t) => {

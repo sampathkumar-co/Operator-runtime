@@ -17,7 +17,7 @@ import {
   settleAfterInteraction,
   unwrapRuntimeValue,
   validateNavigationUrl,
-  waitForReadyState
+  waitForDestinationReady
 } from './browser-cdp-page.ts';
 
 const SCORE: CapabilityScore = {
@@ -135,9 +135,9 @@ export class BrowserCdpProvider implements CapabilityProvider {
           throw new OperatorError('BROWSER_NAVIGATION_FAILED', result.errorText, { retryable: true });
         }
       }
-      await waitForReadyState(session, 10_000, signal);
+      const readiness = await waitForDestinationReady(session, url, 10_000, signal);
       throwIfAborted(signal);
-      const state = await pageIdentity(session);
+      const state = readiness.state;
       if (!sameDestination(state.url, url)) {
         throw new OperatorError('BROWSER_POSTCONDITION_FAILED', 'Browser did not reach the requested destination.', { retryable: true, details: { requested: url, actual: state.url } });
       }
@@ -145,7 +145,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { targetId: target.id, requestedUrl: url, ...state, diagnostics: diagnostics.snapshot() },
+        output: { targetId: target.id, requestedUrl: url, ...state, readiness: { firstObservedUrl: readiness.firstObservedUrl, polls: readiness.polls, elapsedMs: readiness.elapsedMs }, diagnostics: diagnostics.snapshot() },
         evidence: [
           evidence('browser_navigation', 'pass', 'Browser navigation completed through CDP.', { targetId: target.id, requestedUrl: url }),
           evidence('postcondition', 'pass', 'Active target URL matches the requested destination.', { actualUrl: state.url, title: state.title })
@@ -217,11 +217,16 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'hover', 'type', 'select', 'set_value'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation must be click, hover, type, select, or set_value.');
+    if (!['click', 'hover', 'drag', 'type', 'select', 'set_value'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation must be click, hover, drag, type, select, or set_value.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
-    if (!targetSpec.css && !targetSpec.text && !(targetSpec.role && targetSpec.name)) {
-      throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide css, text, or role+name for semantic targeting.');
+    if (!targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide css, text, renderedColor, or role+name for semantic targeting.');
+    }
+    const deltaX = operation === 'drag' ? Number(action.input.deltaX) : undefined;
+    const deltaY = operation === 'drag' ? Number(action.input.deltaY) : undefined;
+    if (operation === 'drag' && (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX!) > 2000 || Math.abs(deltaY!) > 2000 || (deltaX === 0 && deltaY === 0))) {
+      throw new OperatorError('INVALID_BROWSER_DRAG', 'Drag requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
 
     const tabs = await this.#listTargets(signal);
@@ -240,7 +245,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const interaction = await performSemanticInteraction(session, {
         operation,
         target: targetSpec,
-        value: action.input.value ?? null
+        value: action.input.value ?? null,
+        ...(operation === 'drag' ? { deltaX, deltaY } : {})
       });
       const value = interaction.value;
       if (value.ok !== true) {

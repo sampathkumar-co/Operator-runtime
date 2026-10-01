@@ -247,13 +247,14 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   }
 
   #discoveryDataDirs(): string[] {
-    const values = [this.#managedDataDir()];
+    const values: string[] = [];
     for (const candidate of this.#options.discoveryDataDirs ?? []) {
       if (!path.isAbsolute(candidate)) {
         throw new OperatorError('UNSAFE_BROWSER_DISCOVERY_DIR', 'Browser discovery data directories must be absolute paths.');
       }
       values.push(path.resolve(candidate));
     }
+    values.push(this.#managedDataDir());
     // Do not auto-attach to normal Chrome/Edge user profiles. A configured CDP endpoint
     // or an explicit discoveryDataDirs entry is required for non-managed profiles.
     return values;
