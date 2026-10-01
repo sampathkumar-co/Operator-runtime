@@ -944,17 +944,20 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Semantically click, type, or select a browser control by CSS, text, or role+accessible name. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Semantically click, type, select, or set a bounded slider value on a browser control by CSS, text, or role+accessible name. Select accepts one value or a bounded list for native multi-select controls. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'type', 'select']),
+      operation: z.enum(['click', 'type', 'select', 'set_value']),
       target: z.object({
         css: z.string().min(1).max(500).optional(),
         text: z.string().min(1).max(500).optional(),
         role: z.string().min(1).max(100).optional(),
         name: z.string().min(1).max(500).optional()
       }),
-      value: z.string().max(100000).optional()
+      value: z.union([
+        z.string().max(100000),
+        z.array(z.string().max(100000)).min(1).max(100)
+      ]).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, async ({ targetId, operation, target, value }) => invoke('browser.interact', 'external', { targetId, operation, target, value }, targetId));

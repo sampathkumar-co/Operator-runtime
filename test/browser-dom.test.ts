@@ -49,6 +49,9 @@ class FakeElement {
   parentElement?: FakeElement;
   children: FakeElement[] = [];
   tabIndex = -1;
+  multiple = false;
+  selected = false;
+  options: FakeElement[] = [];
   onKey?: (key: string) => void;
   ownerDocument!: FakeRoot;
   #attrs = new Map<string, string>();
@@ -205,6 +208,31 @@ test('cross-origin frame locator uses native button text instead of element id',
   const located = semanticLocatorFunction({ role: 'button', name: 'Increment' }) as any;
   assert.equal(located.count, 1);
   assert.equal(located.matches[0].name, 'Increment');
+});
+
+test('semantic select preserves bounded native multi-select values', (t) => {
+  const root = new FakeRoot();
+  const select = new FakeElement('select');
+  select.setAttribute('id', 'options');
+  select.id = 'options';
+  select.multiple = true;
+  const ertha = new FakeElement('option', 'Ertha'); ertha.value = 'Ertha';
+  const merridie = new FakeElement('option', 'Merridie'); merridie.value = 'Merridie';
+  const aurel = new FakeElement('option', 'Aurel'); aurel.value = 'Aurel';
+  select.options = [ertha, merridie, aurel];
+  attach(root, select, ertha, merridie, aurel);
+  installDocument(t, root);
+
+  const result = interactionFunction({
+    operation: 'select',
+    target: { role: 'combobox', name: 'options' },
+    value: ['Ertha', 'Aurel']
+  }) as any;
+
+  assert.equal(result.ok, true);
+  assert.equal(ertha.selected, true);
+  assert.equal(merridie.selected, false);
+  assert.equal(aurel.selected, true);
 });
 
 test('semantic snapshot exposes bounded native range slider metadata', (t) => {

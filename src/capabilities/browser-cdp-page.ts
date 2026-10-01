@@ -505,11 +505,36 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     if (actual !== value) return { ok: false, error: 'Text input postcondition failed.', expected: value, actual };
   } else if (input.operation === 'select') {
     if (element.tagName !== 'SELECT') return { ok: false, error: 'Matched element is not a select control.' };
-    const value = String(input.value ?? '');
-    control.value = value;
+    const select = element as HTMLSelectElement;
+    const requested = Array.isArray(input.value) ? input.value.map((item) => String(item)) : [String(input.value ?? '')];
+    if (requested.length < 1 || requested.length > 100) return { ok: false, error: 'Select value list must contain 1-100 entries.' };
+    if (!select.multiple && requested.length !== 1) return { ok: false, error: 'Multiple values require a multi-select control.' };
+    const desired = new Set(requested);
+    const options = Array.from(select.options ?? []);
+    const available = new Set(options.flatMap((option) => [String(option.value), trim(option.textContent)]).filter(Boolean));
+    const missing = requested.filter((value) => !available.has(value));
+    if (missing.length) return { ok: false, error: 'Select option was not found.', missing: missing.slice(0, 20) };
+    if (select.multiple) {
+      for (const option of options) option.selected = desired.has(String(option.value)) || desired.has(trim(option.textContent));
+    } else {
+      const value = requested[0]!;
+      control.value = value;
+      if (String(control.value ?? '') !== value) {
+        const option = options.find((candidate) => trim(candidate.textContent) === value);
+        if (option) control.value = String(option.value);
+      }
+    }
     control.dispatchEvent?.(new view.Event('input', { bubbles: true }));
     control.dispatchEvent?.(new view.Event('change', { bubbles: true }));
-    if (String(control.value ?? '') !== value) return { ok: false, error: 'Select postcondition failed.', expected: value, actual: String(control.value ?? '') };
+    const actual = select.multiple
+      ? options.filter((option) => option.selected).map((option) => String(option.value || trim(option.textContent)))
+      : [String(control.value ?? '')];
+    const expectedValues = select.multiple
+      ? options.filter((option) => desired.has(String(option.value)) || desired.has(trim(option.textContent))).map((option) => String(option.value || trim(option.textContent)))
+      : [String(control.value ?? '')];
+    if (actual.length !== expectedValues.length || actual.some((value, index) => value !== expectedValues[index])) {
+      return { ok: false, error: 'Select postcondition failed.', expected: expectedValues, actual };
+    }
   } else if (input.operation === 'set_value') {
     if (roleOf(element) !== 'slider') return { ok: false, error: 'Matched element is not a slider.' };
     const nativeRange = element.tagName === 'INPUT' && trim(element.getAttribute('type') || '').toLowerCase() === 'range';
