@@ -311,7 +311,7 @@ export class ProcessProvider implements CapabilityProvider {
     if (!/^[0-9a-f]{64}$/.test(expectedFingerprint)) return failure(action, this.name, started, 'PROCESS_PRECONDITION_REQUIRED', 'process.manage terminate requires expectedFingerprint from a fresh process.inspect.');
     if (pid === process.pid || pid <= 4) return failure(action, this.name, started, 'PROCESS_TERMINATE_DENIED', 'Refusing to terminate the Operator process or reserved system PIDs.');
     try {
-      const processes = await runTasklist(signal, pid);
+      const processes = await runTasklistVerbose(signal, pid);
       const target = processes.find((entry) => entry.pid === pid);
       if (!target) return failure(action, this.name, started, 'PROCESS_NOT_FOUND', 'Process no longer exists.');
       if (target.fingerprint !== expectedFingerprint) return failure(action, this.name, started, 'PROCESS_PRECONDITION_FAILED', 'Process identity changed since inspection.');
@@ -553,17 +553,58 @@ const CRITICAL_WINDOWS_PROCESSES = new Set([
 
 type WindowsProcessRow = {
   imageName: string; pid: number; sessionName: string; sessionNumber: number; memoryKb: number;
-  status: string; userName: string; cpuTime: string; windowTitle: string; fingerprint: string;
+  fingerprint: string;
 };
+
+type WindowsVerboseProcessRow = WindowsProcessRow & {
+  status: string; userName: string; cpuTime: string; windowTitle: string;
+};
+
+function processFingerprint(imageName: string, pid: number, sessionName: string, sessionNumber: number): string {
+  return crypto.createHash('sha256')
+    .update(imageName.toLowerCase()).update('\0')
+    .update(String(pid)).update('\0')
+    .update(sessionName.toLowerCase()).update('\0')
+    .update(String(Number.isFinite(sessionNumber) ? sessionNumber : 0))
+    .digest('hex');
+}
 
 async function runTasklist(signal?: AbortSignal, pidFilter?: number): Promise<WindowsProcessRow[]> {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
   const executable = path.join(systemRoot, 'System32', 'tasklist.exe');
-  const args = ['/V', '/FO', 'CSV', '/NH'];
+  const args = ['/FO', 'CSV', '/NH'];
   if (pidFilter !== undefined) args.push('/FI', `PID eq ${pidFilter}`);
   const output = await runProcess(executable, args, process.cwd(), 15_000, 8 * 1024 * 1024, {}, signal);
   if (output.exitCode !== 0) throw new OperatorError('PROCESS_INSPECT_FAILED', `tasklist exited with ${String(output.exitCode)}.`);
   const rows: WindowsProcessRow[] = [];
+  for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
+    const cols = parseCsvLine(line);
+    if (cols.length < 5) continue;
+    const pid = Number(cols[1]);
+    const sessionNumber = Number(cols[3]);
+    const memoryKb = Number(String(cols[4]).replace(/[^0-9]/g, ''));
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    const imageName = cols[0]!;
+    const sessionName = cols[2] ?? '';
+    const normalizedSessionNumber = Number.isFinite(sessionNumber) ? sessionNumber : 0;
+    rows.push({
+      imageName, pid, sessionName,
+      sessionNumber: normalizedSessionNumber,
+      memoryKb: Number.isFinite(memoryKb) ? memoryKb : 0,
+      fingerprint: processFingerprint(imageName, pid, sessionName, normalizedSessionNumber)
+    });
+  }
+  return rows;
+}
+
+async function runTasklistVerbose(signal?: AbortSignal, pidFilter?: number): Promise<WindowsVerboseProcessRow[]> {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const executable = path.join(systemRoot, 'System32', 'tasklist.exe');
+  const args = ['/V', '/FO', 'CSV', '/NH'];
+  if (pidFilter !== undefined) args.push('/FI', `PID eq ${pidFilter}`);
+  const output = await runProcess(executable, args, process.cwd(), 15_000, 512 * 1024, {}, signal);
+  if (output.exitCode !== 0) throw new OperatorError('PROCESS_INSPECT_FAILED', `tasklist exited with ${String(output.exitCode)}.`);
+  const rows: WindowsVerboseProcessRow[] = [];
   for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
     const cols = parseCsvLine(line);
     if (cols.length < 9) continue;
@@ -573,22 +614,16 @@ async function runTasklist(signal?: AbortSignal, pidFilter?: number): Promise<Wi
     if (!Number.isSafeInteger(pid) || pid <= 0) continue;
     const imageName = cols[0]!;
     const sessionName = cols[2] ?? '';
-    const status = cols[5] ?? '';
-    const userName = cols[6] ?? '';
-    const cpuTime = cols[7] ?? '';
-    const windowTitle = cols.slice(8).join(',');
-    const fingerprint = crypto.createHash('sha256')
-      .update(imageName.toLowerCase()).update('\0')
-      .update(String(pid)).update('\0')
-      .update(sessionName.toLowerCase()).update('\0')
-      .update(String(Number.isFinite(sessionNumber) ? sessionNumber : 0)).update('\0')
-      .update(userName.toLowerCase())
-      .digest('hex');
+    const normalizedSessionNumber = Number.isFinite(sessionNumber) ? sessionNumber : 0;
     rows.push({
       imageName, pid, sessionName,
-      sessionNumber: Number.isFinite(sessionNumber) ? sessionNumber : 0,
+      sessionNumber: normalizedSessionNumber,
       memoryKb: Number.isFinite(memoryKb) ? memoryKb : 0,
-      status, userName, cpuTime, windowTitle, fingerprint
+      status: cols[5] ?? '',
+      userName: cols[6] ?? '',
+      cpuTime: cols[7] ?? '',
+      windowTitle: cols.slice(8).join(','),
+      fingerprint: processFingerprint(imageName, pid, sessionName, normalizedSessionNumber)
     });
   }
   return rows;

@@ -221,6 +221,35 @@ test('Windows process inspection returns bounded metadata without command lines'
 });
 
 
+test('Windows process inspection collection queries avoid verbose global tasklist', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows-only process inspection');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-collection-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+
+  const listed = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+    input: { limit: 5 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(listed.ok, true, listed.error?.message);
+  assert.ok(((listed.output as any).processes as any[]).length > 0);
+
+  const named = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+    input: { name: 'node', limit: 5 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(named.ok, true, named.error?.message);
+  const processes = (named.output as any).processes as any[];
+  assert.ok(processes.some((entry) => String(entry.imageName).toLowerCase().includes('node')));
+  for (const entry of processes) {
+    assert.equal('commandLine' in entry, false);
+    assert.equal('environment' in entry, false);
+    assert.equal('userName' in entry, false);
+    assert.equal('windowTitle' in entry, false);
+  }
+});
+
+
 test('Windows process.manage requires fresh identity fingerprint and terminates only current-user target', async (ctx) => {
   if (process.platform !== 'win32') return ctx.skip('Windows-only process management');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-manage-'));
