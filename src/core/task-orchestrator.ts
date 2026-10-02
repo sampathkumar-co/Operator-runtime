@@ -117,6 +117,8 @@ export class TaskOrchestrator {
   #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
   #resourceLeases?: ResourceLeaseStore;
+  #wallNow: () => number;
+  #monotonicNow: () => number;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -125,6 +127,8 @@ export class TaskOrchestrator {
     planners?: TaskPlanner[];
     executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
     resourceLeases?: ResourceLeaseStore;
+    wallNow?: () => number;
+    monotonicNow?: () => number;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -133,6 +137,8 @@ export class TaskOrchestrator {
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
     this.#resourceLeases = options.resourceLeases;
+    this.#wallNow = options.wallNow ?? Date.now;
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -228,9 +234,11 @@ export class TaskOrchestrator {
     const planner = this.#planners.get(execution.plannerId);
     if (!planner) throw new OperatorError('TASK_PLANNER_UNAVAILABLE', `Task planner ${execution.plannerId} is unavailable.`);
     const goal = parseGoal(execution.plannerState.goal, execution.goalKind);
+    let activeDeadline = this.#monotonicNow() + Math.max(0, execution.deadlineAt ? Date.parse(execution.deadlineAt) - this.#wallNow() : execution.timeoutMs);
     if (!execution.startedAt) {
-      execution.startedAt = new Date().toISOString();
-      execution.deadlineAt = new Date(Date.now() + execution.timeoutMs).toISOString();
+      execution.startedAt = new Date(this.#wallNow()).toISOString();
+      execution.deadlineAt = new Date(this.#wallNow() + execution.timeoutMs).toISOString();
+      activeDeadline = this.#monotonicNow() + execution.timeoutMs;
     }
     task.state = 'RUNNING';
     await this.#persistRunState(task, assertLease);
@@ -242,11 +250,12 @@ export class TaskOrchestrator {
       const current = task.execution!;
       const interrupted = this.#markInterrupted(task);
       if (interrupted > 0) {
-        current.deadlineAt = new Date(Date.now() + current.timeoutMs).toISOString();
+        current.deadlineAt = new Date(this.#wallNow() + current.timeoutMs).toISOString();
+        activeDeadline = this.#monotonicNow() + current.timeoutMs;
         task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s), refreshed the active execution deadline, and preserved step/attempt budgets.', { count: interrupted }));
         await this.#persistRunState(task, assertLease);
       }
-      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
+      if (this.#monotonicNow() >= activeDeadline) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
       const context = { task, goal };
       let decision: PlannerDecision;
       try { decision = planner.next(context); }
@@ -463,7 +472,7 @@ export class TaskOrchestrator {
         return task;
       }
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
-        const remainingMs = Math.max(0, Date.parse(latestExecution.deadlineAt!) - Date.now());
+        const remainingMs = Math.max(0, activeDeadline - this.#monotonicNow());
         const approvalOutcome = await authorization.onApprovalRequired?.(action, remainingMs);
         if (approvalOutcome === 'retry') {
           latestRecord.state = 'BLOCKED';
@@ -542,7 +551,7 @@ export class TaskOrchestrator {
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
       if (task.execution?.startedAt) {
-        task.execution.deadlineAt = new Date(Date.now() + task.execution.timeoutMs).toISOString();
+        task.execution.deadlineAt = new Date(this.#wallNow() + task.execution.timeoutMs).toISOString();
         task.evidence.push(evidence('task_resume', 'info', 'Resumed task with a fresh active execution deadline; step and attempt budgets were preserved.'));
       }
       await this.#store.put(task);

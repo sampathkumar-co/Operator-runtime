@@ -17,6 +17,7 @@ type Pending = {
   resolve: (value: JsonMap) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  detachAbort?: () => void;
 };
 
 type EventListener = (params: JsonMap, sessionId?: string) => void;
@@ -99,6 +100,7 @@ export class CdpConnection {
           const pending = this.#pending.get(message.id);
           if (!pending) return;
           clearTimeout(pending.timer);
+          pending.detachAbort?.();
           this.#pending.delete(message.id);
           if (message.error) {
             pending.reject(new OperatorError('CDP_COMMAND_FAILED', message.error.message ?? 'CDP command failed.', { retryable: false, details: { code: message.error.code } }));
@@ -120,6 +122,7 @@ export class CdpConnection {
       const error = new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection closed.', { retryable: true });
       for (const pending of this.#pending.values()) {
         clearTimeout(pending.timer);
+        pending.detachAbort?.();
         pending.reject(error);
       }
       this.#pending.clear();
@@ -128,19 +131,21 @@ export class CdpConnection {
 
   get closed(): boolean { return this.#closed; }
 
-  async send(method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<JsonMap> {
-    return this.#send(method, params, timeoutMs);
+  async send(method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
+    return this.#send(method, params, timeoutMs, undefined, signal);
   }
 
-  async sendInSession(sessionId: string, method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<JsonMap> {
+  async sendInSession(sessionId: string, method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
     if (!sessionId || sessionId.length > 256) {
       throw new OperatorError('INVALID_CDP_SESSION', 'Flattened CDP session id must contain 1-256 characters.');
     }
-    return this.#send(method, params, timeoutMs, sessionId);
+    return this.#send(method, params, timeoutMs, sessionId, signal);
   }
 
-  async #send(method: string, params: JsonMap, timeoutMs: number, sessionId?: string): Promise<JsonMap> {
+  async #send(method: string, params: JsonMap, timeoutMs: number, sessionId?: string, signal?: AbortSignal): Promise<JsonMap> {
+    if (signal?.aborted) throw aborted();
     await this.#ready;
+    if (signal?.aborted) throw aborted();
     if (this.#closed || this.#socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection is not open.', { retryable: true });
     }
@@ -148,9 +153,18 @@ export class CdpConnection {
     return await new Promise<JsonMap>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
+        signal?.removeEventListener('abort', onAbort);
         reject(new OperatorError('CDP_COMMAND_TIMEOUT', `${method} timed out.`, { retryable: true }));
       }, timeoutMs);
-      this.#pending.set(id, { resolve, reject, timer });
+      const onAbort = () => {
+        const pending = this.#pending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.#pending.delete(id);
+        reject(aborted());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.#pending.set(id, { resolve, reject, timer, ...(signal ? { detachAbort: () => signal.removeEventListener('abort', onAbort) } : {}) });
       this.#socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -170,6 +184,10 @@ export class CdpConnection {
     this.#closed = true;
     try { this.#socket.close(); } catch { /* noop */ }
   }
+}
+
+function aborted(): OperatorError {
+  return new OperatorError('EXECUTION_ABORTED', 'Browser execution was cancelled.', { retryable: false });
 }
 
 export class CdpSessionManager {

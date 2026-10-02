@@ -144,3 +144,29 @@ gitTest('project transaction refuses external trusted commands because their eff
   assert.equal(result.error?.code, 'TRANSACTION_RISK_UNSUPPORTED');
   await assert.rejects(fs.access(path.join(projectRoot, marker)));
 });
+
+gitTest('timed-out transaction quiesces detached descendants before restoring Git state', async (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows process-tree regression'); return; }
+  const lateScript = "setTimeout(()=>require('fs').writeFileSync('app.txt','late-after-rollback\\n'),2500)";
+  const parentScript = [
+    "const {spawn}=require('child_process')",
+    `const child=spawn(process.execPath,['-e',${JSON.stringify(lateScript)}],{detached:true,stdio:'ignore'})`,
+    'child.unref()',
+    "require('fs').writeFileSync('app.txt','mutated-before-timeout\\n')",
+    'setInterval(()=>{},1000)'
+  ].join(';');
+  const { projectRoot, registryPath } = await setup(t, [{
+    id: 'detached-timeout', executable: 'node', args: ['-e', parentScript], cwd: '.', risk: 'write', timeoutMs: 1000,
+    artifacts: [{ path: 'app.txt', kind: 'file', minBytes: 2, mustChange: true }]
+  }]);
+  const provider = new ProjectTransactionProvider({ allowedRoots: [projectRoot], allowedExecutables: ['node'], registryPath });
+  const result = await provider.execute({
+    id: 'transaction-detached-timeout', capability: 'project.transaction.run', risk: 'destructive',
+    input: { path: projectRoot, commandId: 'detached-timeout', expectedRisk: 'write' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal((result.output as any).rollbackPerformed, true);
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  assert.equal(await fs.readFile(path.join(projectRoot, 'app.txt'), 'utf8'), 'base\n');
+  assert.equal(git(projectRoot, 'status', '--porcelain=v1'), '');
+});

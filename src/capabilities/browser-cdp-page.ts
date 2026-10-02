@@ -198,7 +198,13 @@ export function failure(action: ActionRequest, provider: string, started: number
     capability: action.capability,
     provider,
     evidence: [evidence('browser_state', 'fail', op.message, { code: op.code })],
-    error: { code: op.code, message: op.message, retryable: op.retryable },
+    error: {
+      code: op.code,
+      message: op.message,
+      retryable: op.retryable,
+      ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+      ...(op.details ? { details: structuredClone(op.details) } : {})
+    },
     durationMs: Math.round(performance.now() - started)
   };
 }
@@ -283,8 +289,15 @@ export function semanticSnapshotFunction() {
   const visible = (element: Element) => {
     const style = styleOf(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
+    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
+    }
     if (style && (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0)) return false;
-    return !rect || (rect.width > 0 && rect.height > 0);
+    if (!rect) return true;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const view = viewOf(element); const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
+    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
   };
   const readableText = (element: Element, max = 180) => {
     const style = styleOf(element);
@@ -570,8 +583,15 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     const view = element.ownerDocument?.defaultView;
     const style = view?.getComputedStyle?.(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none')) return false;
-    return !rect || (rect.width > 0 && rect.height > 0);
+    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
+    }
+    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none' || Number(style.opacity) === 0)) return false;
+    if (!rect) return true;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
+    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
   };
   const normalizeColor = (raw: string) => {
     const probe = document.createElement?.('span');

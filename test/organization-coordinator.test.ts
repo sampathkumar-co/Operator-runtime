@@ -131,6 +131,49 @@ test('stage8 rejects targets outside explicit organization scope prefixes', asyn
   );
 });
 
+test('stage8 bounded retention reclaims only the oldest terminal program beyond 500 entries', async (t) => {
+  const state = await tempDir(t);
+  const org = new OrganizationCoordinator(state, new TeamCoordinator(state));
+  const seed = await org.create({
+    objective: 'retention seed',
+    policy: { allowedScopePrefixes: ['org:test'] },
+    targets: [{ key: 'seed', scopeKey: 'org:test:seed', workItems: work('seed') }]
+  });
+  const file = path.join(state, 'organization-programs.json');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  const oldestId = crypto.randomUUID();
+  persisted.programs = Array.from({ length: 500 }, (_, index) => ({
+    ...structuredClone(seed),
+    id: index === 0 ? oldestId : crypto.randomUUID(),
+    objective: `terminal-${index}`,
+    state: 'VERIFIED',
+    createdAt: new Date(index * 1000).toISOString(),
+    updatedAt: new Date(index * 1000).toISOString()
+  }));
+  await fs.writeFile(file, JSON.stringify(persisted));
+
+  const created = await new OrganizationCoordinator(state, new TeamCoordinator(state)).create({
+    objective: 'new after terminal retention',
+    policy: { allowedScopePrefixes: ['org:test'] },
+    targets: [{ key: 'new', scopeKey: 'org:test:new', workItems: work('new') }]
+  });
+  const after = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  assert.equal(after.programs.length, 500);
+  assert.equal(after.programs.some((item: any) => item.id === oldestId), false);
+  assert.equal(after.programs.some((item: any) => item.id === created.id), true);
+
+  after.programs = after.programs.map((item: any) => ({ ...item, state: 'PENDING' }));
+  await fs.writeFile(file, JSON.stringify(after));
+  await assert.rejects(
+    () => new OrganizationCoordinator(state, new TeamCoordinator(state)).create({
+      objective: 'must not evict active',
+      policy: { allowedScopePrefixes: ['org:test'] },
+      targets: [{ key: 'blocked', scopeKey: 'org:test:blocked', workItems: work('blocked') }]
+    }),
+    (error: any) => error?.code === 'ORGANIZATION_PROGRAM_LIMIT'
+  );
+});
+
 
 test('stage8 compensates already-created missions when a later wave target fails to start', async (t) => {
   const state = await tempDir(t);

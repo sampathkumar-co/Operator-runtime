@@ -45,6 +45,37 @@ gitTest('public Git diff accepts an explicit literal file and rejects directory 
   assert.equal(directory.error?.code, 'GIT_PUBLIC_PATH_FILTER_INVALID');
 });
 
+gitTest('Git diff and status paginate before relay serialization', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitProvider({ allowedRoots: [root] });
+  await fs.writeFile(path.join(root, 'src', 'a.txt'), Array.from({ length: 12_000 }, (_, index) => `changed-${index}-${'x'.repeat(20)}`).join('\n'));
+  let offset = 0;
+  let combined = '';
+  do {
+    const result = await provider.execute({
+      id: `paged-${offset}`, capability: 'git.diff', risk: 'read', provenance: { kind: 'runtime' },
+      input: { cwd: root, paths: ['src/a.txt'], offset, maxBytes: 32 * 1024 }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') < 256 * 1024);
+    const output = result.output as any;
+    combined += output.stdout;
+    if (!output.truncated) break;
+    assert.ok(output.nextOffset > offset);
+    offset = output.nextOffset;
+  } while (true);
+  assert.match(combined, /changed-11999/);
+
+  for (let index = 0; index < 400; index += 1) await fs.writeFile(path.join(root, `untracked-${String(index).padStart(4, '0')}-${'n'.repeat(80)}.txt`), 'x');
+  const status = await provider.execute({
+    id: 'status-page', capability: 'git.status', risk: 'read', provenance: { kind: 'runtime' }, input: { cwd: root, maxBytes: 8 * 1024 }
+  });
+  assert.equal(status.ok, true, status.error?.message);
+  assert.equal((status.output as any).truncated, true);
+  assert.ok((status.output as any).nextOffset > 0);
+  assert.ok(Buffer.byteLength(JSON.stringify(status), 'utf8') < 256 * 1024);
+});
+
 async function publicDiff(provider: GitProvider, root: string, paths: string[]) {
   return provider.execute({
     id: `public-${paths.join('|') || 'empty'}`,

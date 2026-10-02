@@ -139,7 +139,7 @@ test('missing crash-window result replays a read through the normal bounded exec
 });
 
 
-test('replayed delivery resubmits its durable outbox result without re-executing local action', async (t) => {
+test('relay restart recovers a completed mutation with degraded audit evidence without replay', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-durable-replay-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
   const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
@@ -147,10 +147,10 @@ test('replayed delivery resubmits its durable outbox result without re-executing
   const deliveryId = crypto.randomUUID();
   const storedResult = {
     ok: true,
-    capability: 'computer.inspect',
-    provider: 'system.native',
-    output: { hostname: 'durable-before-reconnect' },
-    evidence: [],
+    capability: 'file.create',
+    provider: 'filesystem.native',
+    output: { path: 'created-once.txt', created: true },
+    evidence: [{ kind: 'audit_persistence', status: 'fail', message: 'Primary mutation completed, audit append degraded.' }],
     durationMs: 2
   };
   const outbox = new RelayResultStore(path.join(stateDir, 'relay-outbox'));
@@ -163,9 +163,9 @@ test('replayed delivery resubmits its durable outbox result without re-executing
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
-      capability: 'computer.inspect',
-      provider: 'system.native',
-      output: { hostname: 'different-after-reexecution' },
+      capability: 'file.create',
+      provider: 'filesystem.native',
+      output: { path: 'created-twice.txt', created: true },
       evidence: [],
       durationMs: 1
     }));
@@ -184,8 +184,8 @@ test('replayed delivery resubmits its durable outbox result without re-executing
       publicBoundary: false,
       approvalAuthority: { accountId: crypto.randomUUID(), deviceId: device.deviceId, generation: 1 },
       action: {
-        id: crypto.randomUUID(), capability: 'computer.inspect', risk: 'read',
-        input: {}, provenance: { kind: 'chatgpt' }
+        id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+        input: { path: 'created-once.txt', content: 'once' }, provenance: { kind: 'chatgpt' }
       }
     }
   };

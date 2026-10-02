@@ -20,6 +20,7 @@ type FrameContext = {
 
 type FrameAttachmentScope = {
   frames: AttachedFrame[];
+  degradedReason?: string;
   stop(): Promise<void>;
 };
 
@@ -35,11 +36,16 @@ const AUTO_ATTACH_OFF = {
   flatten: true
 };
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
-async function attachOopifSessions(session: CdpConnection): Promise<FrameAttachmentScope> {
+async function attachOopifSessions(session: CdpConnection, signal?: AbortSignal): Promise<FrameAttachmentScope> {
   const frames = new Map<string, AttachedFrame>();
   const depthBySession = new Map<string, number>();
   const armed = new Set<string>();
@@ -62,44 +68,49 @@ async function attachOopifSessions(session: CdpConnection): Promise<FrameAttachm
   });
 
   try {
-    await session.send('Target.setAutoAttach', AUTO_ATTACH_ON);
+    await session.send('Target.setAutoAttach', AUTO_ATTACH_ON, 8_000, signal);
   } catch {
     offAttached();
-    return { frames: [], async stop() { /* target does not expose child-target auto-attach */ } };
+    if (signal?.aborted) throw abortError();
+    return { frames: [], degradedReason: 'child_target_auto_attach_unavailable', async stop() { /* target does not expose child-target auto-attach */ } };
   }
 
-  for (let round = 0; round < MAX_OOPIF_DEPTH; round += 1) {
-    await delay(ATTACH_SETTLE_MS);
-    const toArm = [...frames.values()].filter((frame) => frame.depth < MAX_OOPIF_DEPTH && !armed.has(frame.sessionId));
-    if (toArm.length === 0 && round > 0) break;
-    await Promise.allSettled(toArm.map(async (frame) => {
-      armed.add(frame.sessionId);
-      await session.sendInSession(frame.sessionId, 'Target.setAutoAttach', AUTO_ATTACH_ON);
-    }));
-  }
-  await delay(ATTACH_SETTLE_MS);
-
-  return {
-    frames: [...frames.values()].sort((a, b) => a.depth - b.depth || a.targetId.localeCompare(b.targetId)),
-    async stop() {
+  const stop = async () => {
       offAttached();
       const deepestFirst = [...frames.values()].sort((a, b) => b.depth - a.depth);
       await Promise.allSettled(deepestFirst.map((frame) => session.sendInSession(frame.sessionId, 'Target.setAutoAttach', AUTO_ATTACH_OFF)));
       await Promise.allSettled([session.send('Target.setAutoAttach', AUTO_ATTACH_OFF)]);
-    }
   };
+  try {
+    for (let round = 0; round < MAX_OOPIF_DEPTH; round += 1) {
+      await delay(ATTACH_SETTLE_MS, signal);
+      const toArm = [...frames.values()].filter((frame) => frame.depth < MAX_OOPIF_DEPTH && !armed.has(frame.sessionId));
+      if (toArm.length === 0 && round > 0) break;
+      await Promise.allSettled(toArm.map(async (frame) => {
+        armed.add(frame.sessionId);
+        await session.sendInSession(frame.sessionId, 'Target.setAutoAttach', AUTO_ATTACH_ON, 8_000, signal);
+      }));
+      if (signal?.aborted) throw abortError();
+    }
+    await delay(ATTACH_SETTLE_MS, signal);
+    return { frames: [...frames.values()].sort((a, b) => a.depth - b.depth || a.targetId.localeCompare(b.targetId)), stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
 }
 
 async function evaluate(
   session: CdpConnection,
   context: FrameContext,
   expression: string,
-  userGesture = false
+  userGesture = false,
+  signal?: AbortSignal
 ): Promise<JsonMap> {
   const params = { expression, returnByValue: true, awaitPromise: true, userGesture };
   return context.frame
-    ? session.sendInSession(context.frame.sessionId, 'Runtime.evaluate', params)
-    : session.send('Runtime.evaluate', params);
+    ? session.sendInSession(context.frame.sessionId, 'Runtime.evaluate', params, 8_000, signal)
+    : session.send('Runtime.evaluate', params, 8_000, signal);
 }
 
 export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }) {
@@ -197,8 +208,27 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     const view = element.ownerDocument?.defaultView;
     const style = view?.getComputedStyle?.(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none')) return false;
-    return !rect || (rect.width > 0 && rect.height > 0);
+    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
+    }
+    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none' || Number(style.opacity) === 0)) return false;
+    if (!rect) return true;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
+    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
+  };
+  const identityOf = (element: Element) => {
+    const parts: string[] = [];
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 8; depth += 1, current = current.parentElement) {
+      const id = current.getAttribute('id');
+      if (id) { parts.unshift(`#${id}`); break; }
+      const parent = current.parentElement;
+      const siblings = parent ? Array.from(parent.children).filter((item) => item.tagName === current!.tagName) : [];
+      parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${Math.max(1, siblings.indexOf(current) + 1)})`);
+    }
+    return parts.join('>');
   };
   const normalizeColor = (raw: string) => {
     const probe = document.createElement?.('span');
@@ -241,41 +271,45 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   }
   return {
     count: matches.length,
-    matches: matches.slice(0, 3).map(({ element, context }) => ({
+    matches: matches.slice(0, 3).map(({ element, context }) => {
+      const rect = element.getBoundingClientRect();
+      return {
       tag: element.tagName.toLowerCase(),
       role: roleOf(element) || (element.ownerDocument?.defaultView?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : ''),
       name: nameOf(element),
+      identity: identityOf(element),
+      geometry: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
       context
-    }))
+    }; })
   };
 }
 
-export async function inspectOopifFrames(session: CdpConnection): Promise<Array<{
+export async function inspectOopifFrames(session: CdpConnection, signal?: AbortSignal): Promise<{ frames: Array<{
   targetId: string;
   url: string;
   depth: number;
   title: string;
   readyState: string;
   semantic: unknown;
-}>> {
-  const scope = await attachOopifSessions(session);
+}>; degradedReason?: string }> {
+  const scope = await attachOopifSessions(session, signal);
   try {
     const output = [];
     for (const frame of scope.frames) {
       try {
         await Promise.allSettled([
-          session.sendInSession(frame.sessionId, 'Runtime.enable'),
-          session.sendInSession(frame.sessionId, 'Accessibility.enable')
+          session.sendInSession(frame.sessionId, 'Runtime.enable', {}, 8_000, signal),
+          session.sendInSession(frame.sessionId, 'Accessibility.enable', {}, 8_000, signal)
         ]);
         const [identityResult, semanticResult] = await Promise.all([
           session.sendInSession(frame.sessionId, 'Runtime.evaluate', {
             expression: '({url:location.href,title:document.title,readyState:document.readyState})',
             returnByValue: true
-          }),
+          }, 8_000, signal),
           session.sendInSession(frame.sessionId, 'Runtime.evaluate', {
             expression: `(${semanticSnapshotFunction.toString()})()`,
             returnByValue: true
-          })
+          }, 8_000, signal)
         ]);
         const identity = unwrapRuntimeValue(identityResult) as JsonMap | undefined;
         output.push({
@@ -287,10 +321,11 @@ export async function inspectOopifFrames(session: CdpConnection): Promise<Array<
           semantic: unwrapRuntimeValue(semanticResult) ?? null
         });
       } catch {
+        if (signal?.aborted) throw abortError();
         // A frame may disappear during navigation. Omit it rather than failing the bounded parent snapshot.
       }
     }
-    return output;
+    return { frames: output, ...(scope.degradedReason ? { degradedReason: scope.degradedReason } : {}) };
   } finally {
     await scope.stop();
   }
@@ -298,9 +333,10 @@ export async function inspectOopifFrames(session: CdpConnection): Promise<Array<
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }
+  input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number },
+  signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
-  const scope = await attachOopifSessions(session);
+  const scope = await attachOopifSessions(session, signal);
   try {
     const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
     const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)})`;
@@ -308,10 +344,11 @@ export async function performSemanticInteraction(
 
     for (const context of contexts) {
       try {
-        const located = unwrapRuntimeValue(await evaluate(session, context, locateExpression)) as JsonMap | undefined;
+        const located = unwrapRuntimeValue(await evaluate(session, context, locateExpression, false, signal)) as JsonMap | undefined;
         const count = typeof located?.count === 'number' ? located.count : 0;
         if (count > 0) matches.push({ context, count, samples: located?.matches });
       } catch {
+        if (signal?.aborted) throw abortError();
         // Cross-origin frame may disappear or deny execution while the page is changing; continue bounded search.
       }
     }
@@ -328,8 +365,48 @@ export async function performSemanticInteraction(
     }
 
     const chosen = matches[0]!.context;
+    if (['click', 'hover', 'drag'].includes(input.operation)) {
+      const first = firstLocatedSample(matches[0]!.samples);
+      const confirmed = unwrapRuntimeValue(await evaluate(session, chosen, locateExpression, false, signal)) as JsonMap | undefined;
+      const second = firstLocatedSample(confirmed?.matches);
+      if (confirmed?.count !== 1 || !first || !second || !sameLocatedTarget(first, second)) {
+        throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target identity or geometry changed between preflight and native input dispatch; re-observe before retrying.', {
+          retryable: true,
+          details: { target: input.target, before: first, after: second }
+        });
+      }
+      const geometry = second.geometry as JsonMap;
+      const x = Number(geometry.x) + Number(geometry.width) / 2;
+      const y = Number(geometry.y) + Number(geometry.height) / 2;
+      if (![x, y, geometry.width, geometry.height].every((value) => Number.isFinite(Number(value))) || Number(geometry.width) <= 0 || Number(geometry.height) <= 0) {
+        throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target geometry is not actionable.', { retryable: true });
+      }
+      const dispatch = (params: JsonMap) => chosen.frame
+        ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
+        : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
+      if (input.operation === 'hover') {
+        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+      } else if (input.operation === 'click') {
+        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+        await dispatch({ type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+      } else {
+        const deltaX = Number(input.deltaX); const deltaY = Number(input.deltaY);
+        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+        const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(deltaX, deltaY) / 20)));
+        for (let step = 1; step <= steps; step += 1) {
+          await dispatch({ type: 'mouseMoved', x: x + deltaX * step / steps, y: y + deltaY * step / steps, button: 'left', buttons: 1 });
+        }
+        await dispatch({ type: 'mouseReleased', x: x + deltaX, y: y + deltaY, button: 'left', buttons: 0, clickCount: 1 });
+      }
+      return {
+        value: { ok: true, matched: second, after: { nativeInputDispatched: true } },
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
     const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)})`;
-    let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true));
+    let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
     }
@@ -339,11 +416,11 @@ export async function performSemanticInteraction(
         const key = String(inputKey);
         const virtualKey = key === 'ArrowLeft' ? 37 : key === 'ArrowRight' ? 39 : key === 'ArrowUp' ? 38 : key === 'ArrowDown' ? 40 : 0;
         if (!virtualKey) throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Slider requested an unsupported keyboard input.', { retryable: false });
-        await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey });
-        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey });
+        await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
+        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
       }
       const verifyExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'verify_value' })})`;
-      const verified = unwrapRuntimeValue(await evaluate(session, chosen, verifyExpression, true));
+      const verified = unwrapRuntimeValue(await evaluate(session, chosen, verifyExpression, true, signal));
       if (!verified || typeof verified !== 'object' || (verified as JsonMap).ok !== true) {
         const error = verified && typeof verified === 'object' && typeof (verified as JsonMap).error === 'string'
           ? String((verified as JsonMap).error)
@@ -360,4 +437,19 @@ export async function performSemanticInteraction(
   } finally {
     await scope.stop();
   }
+}
+
+function abortError(): OperatorError {
+  return new OperatorError('EXECUTION_ABORTED', 'Browser frame discovery was cancelled.', { retryable: false });
+}
+
+function firstLocatedSample(input: unknown): JsonMap | undefined {
+  return Array.isArray(input) && input[0] && typeof input[0] === 'object' && !Array.isArray(input[0]) ? input[0] as JsonMap : undefined;
+}
+
+function sameLocatedTarget(left: JsonMap, right: JsonMap): boolean {
+  if (left.identity !== right.identity || left.tag !== right.tag || left.role !== right.role || left.name !== right.name) return false;
+  const a = left.geometry as JsonMap | undefined; const b = right.geometry as JsonMap | undefined;
+  if (!a || !b) return false;
+  return ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(Number(a[key])) && Number.isFinite(Number(b[key])) && Math.abs(Number(a[key]) - Number(b[key])) <= 1);
 }

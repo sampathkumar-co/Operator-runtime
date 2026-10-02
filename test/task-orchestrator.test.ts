@@ -284,6 +284,36 @@ test('task executor detects a no-progress planner loop before exhausting the glo
   assert.equal(failed.execution?.stepCount, 2);
 });
 
+test('active task timeout uses a monotonic clock despite wall-clock jumps', async (t) => {
+  const root = await tempDir(t, 'operator-task-monotonic-root-');
+  const state = await tempDir(t, 'operator-task-monotonic-state-');
+  const target = path.join(root, 'input.txt');
+  await fs.writeFile(target, 'data');
+  const runtime = new OperatorRuntime().register(filesystem(root));
+  let wall = Date.parse('2026-01-01T00:00:00.000Z');
+  let monotonic = 0;
+  let calls = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime, store: new TaskStore(state), permissions: permissions(root, ['file.read']), planners: [new StuckPlanner()],
+    wallNow: () => wall,
+    monotonicNow: () => monotonic,
+    executeAction: async (action, profile, context) => {
+      calls += 1;
+      monotonic += 60;
+      wall += calls % 2 === 0 ? 86_400_000 : -172_800_000;
+      return await runtime.execute(action, profile, context);
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Use elapsed active time.', authorizedScope: [root], successConditions: ['stop on monotonic budget'],
+    goal: { kind: 'controlled-file-change', root, path: target, content: 'unused' }, timeoutMs: 100, maxSteps: 20
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'TASK_TIMEOUT');
+  assert.equal(calls, 2);
+});
+
 class StaleRunnerWriteStore extends TaskStore {
   #blockedOnce = false;
   blocked!: () => void;

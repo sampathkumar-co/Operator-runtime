@@ -46,6 +46,7 @@ export interface ActionResult {
     message: string;
     retryable?: boolean;
     sideEffectState?: SideEffectState;
+    details?: Record<string, unknown>;
   };
   durationMs: number;
 }

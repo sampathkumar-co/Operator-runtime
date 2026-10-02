@@ -155,7 +155,8 @@ export class ProcessProvider implements CapabilityProvider {
         evidence: [evidence('process', 'fail', op.message, { code: op.code })],
         error: {
           code: op.code, message: op.message, retryable: op.retryable,
-          sideEffectState: action.risk === 'read' ? 'none' : processFailureSideEffectState(op)
+          sideEffectState: action.risk === 'read' ? 'none' : processFailureSideEffectState(op),
+          ...(op.details ? { details: structuredClone(op.details) } : {})
         },
         durationMs: Math.round(performance.now() - started)
       };
@@ -200,6 +201,11 @@ export class ProcessProvider implements CapabilityProvider {
           session.updatedAt = new Date().toISOString();
           this.#appendSessionEvent(session, 'system', `process exited code=${String(code)} signal=${String(signal ?? '')}`);
         });
+        if (context.signal?.aborted) {
+          await terminateProcessTree(child, session.pid);
+          session.state = 'terminated';
+          return failure(action, this.name, started, new OperatorError('EXECUTION_ABORTED', 'Terminal session start was cancelled after process creation; the owned process tree was quiesced.', { details: { sideEffectState: 'uncertain' } }));
+        }
         return {
           ok: true, capability: action.capability, provider: this.name,
           output: this.#sessionSummary(session),
@@ -208,7 +214,7 @@ export class ProcessProvider implements CapabilityProvider {
         };
       } catch (error) {
         const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_START_FAILED', error instanceof Error ? error.message : String(error));
-        return failure(action, this.name, started, op.code, op.message);
+        return failure(action, this.name, started, op);
       }
     }
 
@@ -257,7 +263,24 @@ export class ProcessProvider implements CapabilityProvider {
       if (!input || input.includes('\0') || Buffer.byteLength(input, 'utf8') > MAX_SESSION_INPUT_BYTES) {
         return failure(action, this.name, started, 'PROCESS_INPUT_INVALID', `Session input must contain 1-${MAX_SESSION_INPUT_BYTES} UTF-8 bytes and no NUL.`);
       }
-      await new Promise<void>((resolve, reject) => session.child.stdin.write(input, (error) => error ? reject(error) : resolve()));
+      if (context.signal?.aborted) return failure(action, this.name, started, new OperatorError('EXECUTION_ABORTED', 'Terminal session write was cancelled before dispatch.', { details: { sideEffectState: 'none' } }));
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = (error?: Error | null) => {
+            if (settled) return;
+            settled = true;
+            context.signal?.removeEventListener('abort', onAbort);
+            error ? reject(error) : resolve();
+          };
+          const onAbort = () => finish(new OperatorError('EXECUTION_ABORTED', 'Terminal session write was cancelled after dispatch.', { details: { sideEffectState: 'uncertain' } }));
+          context.signal?.addEventListener('abort', onAbort, { once: true });
+          session.child.stdin.write(input, (error) => finish(error));
+        });
+      } catch (error) {
+        const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_SESSION_WRITE_FAILED', error instanceof Error ? error.message : String(error), { details: { sideEffectState: 'uncertain' } });
+        return failure(action, this.name, started, op);
+      }
       session.updatedAt = new Date().toISOString();
       this.#appendSessionEvent(session, 'system', `stdin write bytes=${Buffer.byteLength(input, 'utf8')}`);
       return {
@@ -277,7 +300,7 @@ export class ProcessProvider implements CapabilityProvider {
           return {
             ok: false, capability: action.capability, provider: this.name,
             evidence: [evidence('process_session_terminate', 'fail', op.message, { sessionId, pid: session.pid, code: op.code })],
-            error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'uncertain' },
+            error: { code: op.code, message: op.message, retryable: op.retryable, sideEffectState: 'uncertain', ...(op.details ? { details: structuredClone(op.details) } : {}) },
             durationMs: Math.round(performance.now() - started)
           };
         }
@@ -313,7 +336,7 @@ export class ProcessProvider implements CapabilityProvider {
       };
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_INSPECT_FAILED', error instanceof Error ? error.message : String(error));
-      return failure(action, this.name, started, op.code, op.message);
+      return failure(action, this.name, started, op);
     }
   }
 
@@ -345,7 +368,7 @@ export class ProcessProvider implements CapabilityProvider {
       };
     } catch (error) {
       const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_TERMINATE_FAILED', error instanceof Error ? error.message : String(error));
-      return failure(action, this.name, started, op.code, op.message);
+      return failure(action, this.name, started, op);
     }
   }
 
@@ -398,13 +421,17 @@ export class ProcessProvider implements CapabilityProvider {
   }
 }
 
-function failure(action: ActionRequest, provider: string, started: number, code: string, message: string): ActionResult {
+function failure(action: ActionRequest, provider: string, started: number, codeOrError: string | OperatorError, message?: string): ActionResult {
+  const op = codeOrError instanceof OperatorError ? codeOrError : new OperatorError(codeOrError, message ?? codeOrError);
+  const sideEffectState = op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState))
+    ? op.details.sideEffectState as 'none' | 'known' | 'uncertain'
+    : undefined;
   return {
     ok: false,
     capability: action.capability,
     provider,
-    evidence: [evidence('process_policy', 'fail', message, { code })],
-    error: { code, message, retryable: false },
+    evidence: [evidence('process_policy', 'fail', op.message, { code: op.code })],
+    error: { code: op.code, message: op.message, retryable: op.retryable, ...(sideEffectState ? { sideEffectState } : {}), ...(op.details ? { details: structuredClone(op.details) } : {}) },
     durationMs: Math.round(performance.now() - started)
   };
 }

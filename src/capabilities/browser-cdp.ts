@@ -92,12 +92,13 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
     throwIfAborted(signal);
-    const [mainPage, frames] = await Promise.all([
+    const [mainPage, frameInspection] = await Promise.all([
       inspectPage(session),
-      inspectOopifFrames(session)
+      inspectOopifFrames(session, signal)
     ]);
     throwIfAborted(signal);
-    const page = { ...mainPage, frames };
+    const frames = frameInspection.frames;
+    const page = { ...mainPage, frames, frameCoverage: frameInspection.degradedReason ? { status: 'degraded', reason: frameInspection.degradedReason } : { status: 'complete' } };
     return {
       ok: true,
       capability: action.capability,
@@ -239,7 +240,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
       await session.send('Runtime.enable');
       if (expectDownload) {
         if (operation !== 'click') throw new OperatorError('INVALID_DOWNLOAD_INTERACTION', 'expectDownload is only valid for click operations.');
-        download = await this.#prepareDownload(Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000), signal);
+        const frameTree = await session.send('Page.getFrameTree');
+        const frameIds = collectFrameIds(frameTree.frameTree);
+        if (frameIds.size === 0) throw new OperatorError('BROWSER_DOWNLOAD_CORRELATION_UNAVAILABLE', 'The initiating target did not expose a frame identity for download correlation.');
+        download = await this.#prepareDownload(
+          Math.min(Math.max(Number(action.input.downloadTimeoutMs ?? 30_000), 1_000), 10 * 60_000),
+          targetId,
+          frameIds,
+          signal
+        );
       }
       const before = await pageIdentity(session);
       const interaction = await performSemanticInteraction(session, {
@@ -247,7 +256,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         target: targetSpec,
         value: action.input.value ?? null,
         ...(operation === 'drag' ? { deltaX, deltaY } : {})
-      });
+      }, signal);
       const value = interaction.value;
       if (value.ok !== true) {
         const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
@@ -290,15 +299,19 @@ export class BrowserCdpProvider implements CapabilityProvider {
     return this.#browserSession;
   }
 
-  async #prepareDownload(timeoutMs: number, signal?: AbortSignal): Promise<DownloadTracker> {
+  async #prepareDownload(timeoutMs: number, targetId: string, allowedFrameIds: Set<string>, signal?: AbortSignal): Promise<DownloadTracker> {
     const browser = await this.#browserConnection(signal);
     await browser.send('Browser.setDownloadBehavior', { behavior: 'default', eventsEnabled: true });
+    await browser.send('Target.setDiscoverTargets', { discover: true });
     let activeGuid: string | undefined;
     let meta: { url?: string; suggestedFilename?: string } = {};
     let settled = false;
     let resolveDone!: (value: { guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }) => void;
     let rejectDone!: (error: Error) => void;
     const done = new Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+    // The interaction settles before awaiting download completion; attach a
+    // handler now so an early ambiguity/cancellation is not process-global.
+    void done.catch(() => undefined);
     const onAbort = () => {
       if (settled) return;
       settled = true;
@@ -315,8 +328,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
     }, timeoutMs);
     if (signal?.aborted) onAbort();
     const offBegin = browser.on('Browser.downloadWillBegin', (params) => {
-      if (activeGuid) return;
-      activeGuid = typeof params.guid === 'string' ? params.guid : undefined;
+      const frameId = typeof params.frameId === 'string' ? params.frameId : '';
+      const guid = typeof params.guid === 'string' ? params.guid : '';
+      if (!frameId || !allowedFrameIds.has(frameId) || !guid || settled) return;
+      if (activeGuid && activeGuid !== guid) {
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        rejectDone(new OperatorError('BROWSER_DOWNLOAD_AMBIGUOUS', 'Multiple downloads began in the initiating target; refusing to guess which one belongs to the action.', { retryable: false }));
+        return;
+      }
+      activeGuid = guid;
       meta = {
         url: typeof params.url === 'string' ? params.url.slice(0, 2000) : undefined,
         suggestedFilename: typeof params.suggestedFilename === 'string' ? params.suggestedFilename.slice(0, 500) : undefined
@@ -325,8 +347,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const offProgress = browser.on('Browser.downloadProgress', (params) => {
       const guid = typeof params.guid === 'string' ? params.guid : '';
       const state = typeof params.state === 'string' ? params.state : '';
-      if (!guid || (activeGuid && guid !== activeGuid) || !['completed', 'canceled'].includes(state)) return;
-      activeGuid = activeGuid ?? guid;
+      if (!activeGuid || !guid || guid !== activeGuid || !['completed', 'canceled'].includes(state) || settled) return;
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
@@ -339,7 +360,14 @@ export class BrowserCdpProvider implements CapabilityProvider {
         filePath: typeof params.filePath === 'string' ? params.filePath.slice(0, 2000) : undefined
       });
     });
-    return { done, stop: () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); offBegin(); offProgress(); } };
+    const offDestroyed = browser.on('Target.targetDestroyed', (params) => {
+      if (settled || params.targetId !== targetId) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      rejectDone(new OperatorError('BROWSER_DOWNLOAD_TARGET_CLOSED', 'The initiating browser target closed before its download completed.', { retryable: true }));
+    });
+    return { done, stop: () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); offBegin(); offProgress(); offDestroyed(); } };
   }
 
   async #listTargets(signal?: AbortSignal): Promise<CdpTarget[]> {
@@ -371,6 +399,15 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (!target.id) throw new OperatorError('CDP_CREATE_TAB_FAILED', 'Browser returned an invalid new-tab target.', { retryable: true });
     return target;
   }
+}
+
+function collectFrameIds(input: unknown, output = new Set<string>()): Set<string> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return output;
+  const node = input as JsonMap;
+  const frame = node.frame && typeof node.frame === 'object' && !Array.isArray(node.frame) ? node.frame as JsonMap : undefined;
+  if (typeof frame?.id === 'string' && frame.id.length > 0) output.add(frame.id);
+  if (Array.isArray(node.childFrames)) for (const child of node.childFrames.slice(0, 256)) collectFrameIds(child, output);
+  return output;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

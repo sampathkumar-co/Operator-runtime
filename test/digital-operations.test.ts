@@ -205,28 +205,41 @@ test('stage10 running operation renews its device reservation and blocks visibly
   const sessionId = crypto.randomUUID();
   let heartbeats = 0;
   let loseReservation = false;
+  let nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+  let expiresAtMs = nowMs + 10_000;
+  let activeWorkload = '';
   const devices = {
-    async reserve() {
-      const now = new Date().toISOString();
-      return { id: reservationId, sessionId, deviceId: crypto.randomUUID(), acquiredAt: now, heartbeatAt: now, expiresAt: new Date(Date.now() + 10_000).toISOString(), state: 'ACTIVE' };
+    async reserve(request: { workloadKey: string }) {
+      if (activeWorkload && activeWorkload !== request.workloadKey && nowMs < expiresAtMs) throw Object.assign(new Error('capacity held'), { code: 'DEVICE_POOL_NO_ELIGIBLE_DEVICE' });
+      activeWorkload = request.workloadKey;
+      expiresAtMs = nowMs + 10_000;
+      const now = new Date(nowMs).toISOString();
+      return { id: reservationId, sessionId, deviceId: crypto.randomUUID(), acquiredAt: now, heartbeatAt: now, expiresAt: new Date(expiresAtMs).toISOString(), state: 'ACTIVE' };
     },
     async heartbeat(id: string, session: string) {
       heartbeats += 1;
       assert.equal(id, reservationId); assert.equal(session, sessionId);
       if (loseReservation) throw Object.assign(new Error('lost'), { code: 'DEVICE_POOL_RESERVATION_LOST' });
-      return { id, sessionId: session, state: 'ACTIVE' };
+      expiresAtMs = nowMs + 10_000;
+      return { id, sessionId: session, state: 'ACTIVE', heartbeatAt: new Date(nowMs).toISOString(), expiresAt: new Date(expiresAtMs).toISOString() };
     },
     async release() { return {}; }
   };
-  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any });
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, clock: () => new Date(nowMs) });
   const operation = await ops.submit({
     objective: 'Hold device capacity', scopeKey: 'project:device', successConditions: ['verified'],
     execution: { kind: 'team', workItems: work() },
     device: { request: { workloadKey: 'job:held', leaseMs: 10_000 }, advertisements: [] }, run: true
   });
+  nowMs += 9_000;
   const running = await ops.refresh(operation.id);
   assert.equal(running.state, 'RUNNING');
   assert.equal(heartbeats, 1);
+  nowMs += 9_000;
+  await assert.rejects(
+    () => devices.reserve({ workloadKey: 'job:second' }),
+    (error: any) => error?.code === 'DEVICE_POOL_NO_ELIGIBLE_DEVICE'
+  );
   loseReservation = true;
   const blocked = await ops.refresh(operation.id);
   assert.equal(blocked.state, 'BLOCKED');

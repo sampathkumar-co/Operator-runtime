@@ -80,10 +80,14 @@ export function registerPublicTools(
   server.registerTool('git.status', {
     title: 'Inspect Git status',
     description: 'Read repository status for an authorized project using Git directly.',
-    inputSchema: z.object({ cwd: z.string().min(1).max(4096) }),
+    inputSchema: z.object({
+      cwd: z.string().min(1).max(4096),
+      offset: z.number().int().min(0).max(1000000).default(0),
+      maxBytes: z.number().int().min(1024).max(131072).default(65536)
+    }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd }) => invoke('git.status', 'read', { cwd }, cwd));
+  }, async ({ cwd, offset, maxBytes }) => invoke('git.status', 'read', { cwd, offset, maxBytes }, cwd));
 
   server.registerTool('git.diff', {
     title: 'Inspect safe Git diff',

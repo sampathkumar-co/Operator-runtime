@@ -8,6 +8,7 @@ import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
+import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayControlService } from './control-service.ts';
 import { RelayHub } from './relay-hub.ts';
@@ -59,6 +60,7 @@ function createRelayStores(stateDir: string) {
   });
   const deliveries = new RelayDeliveryStore(stateDir);
   const results = new RelayResultStore(stateDir);
+  const reservationReconciliations = new RelayReservationReconciliationStore(stateDir);
   const enrollments = new DeviceEnrollmentStore(stateDir);
   const accounts = new AccountDeviceRegistry(stateDir, devices, {
     onReleaseDevice: async (deviceId, accountId, reason) => {
@@ -87,7 +89,7 @@ function createRelayStores(stateDir: string) {
     }
   });
   return {
-    identity, devices, sessions, deliveries, results, accounts, enrollments,
+    identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments,
     attachHub(hub: RelayHub) { liveHub = hub; }
   };
 }
@@ -114,7 +116,7 @@ export async function runRelayResultService(config = readRelayServiceConfig()): 
 async function main(): Promise<void> {
   const config = readRelayServiceConfig();
   const stores = createRelayStores(config.stateDir);
-  const { identity, devices, sessions, deliveries, results, accounts, enrollments } = stores;
+  const { identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments } = stores;
 
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   stores.attachHub(hub);
@@ -130,7 +132,7 @@ async function main(): Promise<void> {
     logListening('operator-relay-results', resultListening.host, resultListening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     if (config.controlToken) {
       controlService = new RelayControlService({
-        hub, results, accounts, enrollments, devices, token: config.controlToken,
+        hub, results, accounts, enrollments, devices, reservationReconciliations, token: config.controlToken,
         onDiagnostic: (event) => process.stderr.write(JSON.stringify(event) + '\n')
       });
       const controlListening = await controlService.listen(config.controlHost, config.controlPort);

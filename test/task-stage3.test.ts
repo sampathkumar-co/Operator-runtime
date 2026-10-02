@@ -415,7 +415,7 @@ test('stage3 mutating quality check runs transactionally and rolls back false-gr
   assert.ok(transaction);
   const failed = await orchestrator.resume(task.id, [transaction!.actionId]);
   assert.equal(failed.state, 'FAILED');
-  assert.equal(failed.failures.at(-1)?.code, 'TRANSACTION_FAILED_ROLLED_BACK');
+  assert.equal(failed.failures.at(-1)?.code, 'TRANSACTION_FAILED_GIT_STATE_RESTORED');
   assert.equal(await fs.readFile(path.join(root, 'app.txt'), 'utf8'), 'base\n');
   const status = await new Promise<string>((resolve, reject) =>
     execFile('git', ['status', '--porcelain=v1'], { cwd: root, encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout))

@@ -180,7 +180,13 @@ export class PostgresProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('postgres', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code,
+          message: op.message,
+          retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(op.details ? { details: structuredClone(op.details) } : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }

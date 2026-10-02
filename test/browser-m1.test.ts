@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 import { BrowserCdpProvider } from '../src/capabilities/browser-cdp.ts';
+import { performSemanticInteraction } from '../src/capabilities/browser-cdp-frames.ts';
 
 type Listener = (event: any) => void;
 
 class FakeWebSocket {
   static readonly OPEN = 1;
+  static downloadScenario: 'complete' | 'unrelated-first' | 'simultaneous' | 'canceled' | 'target-closed' = 'complete';
+  static autoAttachDisabled = 0;
+  static #instances = new Set<FakeWebSocket>();
   readonly url: string;
   readyState = 0;
   #listeners = new Map<string, Set<Listener>>();
@@ -16,6 +20,7 @@ class FakeWebSocket {
   constructor(url: string) {
     this.url = url;
     this.#oopif = url.includes('/oopif');
+    FakeWebSocket.#instances.add(this);
     queueMicrotask(() => {
       this.readyState = FakeWebSocket.OPEN;
       this.#emit('open', {});
@@ -38,6 +43,7 @@ class FakeWebSocket {
     let result: Record<string, unknown> = {};
 
     if (message.method === 'Target.setAutoAttach') {
+      if (message.params?.autoAttach === false) FakeWebSocket.autoAttachDisabled += 1;
       this.#reply(message.id, result, message.sessionId);
       if (this.#oopif && !message.sessionId && message.params?.autoAttach === true) {
         queueMicrotask(() => this.#emit('message', { data: JSON.stringify({
@@ -61,6 +67,10 @@ class FakeWebSocket {
       this.#state.url = String(message.params?.url ?? this.#state.url);
       this.#state.title = 'Destination';
       result = { frameId: 'frame-1' };
+    } else if (message.method === 'Page.getFrameTree') {
+      result = { frameTree: { frame: { id: 'frame-main', url: this.#state.url } } };
+    } else if (message.method === 'Input.dispatchMouseEvent') {
+      if (message.params?.type === 'mouseReleased') FakeWebSocket.#emitDownload();
     } else if (message.method === 'Runtime.evaluate') {
       const expression = String(message.params?.expression ?? '');
       if (expression.includes('semanticLocatorFunction')) {
@@ -70,7 +80,7 @@ class FakeWebSocket {
           result: {
             value: {
               count,
-              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', context: { frameDepth: 0, shadowDepth: 0 } }] : []
+              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', identity: '#email', geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } }] : []
             }
           }
         };
@@ -112,6 +122,35 @@ class FakeWebSocket {
     this.#emit('close', {});
   }
 
+  static #broadcast(method: string, params: Record<string, unknown>): void {
+    for (const socket of FakeWebSocket.#instances) {
+      if (!socket.url.includes('/browser')) continue;
+      socket.#emit('message', { data: JSON.stringify({ method, params }) });
+    }
+  }
+
+  static #emitDownload(): void {
+    const scenario = FakeWebSocket.downloadScenario;
+    if (scenario === 'target-closed') {
+      queueMicrotask(() => FakeWebSocket.#broadcast('Target.targetDestroyed', { targetId: 'tab-1' }));
+      return;
+    }
+    if (scenario === 'unrelated-first') {
+      queueMicrotask(() => {
+        FakeWebSocket.#broadcast('Browser.downloadWillBegin', { guid: 'other', frameId: 'frame-other', url: 'https://other.test/file' });
+        FakeWebSocket.#broadcast('Browser.downloadProgress', { guid: 'other', state: 'completed' });
+      });
+    }
+    queueMicrotask(() => {
+      FakeWebSocket.#broadcast('Browser.downloadWillBegin', { guid: 'expected', frameId: 'frame-main', url: 'https://example.test/file', suggestedFilename: 'file.txt' });
+      if (scenario === 'simultaneous') {
+        FakeWebSocket.#broadcast('Browser.downloadWillBegin', { guid: 'second', frameId: 'frame-main', url: 'https://example.test/second' });
+      } else {
+        FakeWebSocket.#broadcast('Browser.downloadProgress', { guid: 'expected', state: scenario === 'canceled' ? 'canceled' : 'completed', receivedBytes: 10, totalBytes: 10 });
+      }
+    });
+  }
+
   #reply(id: number, result: Record<string, unknown>, sessionId?: string): void {
     queueMicrotask(() => this.#emit('message', { data: JSON.stringify({ id, result, ...(sessionId ? { sessionId } : {}) }) }));
   }
@@ -126,6 +165,11 @@ async function withCdpServer(t: any, fn: (endpoint: string) => Promise<void>, we
     if (req.url === '/json/list') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify([{ id: 'tab-1', type: 'page', title: 'Start', url: 'https://example.test/start', webSocketDebuggerUrl: `ws://127.0.0.1${websocketPath}` }]));
+      return;
+    }
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ webSocketDebuggerUrl: 'ws://127.0.0.1/browser' }));
       return;
     }
     res.writeHead(404).end();
@@ -255,4 +299,97 @@ test('internal tab close verifies target disappearance without enlarging MCP sur
   const result = await provider.execute({ id: 'close-1', capability: 'browser.tab.close', risk: 'write', input: { targetId: 'close-me' }, provenance: { kind: 'runtime' } });
   assert.equal(result.ok, true);
   assert.equal((result.output as any).closed, true);
+});
+
+test('semantic pointer actions use native CDP input and reject a target that changes after preflight', async () => {
+  const nativeEvents: any[] = [];
+  let locateCalls = 0;
+  const sample = { tag: 'button', role: 'button', name: 'Save', identity: '#save', geometry: { x: 10, y: 20, width: 80, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        locateCalls += 1;
+        return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const clicked = await performSemanticInteraction(session as any, { operation: 'click', target: { role: 'button', name: 'Save' }, value: null });
+  assert.equal(locateCalls, 2);
+  assert.deepEqual(nativeEvents.map((event) => event.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
+  assert.equal(clicked.value.ok, true);
+
+  let changedCalls = 0;
+  const changed = { ...sample, identity: '#replacement', geometry: { ...sample.geometry, x: 100 } };
+  const unstable = {
+    on() { return () => undefined; },
+    async send(method: string) {
+      if (method === 'Runtime.evaluate') return { result: { value: { count: 1, matches: [changedCalls++ === 0 ? sample : changed] } } };
+      if (method === 'Input.dispatchMouseEvent') throw new Error('stale target must not receive input');
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  await assert.rejects(
+    () => performSemanticInteraction(unstable as any, { operation: 'click', target: { role: 'button', name: 'Save' }, value: null }),
+    (error: any) => error?.code === 'BROWSER_STALE_TARGET'
+  );
+});
+
+test('download tracking binds events to the initiating target frame and fails closed on ambiguity', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const run = async (scenario: typeof FakeWebSocket.downloadScenario) => {
+      FakeWebSocket.downloadScenario = scenario;
+      const provider = new BrowserCdpProvider(endpoint);
+      try {
+        return await provider.execute({
+          id: `download-${scenario}`, capability: 'browser.interact', risk: 'external',
+          input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' }, expectDownload: true, downloadTimeoutMs: 1000 },
+          provenance: { kind: 'runtime' }
+        });
+      } finally { provider.close(); }
+    };
+
+    const unrelatedFirst = await run('unrelated-first');
+    assert.equal(unrelatedFirst.ok, true, unrelatedFirst.error?.message);
+    assert.equal((unrelatedFirst.output as any).download.guid, 'expected');
+
+    const simultaneous = await run('simultaneous');
+    assert.equal(simultaneous.ok, false);
+    assert.equal(simultaneous.error?.code, 'BROWSER_DOWNLOAD_AMBIGUOUS');
+
+    const canceled = await run('canceled');
+    assert.equal(canceled.ok, false);
+    assert.equal(canceled.error?.code, 'BROWSER_DOWNLOAD_CANCELED');
+
+    const closed = await run('target-closed');
+    assert.equal(closed.ok, false);
+    assert.equal(closed.error?.code, 'BROWSER_DOWNLOAD_TARGET_CLOSED');
+  });
+});
+
+test('OOPIF discovery cancellation returns promptly and disables auto-attach', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  FakeWebSocket.autoAttachDisabled = 0;
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 60);
+    const started = performance.now();
+    const result = await provider.execute({
+      id: 'cancel-oopif', capability: 'browser.inspect', risk: 'read', input: { targetId: 'tab-1' }, provenance: { kind: 'runtime' }
+    }, { signal: controller.signal });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+    assert.ok(performance.now() - started < 250);
+    assert.ok(FakeWebSocket.autoAttachDisabled >= 1);
+  }, '/oopif');
 });
