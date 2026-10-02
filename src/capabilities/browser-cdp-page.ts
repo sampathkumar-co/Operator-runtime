@@ -159,8 +159,8 @@ export async function waitForDestinationReady(
   });
 }
 
-export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal): Promise<void> {
-  await delay(50, signal);
+export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal, initialDelayMs = 50): Promise<void> {
+  await delay(Math.max(0, Math.min(500, initialDelayMs)), signal);
   try { await waitForReadyState(session, 2_000, signal); } catch (error) {
     if (!(error instanceof OperatorError) || error.code !== 'BROWSER_READY_TIMEOUT') throw error;
   }
@@ -686,6 +686,14 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const readableValue = element.tagName === 'INPUT' && inputType === 'password'
         ? ''
         : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? String((control as HTMLInputElement).value ?? '').slice(0, 500) : '';
+      const ariaAutocomplete = trim(element.getAttribute('aria-autocomplete'), 80);
+      const autocomplete = Boolean(
+        ariaAutocomplete
+        || element.hasAttribute('list')
+        || trim(element.getAttribute('role')).toLowerCase() === 'combobox'
+        || /(?:^|\s)ui-autocomplete-input(?:\s|$)/i.test(element.getAttribute('class') ?? '')
+      );
+      const popupId = trim(element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || element.getAttribute('list'), 240);
       const scroll = scrollStateOf(element);
       return {
         ref: observedRefOf(element),
@@ -696,6 +704,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         type: inputType,
         semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
         ...(readableValue ? { value: readableValue } : {}),
+        ...(autocomplete ? { autocomplete: true, ...(ariaAutocomplete ? { autocompleteMode: ariaAutocomplete } : {}), ...(popupId ? { popupId } : {}) } : {}),
         ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
         ...(element.tagName === 'OPTION' ? { selected: Boolean((element as HTMLOptionElement).selected) } : element.hasAttribute('aria-selected') ? { selected: element.getAttribute('aria-selected') === 'true' } : {}),
         ...(element.tagName === 'SELECT' ? { multiple: Boolean((element as HTMLSelectElement).multiple) } : {}),
@@ -999,7 +1008,14 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
   };
   if (contract.stateOf(element).disabled) return { ok: false, error: 'Matched element is disabled.' };
   const initialRect = element.getBoundingClientRect();
-  const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '', geometry: { x: initialRect.x, y: initialRect.y, width: initialRect.width, height: initialRect.height } };
+  const ariaAutocomplete = trim(element.getAttribute('aria-autocomplete'));
+  const autocomplete = Boolean(
+    ariaAutocomplete
+    || element.hasAttribute('list')
+    || trim(element.getAttribute('role')).toLowerCase() === 'combobox'
+    || /(?:^|\s)ui-autocomplete-input(?:\s|$)/i.test(element.getAttribute('class') ?? '')
+  );
+  const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '', ...(autocomplete ? { autocomplete: true } : {}), geometry: { x: initialRect.x, y: initialRect.y, width: initialRect.width, height: initialRect.height } };
   const view = element.ownerDocument?.defaultView ?? window;
 
   const pointerPoint = (targetElement: Element) => {

@@ -356,7 +356,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
         }
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
-      await settleAfterInteraction(session, signal);
+      const matchedAutocomplete = Boolean(value.matched && typeof value.matched === 'object' && (value.matched as JsonMap).autocomplete === true);
+      await settleAfterInteraction(session, signal, operation === 'type' && matchedAutocomplete ? 350 : 50);
       throwIfAborted(signal);
       const after = await pageIdentity(session);
       const afterTarget = await observeSemanticTargetState(session, targetSpec, signal);

@@ -707,6 +707,28 @@ test('bounded text selection uses visible control offsets and verifies its postc
 });
 
 
+test('Browser Observation V2 marks autocomplete text controls and preserves the hint through lookup and typing', (t) => {
+  const root = new FakeRoot();
+  const input = new FakeElement('input');
+  input.setAttribute('aria-label', 'Destination');
+  input.setAttribute('aria-autocomplete', 'list');
+  attach(root, input); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Destination');
+  assert.equal(observed.autocomplete, true);
+  assert.equal(observed.autocompleteMode, 'list');
+
+  const located = semanticLocatorFunction({ ref: observed.ref }) as any;
+  assert.equal(located.count, 1);
+  assert.equal(located.matches[0].autocomplete, true);
+
+  const typed = interactionFunction({ operation: 'type', target: { ref: observed.ref }, value: 'SHG' }) as any;
+  assert.equal(typed.ok, true);
+  assert.equal(typed.matched.autocomplete, true);
+  assert.equal(typed.after.value, 'SHG');
+});
+
 test('focused Browser Observation V2 ranks a prior observed ref before truncation and refreshes its generation', (t) => {
   const root = new FakeRoot();
   const firstButton = new FakeElement('button', 'First'); firstButton.y = 10;

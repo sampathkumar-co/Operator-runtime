@@ -307,12 +307,19 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       const type = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
       const readableValue = element.tagName === 'INPUT' && type === 'password' ? '' : typeof control.value === 'string' ? control.value.slice(0, 500) : '';
+      const autocomplete = Boolean(
+        trim(element.getAttribute('aria-autocomplete'))
+        || element.hasAttribute('list')
+        || trim(element.getAttribute('role')).toLowerCase() === 'combobox'
+        || /(?:^|\s)ui-autocomplete-input(?:\s|$)/i.test(element.getAttribute('class') ?? '')
+      );
       return {
       tag: element.tagName.toLowerCase(),
       role,
       name: nameOf(element),
       identity: identityOf(element),
       ...(readableValue ? { value: readableValue } : {}),
+      ...(autocomplete ? { autocomplete: true } : {}),
       ...(element.hasAttribute('aria-expanded') ? { expanded: element.getAttribute('aria-expanded') === 'true' } : {}),
       ...(element.hasAttribute('aria-selected') ? { selected: element.getAttribute('aria-selected') === 'true' } : {}),
       ...(element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
