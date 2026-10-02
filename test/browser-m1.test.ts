@@ -305,12 +305,13 @@ test('semantic pointer actions use native CDP input and reject a target that cha
   const nativeEvents: any[] = [];
   let locateCalls = 0;
   const sample = { tag: 'button', role: 'button', name: 'Save', identity: '#save', geometry: { x: 10, y: 20, width: 80, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const beforeScroll = { ...sample, geometry: { ...sample.geometry, y: 900 } };
   const session = {
     on() { return () => undefined; },
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         locateCalls += 1;
-        return { result: { value: { count: 1, matches: [sample] } } };
+        return { result: { value: { count: 1, matches: [locateCalls === 1 ? beforeScroll : sample] } } };
       }
       if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
       return {};
@@ -318,7 +319,7 @@ test('semantic pointer actions use native CDP input and reject a target that cha
     async sendInSession() { return {}; }
   };
   const clicked = await performSemanticInteraction(session as any, { operation: 'click', target: { role: 'button', name: 'Save' }, value: null });
-  assert.equal(locateCalls, 2);
+  assert.equal(locateCalls, 3);
   assert.deepEqual(nativeEvents.map((event) => event.type), ['mouseMoved', 'mousePressed', 'mouseReleased']);
   assert.equal(clicked.value.ok, true);
 

@@ -937,10 +937,21 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
-    description: 'Inspect compact Chromium tab state or a bounded semantic/accessibility snapshot of one target. Raw HTML and DevTools WebSocket URLs are not returned.',
-    inputSchema: z.object({ targetId: z.string().min(1).optional() }),
+    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets and budgets paginate controls, visible text, and visual objects without returning raw HTML or DevTools WebSocket URLs.',
+    inputSchema: z.object({
+      targetId: z.string().min(1).optional(),
+      observation: z.object({
+        controlOffset: z.number().int().min(0).max(10_000).optional(),
+        textOffset: z.number().int().min(0).max(10_000).optional(),
+        visualOffset: z.number().int().min(0).max(10_000).optional(),
+        maxControls: z.number().int().min(1).max(160).optional(),
+        maxText: z.number().int().min(1).max(240).optional(),
+        maxVisuals: z.number().int().min(1).max(160).optional(),
+        maxBytes: z.number().int().min(16 * 1024).max(128 * 1024).optional()
+      }).optional()
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
-  }, async ({ targetId }) => invoke('browser.inspect', 'read', { targetId }));
+  }, async ({ targetId, observation }) => invoke('browser.inspect', 'read', { targetId, observation }));
 
   server.registerTool('browser.navigate', {
     title: 'Navigate browser',

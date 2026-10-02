@@ -1,6 +1,6 @@
 import { OperatorError } from '../core/errors.ts';
 import type { CdpConnection, JsonMap } from './browser-cdp-connection.ts';
-import { interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue } from './browser-cdp-page.ts';
+import { browserDomContractFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
 
 const MAX_OOPIF_SESSIONS = 16;
 const MAX_OOPIF_DEPTH = 4;
@@ -113,7 +113,7 @@ async function evaluate(
     : session.send('Runtime.evaluate', params, 8_000, signal);
 }
 
-export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }) {
+export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer = false) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -204,20 +204,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     }
     return '';
   };
-  const visible = (element: Element) => {
-    const view = element.ownerDocument?.defaultView;
-    const style = view?.getComputedStyle?.(element);
-    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
-    for (let current: Element | null = element; current; current = current.parentElement) {
-      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
-    }
-    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none' || Number(style.opacity) === 0)) return false;
-    if (!rect) return true;
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
-    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
-  };
+  const eligible = (element: Element) => { const state = contract.stateOf(element); return state.rendered && !state.pointerBlocked && !state.disabled && (!state.inViewport || !state.occluded); };
   const identityOf = (element: Element) => {
     const parts: string[] = [];
     let current: Element | null = element;
@@ -243,7 +230,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const selector = target.css || (desiredColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   let matches = deepQuery(selector, 1000).filter(({ element }) => {
-    if (!visible(element)) return false;
+    if (!eligible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
     if (target.role && roleOf(element) !== target.role.toLowerCase()) return false;
     if (target.name && nameOf(element).toLowerCase() !== target.name.toLowerCase()) return false;
@@ -257,7 +244,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   if (!matches.length && !target.css && !target.role && !target.renderedColor && (target.text || target.name)) {
     const desired = (target.name || target.text || '').toLowerCase();
     matches = deepQuery('*', 1000).filter(({ element }) => {
-      if (!visible(element)) return false;
+      if (!eligible(element)) return false;
       const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
       if (style?.cursor !== 'pointer') return false;
       const name = nameOf(element).toLowerCase();
@@ -268,6 +255,12 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     const desired = (target.name || target.text || '').toLowerCase();
     const exact = matches.filter(({ element }) => nameOf(element).toLowerCase() === desired);
     if (exact.length === 1) matches = exact;
+  }
+  if (prepareForPointer && matches.length === 1) {
+    const element = matches[0]!.element;
+    (element as HTMLElement).scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
+    const state = contract.stateOf(element);
+    if (!state.actionable) matches = [];
   }
   return {
     count: matches.length,
@@ -284,7 +277,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   };
 }
 
-export async function inspectOopifFrames(session: CdpConnection, signal?: AbortSignal): Promise<{ frames: Array<{
+export async function inspectOopifFrames(session: CdpConnection, signal: AbortSignal | undefined, observation: BrowserObservationOptions): Promise<{ frames: Array<{
   targetId: string;
   url: string;
   depth: number;
@@ -307,7 +300,7 @@ export async function inspectOopifFrames(session: CdpConnection, signal?: AbortS
             returnByValue: true
           }, 8_000, signal),
           session.sendInSession(frame.sessionId, 'Runtime.evaluate', {
-            expression: `(${semanticSnapshotFunction.toString()})()`,
+            expression: `(${semanticSnapshotFunction.toString()})(${JSON.stringify(observation)}, (${browserDomContractFunction.toString()})())`,
             returnByValue: true
           }, 8_000, signal)
         ]);
@@ -339,7 +332,7 @@ export async function performSemanticInteraction(
   const scope = await attachOopifSessions(session, signal);
   try {
     const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
-    const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)})`;
+    const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})())`;
     const matches: Array<{ context: FrameContext; count: number; samples: unknown }> = [];
 
     for (const context of contexts) {
@@ -367,12 +360,21 @@ export async function performSemanticInteraction(
     const chosen = matches[0]!.context;
     if (['click', 'hover', 'drag'].includes(input.operation)) {
       const first = firstLocatedSample(matches[0]!.samples);
+      const prepareExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})(), true)`;
+      const preparedResult = unwrapRuntimeValue(await evaluate(session, chosen, prepareExpression, false, signal)) as JsonMap | undefined;
+      const prepared = firstLocatedSample(preparedResult?.matches);
+      if (preparedResult?.count !== 1 || !first || !prepared || !sameLocatedIdentity(first, prepared)) {
+        throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target identity changed while scrolling into action position; re-observe before retrying.', {
+          retryable: true,
+          details: { target: input.target, before: first, after: prepared }
+        });
+      }
       const confirmed = unwrapRuntimeValue(await evaluate(session, chosen, locateExpression, false, signal)) as JsonMap | undefined;
       const second = firstLocatedSample(confirmed?.matches);
-      if (confirmed?.count !== 1 || !first || !second || !sameLocatedTarget(first, second)) {
-        throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target identity or geometry changed between preflight and native input dispatch; re-observe before retrying.', {
+      if (confirmed?.count !== 1 || !second || !sameLocatedTarget(prepared, second)) {
+        throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target identity or geometry changed after scroll and before native input dispatch; re-observe before retrying.', {
           retryable: true,
-          details: { target: input.target, before: first, after: second }
+          details: { target: input.target, before: prepared, after: second }
         });
       }
       const geometry = second.geometry as JsonMap;
@@ -405,7 +407,7 @@ export async function performSemanticInteraction(
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }
-    const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)})`;
+    const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)}, (${browserDomContractFunction.toString()})())`;
     let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
@@ -419,7 +421,7 @@ export async function performSemanticInteraction(
         await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
         await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
       }
-      const verifyExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'verify_value' })})`;
+      const verifyExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'verify_value' })}, (${browserDomContractFunction.toString()})())`;
       const verified = unwrapRuntimeValue(await evaluate(session, chosen, verifyExpression, true, signal));
       if (!verified || typeof verified !== 'object' || (verified as JsonMap).ok !== true) {
         const error = verified && typeof verified === 'object' && typeof (verified as JsonMap).error === 'string'
@@ -447,8 +449,12 @@ function firstLocatedSample(input: unknown): JsonMap | undefined {
   return Array.isArray(input) && input[0] && typeof input[0] === 'object' && !Array.isArray(input[0]) ? input[0] as JsonMap : undefined;
 }
 
+function sameLocatedIdentity(left: JsonMap, right: JsonMap): boolean {
+  return left.identity === right.identity && left.tag === right.tag && left.role === right.role && left.name === right.name;
+}
+
 function sameLocatedTarget(left: JsonMap, right: JsonMap): boolean {
-  if (left.identity !== right.identity || left.tag !== right.tag || left.role !== right.role || left.name !== right.name) return false;
+  if (!sameLocatedIdentity(left, right)) return false;
   const a = left.geometry as JsonMap | undefined; const b = right.geometry as JsonMap | undefined;
   if (!a || !b) return false;
   return ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(Number(a[key])) && Number.isFinite(Number(b[key])) && Math.abs(Number(a[key]) - Number(b[key])) <= 1);

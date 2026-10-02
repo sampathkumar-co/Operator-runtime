@@ -5,6 +5,36 @@ import type { CdpConnection, CdpTarget, JsonMap } from './browser-cdp-connection
 
 const MAX_AX_NODES = 160;
 
+export type BrowserObservationOptions = {
+  controlOffset: number;
+  textOffset: number;
+  visualOffset: number;
+  maxControls: number;
+  maxText: number;
+  maxVisuals: number;
+  maxBytes: number;
+};
+
+export function normalizeObservationOptions(input: unknown): BrowserObservationOptions {
+  const raw = input && typeof input === 'object' && !Array.isArray(input) ? input as JsonMap : {};
+  const integer = (key: string, fallback: number, min: number, max: number) => {
+    const value = raw[key] === undefined ? fallback : Number(raw[key]);
+    if (!Number.isSafeInteger(value) || value < min || value > max) {
+      throw new OperatorError('BROWSER_OBSERVATION_BUDGET_INVALID', `${key} must be an integer between ${min} and ${max}.`);
+    }
+    return value;
+  };
+  return {
+    controlOffset: integer('controlOffset', 0, 0, 10_000),
+    textOffset: integer('textOffset', 0, 0, 10_000),
+    visualOffset: integer('visualOffset', 0, 0, 10_000),
+    maxControls: integer('maxControls', 120, 1, 160),
+    maxText: integer('maxText', 180, 1, 240),
+    maxVisuals: integer('maxVisuals', 120, 1, 160),
+    maxBytes: integer('maxBytes', 64 * 1024, 16 * 1024, 128 * 1024)
+  };
+}
+
 export function assertLoopbackEndpoint(endpoint: URL): void {
   if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(endpoint.hostname)) {
     throw new OperatorError('UNSAFE_CDP_ENDPOINT', 'CDP provider only permits loopback endpoints.');
@@ -114,7 +144,7 @@ export async function settleAfterInteraction(session: CdpConnection, signal?: Ab
   }
 }
 
-export async function inspectPage(session: CdpConnection): Promise<{
+export async function inspectPage(session: CdpConnection, observation: BrowserObservationOptions): Promise<{
   url: string;
   title: string;
   readyState: string;
@@ -126,7 +156,7 @@ export async function inspectPage(session: CdpConnection): Promise<{
   const [identity, ax, dom] = await Promise.all([
     pageIdentity(session),
     session.send('Accessibility.getFullAXTree', { depth: 8 }),
-    session.send('Runtime.evaluate', { expression: `(${semanticSnapshotFunction.toString()})()`, returnByValue: true })
+    session.send('Runtime.evaluate', { expression: `(${semanticSnapshotFunction.toString()})(${JSON.stringify(observation)}, (${browserDomContractFunction.toString()})())`, returnByValue: true })
   ]);
 
   const nodes = Array.isArray(ax.nodes) ? ax.nodes as JsonMap[] : [];
@@ -232,8 +262,76 @@ function abortError(): OperatorError {
   return new OperatorError('EXECUTION_ABORTED', 'Browser execution was cancelled.', { retryable: false });
 }
 
-export function semanticSnapshotFunction() {
+export function browserDomContractFunction() {
+  const stateOf = (element: Element) => {
+    const documentOf = element.ownerDocument;
+    const view = documentOf?.defaultView;
+    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
+    let rendered = (element as Element & { isConnected?: boolean }).isConnected !== false;
+    let disabled = Boolean((element as Element & { disabled?: boolean }).disabled);
+    let pointerBlocked = false;
+
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') rendered = false;
+      if (current.getAttribute('aria-disabled') === 'true') disabled = true;
+      const style = view?.getComputedStyle?.(current);
+      if (style) {
+        if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.display === 'none' || Number(style.opacity) === 0) rendered = false;
+        if (style.pointerEvents === 'none') pointerBlocked = true;
+      }
+    }
+
+    let inViewport = true;
+    if (rect) {
+      if (rect.width <= 0 || rect.height <= 0) rendered = false;
+      const width = Number(view?.innerWidth ?? 0);
+      const height = Number(view?.innerHeight ?? 0);
+      if (width > 0 && height > 0) {
+        inViewport = !(rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height);
+      }
+    }
+
+    let occluded = false;
+    if (rendered && inViewport && rect && !pointerBlocked) {
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const root = element.getRootNode?.() as (Document | ShadowRoot) | undefined;
+      const rootHitTest = root && typeof (root as Document & { elementFromPoint?: (x: number, y: number) => Element | null }).elementFromPoint === 'function'
+        ? (root as Document & { elementFromPoint: (x: number, y: number) => Element | null }).elementFromPoint.bind(root)
+        : root === documentOf && typeof documentOf?.elementFromPoint === 'function'
+          ? documentOf.elementFromPoint.bind(documentOf)
+          : undefined;
+      const hit = rootHitTest?.(x, y) ?? null;
+      if (hit && hit !== element && !element.contains(hit) && !hit.contains(element)) occluded = true;
+    }
+
+    const visible = rendered && inViewport;
+    return {
+      visible,
+      rendered,
+      inViewport,
+      disabled,
+      pointerBlocked,
+      occluded,
+      actionable: visible && !disabled && !pointerBlocked && !occluded,
+      rect
+    };
+  };
+  return { stateOf };
+}
+
+export function semanticSnapshotFunction(options: Partial<BrowserObservationOptions> = {}, contract = browserDomContractFunction()) {
   const trim = (value: unknown, max = 180) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const integer = (value: unknown, fallback: number, min: number, max: number) => Number.isSafeInteger(Number(value)) && Number(value) >= min && Number(value) <= max ? Number(value) : fallback;
+  const budget = {
+    controlOffset: integer(options.controlOffset, 0, 0, 10_000),
+    textOffset: integer(options.textOffset, 0, 0, 10_000),
+    visualOffset: integer(options.visualOffset, 0, 0, 10_000),
+    maxControls: integer(options.maxControls, 120, 1, 160),
+    maxText: integer(options.maxText, 180, 1, 240),
+    maxVisuals: integer(options.maxVisuals, 120, 1, 160),
+    maxBytes: integer(options.maxBytes, 64 * 1024, 16 * 1024, 128 * 1024)
+  };
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
     for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
@@ -286,19 +384,7 @@ export function semanticSnapshotFunction() {
   };
   const viewOf = (element: Element) => element.ownerDocument?.defaultView;
   const styleOf = (element: Element) => viewOf(element)?.getComputedStyle?.(element);
-  const visible = (element: Element) => {
-    const style = styleOf(element);
-    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
-    for (let current: Element | null = element; current; current = current.parentElement) {
-      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
-    }
-    if (style && (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0)) return false;
-    if (!rect) return true;
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    const view = viewOf(element); const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
-    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
-  };
+  const visible = (element: Element) => contract.stateOf(element).visible;
   const readableText = (element: Element, max = 180) => {
     const style = styleOf(element);
     const fontSize = Number.parseFloat(String(style?.fontSize ?? ''));
@@ -385,20 +471,20 @@ export function semanticSnapshotFunction() {
     }
     return '';
   };
-  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 160);
+  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 320);
   const seenControls = new Set(semanticControls.map(({ element }) => element));
-  const pointerControls = deepQuery('*', 240)
+  const pointerControls = deepQuery('*', 600)
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
       const style = viewOf(element)?.getComputedStyle?.(element);
-      return style?.cursor === 'pointer' && style.pointerEvents !== 'none'
-        && !(element as HTMLButtonElement).disabled && element.getAttribute('aria-disabled') !== 'true'
+      return contract.stateOf(element).actionable
+        && style?.cursor === 'pointer'
         && Boolean(accessibleName(element));
-    })
-    .slice(0, 60);
-  const controls = [...semanticControls, ...pointerControls]
+    });
+  const controlCandidates = [...semanticControls, ...pointerControls]
     .filter(({ element }) => visible(element))
     .map(({ element, context }) => {
+      const state = contract.stateOf(element);
       const semanticRole = roleOf(element);
       const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
       const rect = element.getBoundingClientRect();
@@ -417,7 +503,10 @@ export function semanticSnapshotFunction() {
         ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : {}),
         ...(element.tagName === 'OPTION' ? { selected: Boolean((element as HTMLOptionElement).selected) } : {}),
         ...(element.tagName === 'SELECT' ? { multiple: Boolean((element as HTMLSelectElement).multiple) } : {}),
-        disabled: Boolean((element as HTMLInputElement).disabled || element.getAttribute('aria-disabled') === 'true'),
+        disabled: state.disabled,
+        actionable: state.actionable,
+        ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
+        ...(state.occluded ? { occluded: true } : {}),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         ...(semanticRole === 'slider' ? {
           min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
@@ -430,8 +519,19 @@ export function semanticSnapshotFunction() {
       };
     })
     .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
-    .slice(0, 120);
-  const visibleText = deepQuery('*', 600)
+    .sort((left, right) => {
+      const score = (item: typeof left) => (item.actionable ? 50 : 0)
+        + (item.role === 'pointer' ? 20 : 40)
+        + (item.name ? 10 : 0)
+        + (item.href ? 5 : 0)
+        + (item.role === 'slider' ? 5 : 0);
+      return score(right) - score(left)
+        || left.rect.y - right.rect.y
+        || left.rect.x - right.rect.x
+        || left.selector.localeCompare(right.selector);
+    });
+  const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls);
+  const visibleTextCandidates = deepQuery('*', 600)
     .filter(({ element }) => visible(element)
       && Array.from(element.children ?? []).length === 0
       && Boolean(readableText(element)))
@@ -445,7 +545,15 @@ export function semanticSnapshotFunction() {
         context
       };
     })
-    .slice(0, 180);
+    .sort((left, right) => {
+      const semanticScore = (item: typeof left) => (/^-?(?:\d+\.?\d*|\.\d+)$/.test(item.text) ? 20 : 0)
+        + (item.text.length <= 80 ? 5 : 0);
+      return semanticScore(right) - semanticScore(left)
+        || left.rect.y - right.rect.y
+        || left.rect.x - right.rect.x
+        || left.selector.localeCompare(right.selector);
+    });
+  const visibleText = visibleTextCandidates.slice(budget.textOffset, budget.textOffset + budget.maxText);
   const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => readableText(element)).filter(Boolean).slice(0, 60);
   const forms = deepQuery('form', 30).map(({ element: form, context }) => {
     const anyForm = form as HTMLFormElement;
@@ -456,8 +564,9 @@ export function semanticSnapshotFunction() {
       context
     };
   });
-  const visuals = deepQuery('*', 600).flatMap(({ element, context }) => {
-    if (!visible(element)) return [];
+  const visualCandidates = deepQuery('*', 600).flatMap(({ element, context }) => {
+    const state = contract.stateOf(element);
+    if (!state.visible) return [];
     const style = viewOf(element)?.getComputedStyle?.(element);
     const colors = {
       background: trim(style?.backgroundColor, 64).toLowerCase(),
@@ -469,16 +578,42 @@ export function semanticSnapshotFunction() {
     const rect = element.getBoundingClientRect();
     if (rect.width * rect.height < 16) return [];
     const role = roleOf(element);
-    const pointer = style?.cursor === 'pointer' && style.pointerEvents !== 'none';
-    return [{ tag: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName)), context }];
-  }).slice(0, 120);
+    const pointer = style?.cursor === 'pointer' && !state.pointerBlocked;
+    const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
+    return [{ tag: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), context }];
+  }).sort((left, right) => {
+    const score = (item: typeof left) => (item.actionable ? 50 : 0)
+      + (['circle', 'rect', 'polygon', 'path', 'ellipse', 'svg'].includes(item.tag) ? 40 : 0)
+      + (item.role ? 10 : 0)
+      + (item.name ? 5 : 0);
+    const leftArea = left.rect.width * left.rect.height;
+    const rightArea = right.rect.width * right.rect.height;
+    return score(right) - score(left)
+      || leftArea - rightArea
+      || left.rect.y - right.rect.y
+      || left.rect.x - right.rect.x
+      || left.selector.localeCompare(right.selector);
+  });
+  const visualObjects = visualCandidates.slice(budget.visualOffset, budget.visualOffset + budget.maxVisuals);
+  const pageMeta = (total: number, offset: number, limit: number, returned: number) => {
+    const nextOffset = offset + returned;
+    const truncated = nextOffset < total;
+    return { offset, limit, returned, total, truncated, ...(truncated ? { nextOffset } : {}) };
+  };
   return {
-    headings, controls, forms, visuals, visibleText,
+    schemaVersion: 2,
+    budgets: budget,
+    pagination: {
+      controls: pageMeta(controlCandidates.length, budget.controlOffset, budget.maxControls, controls.length),
+      visibleText: pageMeta(visibleTextCandidates.length, budget.textOffset, budget.maxText, visibleText.length),
+      visualObjects: pageMeta(visualCandidates.length, budget.visualOffset, budget.maxVisuals, visualObjects.length)
+    },
+    headings, controls, forms, visualObjects, visuals: visualObjects, visibleText,
     textExcerpt: trim(visibleText.map((item) => item.text).join(' '), 1600)
   };
 }
 
-export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }) {
+export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }, contract = browserDomContractFunction()) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -579,20 +714,7 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     }
     return '';
   };
-  const visible = (element: Element) => {
-    const view = element.ownerDocument?.defaultView;
-    const style = view?.getComputedStyle?.(element);
-    const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if ((element as Element & { isConnected?: boolean }).isConnected === false) return false;
-    for (let current: Element | null = element; current; current = current.parentElement) {
-      if (current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
-    }
-    if (style && (style.visibility === 'hidden' || style.display === 'none' || style.pointerEvents === 'none' || Number(style.opacity) === 0)) return false;
-    if (!rect) return true;
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    const width = Number(view?.innerWidth ?? 0); const height = Number(view?.innerHeight ?? 0);
-    return !(width > 0 && height > 0 && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= width || rect.top >= height));
-  };
+  const visible = (element: Element) => { const state = contract.stateOf(element); return state.visible && !state.pointerBlocked && !state.occluded; };
   const normalizeColor = (raw: string) => {
     const probe = document.createElement?.('span');
     if (!probe) return trim(raw).toLowerCase();
@@ -645,7 +767,7 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     click?: () => void;
     dispatchEvent?: (event: Event) => boolean;
   };
-  if (control.disabled === true || element.getAttribute('aria-disabled') === 'true') return { ok: false, error: 'Matched element is disabled.' };
+  if (contract.stateOf(element).disabled) return { ok: false, error: 'Matched element is disabled.' };
   const initialRect = element.getBoundingClientRect();
   const before = { name: nameOf(element), role: roleOf(element), value: typeof control.value === 'string' ? control.value : '', geometry: { x: initialRect.x, y: initialRect.y, width: initialRect.width, height: initialRect.height } };
   const view = element.ownerDocument?.defaultView ?? window;

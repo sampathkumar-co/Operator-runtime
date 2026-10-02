@@ -9,6 +9,7 @@ import {
   compactTab,
   failure,
   inspectPage,
+  normalizeObservationOptions,
   normalizeTargetSpec,
   pageIdentity,
   requirePageTarget,
@@ -91,22 +92,24 @@ export class BrowserCdpProvider implements CapabilityProvider {
 
     const target = requireTarget(tabs, targetId);
     const session = this.#sessions.get(target);
+    const observation = normalizeObservationOptions(action.input.observation);
     throwIfAborted(signal);
     const [mainPage, frameInspection] = await Promise.all([
-      inspectPage(session),
-      inspectOopifFrames(session, signal)
+      inspectPage(session, observation),
+      inspectOopifFrames(session, signal, observation)
     ]);
     throwIfAborted(signal);
     const frames = frameInspection.frames;
     const page = { ...mainPage, frames, frameCoverage: frameInspection.degradedReason ? { status: 'degraded', reason: frameInspection.degradedReason } : { status: 'complete' } };
+    const bounded = boundBrowserInspectOutput({ target: compactTab(target), page }, observation.maxBytes);
     return {
       ok: true,
       capability: action.capability,
       provider: this.name,
-      output: { target: compactTab(target), page },
+      output: bounded.output,
       evidence: [
         evidence('browser_state', 'pass', 'Semantic page state inspected through CDP across the main document, open shadow roots, same-origin frames, and bounded attached cross-origin frame targets.', { targetId, oopifFrames: frames.length }),
-        evidence('data_minimization', 'pass', 'Returned bounded accessibility/DOM summaries instead of raw page HTML.', { accessibilityNodes: page.accessibility.length, oopifFrames: frames.length })
+        evidence('data_minimization', 'pass', 'Returned bounded accessibility/DOM summaries instead of raw page HTML.', { accessibilityNodes: page.accessibility.length, oopifFrames: frames.length, returnedBytes: bounded.returnedBytes, truncated: bounded.truncated })
       ],
       durationMs: Math.round(performance.now() - started)
     };
@@ -408,6 +411,93 @@ function collectFrameIds(input: unknown, output = new Set<string>()): Set<string
   if (typeof frame?.id === 'string' && frame.id.length > 0) output.add(frame.id);
   if (Array.isArray(node.childFrames)) for (const child of node.childFrames.slice(0, 256)) collectFrameIds(child, output);
   return output;
+}
+
+export function boundBrowserInspectOutput(output: JsonMap, maxBytes: number): { output: JsonMap; returnedBytes: number; truncated: boolean } {
+  const byteLength = () => Buffer.byteLength(JSON.stringify(output), 'utf8');
+  const page = output.page && typeof output.page === 'object' && !Array.isArray(output.page) ? output.page as JsonMap : undefined;
+  if (!page) return { output, returnedBytes: byteLength(), truncated: false };
+
+  const initialBytes = byteLength();
+  let truncated = false;
+  const targetBytes = Math.max(1024, maxBytes - 768);
+
+  const semanticScopes = (): JsonMap[] => {
+    const scopes: JsonMap[] = [];
+    if (page.semantic && typeof page.semantic === 'object' && !Array.isArray(page.semantic)) scopes.push(page.semantic as JsonMap);
+    const frames = Array.isArray(page.frames) ? page.frames as JsonMap[] : [];
+    for (const frame of frames) {
+      if (frame?.semantic && typeof frame.semantic === 'object' && !Array.isArray(frame.semantic)) scopes.push(frame.semantic as JsonMap);
+    }
+    return scopes;
+  };
+
+  const updatePageMeta = (semantic: JsonMap, key: 'controls' | 'visibleText' | 'visualObjects', returned: number) => {
+    const pagination = semantic.pagination && typeof semantic.pagination === 'object' && !Array.isArray(semantic.pagination)
+      ? semantic.pagination as JsonMap
+      : undefined;
+    const meta = pagination?.[key] && typeof pagination[key] === 'object' && !Array.isArray(pagination[key])
+      ? pagination[key] as JsonMap
+      : undefined;
+    if (!meta) return;
+    const offset = Number(meta.offset ?? 0);
+    const total = Number(meta.total ?? returned);
+    meta.returned = returned;
+    meta.truncated = offset + returned < total;
+    if (meta.truncated) meta.nextOffset = offset + returned;
+    else delete meta.nextOffset;
+  };
+
+  while (byteLength() > targetBytes) {
+    const candidates: Array<{ owner: JsonMap; key: string; bytes: number; semantic?: JsonMap; paginationKey?: 'controls' | 'visibleText' | 'visualObjects' }> = [];
+    if (Array.isArray(page.accessibility) && page.accessibility.length > 0) {
+      candidates.push({ owner: page, key: 'accessibility', bytes: Buffer.byteLength(JSON.stringify(page.accessibility), 'utf8') });
+    }
+    for (const semantic of semanticScopes()) {
+      for (const key of ['controls', 'visibleText', 'visualObjects', 'headings', 'forms'] as const) {
+        const value = semantic[key];
+        if (Array.isArray(value) && value.length > 0) {
+          candidates.push({
+            owner: semantic,
+            key,
+            bytes: Buffer.byteLength(JSON.stringify(value), 'utf8'),
+            semantic,
+            ...(key === 'controls' || key === 'visibleText' || key === 'visualObjects' ? { paginationKey: key } : {})
+          });
+        }
+      }
+    }
+    candidates.sort((left, right) => right.bytes - left.bytes);
+    const candidate = candidates[0];
+    if (!candidate) {
+      const frames = Array.isArray(page.frames) ? page.frames as JsonMap[] : [];
+      if (frames.length === 0) break;
+      const totalFrames = Number((page.frameCoverage as JsonMap | undefined)?.totalFrames ?? frames.length);
+      frames.pop();
+      page.frameCoverage = { status: 'degraded', reason: 'output_budget', totalFrames, returnedFrames: frames.length };
+      truncated = true;
+      continue;
+    }
+    const value = candidate.owner[candidate.key] as unknown[];
+    const nextLength = Math.max(0, Math.floor(value.length / 2));
+    candidate.owner[candidate.key] = value.slice(0, nextLength);
+    if (candidate.key === 'visualObjects' && candidate.semantic) candidate.semantic.visuals = candidate.owner[candidate.key];
+    if (candidate.paginationKey && candidate.semantic) updatePageMeta(candidate.semantic, candidate.paginationKey, nextLength);
+    if (candidate.key === 'accessibility') {
+      if (page.accessibilityTotal === undefined) page.accessibilityTotal = value.length;
+      page.accessibilityTruncated = true;
+    } else if (!candidate.paginationKey && candidate.semantic) {
+      candidate.semantic.summaryTruncated = true;
+    }
+    truncated = true;
+  }
+
+  output.truncated = truncated;
+  if (truncated) output.totalBytes = initialBytes;
+  output.returnedBytes = 0;
+  output.returnedBytes = byteLength();
+  output.returnedBytes = byteLength();
+  return { output, returnedBytes: Number(output.returnedBytes), truncated };
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

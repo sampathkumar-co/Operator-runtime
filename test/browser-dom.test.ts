@@ -14,6 +14,7 @@ class FakeEvent {
 
 class FakeRoot {
   elements: FakeElement[] = [];
+  hit?: FakeElement;
   documentElement = {};
   defaultView: any = {
     getComputedStyle: (element: FakeElement) => ({ visibility: element.visibility, display: element.display, cursor: element.cursor, pointerEvents: element.pointerEvents, opacity: element.style.opacity ?? '1', fontSize: element.style.fontSize ?? '16px', backgroundColor: element.backgroundColor, fill: element.fill, stroke: element.stroke, color: element.style.color === 'olive' ? 'rgb(128, 128, 0)' : element.style.color }),
@@ -36,6 +37,8 @@ class FakeRoot {
   getElementById(id: string): FakeElement | undefined {
     return this.elements.find((element) => element.id === id);
   }
+
+  elementFromPoint(): FakeElement | undefined { return this.hit; }
 }
 
 class FakeElement {
@@ -288,6 +291,59 @@ test('semantic snapshot exposes bounded control state and geometry without passw
   assert.equal('value' in (byName.get('Password') as any), false);
   assert.equal((byName.get('Exact copy') as any).value, 'A  B\n C ');
   assert.equal((byName.get('Enabled') as any).checked, true);
+});
+
+test('Browser Observation V2 ranks before truncation and reports truthful pagination', (t) => {
+  const root = new FakeRoot();
+  const disabled = new FakeElement('button', 'Disabled first'); disabled.disabled = true; disabled.y = 1;
+  const first = new FakeElement('button', 'First active'); first.y = 10;
+  const second = new FakeElement('button', 'Second active'); second.y = 20;
+  attach(root, disabled, second, first); installDocument(t, root);
+
+  const firstPage = semanticSnapshotFunction({ maxControls: 1, maxText: 1, maxVisuals: 1 }) as any;
+  assert.equal(firstPage.schemaVersion, 2);
+  assert.equal(firstPage.controls[0].name, 'First active');
+  assert.deepEqual(firstPage.visualObjects, firstPage.visuals);
+  assert.deepEqual(firstPage.pagination.controls, {
+    offset: 0, limit: 1, returned: 1, total: 3, truncated: true, nextOffset: 1
+  });
+
+  const secondPage = semanticSnapshotFunction({ controlOffset: 1, maxControls: 1, maxText: 1, maxVisuals: 1 }) as any;
+  assert.equal(secondPage.controls[0].name, 'Second active');
+  assert.equal(secondPage.pagination.controls.nextOffset, 2);
+});
+
+test('shared DOM contract keeps inspect and actionability aligned for ancestor-hidden and pointer-blocked controls', (t) => {
+  const root = new FakeRoot();
+  const hiddenParent = new FakeElement('div'); hiddenParent.display = 'none';
+  const hiddenChild = new FakeElement('button', 'Hidden child'); hiddenChild.parentElement = hiddenParent; hiddenParent.children = [hiddenChild];
+  const blockedParent = new FakeElement('div'); blockedParent.pointerEvents = 'none';
+  const blockedChild = new FakeElement('button', 'Blocked child'); blockedChild.parentElement = blockedParent; blockedParent.children = [blockedChild];
+  attach(root, hiddenParent, hiddenChild, blockedParent, blockedChild); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.equal(snapshot.controls.some((control: any) => control.name === 'Hidden child'), false);
+  const blocked = snapshot.controls.find((control: any) => control.name === 'Blocked child');
+  assert.ok(blocked);
+  assert.equal(blocked.actionable, false);
+  assert.equal(blocked.pointerBlocked, true);
+  assert.equal((semanticLocatorFunction({ name: 'Blocked child' }) as any).count, 0);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Blocked child' }, value: null }) as any).error, /No matching/);
+});
+
+test('shared DOM contract marks center-point occlusion non-actionable before dispatch', (t) => {
+  const root = new FakeRoot();
+  const target = new FakeElement('button', 'Target');
+  const overlay = new FakeElement('div', 'Overlay');
+  attach(root, target, overlay); root.hit = overlay; installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Target');
+  assert.ok(observed);
+  assert.equal(observed.actionable, false);
+  assert.equal(observed.occluded, true);
+  assert.equal((semanticLocatorFunction({ name: 'Target' }) as any).count, 0);
+  assert.match((interactionFunction({ operation: 'click', target: { name: 'Target' }, value: null }) as any).error, /No matching/);
 });
 
 test('semantic snapshot exposes rendered leaf text but suppresses visually hidden text', (t) => {
