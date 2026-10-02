@@ -451,6 +451,30 @@ test('browser provider prevents a second equivalent no-progress action and prese
   });
 });
 
+test('browser no-progress detection groups parameter-varied drag attempts against unchanged state', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const drag = (id: string, deltaY: number) => provider.execute({
+      id, capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'drag_by', target: { role: 'textbox', name: 'Email' }, deltaX: 0, deltaY },
+      provenance: { kind: 'runtime' }
+    });
+    const first = await drag('drag-family-1', 80);
+    assert.equal(first.ok, true, first.error?.message);
+    assert.equal((first.output as any).stateDelta.progress, false);
+    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
+
+    const second = await drag('drag-family-2', 240);
+    assert.equal(second.ok, false);
+    assert.equal(second.error?.code, 'BROWSER_NO_PROGRESS');
+    assert.deepEqual((second.error?.details as any)?.actionFamily, { family: 'drag-displacement' });
+    assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
+  });
+});
+
 test('browser.verify independently reports VERIFIED and NOT_COMPLETE from public semantic state', async (t) => {
   const original = globalThis.WebSocket;
   Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });

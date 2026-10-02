@@ -77,6 +77,7 @@ class FakeElement {
   onEvent?: (event: FakeEvent) => void;
   x = 0;
   y = 0;
+  screenMatrix?: { a: number; b: number; c: number; d: number; e: number; f: number };
   ownerDocument!: FakeRoot;
   #attrs = new Map<string, string>();
 
@@ -90,6 +91,7 @@ class FakeElement {
   hasAttribute(name: string): boolean { return this.#attrs.has(name); }
   getRootNode(): FakeRoot { return this.ownerDocument; }
   getBoundingClientRect(): any { return { x: this.x, y: this.y, left: this.x, top: this.y, width: 20, height: 20 }; }
+  getScreenCTM(): any { return this.screenMatrix ?? null; }
   focus(): void { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
   setSelectionRange(start: number, end: number): void { this.selectionStart = start; this.selectionEnd = end; }
   click(): void { this.clicked = true; this.onEvent?.(new FakeEvent('click')); }
@@ -577,25 +579,35 @@ test('Browser Observation V2 refs are ephemeral, relationship-aware, and fail st
   assert.match(stale.error, /stale/i);
 });
 
-test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts', (t) => {
+test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts with explicit coordinate spaces', (t) => {
   const root = new FakeRoot();
   const polygon = new FakeElement('polygon');
   polygon.setAttribute('points', '0,0 10,0 10,10');
   polygon.setAttribute('aria-rowindex', '2');
   polygon.setAttribute('aria-colindex', '3');
   polygon.fill = 'rgb(1, 2, 3)';
-  attach(root, polygon); installDocument(t, root);
+  polygon.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
+  const line = new FakeElement('line');
+  line.setAttribute('x1', '2'); line.setAttribute('y1', '3'); line.setAttribute('x2', '12'); line.setAttribute('y2', '13');
+  line.stroke = 'rgb(0, 0, 0)'; line.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
+  attach(root, polygon, line); installDocument(t, root);
 
   const snapshot = semanticSnapshotFunction() as any;
   const visual = snapshot.visualObjects.find((item: any) => item.tag === 'polygon');
   assert.ok(visual);
   assert.equal(visual.primitive, 'polygon');
   assert.equal(visual.pointCount, 3);
+  assert.equal(visual.pointsCoordinateSpace, 'svg-local');
   assert.deepEqual(visual.points, [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]);
+  assert.equal(visual.viewportPointsCoordinateSpace, 'viewport');
+  assert.deepEqual(visual.viewportPoints, [{ x: 20, y: 30 }, { x: 30, y: 30 }, { x: 30, y: 40 }]);
   assert.equal(visual.row, 2);
   assert.equal(visual.column, 3);
   assert.equal(visual.geometry.coordinateSpace, 'viewport');
-  assert.equal('x1' in visual, false);
+
+  const lineVisual = snapshot.visualObjects.find((item: any) => item.tag === 'line');
+  assert.equal(lineVisual.line.coordinateSpace, 'svg-local');
+  assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43 });
 });
 
 

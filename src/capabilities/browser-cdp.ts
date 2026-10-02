@@ -387,7 +387,18 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
       const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
-      const noProgressKey = JSON.stringify({ targetId, actionIdentity, beforeRelevant, actionPayload });
+      const noProgressFamily = (() => {
+        if (operation === 'drag' || operation === 'drag_by') return { family: 'drag-displacement' };
+        if (operation === 'resize') return { family: 'resize-displacement' };
+        if (operation === 'drag_between') return { family: 'drag-between', toTarget: toTargetSpec };
+        if (operation === 'click_relative') return { family: 'click-relative' };
+        if (operation === 'key_press') return { family: 'key-press', key: action.input.key };
+        if (operation === 'hotkey') return { family: 'hotkey', keys: action.input.keys };
+        if (operation === 'type' || operation === 'select' || operation === 'set_value') return { family: operation, value: action.input.value ?? null };
+        if (operation === 'select_text_range') return { family: operation, start: action.input.start, end: action.input.end };
+        return { family: operation };
+      })();
+      const noProgressKey = JSON.stringify({ targetId, actionIdentity, beforeRelevant, noProgressFamily });
       let repeatedNoProgress = 0;
       if (operation !== 'hover' && !stateProgress) {
         repeatedNoProgress = (this.#noProgressHistory.get(noProgressKey) ?? 0) + 1;
@@ -397,7 +408,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
           this.#noProgressPrevented += 1;
           throw new OperatorError('BROWSER_NO_PROGRESS', 'The same browser action produced no meaningful state delta twice; re-observe and change strategy instead of repeating it.', {
             retryable: false,
-            details: { sideEffectState: 'known', repeatedAction: actionPayload, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
+            details: { sideEffectState: 'known', repeatedAction: actionPayload, actionFamily: noProgressFamily, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
           });
         }
       } else if (stateProgress) {

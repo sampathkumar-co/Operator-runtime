@@ -450,16 +450,36 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       rowSpan: finiteAttr('aria-rowspan'),
       columnSpan: finiteAttr('aria-colspan')
     };
+    const screenMatrix = (() => {
+      try {
+        const matrix = (element as Element & { getScreenCTM?: () => { a: number; b: number; c: number; d: number; e: number; f: number } | null }).getScreenCTM?.();
+        return matrix && [matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f].every(Number.isFinite) ? matrix : undefined;
+      } catch { return undefined; }
+    })();
+    const toViewport = (point: { x: number; y: number }) => screenMatrix ? {
+      x: Math.round((screenMatrix.a * point.x + screenMatrix.c * point.y + screenMatrix.e) * 1000) / 1000,
+      y: Math.round((screenMatrix.b * point.x + screenMatrix.d * point.y + screenMatrix.f) * 1000) / 1000
+    } : undefined;
     if (tag === 'polygon' || tag === 'polyline') {
       const nums = trim(element.getAttribute('points'), 2048).split(/[\s,]+/).map(Number).filter(Number.isFinite).slice(0, 128);
-      const points = [];
-      for (let index = 0; index + 1 < nums.length; index += 2) points.push({ x: nums[index], y: nums[index + 1] });
-      return { ...(points.length ? { points, pointCount: points.length } : {}), ...grid };
+      const points: Array<{ x: number; y: number }> = [];
+      for (let index = 0; index + 1 < nums.length; index += 2) points.push({ x: nums[index]!, y: nums[index + 1]! });
+      const viewportPoints = points.map(toViewport).filter((point): point is { x: number; y: number } => Boolean(point));
+      return { ...(points.length ? { points, pointCount: points.length, pointsCoordinateSpace: 'svg-local', ...(viewportPoints.length === points.length ? { viewportPoints, viewportPointsCoordinateSpace: 'viewport' } : {}) } : {}), ...grid };
     }
-    if (tag === 'line') return { line: { x1: finiteAttr('x1'), y1: finiteAttr('y1'), x2: finiteAttr('x2'), y2: finiteAttr('y2') }, ...grid };
-    if (tag === 'circle') return { circle: { cx: finiteAttr('cx'), cy: finiteAttr('cy'), r: finiteAttr('r') }, ...grid };
-    if (tag === 'ellipse') return { ellipse: { cx: finiteAttr('cx'), cy: finiteAttr('cy'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
-    if (tag === 'rect') return { svgRect: { x: finiteAttr('x'), y: finiteAttr('y'), width: finiteAttr('width'), height: finiteAttr('height'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
+    if (tag === 'line') {
+      const line = { coordinateSpace: 'svg-local', x1: finiteAttr('x1'), y1: finiteAttr('y1'), x2: finiteAttr('x2'), y2: finiteAttr('y2') };
+      const first = line.x1 === undefined || line.y1 === undefined ? undefined : toViewport({ x: line.x1, y: line.y1 });
+      const second = line.x2 === undefined || line.y2 === undefined ? undefined : toViewport({ x: line.x2, y: line.y2 });
+      return { line, ...(first && second ? { viewportLine: { coordinateSpace: 'viewport', x1: first.x, y1: first.y, x2: second.x, y2: second.y } } : {}), ...grid };
+    }
+    if (tag === 'circle') {
+      const circle = { coordinateSpace: 'svg-local', cx: finiteAttr('cx'), cy: finiteAttr('cy'), r: finiteAttr('r') };
+      const viewportCenter = circle.cx === undefined || circle.cy === undefined ? undefined : toViewport({ x: circle.cx, y: circle.cy });
+      return { circle, ...(viewportCenter ? { viewportCenter: { coordinateSpace: 'viewport', ...viewportCenter } } : {}), ...grid };
+    }
+    if (tag === 'ellipse') return { ellipse: { coordinateSpace: 'svg-local', cx: finiteAttr('cx'), cy: finiteAttr('cy'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
+    if (tag === 'rect') return { svgRect: { coordinateSpace: 'svg-local', x: finiteAttr('x'), y: finiteAttr('y'), width: finiteAttr('width'), height: finiteAttr('height'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
     return grid;
   };
   const legacySliderRoot = (element: Element) => {
