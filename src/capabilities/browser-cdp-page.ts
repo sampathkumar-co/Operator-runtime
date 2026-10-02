@@ -361,11 +361,23 @@ export function semanticSnapshotFunction() {
     .map(({ element, context }) => {
       const semanticRole = roleOf(element);
       const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      const rect = element.getBoundingClientRect();
+      const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
+      const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLOptionElement;
+      const readableValue = element.tagName === 'INPUT' && inputType === 'password'
+        ? ''
+        : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? trim((control as HTMLInputElement).value, 500) : '';
       return {
         tag: element.tagName.toLowerCase(),
         role,
         name: accessibleName(element),
-        type: element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text') : '',
+        type: inputType,
+        ...(readableValue ? { value: readableValue } : {}),
+        ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : {}),
+        ...(element.tagName === 'OPTION' ? { selected: Boolean((element as HTMLOptionElement).selected) } : {}),
+        ...(element.tagName === 'SELECT' ? { multiple: Boolean((element as HTMLSelectElement).multiple) } : {}),
+        disabled: Boolean((element as HTMLInputElement).disabled || element.getAttribute('aria-disabled') === 'true'),
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         ...(semanticRole === 'slider' ? {
           min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
           max: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).max || element.getAttribute('aria-valuemax') || '' : element.getAttribute('aria-valuemax') || ''),

@@ -47,6 +47,7 @@ class FakeElement {
   max = '';
   step = '';
   disabled = false;
+  checked = false;
   isContentEditable = false;
   clicked = false;
   cursor = 'auto';
@@ -254,6 +255,21 @@ test('pointer-style custom controls are discoverable through shadow roots and sa
   const snapshot = semanticSnapshotFunction() as any;
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Shadow action').context.shadowDepth, 1);
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
+});
+
+test('semantic snapshot exposes bounded control state and geometry without password values', (t) => {
+  const root = new FakeRoot();
+  const text = new FakeElement('input'); text.setAttribute('type', 'text'); text.setAttribute('placeholder', 'Name'); text.value = 'Alice'; text.x = 10; text.y = 20;
+  const password = new FakeElement('input'); password.setAttribute('type', 'password'); password.setAttribute('placeholder', 'Password'); password.value = 'super-secret';
+  const checkbox = new FakeElement('input'); checkbox.setAttribute('type', 'checkbox'); checkbox.setAttribute('aria-label', 'Enabled'); checkbox.checked = true;
+  attach(root, text, password, checkbox); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const byName = new Map(snapshot.controls.map((control: any) => [control.name, control]));
+  assert.equal((byName.get('Name') as any).value, 'Alice');
+  assert.deepEqual((byName.get('Name') as any).rect, { x: 10, y: 20, width: 20, height: 20 });
+  assert.equal('value' in (byName.get('Password') as any), false);
+  assert.equal((byName.get('Enabled') as any).checked, true);
 });
 
 test('semantic snapshot exposes rendered leaf text but suppresses visually hidden text', (t) => {
