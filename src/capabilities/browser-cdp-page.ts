@@ -293,6 +293,33 @@ export function semanticSnapshotFunction() {
     if (style && Number(style.opacity) === 0) return '';
     return trim(element.textContent, max);
   };
+  const cssEscape = (value: string) => {
+    const css = (viewOf(document.documentElement) as Window & { CSS?: { escape?: (input: string) => string } } | undefined)?.CSS;
+    return css?.escape ? css.escape(value) : value.replace(/[^A-Za-z0-9_-]/g, (char) => '\\' + char);
+  };
+  const selectorOf = (element: Element) => {
+    if (element.id) return '#' + cssEscape(element.id);
+    const parts: string[] = [];
+    let current: Element | null = element;
+    for (let depth = 0; current && depth < 8; depth += 1) {
+      const tag = current.tagName.toLowerCase();
+      const classList = Array.from(current.classList ?? []).filter((name) => /^[A-Za-z_-][A-Za-z0-9_-]*$/.test(name)).slice(0, 2);
+      let part = tag + classList.map((name) => '.' + cssEscape(name)).join('');
+      const parent = current.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current!.tagName);
+        if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
+      }
+      parts.unshift(part);
+      if (!parent || ['BODY', 'HTML'].includes(parent.tagName)) break;
+      if (parent.id) {
+        parts.unshift('#' + cssEscape(parent.id));
+        break;
+      }
+      current = parent;
+    }
+    return parts.join(' > ');
+  };
   const accessibleName = (element: Element) => {
     const aria = element.getAttribute('aria-label');
     if (aria) return trim(aria);
@@ -369,6 +396,7 @@ export function semanticSnapshotFunction() {
         : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? trim((control as HTMLInputElement).value, 500) : '';
       return {
         tag: element.tagName.toLowerCase(),
+        selector: selectorOf(element),
         role,
         name: accessibleName(element),
         type: inputType,
@@ -398,6 +426,7 @@ export function semanticSnapshotFunction() {
       const rect = element.getBoundingClientRect();
       return {
         tag: element.tagName.toLowerCase(),
+        selector: selectorOf(element),
         text: readableText(element),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         context
@@ -428,7 +457,7 @@ export function semanticSnapshotFunction() {
     if (rect.width * rect.height < 16) return [];
     const role = roleOf(element);
     const pointer = style?.cursor === 'pointer' && style.pointerEvents !== 'none';
-    return [{ tag: element.tagName.toLowerCase(), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName)), context }];
+    return [{ tag: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName)), context }];
   }).slice(0, 120);
   return {
     headings, controls, forms, visuals, visibleText,

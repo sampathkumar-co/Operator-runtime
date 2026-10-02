@@ -257,6 +257,22 @@ test('pointer-style custom controls are discoverable through shadow roots and sa
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
 });
 
+test('semantic snapshot emits distinct structural selectors for duplicate visible siblings', (t) => {
+  const root = new FakeRoot();
+  const parent = new FakeElement('section');
+  const first = new FakeElement('div', 'Open'); first.cursor = 'pointer';
+  const second = new FakeElement('div', 'Open'); second.cursor = 'pointer';
+  first.parentElement = parent; second.parentElement = parent; parent.children = [first, second];
+  attach(root, parent, first, second); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const controls = snapshot.controls.filter((control: any) => control.name === 'Open');
+  assert.equal(controls.length, 2);
+  assert.notEqual(controls[0].selector, controls[1].selector);
+  assert.match(controls[0].selector, /nth-of-type\(1\)/);
+  assert.match(controls[1].selector, /nth-of-type\(2\)/);
+});
+
 test('semantic snapshot exposes bounded control state and geometry without password values', (t) => {
   const root = new FakeRoot();
   const text = new FakeElement('input'); text.setAttribute('type', 'text'); text.setAttribute('placeholder', 'Name'); text.value = 'Alice'; text.x = 10; text.y = 20;
