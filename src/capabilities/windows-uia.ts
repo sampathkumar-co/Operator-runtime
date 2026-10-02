@@ -60,6 +60,7 @@ export type WindowsUiaOptions = {
   binaryPath?: string;
   timeoutMs?: number;
   platform?: NodeJS.Platform;
+  client?: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void };
 };
 
 class WindowsUiaSidecarClient {
@@ -227,7 +228,7 @@ class WindowsUiaSidecarClient {
 export class WindowsUiaProvider implements CapabilityProvider {
   readonly name = 'windows.uia';
   #platform: NodeJS.Platform;
-  #client: WindowsUiaSidecarClient;
+  #client: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void };
   #captureLeases = new Map<string, CaptureLease>();
 
   constructor(options: WindowsUiaOptions = {}) {
@@ -235,7 +236,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
     const binary = options.binaryPath
       ?? process.env.OPERATOR_WINDOWS_UIA_PATH
       ?? path.join(process.cwd(), 'native', 'windows-uia', 'target', 'release', 'operator-windows-uia.exe');
-    this.#client = new WindowsUiaSidecarClient(binary, options.timeoutMs);
+    this.#client = options.client ?? new WindowsUiaSidecarClient(binary, options.timeoutMs);
   }
 
   supports(action: ActionRequest): boolean {
@@ -289,12 +290,14 @@ export class WindowsUiaProvider implements CapabilityProvider {
       const op = error instanceof OperatorError
         ? error
         : new OperatorError('UIA_PROVIDER_FAILED', error instanceof Error ? error.message : String(error), { retryable: true });
+      const ambiguousMutation = action.risk !== 'read'
+        && ['UIA_SIDECAR_TIMEOUT', 'UIA_SIDECAR_CLOSED', 'UIA_SIDECAR_EXITED', 'EXECUTION_ABORTED'].includes(op.code);
       return {
         ok: false,
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('windows_uia', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: { code: op.code, message: op.message, retryable: ambiguousMutation ? false : op.retryable, sideEffectState: ambiguousMutation ? 'uncertain' : action.risk === 'read' ? 'none' : undefined },
         durationMs: Math.round(performance.now() - started)
       };
     }

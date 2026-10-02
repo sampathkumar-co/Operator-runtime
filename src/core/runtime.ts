@@ -4,6 +4,7 @@ import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
+import { conservativeSideEffectState, retrySafeWithoutReconciliation, validSideEffectState } from './side-effect.ts';
 
 export class OperatorRuntime {
   readonly router: CapabilityRouter;
@@ -95,13 +96,36 @@ export class OperatorRuntime {
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
         result.durationMs = Math.round(performance.now() - start);
         if (result.ok) return result;
-        failures.push(result.error ?? { code: 'PROVIDER_FAILED', message: `${provider.name} failed.` });
+        const sideEffectState = conservativeSideEffectState(canonicalAction.risk, result);
+        const failure = {
+          ...(result.error ?? { code: 'PROVIDER_FAILED', message: `${provider.name} failed.` }),
+          sideEffectState
+        };
+        failures.push(failure);
+        if (canonicalAction.risk !== 'read'
+          && (failure.retryable !== true || !retrySafeWithoutReconciliation(canonicalAction.risk, sideEffectState))) {
+          return { ...result, error: failure };
+        }
       } catch (error) {
-        if (context.signal?.aborted || isAbortError(error)) return abortedResult(canonicalAction, start);
+        if (context.signal?.aborted || isAbortError(error)) return abortedResult(canonicalAction, start, true);
         const op = error instanceof OperatorError
           ? error
           : new OperatorError('PROVIDER_EXCEPTION', error instanceof Error ? error.message : String(error), { retryable: true });
-        failures.push({ code: op.code, message: op.message, retryable: op.retryable });
+        const sideEffectState = thrownSideEffectState(canonicalAction.risk, op);
+        const failure = { code: op.code, message: op.message, retryable: op.retryable, sideEffectState };
+        failures.push(failure);
+        if (canonicalAction.risk !== 'read'
+          && (op.retryable !== true || !retrySafeWithoutReconciliation(canonicalAction.risk, sideEffectState))) {
+          return {
+            ok: false,
+            capability: canonicalAction.capability,
+            provider: provider.name,
+            evidence: [evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }),
+              evidence('execution', 'fail', op.message, { code: op.code, sideEffectState })],
+            error: failure,
+            durationMs: Math.round(performance.now() - start)
+          };
+        }
         if (!op.retryable) break;
       }
     }
@@ -126,13 +150,24 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'The operation was aborted');
 }
 
-function abortedResult(action: ActionRequest, start: number): ActionResult {
+function thrownSideEffectState(risk: ActionRequest['risk'], error: OperatorError): ActionResult['error']['sideEffectState'] {
+  if (risk === 'read') return 'none';
+  try {
+    if (error.details?.sideEffectState !== undefined) return validSideEffectState(error.details.sideEffectState);
+  } catch {
+    // Malformed exception metadata cannot prove that dispatch was side-effect free.
+  }
+  return 'uncertain';
+}
+
+function abortedResult(action: ActionRequest, start: number, afterDispatch = false): ActionResult {
+  const sideEffectState = action.risk === 'read' || !afterDispatch ? 'none' : 'uncertain';
   return {
     ok: false,
     capability: action.capability,
     provider: 'runtime',
     evidence: [evidence('execution', 'fail', 'Execution was cancelled before completion.', { code: 'EXECUTION_ABORTED' })],
-    error: { code: 'EXECUTION_ABORTED', message: 'Execution was cancelled before completion.', retryable: false },
+    error: { code: 'EXECUTION_ABORTED', message: 'Execution was cancelled before completion.', retryable: false, sideEffectState },
     durationMs: Math.round(performance.now() - start)
   };
 }

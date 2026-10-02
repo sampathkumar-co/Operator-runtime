@@ -371,22 +371,16 @@ export function createLocalAgentServer(options: {
       }
     }
 
-    await options.audit?.append({
-      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-      actionId: action.id,
-      providerId: result.provider,
-      capability: action.capability,
-      target: action.target,
-      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
-      risk: action.risk,
-      details: {
-        studioWorkflow: true,
-        durationMs: result.durationMs,
-        errorCode: result.error?.code,
-        sideEffectState: result.error?.sideEffectState,
-        autoResumedAfterApproval
-      }
-    });
+    try {
+      await options.audit?.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id, providerId: result.provider, capability: action.capability, target: action.target,
+        result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure', risk: action.risk,
+        details: { studioWorkflow: true, durationMs: result.durationMs, errorCode: result.error?.code, sideEffectState: result.error?.sideEffectState, autoResumedAfterApproval }
+      });
+    } catch (error) {
+      result = resultWithAuditDegradation(result, error);
+    }
     return result;
   };
 
@@ -1350,11 +1344,18 @@ export function createLocalAgentServer(options: {
         const ownedLease = authorization.workItem.lease;
         if (!ownedLease) throw new Error('Authorized team work lost its lease before execution.');
         const remainingLeaseMs = Math.max(1, Date.parse(ownedLease.expiresAt) - Date.now());
+        const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
+        const receipt = await options.teams.beginActionExecution(teamExecuteRoute[1]!, {
+          workerId, workItemId: teamExecuteRoute[2]!, leaseId, action: teamAction
+        });
+        if (receipt.status === 'completed') {
+          send(res, receipt.result.ok ? 200 : 409, receipt.result);
+          return;
+        }
         const controller = new AbortController();
         const actionKey = [teamExecuteRoute[1]!, teamExecuteRoute[2]!, leaseId, action.id].join(':');
         activeTeamActions.set(actionKey, { missionId: teamExecuteRoute[1]!, workItemId: teamExecuteRoute[2]!, workerId, controller });
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(remainingLeaseMs)]);
-        const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
         let result: ActionResult;
         let autoResumedAfterApproval = false;
         try {
@@ -1383,7 +1384,11 @@ export function createLocalAgentServer(options: {
             };
           }
         }
-        await options.audit?.append({
+        result = await options.teams.completeActionExecution(teamExecuteRoute[1]!, {
+          workerId, workItemId: teamExecuteRoute[2]!, leaseId, action: teamAction, result
+        });
+        try {
+          await options.audit?.append({
           traceId: teamExecuteRoute[1]!,
           missionId: teamExecuteRoute[1]!,
           workItemId: teamExecuteRoute[2]!,
@@ -1401,7 +1406,11 @@ export function createLocalAgentServer(options: {
             teamLeaseId: leaseId,
             autoResumedAfterApproval
           }
-        });
+          });
+        } catch (error) {
+          const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'AUDIT_APPEND_FAILED';
+          result = await options.teams.recordActionAuditFailure(teamExecuteRoute[1]!, teamAction.id, result, code);
+        }
         send(res, result.ok ? 200 : 409, result);
         } finally {
           activeTeamActions.delete(actionKey);
@@ -1942,28 +1951,23 @@ export function createLocalAgentServer(options: {
             teachCaptureCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CAPTURE_FAILED';
           }
         }
-        await options.audit?.append({
-          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-          actionId: action.id,
-          providerId: result.provider,
-          capability: action.capability,
-          target: action.target,
-          result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
-          risk: action.risk,
-          details: {
-            provenanceKind: action.provenance.kind,
-            durationMs: result.durationMs,
-            errorCode: result.error?.code,
-            sideEffectState: result.error?.sideEffectState,
-            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
-            autoResumedAfterApproval,
-            enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
-            enterpriseRoleIds: requestPermissionDecision.roleIds,
-            enterpriseBindingIds: requestPermissionDecision.bindingIds,
-            teachCaptured,
-            teachCaptureCode
-          }
-        });
+        try {
+          await options.audit?.append({
+            ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+            actionId: action.id, providerId: result.provider, capability: action.capability, target: action.target,
+            result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure', risk: action.risk,
+            details: {
+              provenanceKind: action.provenance.kind, durationMs: result.durationMs, errorCode: result.error?.code,
+              sideEffectState: result.error?.sideEffectState,
+              sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
+              autoResumedAfterApproval, enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
+              enterpriseRoleIds: requestPermissionDecision.roleIds, enterpriseBindingIds: requestPermissionDecision.bindingIds,
+              teachCaptured, teachCaptureCode
+            }
+          });
+        } catch (error) {
+          result = resultWithAuditDegradation(result, error);
+        }
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1996,6 +2000,18 @@ export function createLocalAgentServer(options: {
       if (!server.listening) return;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
+  };
+}
+
+function resultWithAuditDegradation(result: ActionResult, error: unknown): ActionResult {
+  const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'AUDIT_APPEND_FAILED';
+  return {
+    ...result,
+    evidence: [...result.evidence, {
+      kind: 'audit_persistence', status: 'fail',
+      message: 'The primary action result is authoritative, but its post-execution audit record could not be persisted.',
+      data: { code }, timestamp: new Date().toISOString()
+    }]
   };
 }
 

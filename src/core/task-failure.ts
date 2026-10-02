@@ -44,7 +44,15 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   if (/PRECONDITION|STATE_CHANGED|FINGERPRINT|STALE|TARGET_NOT_FOUND|ELEMENT_NOT_FOUND|WAIT_TIMEOUT|TARGET_NOT_UNIQUE|AMBIGUOUS/i.test(code)) {
     return { class: 'stale-state', strategy: 'reobserve', retryable: true, code };
   }
-  if (/TARGET_EXISTS|CONTENT_MISMATCH|POSTCONDITION|ARTIFACT.*MISMATCH/i.test(code)) {
+  if (/POSTCONDITION|VERIFY|VERIFICATION/i.test(code)) {
+    return { class: 'postcondition', strategy: 'fail', retryable: false, code };
+  }
+  if (/ARTIFACT.*MISMATCH/i.test(code)) {
+    return error?.sideEffectState === 'none'
+      ? { class: 'target-drift', strategy: 'repair', retryable: true, code }
+      : { class: 'postcondition', strategy: 'fail', retryable: false, code };
+  }
+  if (/TARGET_EXISTS|CONTENT_MISMATCH/i.test(code)) {
     return { class: 'target-drift', strategy: 'repair', retryable: true, code };
   }
   if (/TIMEOUT|TEMPORARY|UNAVAILABLE|OFFLINE|CONNECTION|RELAY_RESULT_PENDING|RATE_LIMIT|BUSY/i.test(code) || error?.retryable === true) {
@@ -52,9 +60,6 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   }
   if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY/i.test(code)) {
     return { class: 'policy', strategy: 'fail', retryable: false, code };
-  }
-  if (/POSTCONDITION|VERIFY|VERIFICATION/i.test(code)) {
-    return { class: 'postcondition', strategy: 'fail', retryable: false, code };
   }
   if (error) return { class: 'permanent', strategy: 'fail', retryable: false, code };
   return { class: 'unknown', strategy: 'fail', retryable: false, code };

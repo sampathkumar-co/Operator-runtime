@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WindowsUiaProvider } from '../src/capabilities/windows-uia.ts';
+import { OperatorError } from '../src/core/errors.ts';
 
 const provenance = { kind: 'chatgpt' as const };
 
@@ -121,4 +122,29 @@ test('visual capture remains a Windows-only provider capability', () => {
   const windows = new WindowsUiaProvider({ platform: 'win32', binaryPath: '/definitely/missing/operator-windows-uia.exe' });
   assert.equal(windows.supports({ id: 'v2', capability: 'visual.capture', risk: 'read', input: {}, provenance }), true);
   windows.close();
+});
+
+test('mutating UIA transport timeout is uncertain and is never replayed after late success', async () => {
+  let calls = 0;
+  let lateSuccess = false;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call() {
+        calls += 1;
+        setImmediate(() => { lateSuccess = true; });
+        throw new OperatorError('UIA_SIDECAR_TIMEOUT', 'operate timed out', { retryable: true });
+      },
+      close() {}
+    }
+  });
+  const result = await provider.execute({
+    id: 'late-operate', capability: 'app.operate', risk: 'external', provenance,
+    input: { operation: 'invoke', selector: { automationId: 'save' } }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lateSuccess, true);
+  assert.equal(calls, 1);
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  assert.equal(result.error?.retryable, false);
 });

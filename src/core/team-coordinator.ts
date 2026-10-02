@@ -5,6 +5,8 @@ import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import type { ActionRisk, SideEffectState } from './types.ts';
 import { validSideEffectState } from './side-effect.ts';
+import type { ActionRequest, ActionResult } from './types.ts';
+import { canonicalJson } from './action-identity.ts';
 
 export type TeamRole = 'supervisor' | 'planner' | 'coder' | 'tester' | 'browser' | 'ui' | 'verifier' | 'general';
 export type TeamMissionState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
@@ -96,8 +98,24 @@ export interface TeamMission {
   workItems: TeamWorkItem[];
   blackboard: TeamBlackboardEntry[];
   events: TeamEvent[];
+  actionReceipts: TeamActionReceipt[];
   startedAt?: string;
   deadlineAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamActionReceipt {
+  missionId: string;
+  workItemId: string;
+  workerId: string;
+  leaseId: string;
+  actionId: string;
+  actionDigest: string;
+  capability: string;
+  risk: ActionRisk;
+  state: 'DISPATCHING' | 'COMPLETED' | 'UNCERTAIN';
+  result?: ActionResult;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,6 +147,7 @@ const MAX_RESOURCES = 5000;
 const MAX_EVENTS = 20_000;
 const MAX_BLACKBOARD_ENTRIES = 2000;
 const MAX_BLACKBOARD_VALUE_BYTES = 64 * 1024;
+const MAX_ACTION_RECEIPTS = 4000;
 const STORE_OPTIONS = {
   maxBytes: MAX_MISSION_BYTES,
   errorCode: 'TEAM_STATE_CORRUPT',
@@ -201,6 +220,7 @@ export class TeamCoordinator {
       workItems,
       blackboard: [],
       events: [],
+      actionReceipts: [],
       createdAt: now,
       updatedAt: now
     };
@@ -478,6 +498,92 @@ export class TeamCoordinator {
     if (gateError) throw new OperatorError(gateError.code, gateError.message);
     if (!authorized) throw new OperatorError('TEAM_EXECUTION_DENIED', 'Work execution authorization was not granted.');
     return { mission, workItem: authorized };
+  }
+
+  async beginActionExecution(missionId: string, input: {
+    workerId: string; workItemId: string; leaseId: string; action: ActionRequest;
+  }): Promise<{ status: 'dispatch' } | { status: 'completed'; result: ActionResult }> {
+    let outcome: { status: 'dispatch' } | { status: 'completed'; result: ActionResult } | { status: 'uncertain' } | undefined;
+    const digest = actionDigest(input.action);
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      const item = requireWorkItem(mission, input.workItemId);
+      requireLease(item, input.workerId, input.leaseId, mission.epoch);
+      const sameId = mission.actionReceipts.find((receipt) => receipt.actionId === input.action.id);
+      if (sameId) {
+        if (sameId.missionId !== mission.id || sameId.workItemId !== item.id || sameId.workerId !== input.workerId
+          || sameId.leaseId !== input.leaseId || sameId.actionDigest !== digest
+          || sameId.capability !== input.action.capability || sameId.risk !== input.action.risk) {
+          throw new OperatorError('TEAM_ACTION_RECEIPT_CONFLICT', 'Action id is already bound to a different team execution identity or payload.');
+        }
+        if (sameId.state === 'COMPLETED' && sameId.result) {
+          outcome = { status: 'completed', result: structuredClone(sameId.result) };
+          return mission;
+        }
+        if (sameId.state === 'DISPATCHING') {
+          sameId.state = 'UNCERTAIN';
+          sameId.updatedAt = new Date().toISOString();
+          appendEvent(mission, 'work.action_uncertain', input.workerId, item.id, { actionId: input.action.id });
+        }
+        outcome = { status: 'uncertain' };
+        return mission;
+      }
+      if (mission.actionReceipts.length >= MAX_ACTION_RECEIPTS) throw new OperatorError('TEAM_ACTION_RECEIPT_LIMIT', 'Team action receipt limit reached.');
+      const now = new Date().toISOString();
+      mission.actionReceipts.push({
+        missionId: mission.id, workItemId: item.id, workerId: input.workerId, leaseId: input.leaseId,
+        actionId: input.action.id, actionDigest: digest, capability: input.action.capability, risk: input.action.risk,
+        state: 'DISPATCHING', createdAt: now, updatedAt: now
+      });
+      mission.updatedAt = now;
+      appendEvent(mission, 'work.action_dispatching', input.workerId, item.id, { actionId: input.action.id, capability: input.action.capability });
+      outcome = { status: 'dispatch' };
+      return mission;
+    });
+    if (outcome?.status === 'uncertain') throw new OperatorError('TEAM_ACTION_RECONCILIATION_REQUIRED', 'A prior dispatch of this team action has uncertain outcome and cannot be replayed.');
+    if (!outcome) throw new OperatorError('TEAM_EXECUTION_DENIED', 'Team action receipt could not be prepared.');
+    return outcome;
+  }
+
+  async completeActionExecution(missionId: string, input: {
+    workerId: string; workItemId: string; leaseId: string; action: ActionRequest; result: ActionResult;
+  }): Promise<ActionResult> {
+    const digest = actionDigest(input.action);
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      const receipt = mission.actionReceipts.find((candidate) => candidate.actionId === input.action.id);
+      if (!receipt || receipt.workItemId !== input.workItemId || receipt.workerId !== input.workerId
+        || receipt.leaseId !== input.leaseId || receipt.actionDigest !== digest) {
+        throw new OperatorError('TEAM_ACTION_RECEIPT_CONFLICT', 'Team action completion does not match its durable dispatch receipt.');
+      }
+      if (receipt.state === 'UNCERTAIN') throw new OperatorError('TEAM_ACTION_RECONCILIATION_REQUIRED', 'Uncertain team action cannot be completed without reconciliation.');
+      if (receipt.state === 'COMPLETED') return mission;
+      receipt.state = 'COMPLETED';
+      receipt.result = structuredClone(input.result);
+      receipt.updatedAt = new Date().toISOString();
+      mission.updatedAt = receipt.updatedAt;
+      appendEvent(mission, 'work.action_completed', input.workerId, input.workItemId, { actionId: input.action.id, ok: input.result.ok });
+      return mission;
+    });
+    return structuredClone(input.result);
+  }
+
+  async recordActionAuditFailure(missionId: string, actionId: string, result: ActionResult, code: string): Promise<ActionResult> {
+    const degraded: ActionResult = {
+      ...structuredClone(result),
+      evidence: [...result.evidence, { kind: 'audit_persistence', status: 'fail', message: 'The action result is authoritative, but its post-execution audit record could not be persisted.', data: { code }, timestamp: new Date().toISOString() }]
+    };
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      const receipt = mission.actionReceipts.find((candidate) => candidate.actionId === actionId && candidate.state === 'COMPLETED');
+      if (!receipt) throw new OperatorError('TEAM_ACTION_RECEIPT_NOT_FOUND', 'Completed team action receipt was not found for audit degradation.');
+      receipt.result = structuredClone(degraded);
+      receipt.updatedAt = new Date().toISOString();
+      mission.updatedAt = receipt.updatedAt;
+      appendEvent(mission, 'work.action_audit_degraded', receipt.workerId, receipt.workItemId, { actionId, code });
+      return mission;
+    });
+    return degraded;
   }
 
   async complete(missionId: string, input: {
@@ -873,7 +979,13 @@ function validateMission(input: unknown): TeamMission {
     cloneBoundedJson(entry.value, MAX_BLACKBOARD_VALUE_BYTES, 'blackboard value');
   }
   if (!Array.isArray(mission.events) || mission.events.length > MAX_EVENTS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission events are invalid.');
+  if (mission.actionReceipts === undefined) mission.actionReceipts = [];
+  if (!Array.isArray(mission.actionReceipts) || mission.actionReceipts.length > MAX_ACTION_RECEIPTS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission action receipts are invalid.');
   return mission;
+}
+
+function actionDigest(action: ActionRequest): string {
+  return crypto.createHash('sha256').update(canonicalJson(action)).digest('hex');
 }
 
 function validateEvidence(input: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>): Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }> {

@@ -852,8 +852,12 @@ test('an in-flight pause survives action completion and can be resumed durably',
   });
   const running = orchestrator.run(task.id);
   await provider.startedPromise;
-  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  let pauseSettled = false;
+  const pausing = orchestrator.pause(task.id).finally(() => { pauseSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pauseSettled, false);
   provider.release();
+  assert.equal((await pausing).state, 'PAUSED');
   const paused = await running;
   assert.equal(paused.state, 'PAUSED');
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
@@ -913,8 +917,9 @@ test('concurrent cancel cannot be overwritten by resume', async (t) => {
 
   const initialRun = orchestrator.run(task.id);
   await provider.startedPromise;
-  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  const pausing = orchestrator.pause(task.id);
   provider.release();
+  assert.equal((await pausing).state, 'PAUSED');
   assert.equal((await initialRun).state, 'PAUSED');
 
   const resumed = orchestrator.resume(task.id);
@@ -978,6 +983,78 @@ test('cancelling an in-flight task aborts provider execution and persists an int
   assert.equal(cancelled.execution?.records[0]?.state, 'INTERRUPTED');
   assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
   assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
+});
+
+class IgnoringAbortMutationProvider implements CapabilityProvider {
+  readonly name = 'test.ignoring-abort-mutation';
+  started!: () => void;
+  release!: () => void;
+  readonly startedPromise = new Promise<void>((resolve) => { this.started = resolve; });
+  readonly releasePromise = new Promise<void>((resolve) => { this.release = resolve; });
+  supports(action: ActionRequest): boolean { return action.capability === 'file.write'; }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.started();
+    await this.releasePromise;
+    return { ok: true, capability: action.capability, provider: this.name, output: {}, evidence: [], durationMs: 0 };
+  }
+}
+
+class OneWritePlanner extends OneStepPlanner {
+  override next({ task }: TaskPlannerContext): PlannerDecision {
+    return task.execution!.plannerState.phase === 'complete'
+      ? { type: 'complete', message: 'done' }
+      : { type: 'step', key: 'one-write', title: 'One delayed mutation', capability: 'file.write', input: { path: 'output.txt', content: 'changed' } };
+  }
+}
+
+test('cancel does not return terminal state before an abort-ignoring mutation settles', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-quiesce-');
+  const state = await tempDir(t, 'operator-task-cancel-quiesce-state-');
+  const provider = new IgnoringAbortMutationProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel only after mutation settles.', authorizedScope: [root], successConditions: ['truthful cancellation'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' }
+  });
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  let cancelSettled = false;
+  const cancelling = orchestrator.cancel(task.id).finally(() => { cancelSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancelSettled, false);
+  assert.equal((await new TaskStore(state).get(task.id)).state, 'RUNNING');
+  provider.release();
+  const cancelled = await cancelling;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal((await running).state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.sideEffectState, 'known');
+});
+
+test('post-mutation executor exception is recorded uncertain instead of side-effect free', async (t) => {
+  const root = await tempDir(t, 'operator-task-executor-uncertain-');
+  const state = await tempDir(t, 'operator-task-executor-uncertain-state-');
+  const target = path.join(root, 'output.txt');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()],
+    executeAction: async () => {
+      await fs.writeFile(target, 'mutated', 'utf8');
+      throw new Error('post-execution bookkeeping failed');
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Preserve mutation truth.', authorizedScope: [root], successConditions: ['requires reconciliation'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' }
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(await fs.readFile(target, 'utf8'), 'mutated');
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.execution?.records[0]?.sideEffectState, 'uncertain');
+  assert.equal(failed.execution?.records[0]?.errorCode, 'TASK_EXECUTOR_EXCEPTION');
 });
 
 test('a durable execution lease prevents a second orchestrator from duplicating an in-flight action', async (t) => {

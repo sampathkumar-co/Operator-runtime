@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -11,7 +11,7 @@ import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
 import { verifyTaskCompletion } from './task-verifier.ts';
-import { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
+import { conservativeSideEffectState, retrySafeWithoutReconciliation, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
 
@@ -339,6 +339,7 @@ export class TaskOrchestrator {
       const learningContext = semanticLearningContext(goal, task);
       let result: ActionResult;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
+      let executionDispatched = false;
       try {
         if (this.#resourceLeases) {
           resourceLease = await this.#resourceLeases.acquire(
@@ -347,6 +348,7 @@ export class TaskOrchestrator {
             risk === 'read' ? 'shared' : 'exclusive'
           );
         }
+        executionDispatched = true;
         result = await this.#executeAction(action, permissions, { signal, learningContext });
       } catch (error) {
         const code = error instanceof OperatorError ? error.code : 'TASK_EXECUTOR_EXCEPTION';
@@ -360,7 +362,7 @@ export class TaskOrchestrator {
             code,
             message: error instanceof Error ? error.message : String(error),
             retryable: error instanceof OperatorError ? error.retryable : false,
-            sideEffectState: 'none'
+            sideEffectState: executorExceptionSideEffectState(risk, error, executionDispatched)
           }
         };
       } finally {
@@ -386,7 +388,9 @@ export class TaskOrchestrator {
       }
       const latest = await this.#store.get(task.id);
       await assertLease();
-      const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED' ? latest.state : undefined;
+      const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED'
+        ? latest.state
+        : this.#controlRequests.get(taskId);
       task = latest;
       const latestExecution = task.execution!;
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
@@ -521,11 +525,9 @@ export class TaskOrchestrator {
     }
   }
 
-  async pause(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'PAUSED'); }
+  async pause(taskId: string): Promise<TaskCapsule> { return await this.#requestControl(taskId, 'PAUSED'); }
   async cancel(taskId: string): Promise<TaskCapsule> {
-    const task = await this.#setControlState(taskId, 'CANCELLED');
-    this.#controllers.get(taskId)?.abort();
-    return task;
+    return await this.#requestControl(taskId, 'CANCELLED');
   }
   async resume(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
@@ -565,6 +567,23 @@ export class TaskOrchestrator {
         if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
         return task;
       });
+    } catch (error) {
+      if (previous) this.#controlRequests.set(taskId, previous);
+      else this.#controlRequests.delete(taskId);
+      throw error;
+    }
+  }
+
+  async #requestControl(taskId: string, state: 'PAUSED' | 'CANCELLED'): Promise<TaskCapsule> {
+    const active = this.#active.get(taskId);
+    if (!active) return await this.#setControlState(taskId, state);
+    const previous = this.#controlRequests.get(taskId);
+    this.#controlRequests.set(taskId, state);
+    if (state === 'CANCELLED') this.#controllers.get(taskId)?.abort();
+    try {
+      // A terminal/paused state is not returned until the active provider has
+      // settled and the runner has durably recorded its side-effect truth.
+      return await active;
     } catch (error) {
       if (previous) this.#controlRequests.set(taskId, previous);
       else this.#controlRequests.delete(taskId);
@@ -665,6 +684,14 @@ export class TaskOrchestrator {
     else await this.#store.put(task);
     return task;
   }
+}
+
+function executorExceptionSideEffectState(risk: ActionRisk, error: unknown, dispatched: boolean): SideEffectState {
+  if (risk === 'read' || !dispatched) return 'none';
+  if (error instanceof OperatorError && error.details?.sideEffectState !== undefined) {
+    try { return validSideEffectState(error.details.sideEffectState); } catch { /* fail closed below */ }
+  }
+  return 'uncertain';
 }
 
 export class ProjectQualityGatePlanner implements TaskPlanner {

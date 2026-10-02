@@ -51,6 +51,13 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
   assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
+  for (const code of ['BROWSER_POSTCONDITION_FAILED', 'DOCKER_POSTCONDITION_FAILED', 'PROCESS_TERMINATE_POSTCONDITION_FAILED']) {
+    assert.deepEqual(classifyTaskFailure({ code, message: 'verification failed', retryable: true, sideEffectState: 'uncertain' }), {
+      class: 'postcondition', strategy: 'fail', retryable: false, code
+    });
+  }
+  assert.equal(classifyTaskFailure({ code: 'PROJECT_ARTIFACT_MISMATCH', message: 'drift', sideEffectState: 'none' }).strategy, 'repair');
+  assert.equal(classifyTaskFailure({ code: 'PROJECT_ARTIFACT_MISMATCH', message: 'unknown', sideEffectState: 'uncertain' }).strategy, 'fail');
 });
 
 test('stage3 graph node identity is stable across reconstruction and dependencies remain explicit', () => {

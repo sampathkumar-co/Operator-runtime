@@ -197,7 +197,23 @@ export class StudioWorkflowExecutor {
           });
           const execute = options.executeAction
             ?? ((candidate: ActionRequest, permissions: PermissionProfile, signal?: AbortSignal) => this.#runtime.execute(candidate, permissions, { signal, learningContext: `studio:${current.workflowId}` }));
-          const result = await execute(action, this.#permissions, options.signal);
+          let result: ActionResult;
+          try {
+            result = await execute(action, this.#permissions, options.signal);
+          } catch (error) {
+            const code = error instanceof OperatorError ? error.code : 'STUDIO_EXECUTOR_EXCEPTION';
+            const sideEffectState = freshStep.risk === 'read' ? 'none' : exceptionSideEffectState(error);
+            run = await this.#update(runId, (mutable) => {
+              const record = requireStep(mutable, freshStep.key);
+              record.provider = 'studio-executor';
+              record.sideEffectState = sideEffectState;
+              record.errorCode = code;
+              record.finishedAt = this.#clock().toISOString();
+              record.state = sideEffectState === 'uncertain' ? 'NEEDS_RECONCILIATION' : 'FAILED';
+              mutable.state = sideEffectState === 'uncertain' ? 'BLOCKED' : 'FAILED';
+            });
+            return run;
+          }
           const sideEffectState = conservativeSideEffectState(freshStep.risk, result);
           run = await this.#update(runId, (mutable) => {
             const record = requireStep(mutable, freshStep.key);
@@ -443,6 +459,11 @@ function reconciliationContract(run: StudioWorkflowRun, step: StudioRunStep, res
     inputDigest: step.inputDigest,
     resolution
   };
+}
+
+function exceptionSideEffectState(error: unknown): 'none' | 'known' | 'uncertain' {
+  const stated = error instanceof OperatorError ? error.details?.sideEffectState : undefined;
+  return stated === 'none' || stated === 'known' || stated === 'uncertain' ? stated : 'uncertain';
 }
 
 function validateState(input: unknown): StudioRunStateFile {
