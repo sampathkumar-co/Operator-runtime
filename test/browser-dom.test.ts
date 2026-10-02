@@ -707,6 +707,25 @@ test('bounded text selection uses visible control offsets and verifies its postc
 });
 
 
+test('Browser Observation V2 exposes a bounded page scroll target when the document can scroll', (t) => {
+  const root = new FakeRoot();
+  const scroller = new FakeElement('html');
+  scroller.scrollTop = 25;
+  scroller.scrollHeight = 600;
+  scroller.clientHeight = 120;
+  (root as any).scrollingElement = scroller;
+  attach(root, scroller); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.ok(snapshot.pageScroll?.ref);
+  assert.equal(snapshot.pageScroll.scroll.top, 25);
+  assert.equal(snapshot.pageScroll.scroll.canScrollY, true);
+
+  const located = semanticLocatorFunction({ ref: snapshot.pageScroll.ref }) as any;
+  assert.equal(located.count, 1);
+  assert.equal(located.matches[0].scroll.canScrollY, true);
+});
+
 test('Browser Observation V2 marks autocomplete text controls and preserves the hint through lookup and typing', (t) => {
   const root = new FakeRoot();
   const input = new FakeElement('input');

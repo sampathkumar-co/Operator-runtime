@@ -29,6 +29,7 @@ type Connection = {
   socket: WebSocket;
   deviceId: string;
   sessionId: string;
+  logicalSessionId: string;
   sessionJti: string;
   capabilities: string[];
   resourceProfile?: {
@@ -185,6 +186,7 @@ export class RelayHub {
       .map((connection) => ({
         deviceId: connection.deviceId,
         sessionId: connection.sessionId,
+        logicalSessionId: connection.logicalSessionId,
         capabilities: [...connection.capabilities],
         connectedAt: connection.connectedAt,
         lastSeenAt: connection.lastSeenAt
@@ -444,6 +446,9 @@ export class RelayHub {
       requiredScopes: ['relay:connect'],
       expectedSubjectDeviceId: deviceId
     });
+    const logicalSessionId = payload.logicalSessionId === undefined
+      ? session.jti
+      : validUuid(String(payload.logicalSessionId ?? ''), 'logicalSessionId');
     const registered = (await this.#devices.listDevices()).find((device) => device.deviceId === deviceId);
     if (!registered || registered.status !== 'active') throw new OperatorError('DEVICE_REVOKED', 'Relay device is not an active paired device.');
     if (registered.fingerprint !== fingerprint || session.subjectFingerprint !== fingerprint) throw new OperatorError('RELAY_HELLO_IDENTITY_MISMATCH', 'Relay hello fingerprint does not match paired/session identity.');
@@ -462,7 +467,7 @@ export class RelayHub {
       try { previous.socket.close(4001, 'connection superseded'); } catch { /* noop */ }
     }
     const connection: Connection = {
-      socket, deviceId, sessionId, sessionJti: session.jti, capabilities,
+      socket, deviceId, sessionId, logicalSessionId, sessionJti: session.jti, capabilities,
       ...(resourceProfile ? { resourceProfile } : {}),
       connectedAt: now, lastSeenAt: now,
       readConcurrency,
@@ -473,6 +478,7 @@ export class RelayHub {
       type: 'welcome',
       protocol: 1,
       connectionId: sessionId,
+      logicalSessionId,
       resumeFromSeq: reconciled.lastAckedSeq,
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
       heartbeatMs: HEARTBEAT_MS,
@@ -497,12 +503,16 @@ export class RelayHub {
       throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery could be authorized.');
     }
     const connection = this.#connections.get(authority.deviceId);
-    if (!connection || connection.socket.readyState !== WebSocket.OPEN || (expectedSessionId && connection.sessionId !== expectedSessionId)) {
-      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection changed before delivery could be authorized.', { retryable: true });
+    if (!connection || connection.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'Relay transport is temporarily unavailable for the authorized device.', { retryable: true, details: { deviceId: authority.deviceId, recoverability: 'automatic', transportChanged: true, safeToRetry: true } });
     }
-    if (!(await this.#sessions.isActive(connection.sessionJti, authority.deviceId))) {
-      this.invalidateSession(connection.sessionJti, 'session no longer active');
-      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay session is no longer active.');
+    // A transport/sessionId replacement is not an authority change. Credential
+    // rotation and reconnect may replace the WebSocket while the device,
+    // account authority generation, and capability envelope remain equivalent.
+    void expectedSessionId;
+    if (!(await this.#sessions.isConnectionContinuable(connection.sessionJti, authority.deviceId))) {
+      this.invalidateSession(connection.sessionJti, 'session no longer authorized');
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay credential authority is no longer valid for this device.');
     }
     const missing = requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
     if (missing.length > 0) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before delivery authorization.');
@@ -511,12 +521,12 @@ export class RelayHub {
 
   #assertCurrentDispatchConnection(expected: Connection, requiredCapabilities: string[]): void {
     const current = this.#connections.get(expected.deviceId);
-    if (current !== expected || current.socket.readyState !== WebSocket.OPEN) {
-      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection changed before dispatch success could be committed.', { retryable: true });
+    if (!current || current.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'Relay transport changed before dispatch success could be committed.', { retryable: true, details: { deviceId: expected.deviceId, recoverability: 'automatic', transportChanged: true, safeToRetry: true } });
     }
     const missing = requiredCapabilities.filter((capability) => !current.capabilities.includes(capability));
     if (missing.length > 0) {
-      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before dispatch success could be committed.', { retryable: true });
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before dispatch success could be committed.', { retryable: false, details: { deviceId: expected.deviceId, recoverability: 'security-terminal', authorityChanged: true, safeToRetry: false } });
     }
   }
 

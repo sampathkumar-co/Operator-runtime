@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
-import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
 
 class FakeSocket implements RelaySocketLike {
   readyState = 0;
@@ -63,6 +63,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   const delivered: any[] = [];
   const acknowledged: any[] = [];
   const statuses: RelayClientStatus[] = [];
+  const connectionStates: RelayConnectionState[] = [];
   let client!: RelayClient;
 
   const factory = () => {
@@ -104,6 +105,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     onDelivery: async (delivery) => { delivered.push(delivery); },
     onAcknowledged: async (delivery) => { acknowledged.push({ delivery, state: await client.state() }); },
     onStatus: (status) => statuses.push(status),
+    onConnectionState: (status) => connectionStates.push(status),
     random: () => 0,
     sleep: async () => {}
   });
@@ -122,9 +124,13 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     { state: 'socket-connected' },
     { state: 'authenticated-ready', capabilityCount: 2 },
     { state: 'reconnect-wait', code: 'RELAY_SOCKET_CLOSED', delayMs: 250 },
-    { state: 'socket-connected' },
-    { state: 'authenticated-ready', capabilityCount: 2 }
+    { state: 'socket-connected' }
   ]);
+  assert.deepEqual(connectionStates.map((item) => item.state), [
+    'STARTING', 'CONNECTING', 'AUTHENTICATING', 'READY',
+    'RECONNECTING', 'CONNECTING', 'AUTHENTICATING', 'SHUTTING_DOWN'
+  ]);
+  assert.deepEqual(connectionStates[4], { state: 'RECONNECTING', code: 'RELAY_SOCKET_CLOSED', delayMs: 250, attempt: 2 });
 });
 
 
@@ -549,6 +555,85 @@ test('explicit reconnect does not depend on the current WebSocket emitting close
   assert.equal(sockets[0]?.readyState, 2);
 });
 
+
+test('explicit reconnect drains an in-flight destructive delivery before opening the replacement transport', async (t) => {
+  const state = await stateDir(t, 'operator-relay-reconnect-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Reconnect Drain PC');
+  const sockets: FakeSocket[] = [];
+  const events: string[] = [];
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket: FakeSocket = connectionNumber === 1 ? new StubbornCloseSocket() : new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type === 'hello') {
+        events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
+        socket.server({
+          type: 'welcome',
+          protocol: 1,
+          connectionId: `drain-${connectionNumber}`,
+          resumeFromSeq: frame.payload.resumeAfterSeq,
+          heartbeatMs: 60_000,
+          capabilityBinding: 1,
+          capabilities: ['file.replace']
+        });
+        if (connectionNumber === 1) {
+          socket.server({
+            type: 'delivery',
+            seq: 1,
+            id: 'destructive-1',
+            kind: 'action',
+            payload: { action: { id: 'destructive-1', capability: 'file.replace', risk: 'destructive' } }
+          });
+        } else {
+          setTimeout(() => { client.stop(); socket.close(); }, 0);
+        }
+      }
+      if (frame.type === 'ack' && frame.seq === 1) events.push('ack-1');
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      events.push('delivery-start');
+      markStarted();
+      await deliveryGate;
+      events.push('delivery-durable');
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+  client.reconnect();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(sockets.length, 1, 'replacement transport must wait until accepted destructive work reaches its durable boundary');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+  assert.ok(events.indexOf('delivery-durable') < events.indexOf('ack-1'));
+  assert.ok(events.indexOf('ack-1') < events.indexOf('hello-2-resume-1'));
+});
 
 test('stage7 relay signs bounded resource profile into authenticated hello', async (t) => {
   const state = await stateDir(t, 'operator-relay-resource-profile-');

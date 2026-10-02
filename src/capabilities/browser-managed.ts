@@ -298,7 +298,7 @@ export class ManagedBrowserProvider implements CapabilityProvider {
     this.#launcher = options.launcher ?? new ManagedChromiumLauncher(options);
   }
 
-  supports(action: ActionRequest): boolean {
+  supports(action: ActionRequest): boolean | Promise<boolean> {
     return this.#delegate.supports(action);
   }
 

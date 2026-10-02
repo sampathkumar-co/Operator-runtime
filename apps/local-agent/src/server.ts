@@ -223,6 +223,7 @@ export function createLocalAgentServer(options: {
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
+  getRuntimeStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
   inlineApprovalWaitMs?: number;
@@ -303,18 +304,46 @@ export function createLocalAgentServer(options: {
     signal?: AbortSignal,
     basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
-    const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
+    let approvalLeaseId: string | null = null;
+    if (options.approvals) {
+      try {
+        approvalLeaseId = await options.approvals.claim(action, approvalAuthority);
+      } catch (error) {
+        if (error instanceof OperatorError && error.code === 'APPROVAL_IN_USE') {
+          return {
+            ok: false,
+            capability: action.capability,
+            provider: 'policy',
+            evidence: [{ kind: 'approval', status: 'info', message: 'This approved action is already executing.', timestamp: new Date().toISOString() }],
+            error: { code: error.code, message: error.message, retryable: true, sideEffectState: 'none' },
+            durationMs: 0
+          };
+        }
+        throw error;
+      }
+    }
     const sessionPermissions = options.sessionApprovals
       ? options.sessionApprovals.permissionsFor(approvalAuthority, basePermissions)
       : basePermissions;
-    const permissions = oneTimeApproved
+    const permissions = approvalLeaseId
       ? {
           ...sessionPermissions,
           approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
         }
       : sessionPermissions;
-    if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-    const result = await options.runtime.execute(action, permissions, { signal });
+    let result: ActionResult;
+    try {
+      result = await options.runtime.execute(action, permissions, { signal });
+    } catch (error) {
+      if (approvalLeaseId) {
+        await options.approvals!.settle(action, approvalLeaseId, 'consume', approvalAuthority);
+      }
+      throw error;
+    }
+    if (approvalLeaseId) {
+      const outcome = !result.ok && result.error?.sideEffectState === 'none' ? 'release' : 'consume';
+      await options.approvals!.settle(action, approvalLeaseId, outcome, approvalAuthority);
+    }
     if (options.perception) {
       try {
         await publishPerceptionFromActionResult(options.perception, action, result);
@@ -384,29 +413,39 @@ export function createLocalAgentServer(options: {
     return result;
   };
 
-  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => ({
-    permissionProvider: async (action: ActionRequest) => {
-      const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
-      const sessionPermissions = options.sessionApprovals
-        ? options.sessionApprovals.permissionsFor(authority, basePermissions)
-        : basePermissions;
-      if (!oneTimeApproved) return sessionPermissions;
-      await options.approvals!.consume(action, authority);
-      return {
-        ...sessionPermissions,
-        approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
-      };
-    },
-    onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
-      if (!options.approvals) return undefined;
-      const pending = await options.approvals.register(action, authority);
-      if (!options.recoveryToken) return undefined;
-      const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
-      if (decision === 'approve' || decision === 'session') return 'retry' as const;
-      if (decision === 'deny') return 'deny' as const;
-      return undefined;
-    }
-  });
+  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => {
+    const approvalLeases = new Map<string, string>();
+    return {
+      permissionProvider: async (action: ActionRequest) => {
+        const executionLeaseId = options.approvals ? await options.approvals.claim(action, authority) : null;
+        const sessionPermissions = options.sessionApprovals
+          ? options.sessionApprovals.permissionsFor(authority, basePermissions)
+          : basePermissions;
+        if (!executionLeaseId) return sessionPermissions;
+        approvalLeases.set(action.id, executionLeaseId);
+        return {
+          ...sessionPermissions,
+          approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+        };
+      },
+      onActionResult: async (action: ActionRequest, result: ActionResult) => {
+        const executionLeaseId = approvalLeases.get(action.id);
+        if (!executionLeaseId || !options.approvals) return;
+        approvalLeases.delete(action.id);
+        const outcome = !result.ok && result.error?.sideEffectState === 'none' ? 'release' : 'consume';
+        await options.approvals.settle(action, executionLeaseId, outcome, authority);
+      },
+      onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
+        if (!options.approvals) return undefined;
+        const pending = await options.approvals.register(action, authority);
+        if (!options.recoveryToken) return undefined;
+        const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
+        if (decision === 'approve' || decision === 'session') return 'retry' as const;
+        if (decision === 'deny') return 'deny' as const;
+        return undefined;
+      }
+    };
+  };
 
   const permissionsForRequest = async (
     relayRequest: boolean,
@@ -1665,7 +1704,8 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/settings' && req.method === 'GET') {
-      send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) } });
+      const runtimeStatus = options.getRuntimeStatus ? await options.getRuntimeStatus() : {};
+      send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) }, runtime: runtimeStatus });
       return;
     }
 

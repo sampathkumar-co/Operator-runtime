@@ -1056,6 +1056,89 @@ test('dispatch success is bound to the exact routed session after the final asyn
   await lowRun;
 });
 
+test('same logical session survives credential rotation and transport replacement without spurious authority failure', { timeout: 20_000 }, async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-rotation-handoff-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-rotation-handoff-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  let hub: RelayHub | null = null;
+  const devices = new DeviceRegistryStore(authorityState, {
+    onRevoke: async (deviceId) => { hub?.invalidateDevice(deviceId, 'device revoked'); }
+  });
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices, {
+    onRevoke: async (jti) => { hub?.invalidateSession(jti, 'session revoked'); }
+  });
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'rotation-handoff-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
+  t.after(() => hub?.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+
+  const first = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 5 * 60_000
+  });
+  let currentToken = first.token;
+  const logicalSessionId = crypto.randomUUID();
+  const received: number[] = [];
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    logicalSessionId,
+    getSessionToken: async () => currentToken,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async (delivery) => { received.push(delivery.seq); }
+  });
+  const run = client.run();
+  t.after(() => client.stop());
+
+  await waitFor(async () => (await hub!.onlineDevices(account.accountId)).length === 1);
+  const before = (await hub.onlineDevices(account.accountId))[0]!;
+  assert.equal(before.logicalSessionId, logicalSessionId);
+
+  const replacement = await sessions.rotate(first.payload.jti, { ttlMs: 5 * 60_000 });
+  assert.equal((await hub.onlineDevices(account.accountId))[0]?.sessionId, before.sessionId, 'same-scope rotation must not tear down the current socket');
+
+  const duringHandoff = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { action: { id: 'read-during-rotation', capability: 'file.read', risk: 'read' } }
+  });
+  assert.equal(duringHandoff.delivery.seq, 1);
+  await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === 1);
+
+  currentToken = replacement.token;
+  client.reconnect();
+  await waitFor(async () => {
+    const current = (await hub!.onlineDevices(account.accountId))[0];
+    return Boolean(current && current.sessionId !== before.sessionId && current.logicalSessionId === logicalSessionId);
+  });
+
+  const afterReconnect = await hub.dispatch({
+    accountId: account.accountId,
+    explicitDeviceId: device.deviceId,
+    requiredCapabilities: ['file.read'],
+    kind: 'action',
+    payload: { action: { id: 'read-after-rotation', capability: 'file.read', risk: 'read' } }
+  });
+  assert.equal(afterReconnect.delivery.seq, 2);
+  await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === 2);
+  assert.deepEqual(received, [1, 2]);
+
+  client.stop();
+  await run;
+});
+
 test('account release invalidates the live socket before a concurrent dispatch can route', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-release-race-authority-');
   const deviceState = await tempDir(t, 'operator-relay-release-race-device-');
@@ -1552,6 +1635,91 @@ test('authority lease prevents release purge from overtaking an in-flight delive
   await run;
 });
 
+
+test('one logical runtime remains usable across repeated 30-minute credential boundaries', { timeout: 20_000 }, async (t) => {
+  const authorityState = await tempDir(t, 'operator-relay-multi-rotation-authority-');
+  const deviceState = await tempDir(t, 'operator-relay-multi-rotation-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  let nowMs = Date.parse('2026-10-02T12:00:00.000Z');
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices, {
+    clock: () => new Date(nowMs)
+  });
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'multi-rotation-user' });
+  await accounts.bindDevice(account.accountId, device.deviceId);
+  const hub = new RelayHub({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+
+  const scopes = ['relay:connect', 'cap:file.read'];
+  let credential = await sessions.issue({
+    subjectDeviceId: device.deviceId,
+    audience: 'operator-relay',
+    scopes,
+    ttlMs: 30 * 60_000
+  });
+  let currentToken = credential.token;
+  const seen: number[] = [];
+  const client = new RelayClient({
+    stateDir: deviceState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: deviceIdentity,
+    socketFactory,
+    getSessionToken: async () => currentToken,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async (delivery) => { seen.push(delivery.seq); }
+  });
+  const run = client.run();
+  t.after(() => client.stop());
+
+  let logicalSessionId = '';
+  let previousTransportId = '';
+  await waitFor(async () => {
+    const online = (await hub.onlineDevices(account.accountId))[0];
+    if (!online) return false;
+    logicalSessionId = online.logicalSessionId ?? '';
+    previousTransportId = online.sessionId;
+    return Boolean(logicalSessionId);
+  });
+
+  for (let cycle = 1; cycle <= 2; cycle += 1) {
+    nowMs += 29 * 60_000;
+    const rotated = await sessions.rotate(credential.payload.jti, { ttlMs: 30 * 60_000 });
+
+    const duringHandoff = await hub.dispatch({
+      accountId: account.accountId,
+      explicitDeviceId: device.deviceId,
+      requiredCapabilities: ['file.read'],
+      kind: 'action',
+      payload: { action: { id: `handoff-read-${cycle}`, capability: 'file.read', risk: 'read' } }
+    });
+    await waitFor(() => seen.includes(duringHandoff.delivery.seq));
+
+    credential = rotated;
+    currentToken = rotated.token;
+    client.reconnect();
+
+    await waitFor(async () => {
+      const online = (await hub.onlineDevices(account.accountId))[0];
+      if (!online || online.sessionId === previousTransportId) return false;
+      assert.equal(online.logicalSessionId, logicalSessionId);
+      previousTransportId = online.sessionId;
+      return true;
+    });
+  }
+
+  assert.equal(nowMs - Date.parse('2026-10-02T12:00:00.000Z'), 58 * 60_000);
+  assert.deepEqual(seen, [1, 2]);
+  assert.equal((await hub.onlineDevices(account.accountId))[0]?.logicalSessionId, logicalSessionId);
+
+  client.stop();
+  await run;
+});
 
 test('session rotation preserves public read create and Git capabilities across reconnect', { timeout: 20_000 }, async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-rotate-caps-authority-');

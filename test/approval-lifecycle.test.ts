@@ -252,6 +252,80 @@ test('session approval allows subsequent destructive actions only inside the sam
   assert.equal(await fs.readFile(filePath, 'utf8'), 'v3');
 });
 
+test('approval execution lease releases only explicit no-side-effect failures and can then be retried', async (t) => {
+  const state = await temp(t, 'operator-approval-lease-release-');
+  const store = new ApprovalStore(state);
+  const action = {
+    id: 'lease-release', capability: 'file.replace', risk: 'destructive' as const,
+    input: { path: 'C:\\repo\\lease.txt', content: 'v2', expectedSha256: '1'.repeat(64) },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const pending = await store.register(action);
+  await store.approve(action.id, pending.approvalRequestId);
+
+  const firstLease = await store.claim(action);
+  assert.match(firstLease ?? '', /^[0-9a-f-]{36}$/i);
+  assert.equal(await store.isApproved(action), false, 'active execution lease must make duplicate execution unavailable');
+  await assert.rejects(store.claim(action), (error: any) => error?.code === 'APPROVAL_IN_USE');
+
+  await store.settle(action, firstLease!, 'release');
+  assert.equal(await store.isApproved(action), true, 'side-effect-free failure should preserve the approval for retry');
+
+  const retryLease = await store.claim(action);
+  assert.ok(retryLease && retryLease !== firstLease);
+  await store.settle(action, retryLease!, 'consume');
+  assert.equal(await store.isApproved(action), false);
+  assert.equal((await store.list()).find((record) => record.actionId === action.id)?.status, 'consumed');
+});
+
+test('uncertain or committed execution consumes one-shot approval instead of permitting replay', async (t) => {
+  const state = await temp(t, 'operator-approval-lease-consume-');
+  const store = new ApprovalStore(state);
+  const action = {
+    id: 'lease-consume', capability: 'file.replace', risk: 'destructive' as const,
+    input: { path: 'C:\\repo\\uncertain.txt', content: 'v2', expectedSha256: '2'.repeat(64) },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const pending = await store.register(action);
+  await store.approve(action.id, pending.approvalRequestId);
+  const lease = await store.claim(action);
+  assert.ok(lease);
+  await store.settle(action, lease!, 'consume');
+
+  assert.equal(await store.isApproved(action), false);
+  assert.equal(await store.claim(action), null);
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'approvals.json'), 'utf8'));
+  const record = persisted.records.find((entry: any) => entry.actionId === action.id);
+  assert.equal(record.status, 'consumed');
+  assert.equal(record.executionLeaseId, undefined);
+  assert.equal(record.executionLeaseExpiresAt, undefined);
+});
+
+test('execution lease survives store restart and expires back to the same approved action', async (t) => {
+  const state = await temp(t, 'operator-approval-lease-restart-');
+  let now = Date.parse('2026-10-02T12:00:00.000Z');
+  const action = {
+    id: 'lease-restart', capability: 'file.replace', risk: 'destructive' as const,
+    input: { path: 'C:\\repo\\restart.txt', content: 'v2', expectedSha256: '3'.repeat(64) },
+    provenance: { kind: 'chatgpt' as const }
+  };
+  const first = new ApprovalStore(state, { clock: () => new Date(now) });
+  const pending = await first.register(action);
+  await first.approve(action.id, pending.approvalRequestId);
+  const lease = await first.claim(action);
+  assert.ok(lease);
+
+  const restarted = new ApprovalStore(state, { clock: () => new Date(now) });
+  assert.equal(await restarted.isApproved(action), false);
+  await assert.rejects(restarted.claim(action), (error: any) => error?.code === 'APPROVAL_IN_USE');
+
+  now += 2 * 60_000 + 1;
+  assert.equal(await restarted.isApproved(action), true, 'lost execution lease must expire back to the still-valid approval');
+  const retryLease = await restarted.claim(action);
+  assert.ok(retryLease && retryLease !== lease);
+  await restarted.settle(action, retryLease!, 'consume');
+});
+
 test('pending approval expires hard and is physically pruned', async (t) => {
   const state = await temp(t, 'operator-approval-expiry-');
   let now = Date.parse('2026-09-14T00:00:00.000Z');

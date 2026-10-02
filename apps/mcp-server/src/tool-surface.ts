@@ -29,6 +29,7 @@ export const TOOL_SURFACE: ReadonlyArray<{ name: string; risk: ToolSurfaceRisk; 
   { name: 'process.inspect', risk: 'read', description: 'Inspect bounded Windows process-table metadata without command lines or environments.' },
   { name: 'process.manage', risk: 'destructive', description: 'Terminate one freshly fingerprinted current-user Windows process tree under destructive approval.' },
   { name: 'browser.inspect', risk: 'read', description: 'Inspect Chromium tabs or a bounded semantic page snapshot through loopback CDP.' },
+  { name: 'browser.verify', risk: 'read', description: 'Independently verify bounded visible browser postconditions without mutating page state.' },
   { name: 'browser.navigate', risk: 'write', description: 'Navigate a Chromium tab through CDP and verify the resulting destination.' },
   { name: 'browser.interact', risk: 'external', description: 'Semantically interact with a browser control and verify element/page state.' },
   { name: 'app.inspect', risk: 'read', description: 'Inspect bounded Windows UI Automation state.' },

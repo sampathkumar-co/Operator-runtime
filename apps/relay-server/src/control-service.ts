@@ -3,12 +3,13 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { developerAccountIds } from '../../../src/core/developer-relay-surface.ts';
 import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
-import type { RelayHub } from './relay-hub.ts';
+import type { RelayDispatchRequest, RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import type { DeviceReservation } from '../../../src/core/device-pool.ts';
@@ -17,6 +18,8 @@ import type { RelayReservationReconciliation, RelayReservationReconciliationStor
 const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
+const TRANSPORT_RECOVERY_WINDOW_MS = 5_000;
+const TRANSPORT_RECOVERY_MAX_DELAY_MS = 750;
 
 export interface RelayControlDiagnostic {
   service: 'operator-relay-control';
@@ -183,7 +186,7 @@ export class RelayControlService {
           routedDeviceId = recovered.deviceId;
           delivery = recovered.delivery;
         } else {
-          const dispatched = await this.#hub.dispatch({
+          const dispatched = await this.#dispatchWithRecovery({
             accountId,
             explicitDeviceId: deviceId,
             projectKey,
@@ -191,8 +194,8 @@ export class RelayControlService {
             kind: 'action',
             payload: { action, enterpriseContext: relayEnterpriseContext(accountId, projectKey), ...(publicBoundary ? { publicBoundary: true } : {}) },
             idempotencyKey
-          });
-          routedDeviceId = dispatched.route.deviceId;
+          }, { allowUnpinnedRouteRetry: capabilityRiskRule(action.capability) === 'read' });
+          routedDeviceId = dispatched.deviceId;
           delivery = dispatched.delivery;
         }
         const deadline = Date.now() + waitMs;
@@ -237,6 +240,51 @@ export class RelayControlService {
     return { host, port: address.port };
   }
 
+  async #dispatchWithRecovery(
+    request: RelayDispatchRequest,
+    options: { allowUnpinnedRouteRetry?: boolean; recoveryWindowMs?: number } = {}
+  ) {
+    const recoveryWindowMs = Math.max(0, Math.min(options.recoveryWindowMs ?? TRANSPORT_RECOVERY_WINDOW_MS, TRANSPORT_RECOVERY_WINDOW_MS));
+    const deadline = Date.now() + recoveryWindowMs;
+    let attempt = 0;
+    let pinnedDeviceId = request.explicitDeviceId;
+
+    while (true) {
+      try {
+        const dispatched = await this.#hub.dispatch({
+          ...request,
+          ...(pinnedDeviceId ? { explicitDeviceId: pinnedDeviceId } : {})
+        });
+        return { deviceId: dispatched.route.deviceId, delivery: dispatched.delivery, recovered: attempt > 0 };
+      } catch (error) {
+        if (!(error instanceof OperatorError) || !isRecoverableRelayDispatchError(error)) throw error;
+        if (!request.idempotencyKey) throw error;
+
+        const existing = await this.#hub.recoverIdempotent(request.idempotencyKey);
+        if (existing) {
+          if (existing.delivery.status === 'expired') {
+            throw new OperatorError(
+              'RELAY_EXECUTION_EXPIRED_UNCERTAIN',
+              'The invocation expired after dispatch began and cannot be safely replayed.',
+              { retryable: false, details: { deviceId: existing.deviceId, sideEffectState: 'uncertain', safeToRetry: false } }
+            );
+          }
+          return { deviceId: existing.deviceId, delivery: existing.delivery, recovered: true };
+        }
+
+        const errorDeviceId = typeof error.details?.deviceId === 'string' ? error.details.deviceId : undefined;
+        if (errorDeviceId) pinnedDeviceId = validUuid(errorDeviceId, 'recovery deviceId');
+        const routeIsPinned = Boolean(pinnedDeviceId);
+        if (!routeIsPinned && options.allowUnpinnedRouteRetry !== true) throw error;
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw error;
+        const delayMs = Math.min(remainingMs, relayRecoveryDelayMs(attempt++));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
   async #handleTaskRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const body = await readJson(request) as {
       accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; developerBoundary?: unknown; waitMs?: unknown;
@@ -266,7 +314,7 @@ export class RelayControlService {
       throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Durable task control requires its persisted task-to-device binding.');
     }
 
-    const dispatched = await this.#hub.dispatch({
+    const dispatched = await this.#dispatchWithRecovery({
       accountId,
       explicitDeviceId: boundDeviceId ?? requestedDeviceId,
       projectKey: boundDeviceId ? bindingKey : requestedProjectKey,
@@ -275,7 +323,7 @@ export class RelayControlService {
       payload: { task: task.payload, enterpriseContext: relayEnterpriseContext(accountId, requestedProjectKey) },
       idempotencyKey: freshTaskReceiptKey(accountId, task.payload)
     });
-    const routedDeviceId = dispatched.route.deviceId;
+    const routedDeviceId = dispatched.deviceId;
     if (task.operation === 'submit') await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
 
     const deadline = Date.now() + waitMs;
@@ -310,7 +358,7 @@ export class RelayControlService {
     const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
     const query = validKnowledgeRelayQuery(body.query);
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
-    const dispatched = await this.#hub.dispatch({
+    const dispatched = await this.#dispatchWithRecovery({
       accountId,
       explicitDeviceId: deviceId,
       projectKey,
@@ -318,13 +366,13 @@ export class RelayControlService {
       kind: 'knowledge',
       payload: { query, enterpriseContext: relayEnterpriseContext(accountId, projectKey) },
       idempotencyKey: freshKnowledgeReceiptKey(accountId, query)
-    });
+    }, { allowUnpinnedRouteRetry: true });
     const deadline = Date.now() + waitMs;
     while (Date.now() <= deadline) {
       if (request.aborted || response.destroyed) return;
-      const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
+      const stored = await this.#results.get(dispatched.deviceId, dispatched.delivery.seq);
       if (stored && stored.deliveryId === dispatched.delivery.id) {
-        await this.#assertReplayAuthority(accountId, dispatched.route.deviceId, stored.replayAuthority);
+        await this.#assertReplayAuthority(accountId, dispatched.deviceId, stored.replayAuthority);
         const result = stored.result as unknown;
         if (!isKnowledgeTransportResult(result)) {
           send(response, 502, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_INVALID', message: 'Device returned a malformed knowledge result.' } });
@@ -455,7 +503,7 @@ export class RelayControlService {
         throw error;
       }
       try {
-        const dispatched = await this.#hub.dispatch({
+        const dispatched = await this.#dispatchWithRecovery({
           accountId,
           explicitDeviceId: routedDeviceId,
           requiredCapabilities,
@@ -497,7 +545,7 @@ export class RelayControlService {
           reservationCreated = true;
         }
       }
-      const dispatched = await this.#hub.dispatch({
+      const dispatched = await this.#dispatchWithRecovery({
         accountId,
         explicitDeviceId: boundDeviceId,
         requiredCapabilities: [],
@@ -979,6 +1027,19 @@ function freshExecutionReceiptKey(accountId: string, action: ActionRequest, publ
     .update(':')
     .update(crypto.randomBytes(32))
     .digest('hex');
+}
+
+function isRecoverableRelayDispatchError(error: OperatorError): boolean {
+  if (error.code === 'ROUTE_NO_DEVICE') return true;
+  if (!error.retryable) return false;
+  return error.code === 'RELAY_TRANSPORT_UNAVAILABLE' || error.code === 'ROUTE_DEVICE_OFFLINE';
+}
+
+function relayRecoveryDelayMs(attempt: number): number {
+  const exponent = Math.min(Math.max(Math.trunc(attempt), 0), 4);
+  const base = Math.min(TRANSPORT_RECOVERY_MAX_DELAY_MS, 75 * (2 ** exponent));
+  const jitter = crypto.randomInt(0, Math.max(1, Math.floor(base / 3) + 1));
+  return base + jitter;
 }
 
 function boundedWait(input: unknown): number {

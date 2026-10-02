@@ -10,6 +10,7 @@ export function parseApprovalConsoleCommand(input) {
   if (parts.length === 0) return null;
   const verb = parts[0].toLowerCase();
   if (verb === 'approvals' && parts.length === 1) return { kind: 'list' };
+  if (verb === 'status' && parts.length === 1) return { kind: 'runtime-status' };
   if (verb === 'help' && parts.length === 1) return { kind: 'help' };
   if (verb === 'session-status' && parts.length === 1) return { kind: 'session-status' };
   if ((verb === 'revoke-session' || verb === 'require-approval') && parts.length === 1) return { kind: 'revoke-session' };
@@ -41,6 +42,44 @@ function matchPendingApproval(pending, selector) {
     || String(record.approvalRequestId).toLowerCase().startsWith(needle)
   );
   return matches.length === 1 ? matches[0] : null;
+}
+
+function writeRuntimeStatus(output, payload) {
+  const relay = payload?.runtime?.relay;
+  const state = String(relay?.state ?? 'UNKNOWN').toUpperCase();
+  if (state === 'READY') {
+    output.write(`[mecord-connect] ready — secure relay connected; continuity is automatic.\n`);
+    return;
+  }
+  if (['STARTING', 'CONNECTING', 'AUTHENTICATING', 'RECONNECTING'].includes(state)) {
+    const code = relay?.code ? ` (${relay.code})` : '';
+    output.write(`[mecord-connect] recovering connection${code} — no user action is required unless this becomes revoked.\n`);
+    return;
+  }
+  if (state === 'DEGRADED') {
+    const code = relay?.code ? ` (${relay.code})` : '';
+    if (relay?.credentialRefreshPending === true) {
+      output.write(`[mecord-connect] connected; credential refresh is being recovered${code}. The current transport stays active.\n`);
+    } else if (relay?.recoverable === false) {
+      output.write(`[mecord-connect] connection needs attention${code}.\n`);
+    } else {
+      output.write(`[mecord-connect] connection is degraded${code}; automatic recovery is active.\n`);
+    }
+    return;
+  }
+  if (state === 'REVOKED') {
+    output.write(`[mecord-connect] authorization was revoked${relay?.code ? ` (${relay.code})` : ''}; re-pairing may be required.\n`);
+    return;
+  }
+  if (state === 'DISABLED') {
+    output.write('[mecord-connect] secure relay is disabled for this runtime.\n');
+    return;
+  }
+  if (state === 'SHUTTING_DOWN') {
+    output.write('[mecord-connect] stopping secure remote runtime.\n');
+    return;
+  }
+  output.write(`[mecord-connect] runtime state: ${state.toLowerCase()}.\n`);
 }
 
 function writeApprovalList(output, pending) {
@@ -224,11 +263,16 @@ export function startLocalApprovalConsole({
         const command = parseApprovalConsoleCommand(line);
         if (!command) return;
         if (command.kind === 'help') {
-          output.write('[mecord-connect] commands: approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
+          output.write('[mecord-connect] commands: status | approvals | approve [id-prefix] | session [id-prefix] | deny [id-prefix] | session-status | revoke-session\n');
           return;
         }
         if (command.kind === 'invalid') {
           output.write('[mecord-connect] unknown approval command. Type "help".\n');
+          return;
+        }
+        if (command.kind === 'runtime-status') {
+          const payload = await localAgentJson(baseUrl, agentToken, { pathName: '/v1/settings' });
+          writeRuntimeStatus(output, payload);
           return;
         }
         if (command.kind === 'session-status') {

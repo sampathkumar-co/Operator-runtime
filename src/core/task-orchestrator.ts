@@ -96,6 +96,7 @@ export interface TaskPlanner {
 
 export interface TaskRunAuthorization {
   permissionProvider?: (action: ActionRequest) => PermissionProfile | Promise<PermissionProfile>;
+  onActionResult?: (action: ActionRequest, result: ActionResult) => void | Promise<void>;
   onApprovalRequired?: (
     action: ActionRequest,
     remainingMs: number
@@ -429,6 +430,25 @@ export class TaskOrchestrator {
           }
         }
       }
+      if (authorization.onActionResult) {
+        try {
+          await authorization.onActionResult(action, result);
+        } catch (error) {
+          result = {
+            ok: false,
+            capability: action.capability,
+            provider: 'approval',
+            evidence: result.evidence,
+            durationMs: result.durationMs,
+            error: {
+              code: 'APPROVAL_SETTLEMENT_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+              retryable: false,
+              sideEffectState: result.ok ? 'known' : (result.error?.sideEffectState ?? 'uncertain')
+            }
+          };
+        }
+      }
       const latest = await this.#store.get(task.id);
       await assertLease();
       const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED'
@@ -436,6 +456,17 @@ export class TaskOrchestrator {
         : this.#controlRequests.get(taskId);
       task = latest;
       const latestExecution = task.execution!;
+      const postActionContext: TaskPlannerContext = {
+        task,
+        goal,
+        budget: {
+          maxSteps: latestExecution.maxSteps,
+          usedSteps: latestExecution.stepCount,
+          remainingSteps: Math.max(0, latestExecution.maxSteps - latestExecution.stepCount),
+          maxAttemptsPerStep: latestExecution.maxAttemptsPerStep,
+          activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
+        }
+      };
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
       if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
       const latestNode = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId)
@@ -451,7 +482,7 @@ export class TaskOrchestrator {
       task.evidence.push(...result.evidence);
       if (result.ok) {
         try {
-          planner.accept({ task, goal }, decision, observation);
+          planner.accept(postActionContext, decision, observation);
         } catch (error) {
           await this.#recordLearning(task, result, 'failed', learningContext);
           const postconditionCode = error instanceof OperatorError ? error.code : 'TASK_POSTCONDITION_FAILED';
@@ -468,7 +499,7 @@ export class TaskOrchestrator {
             strategy: failureDecision.strategy,
             capability: result.capability
           }));
-          if (planner.fallback?.({ task, goal }, decision, postconditionObservation)) {
+          if (planner.fallback?.(postActionContext, decision, postconditionObservation)) {
             latestRecord.state = 'FAILED';
             latestRecord.errorCode = postconditionCode;
             setNodeState(task, latestNode.id, 'SKIPPED');
@@ -529,7 +560,7 @@ export class TaskOrchestrator {
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
-      if (planner.fallback?.({ task, goal }, decision, observation)) {
+      if (planner.fallback?.(postActionContext, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
         if (controlState) task.state = controlState;
@@ -1153,7 +1184,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
 
   supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
 
-  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+  next({ task, goal, budget }: TaskPlannerContext): PlannerDecision {
     if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
     const state = task.execution!.plannerState;
     let index = workflowIndex(state, goal.steps.length);
@@ -1161,7 +1192,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
       const child = goal.steps[index]!;
       const childState = workflowChildState(state);
       const proxy = taskWithPlannerState(task, childState);
-      const decision = this.#atomic.next({ task: proxy, goal: child });
+      const decision = this.#atomic.next({ task: proxy, goal: child, budget });
       state.workflowChildState = proxy.execution!.plannerState;
       if (decision.type === 'complete') {
         task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
@@ -1179,20 +1210,20 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
   }
 
-  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
-    const current = this.#current(task, goal, step);
-    this.#atomic.accept({ task: current.proxy, goal: current.child }, current.atomicStep, observation);
+  accept({ task, goal, budget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step, budget);
+    this.#atomic.accept({ task: current.proxy, goal: current.child, budget }, current.atomicStep, observation);
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
   }
 
-  fallback({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
-    const current = this.#current(task, goal, step);
-    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child }, current.atomicStep, observation) ?? false;
+  fallback({ task, goal, budget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step, budget);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget }, current.atomicStep, observation) ?? false;
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
     return handled;
   }
 
-  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>): {
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget']): {
     child: AtomicSemanticTaskGoal;
     proxy: TaskCapsule;
     atomicStep: Extract<PlannerDecision, { type: 'step' }>;
@@ -1203,7 +1234,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     const child = goal.steps[index];
     if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
     const proxy = taskWithPlannerState(task, workflowChildState(state));
-    const expected = this.#atomic.next({ task: proxy, goal: child });
+    const expected = this.#atomic.next({ task: proxy, goal: child, budget });
     if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
       throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
     }

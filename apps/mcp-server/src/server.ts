@@ -937,7 +937,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
-    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets paginate controls/text/visuals, while focusRef/groupRef/role/text/region rank relevant candidates before truncation and return a fresh observation generation without keeping stale refs alive. Raw HTML and DevTools WebSocket URLs are never returned.'
+    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets paginate controls/text/visuals, while focusRef/groupRef/role/text/region rank relevant candidates before truncation and return a fresh observation generation without keeping stale refs alive. Raw HTML and DevTools WebSocket URLs are never returned.',
     inputSchema: z.object({
       targetId: z.string().min(1).optional(),
       observation: z.object({

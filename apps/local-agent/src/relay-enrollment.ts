@@ -42,6 +42,21 @@ export class RelayEnrollmentClient {
 
   stop(): void { this.#abort.abort(); }
 
+  async recover(): Promise<string> {
+    if (this.#abort.signal.aborted) throw new OperatorError('DEVICE_ENROLLMENT_STOPPED', 'Device session recovery was stopped.');
+    const device = await this.#identity.loadOrCreate();
+    const challenged = await this.#post('/v1/device-session/recover/challenge', { deviceId: device.deviceId });
+    if (challenged.status !== 200) throw recoveryHttpError(challenged.status, challenged.body);
+    const pairing = await answerPairingChallenge(challenged.body?.challenge as PublicPairingChallenge, this.#identity);
+    const recovered = await this.#post('/v1/device-session/recover', { pairingResponse: pairing });
+    if (recovered.status !== 200) throw recoveryHttpError(recovered.status, recovered.body);
+    const token = String(recovered.body?.session?.token ?? '');
+    if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) || Buffer.byteLength(token, 'utf8') > 16 * 1024) {
+      throw new OperatorError('DEVICE_SESSION_RECOVERY_INVALID', 'Relay known-device recovery returned an invalid session credential.');
+    }
+    return token;
+  }
+
   async enroll(): Promise<string> {
     if (this.#abort.signal.aborted) throw new OperatorError('DEVICE_ENROLLMENT_STOPPED', 'Device enrollment was stopped.');
     const device = await this.#identity.loadOrCreate();
@@ -93,6 +108,22 @@ export class RelayEnrollmentClient {
     try { body = await response.json(); } catch { /* handled below */ }
     return { status: response.status, body };
   }
+}
+
+function recoveryHttpError(status: number, body: any): OperatorError {
+  const code = typeof body?.error?.code === 'string' ? body.error.code : 'DEVICE_SESSION_RECOVERY_FAILED';
+  if (status === 404 || [
+    'DEVICE_SESSION_RECOVERY_AUTHORITY_REVOKED',
+    'DEVICE_SESSION_RECOVERY_TRUST_REVOKED',
+    'DEVICE_NOT_FOUND',
+    'DEVICE_REVOKED'
+  ].includes(code)) {
+    return new OperatorError('RELAY_SESSION_REENROLL_REQUIRED', 'Known-device session recovery is no longer authorized.', { retryable: false, details: { recoveryCode: code } });
+  }
+  if (code === 'PAIRING_CHALLENGE_EXPIRED' || code === 'PAIRING_CHALLENGE_NOT_FOUND') {
+    return new OperatorError('DEVICE_SESSION_RECOVERY_RETRY', 'Known-device recovery challenge expired before completion.', { retryable: true, details: { recoveryCode: code } });
+  }
+  return enrollmentHttpError(status, body);
 }
 
 function enrollmentHttpError(status: number, body: any): OperatorError {

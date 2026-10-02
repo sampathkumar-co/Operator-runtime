@@ -434,6 +434,144 @@ test('device enrollment can explicitly select the newly paired device as account
 });
 
 
+test('safe reads transparently recover a brief unpinned route outage', async (t) => {
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch() {
+      dispatchCalls += 1;
+      if (dispatchCalls === 1) throw new OperatorError('ROUTE_NO_DEVICE', 'temporary route gap');
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'recovered-read', seq: 1 } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get() {
+      return {
+        deliveryId: 'recovered-read',
+        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, action: action(), waitMs: 1000 });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(dispatchCalls, 2);
+});
+
+test('declared read risk cannot turn a canonical write capability into an unpinned transparent retry', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      async recoverIdempotent() { return null; },
+      async dispatch() {
+        dispatchCalls += 1;
+        throw new OperatorError('ROUTE_NO_DEVICE', 'temporary route gap');
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    publicBoundary: true,
+    action: {
+      ...writeAction(),
+      risk: 'read'
+    },
+    waitMs: 1000
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'ROUTE_NO_DEVICE');
+  assert.equal(dispatchCalls, 1);
+});
+
+test('idempotent mutation recovery pins the already-routed device and reuses the same receipt', async (t) => {
+  let dispatchCalls = 0;
+  const keys: string[] = [];
+  const devices: Array<string | undefined> = [];
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keys.push(input.idempotencyKey);
+      devices.push(input.explicitDeviceId);
+      if (dispatchCalls === 1) {
+        throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'socket replaced', {
+          retryable: true,
+          details: { deviceId: DEVICE_ID, recoverability: 'automatic', transportChanged: true, safeToRetry: true }
+        });
+      }
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'recovered-write', seq: 1 } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get() {
+      return {
+        deliveryId: 'recovered-write',
+        result: { ok: true, capability: 'file.create', provider: 'filesystem.native', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, publicBoundary: true, action: writeAction(), waitMs: 1000 });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(dispatchCalls, 2);
+  assert.equal(keys[0], keys[1], 'transport retry must reuse the exact same idempotency receipt');
+  assert.deepEqual(devices, [undefined, DEVICE_ID], 'retry must pin the device identified before transport churn');
+});
+
+test('authority change is never hidden by transparent transport retry', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      async recoverIdempotent() { return null; },
+      async dispatch() {
+        dispatchCalls += 1;
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'authority generation changed', {
+          retryable: false,
+          details: { deviceId: DEVICE_ID, authorityChanged: true, safeToRetry: false }
+        });
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, action: action(), waitMs: 1000 });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'RELAY_AUTHORITY_CHANGED');
+  assert.equal(dispatchCalls, 1);
+});
+
 test('read requests dispatch fresh work even when a stateless MCP client reuses its invocation ID', async (t) => {
   const keyBySeq = new Map<number, string>();
   const completedByKey = new Map<string, any>();

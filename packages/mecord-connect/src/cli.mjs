@@ -428,8 +428,40 @@ function runRemoteChild(executable, args, { cwd, env }) {
     });
     let stopApprovals = null;
     let settled = false;
+    let userStopRequested = false;
+    let forceKillTimer = null;
     const openedPairingUrls = new Set();
-    const cleanup = () => { try { stopApprovals?.(); } catch { /* noop */ } stopApprovals = null; };
+
+    const removeSignalHandlers = () => {
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+    };
+    const cleanup = () => {
+      removeSignalHandlers();
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+      try { stopApprovals?.(); } catch { /* noop */ }
+      stopApprovals = null;
+    };
+    const requestStop = (signal) => {
+      if (settled || userStopRequested) return;
+      userStopRequested = true;
+      process.stdout.write('[mecord-connect] stopping secure remote runtime...\n');
+      try {
+        if (child.connected) child.send({ type: 'mecord-shutdown', signal });
+      } catch { /* bounded fallback below owns termination */ }
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { child.kill('SIGTERM'); } catch { /* process may already be gone */ }
+        }
+      }, 8_000);
+      forceKillTimer.unref();
+    };
+    const onSigint = () => requestStop('SIGINT');
+    const onSigterm = () => requestStop('SIGTERM');
+    process.once('SIGINT', onSigint);
+    process.once('SIGTERM', onSigterm);
+
     child.on('message', (message) => {
       const ready = validateLocalAgentReadyMessage(message);
       if (ready && !stopApprovals) {
@@ -456,6 +488,10 @@ function runRemoteChild(executable, args, { cwd, env }) {
     child.once('close', (code, signal) => {
       if (settled) return;
       settled = true; cleanup();
+      if (userStopRequested) {
+        resolve(0);
+        return;
+      }
       if (signal) reject(new Error(`Process terminated by signal ${signal}.`));
       else resolve(code ?? 1);
     });

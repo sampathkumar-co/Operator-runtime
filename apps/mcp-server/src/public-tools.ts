@@ -52,7 +52,11 @@ export function registerPublicTools(
   server.registerTool('file.read', {
     title: 'Read safe project text file',
     description: 'Read a bounded UTF-8 text file inside an authorized project root. Secret and credential paths or detected restricted data are refused.',
-    inputSchema: z.object({ path: z.string().min(1).max(4096) }),
+    inputSchema: z.object({
+      path: z.string().min(1).max(4096),
+      offset: z.number().int().min(0).max(100_000_000).default(0),
+      maxBytes: z.number().int().min(1).max(131_072).default(65_536)
+    }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ path, offset, maxBytes }) => invoke('file.read', 'read', { path, encoding: 'utf8', offset, maxBytes }, path));

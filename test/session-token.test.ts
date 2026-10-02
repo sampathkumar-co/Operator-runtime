@@ -177,6 +177,44 @@ test('rotation atomically revokes the old jti and activates exactly one replacem
   assert.equal(/PRIVATE KEY/.test(persisted), false);
 });
 
+test('same-scope rotation preserves a bounded live-connection handoff without weakening fresh-token revocation', async (t) => {
+  let nowMs = Date.parse('2026-10-02T12:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const a = await device('operator-session-handoff-a-', 'A', clock);
+  const b = await device('operator-session-handoff-b-', 'B', clock);
+  t.after(() => Promise.all([fs.rm(a.state, { recursive: true, force: true }), fs.rm(b.state, { recursive: true, force: true })]));
+  await pairBoth(a, b);
+
+  const peer = await b.identity.loadOrCreate();
+  const revoked: string[] = [];
+  const sessions = new DeviceSessionTokenStore(a.state, a.identity, a.registry, {
+    clock,
+    onRevoke: async (jti) => { revoked.push(jti); }
+  });
+  const first = await sessions.issue({
+    subjectDeviceId: peer.deviceId,
+    audience: 'operator-relay',
+    scopes: ['relay:connect', 'cap:file.read'],
+    ttlMs: 5 * 60_000
+  });
+  const replacement = await sessions.rotate(first.payload.jti, { ttlMs: 5 * 60_000 });
+
+  assert.deepEqual(revoked, [], 'same-scope rotation must not kill the healthy transport');
+  await assert.rejects(sessions.verify(first.token, { audience: 'operator-relay' }), (error: any) => error?.code === 'SESSION_REVOKED');
+  assert.equal(await sessions.isConnectionContinuable(first.payload.jti, peer.deviceId), true);
+
+  nowMs += 2 * 60_000 + 1;
+  assert.equal(await sessions.isConnectionContinuable(first.payload.jti, peer.deviceId), false);
+
+  const narrowed = await sessions.rotate(replacement.payload.jti, {
+    ttlMs: 5 * 60_000,
+    scopes: ['relay:connect']
+  });
+  assert.equal(revoked.includes(replacement.payload.jti), true, 'scope-changing rotation must invalidate the predecessor transport');
+  assert.equal(await sessions.isConnectionContinuable(replacement.payload.jti, peer.deviceId), false);
+  assert.equal((await sessions.verify(narrowed.token, { audience: 'operator-relay' })).jti, narrowed.payload.jti);
+});
+
 test('rotation can atomically refresh signed capability scopes for entitlement changes', async (t) => {
   const a = await device('operator-session-scope-rotate-a-', 'A');
   const b = await device('operator-session-scope-rotate-b-', 'B');

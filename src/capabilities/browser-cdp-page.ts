@@ -597,9 +597,9 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const tag = current.tagName.toLowerCase();
       const classList = Array.from(current.classList ?? []).filter((name) => /^[A-Za-z_-][A-Za-z0-9_-]*$/.test(name)).slice(0, 2);
       let part = tag + classList.map((name) => '.' + cssEscape(name)).join('');
-      const parent = current.parentElement;
+      const parent: Element | null = current.parentElement;
       if (parent) {
-        const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === current!.tagName);
+        const siblings: Element[] = Array.from(parent.children).filter((sibling: Element) => sibling.tagName === current!.tagName);
         if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
       }
       parts.unshift(part);
@@ -819,6 +819,11 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       || left.selector.localeCompare(right.selector);
   });
   const visualObjects = visualCandidates.slice(budget.visualOffset, budget.visualOffset + budget.maxVisuals).map(({ _focusScore, ...item }) => item);
+  const pageScroller = document.scrollingElement ?? document.documentElement;
+  const pageScrollState = pageScroller ? scrollStateOf(pageScroller) : undefined;
+  const pageScroll = pageScroller && pageScrollState && (pageScrollState.canScrollY || pageScrollState.canScrollX)
+    ? { ref: observedRefOf(pageScroller), selector: selectorOf(pageScroller), scroll: pageScrollState, geometry: geometryOf(pageScroller, { frameDepth: 0, shadowDepth: 0 }) }
+    : undefined;
   const pageMeta = (total: number, offset: number, limit: number, returned: number) => {
     const nextOffset = offset + returned;
     const truncated = nextOffset < total;
@@ -843,6 +848,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       visualObjects: pageMeta(visualCandidates.length, budget.visualOffset, budget.maxVisuals, visualObjects.length)
     },
     headings, controls, forms, visualObjects, visuals: visualObjects, visibleText,
+    ...(pageScroll ? { pageScroll } : {}),
     textExcerpt: trim(visibleText.map((item) => item.text).join(' '), 1600)
   };
 }

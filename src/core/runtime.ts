@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, PermissionProfile, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
@@ -150,7 +150,7 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'The operation was aborted');
 }
 
-function thrownSideEffectState(risk: ActionRequest['risk'], error: OperatorError): ActionResult['error']['sideEffectState'] {
+function thrownSideEffectState(risk: ActionRequest['risk'], error: OperatorError): SideEffectState {
   if (risk === 'read') return 'none';
   try {
     if (error.details?.sideEffectState !== undefined) return validSideEffectState(error.details.sideEffectState);

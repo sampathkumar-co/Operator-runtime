@@ -14,6 +14,7 @@ const MIN_TTL_MS = 30_000;
 const MAX_SCOPES = 64;
 const MAX_RECORDS = 4096;
 const RETENTION_MS = 24 * 60 * 60_000;
+const ROTATION_HANDOFF_MS = 2 * 60_000;
 const RESET_RECEIPT_RECOVERY_MS = 24 * 60 * 60_000;
 
 type Clock = () => Date;
@@ -139,6 +140,7 @@ export class DeviceSessionTokenStore {
     const peer = await this.#activePeer(snapshot.subjectDeviceId);
     const ttlMs = boundedTtl(options.ttlMs ?? DEFAULT_TTL_MS);
     const scopes = options.scopes === undefined ? [...snapshot.scopes] : validScopes(options.scopes);
+    const scopesChanged = JSON.stringify(scopes) !== JSON.stringify(snapshot.scopes);
     const payload: DeviceSessionPayload = {
       version: 1,
       purpose: PURPOSE,
@@ -172,7 +174,11 @@ export class DeviceSessionTokenStore {
       current.revokedReason = `rotated:${payload.jti}`;
       state.issued.push(recordFrom(payload));
     });
-    await this.#onRevoke?.(jti, snapshot.subjectDeviceId, `rotated:${payload.jti}`);
+    // Normal credential rotation must not tear down a healthy transport. The
+    // predecessor remains valid only for bounded continuation checks below;
+    // fresh handshakes still reject it. Scope-changing rotations are security
+    // significant, so they invalidate the old live connection immediately.
+    if (scopesChanged) await this.#onRevoke?.(jti, snapshot.subjectDeviceId, `rotated:${payload.jti}`);
     return { token, payload };
   }
 
@@ -268,6 +274,40 @@ export class DeviceSessionTokenStore {
     const record = (await this.#read()).issued.find((candidate) => candidate.jti === jti);
     if (!record || record.status !== 'active' || Date.parse(record.expiresAt) <= this.#clock().getTime()) return false;
     if (expectedSubject && record.subjectDeviceId !== expectedSubject) return false;
+    try {
+      await this.#activePeer(record.subjectDeviceId);
+    } catch (error) {
+      if (error instanceof OperatorError && ['DEVICE_NOT_FOUND', 'DEVICE_REVOKED'].includes(error.code)) return false;
+      throw error;
+    }
+    return true;
+  }
+
+  async isConnectionContinuable(jtiInput: string, expectedSubjectDeviceId?: string): Promise<boolean> {
+    const jti = validUuid(jtiInput, 'jti');
+    const expectedSubject = expectedSubjectDeviceId === undefined ? undefined : validUuid(expectedSubjectDeviceId, 'expectedSubjectDeviceId');
+    const state = await this.#read();
+    const record = state.issued.find((candidate) => candidate.jti === jti);
+    if (!record) return false;
+    const nowMs = this.#clock().getTime();
+    let authorized = record.status === 'active' && Date.parse(record.expiresAt) > nowMs;
+    if (!authorized) {
+      const successorJti = rotatedSuccessorJti(record.revokedReason);
+      const revokedAtMs = record.revokedAt ? Date.parse(record.revokedAt) : Number.NaN;
+      const successor = successorJti ? state.issued.find((candidate) => candidate.jti === successorJti) : undefined;
+      authorized = Boolean(
+        successor
+        && successor.status === 'active'
+        && Date.parse(successor.expiresAt) > nowMs
+        && Number.isFinite(revokedAtMs)
+        && nowMs - revokedAtMs <= ROTATION_HANDOFF_MS
+        && successor.issuerDeviceId === record.issuerDeviceId
+        && successor.subjectDeviceId === record.subjectDeviceId
+        && successor.audience === record.audience
+        && JSON.stringify(successor.scopes) === JSON.stringify(record.scopes)
+      );
+    }
+    if (!authorized || (expectedSubject && record.subjectDeviceId !== expectedSubject)) return false;
     try {
       await this.#activePeer(record.subjectDeviceId);
     } catch (error) {
