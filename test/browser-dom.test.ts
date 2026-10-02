@@ -277,14 +277,16 @@ test('semantic snapshot exposes bounded control state and geometry without passw
   const root = new FakeRoot();
   const text = new FakeElement('input'); text.setAttribute('type', 'text'); text.setAttribute('placeholder', 'Name'); text.value = 'Alice'; text.x = 10; text.y = 20;
   const password = new FakeElement('input'); password.setAttribute('type', 'password'); password.setAttribute('placeholder', 'Password'); password.value = 'super-secret';
+  const textarea = new FakeElement('textarea'); textarea.setAttribute('aria-label', 'Exact copy'); textarea.value = 'A  B\n C ';
   const checkbox = new FakeElement('input'); checkbox.setAttribute('type', 'checkbox'); checkbox.setAttribute('aria-label', 'Enabled'); checkbox.checked = true;
-  attach(root, text, password, checkbox); installDocument(t, root);
+  attach(root, text, password, textarea, checkbox); installDocument(t, root);
 
   const snapshot = semanticSnapshotFunction() as any;
   const byName = new Map(snapshot.controls.map((control: any) => [control.name, control]));
   assert.equal((byName.get('Name') as any).value, 'Alice');
   assert.deepEqual((byName.get('Name') as any).rect, { x: 10, y: 20, width: 20, height: 20 });
   assert.equal('value' in (byName.get('Password') as any), false);
+  assert.equal((byName.get('Exact copy') as any).value, 'A  B\n C ');
   assert.equal((byName.get('Enabled') as any).checked, true);
 });
 

@@ -406,7 +406,7 @@ export function semanticSnapshotFunction() {
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLOptionElement;
       const readableValue = element.tagName === 'INPUT' && inputType === 'password'
         ? ''
-        : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? trim((control as HTMLInputElement).value, 500) : '';
+        : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? String((control as HTMLInputElement).value ?? '').slice(0, 500) : '';
       return {
         tag: element.tagName.toLowerCase(),
         selector: selectorOf(element),
