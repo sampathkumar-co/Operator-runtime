@@ -532,6 +532,28 @@ test('click_relative stays inside an observed object and dispatches the verified
 });
 
 
+test('browser scroll uses native CDP wheel input scoped to an observed target', async () => {
+  const nativeEvents: any[] = [];
+  const sample = { tag: 'div', role: 'pointer', name: 'Scrollable list', identity: '#list', actionable: true, documentMutationVersion: 3, scroll: { top: 20, left: 0, scrollHeight: 500, scrollWidth: 100, clientHeight: 120, clientWidth: 100, canScrollY: true, canScrollX: false }, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 20, y: 40, width: 120, height: 100 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') return { result: { value: { count: 1, matches: [sample] } } };
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'scroll', target: { ref: 'b-scroll' }, value: null, deltaX: 0, deltaY: 180
+  });
+  assert.equal(result.value.ok, true);
+  assert.deepEqual(nativeEvents, [
+    { type: 'mouseMoved', x: 80, y: 90, button: 'none', buttons: 0 },
+    { type: 'mouseWheel', x: 80, y: 90, deltaX: 0, deltaY: 180, button: 'none', buttons: 0 }
+  ]);
+});
+
 test('drag_between revalidates two observed refs and uses native center-to-center input', async () => {
   const nativeEvents: any[] = [];
   const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };

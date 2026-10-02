@@ -1005,10 +1005,10 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Interact with an observed browser target using native pointer/keyboard input or bounded semantic text/select operations. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range']),
+      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range']),
       target: z.object({
         ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),

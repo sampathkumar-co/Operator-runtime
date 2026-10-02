@@ -363,22 +363,39 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
-  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element> };
+  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: MutationObserver[] };
   let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
   const priorFocusElement = focus.ref && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.ref) : undefined;
   const priorGroupElement = focus.groupRef && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.groupRef) : undefined;
   if (!observedRegistry || !(observedRegistry.refs instanceof Map)) {
     const bytes = new Uint32Array(2);
     try { globalThis.crypto?.getRandomValues?.(bytes); } catch { bytes[0] = Date.now() >>> 0; bytes[1] = Math.floor(Math.random() * 0xffffffff); }
-    observedRegistry = { nonce: `${bytes[0]!.toString(36)}${bytes[1]!.toString(36)}`, generation: 0, next: 0, refs: new Map() };
+    observedRegistry = { nonce: `${bytes[0]!.toString(36)}${bytes[1]!.toString(36)}`, generation: 0, next: 0, refs: new Map(), mutationVersion: 0, observedDocs: new WeakSet(), observers: [] };
     host[registryKey] = observedRegistry;
   }
+  if (!Number.isSafeInteger(observedRegistry.mutationVersion)) observedRegistry.mutationVersion = 0;
+  if (!(observedRegistry.observedDocs instanceof WeakSet)) observedRegistry.observedDocs = new WeakSet();
+  if (!Array.isArray(observedRegistry.observers)) observedRegistry.observers = [];
+  const ensureMutationObserver = (doc: Document | null | undefined) => {
+    if (!doc || observedRegistry!.observedDocs.has(doc)) return;
+    const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+    const root = doc.documentElement;
+    if (!Observer || !root) return;
+    try {
+      const observer = new Observer(() => { observedRegistry!.mutationVersion += 1; });
+      observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
+      observedRegistry!.observedDocs.add(doc);
+      observedRegistry!.observers.push(observer);
+    } catch { /* same-origin document may disappear while observation is being built */ }
+  };
+  ensureMutationObserver(document);
   observedRegistry.generation += 1;
   observedRegistry.next = 0;
   observedRegistry.refs.clear();
   const observationGeneration = `${observedRegistry.nonce}-${observedRegistry.generation.toString(36)}`;
   const refByElement = new WeakMap<Element, string>();
   const observedRefOf = (element: Element) => {
+    ensureMutationObserver(element.ownerDocument);
     const existing = refByElement.get(element);
     if (existing) return existing;
     const ref = `b-${observationGeneration}-${(++observedRegistry!.next).toString(36)}`;
@@ -423,6 +440,20 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       x: Math.round(x), y: Math.round(y),
       width: Math.round(rect.width), height: Math.round(rect.height),
       center: { x: Math.round(x + rect.width / 2), y: Math.round(y + rect.height / 2) }
+    };
+  };
+  const scrollStateOf = (element: Element) => {
+    const doc = element.ownerDocument;
+    const target = (element === doc?.body || element === doc?.documentElement) ? (doc.scrollingElement ?? element) : element;
+    const node = target as HTMLElement;
+    const top = Number(node.scrollTop); const left = Number(node.scrollLeft);
+    const scrollHeight = Number(node.scrollHeight); const scrollWidth = Number(node.scrollWidth);
+    const clientHeight = Number(node.clientHeight); const clientWidth = Number(node.clientWidth);
+    if (![top, left, scrollHeight, scrollWidth, clientHeight, clientWidth].every(Number.isFinite)) return undefined;
+    return {
+      top, left, scrollHeight, scrollWidth, clientHeight, clientWidth,
+      canScrollY: scrollHeight > clientHeight + 1,
+      canScrollX: scrollWidth > clientWidth + 1
     };
   };
   const focusScoreOf = (element: Element, role: string, text: string, geometry: { x: number; y: number; width: number; height: number }) => {
@@ -643,6 +674,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const readableValue = element.tagName === 'INPUT' && inputType === 'password'
         ? ''
         : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? String((control as HTMLInputElement).value ?? '').slice(0, 500) : '';
+      const scroll = scrollStateOf(element);
       return {
         ref: observedRefOf(element),
         tag: element.tagName.toLowerCase(),
@@ -661,7 +693,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         ...((element as HTMLInputElement).readOnly === true || element.getAttribute('aria-readonly') === 'true' ? { readonly: true } : {}),
         ...(element.getAttribute('placeholder') ? { placeholder: trim(element.getAttribute('placeholder'), 240) } : {}),
         active: element.ownerDocument?.activeElement === element,
-        scrollable: (element as HTMLElement).scrollHeight > (element as HTMLElement).clientHeight || (element as HTMLElement).scrollWidth > (element as HTMLElement).clientWidth,
+        ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}),
         disabled: state.disabled,
         actionable: state.actionable,
         ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
@@ -749,7 +781,8 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
     const effectiveRole = role || (pointer ? 'pointer' : '');
     const geometry = geometryOf(element, context);
-    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
+    const scroll = scrollStateOf(element);
+    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
     const score = (item: typeof left) => item._focusScore
       + (item.actionable ? 50 : 0)
@@ -773,6 +806,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   return {
     schemaVersion: 2,
     observationGeneration,
+    documentMutationVersion: observedRegistry.mutationVersion,
     coordinateSpace: 'viewport',
     focus: {
       ...(focus.ref ? { ref: focus.ref, refResolved: Boolean(priorFocusElement) } : {}),

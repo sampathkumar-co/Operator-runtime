@@ -248,9 +248,19 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       center: { x: x + rect.width / 2, y: y + rect.height / 2 }
     };
   };
+  const scrollStateOf = (element: Element) => {
+    const doc = element.ownerDocument;
+    const targetElement = (element === doc?.body || element === doc?.documentElement) ? (doc.scrollingElement ?? element) : element;
+    const node = targetElement as HTMLElement;
+    const top = Number(node.scrollTop); const left = Number(node.scrollLeft);
+    const scrollHeight = Number(node.scrollHeight); const scrollWidth = Number(node.scrollWidth);
+    const clientHeight = Number(node.clientHeight); const clientWidth = Number(node.clientWidth);
+    if (![top, left, scrollHeight, scrollWidth, clientHeight, clientWidth].every(Number.isFinite)) return undefined;
+    return { top, left, scrollHeight, scrollWidth, clientHeight, clientWidth, canScrollY: scrollHeight > clientHeight + 1, canScrollX: scrollWidth > clientWidth + 1 };
+  };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
-  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; mutationVersion?: number } | undefined })[registryKey];
   const observed = target.ref ? registry?.refs?.get(target.ref) : undefined;
   const selector = target.css || (desiredColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   let matches = (target.ref
@@ -309,6 +319,8 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current')) } : {}),
       active: element.ownerDocument?.activeElement === element,
       actionable: contract.stateOf(element).actionable,
+      documentMutationVersion: Number.isSafeInteger(registry?.mutationVersion) ? registry?.mutationVersion : 0,
+      ...(scrollStateOf(element) ? { scroll: scrollStateOf(element), scrollable: Boolean(scrollStateOf(element)?.canScrollY || scrollStateOf(element)?.canScrollX) } : {}),
       geometry: geometryOf(element, context),
       context
     }; })
@@ -491,7 +503,7 @@ export async function performSemanticInteraction(
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }
-    if (['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative'].includes(input.operation)) {
+    if (['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll'].includes(input.operation)) {
       const first = firstLocatedSample(matches[0]!.samples);
       const prepareExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})(), true)`;
       const preparedResult = unwrapRuntimeValue(await evaluate(session, chosen, prepareExpression, false, signal)) as JsonMap | undefined;
@@ -578,6 +590,9 @@ export async function performSemanticInteraction(
         : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
       if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+      } else if (input.operation === 'scroll') {
+        await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        await dispatch({ type: 'mouseWheel', x, y, deltaX: Number(input.deltaX ?? 0), deltaY: Number(input.deltaY ?? 0), button: 'none', buttons: 0 });
       } else if (input.operation === 'click' || input.operation === 'click_relative') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
         await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });

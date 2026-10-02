@@ -72,6 +72,12 @@ class FakeElement {
   selected = false;
   selectionStart = 0;
   selectionEnd = 0;
+  scrollTop = 0;
+  scrollLeft = 0;
+  scrollHeight = 20;
+  scrollWidth = 20;
+  clientHeight = 20;
+  clientWidth = 20;
   options: FakeElement[] = [];
   onKey?: (key: string) => void;
   onEvent?: (event: FakeEvent) => void;
@@ -610,6 +616,39 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
   assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43 });
 });
 
+
+test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
+  const root = new FakeRoot();
+  const scroller = new FakeElement('div', 'Scrollable list');
+  scroller.backgroundColor = 'rgb(255, 255, 255)';
+  scroller.scrollTop = 40; scroller.scrollHeight = 400; scroller.clientHeight = 120;
+  attach(root, scroller); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.visualObjects.find((item: any) => item.name === 'Scrollable list');
+  assert.ok(observed);
+  assert.equal(observed.scrollable, true);
+  assert.deepEqual(observed.scroll, {
+    top: 40, left: 0, scrollHeight: 400, scrollWidth: 20, clientHeight: 120, clientWidth: 20,
+    canScrollY: true, canScrollX: false
+  });
+  assert.equal(Number.isSafeInteger(snapshot.documentMutationVersion), true);
+});
+
+test('semantic locator carries document mutation version and scroll state into action fingerprints', (t) => {
+  const root = new FakeRoot();
+  const scroller = new FakeElement('div', 'List'); scroller.cursor = 'pointer';
+  scroller.scrollTop = 10; scroller.scrollHeight = 300; scroller.clientHeight = 100;
+  attach(root, scroller); installDocument(t, root);
+  semanticSnapshotFunction();
+  const registry = (globalThis as any)[Symbol.for('mecord.browser.observed-targets.v2')];
+  registry.mutationVersion = 7;
+  const located = semanticLocatorFunction({ name: 'List' }) as any;
+  assert.equal(located.count, 1);
+  assert.equal(located.matches[0].documentMutationVersion, 7);
+  assert.equal(located.matches[0].scroll.top, 10);
+  assert.equal(located.matches[0].scroll.canScrollY, true);
+});
 
 test('same-origin iframe geometry is converted into the owning CDP target viewport', (t) => {
   const root = new FakeRoot();

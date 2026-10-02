@@ -293,7 +293,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
+    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
@@ -303,12 +303,13 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (operation === 'drag_between' && (!targetSpec.ref || !toTargetSpec?.ref)) {
       throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs from the same current observation context.');
     }
-    const deltaOperation = ['drag', 'drag_by', 'resize'].includes(operation);
-    const deltaX = deltaOperation ? Number(action.input.deltaX) : undefined;
-    const deltaY = deltaOperation ? Number(action.input.deltaY) : undefined;
+    const deltaOperation = ['drag', 'drag_by', 'resize', 'scroll'].includes(operation);
+    const deltaX = deltaOperation ? Number(action.input.deltaX ?? 0) : undefined;
+    const deltaY = deltaOperation ? Number(action.input.deltaY ?? 0) : undefined;
     if (deltaOperation && (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX!) > 2000 || Math.abs(deltaY!) > 2000 || (deltaX === 0 && deltaY === 0))) {
-      throw new OperatorError('INVALID_BROWSER_DRAG', 'Drag/resize requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
+      throw new OperatorError(operation === 'scroll' ? 'INVALID_BROWSER_SCROLL' : 'INVALID_BROWSER_DRAG', 'Drag/resize/scroll requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
+    if (operation === 'scroll' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'scroll requires an observed target ref.');
     const xRatio = operation === 'click_relative' ? Number(action.input.xRatio) : undefined;
     const yRatio = operation === 'click_relative' ? Number(action.input.yRatio) : undefined;
     if (operation === 'click_relative' && (!targetSpec.ref || !Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1)) {
@@ -363,7 +364,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const compactTarget = (sample: JsonMap | undefined) => sample ? {
         identity: sample.identity, role: sample.role, name: sample.name, value: sample.value,
         checked: sample.checked, selected: sample.selected, expanded: sample.expanded, current: sample.current,
-        active: sample.active, geometry: sample.geometry
+        active: sample.active, documentMutationVersion: sample.documentMutationVersion, scroll: sample.scroll, geometry: sample.geometry
       } : null;
       const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget) };
       const afterRelevant = {
@@ -390,6 +391,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const noProgressFamily = (() => {
         if (operation === 'drag' || operation === 'drag_by') return { family: 'drag-displacement' };
         if (operation === 'resize') return { family: 'resize-displacement' };
+        if (operation === 'scroll') return { family: 'scroll' };
         if (operation === 'drag_between') return { family: 'drag-between', toTarget: toTargetSpec };
         if (operation === 'click_relative') return { family: 'click-relative' };
         if (operation === 'key_press') return { family: 'key-press', key: action.input.key };
