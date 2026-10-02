@@ -279,12 +279,19 @@ export function semanticSnapshotFunction() {
     return found;
   };
   const viewOf = (element: Element) => element.ownerDocument?.defaultView;
+  const styleOf = (element: Element) => viewOf(element)?.getComputedStyle?.(element);
   const visible = (element: Element) => {
-    const view = viewOf(element);
-    const style = view?.getComputedStyle?.(element);
+    const style = styleOf(element);
     const rect = (element as Element & { getBoundingClientRect?: () => DOMRect }).getBoundingClientRect?.();
-    if (style && (style.visibility === 'hidden' || style.display === 'none')) return false;
+    if (style && (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0)) return false;
     return !rect || (rect.width > 0 && rect.height > 0);
+  };
+  const readableText = (element: Element, max = 180) => {
+    const style = styleOf(element);
+    const fontSize = Number.parseFloat(String(style?.fontSize ?? ''));
+    if (Number.isFinite(fontSize) && fontSize <= 0) return '';
+    if (style && Number(style.opacity) === 0) return '';
+    return trim(element.textContent, max);
   };
   const accessibleName = (element: Element) => {
     const aria = element.getAttribute('aria-label');
@@ -303,8 +310,8 @@ export function semanticSnapshotFunction() {
       if (ancestorName) return trim(ancestorName);
     }
     const explicitRole = trim(element.getAttribute('role')).toLowerCase();
-    const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? trim(element.textContent) : '';
-    const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? trim(element.textContent) : '';
+    const nativeText = ['BUTTON', 'SUMMARY', 'A', 'OPTION'].includes(element.tagName) ? readableText(element) : '';
+    const roleText = explicitRole && !['textbox', 'searchbox', 'combobox', 'slider'].includes(explicitRole) ? readableText(element) : '';
     return trim(
       element.getAttribute('placeholder')
       || nativeText
@@ -312,7 +319,7 @@ export function semanticSnapshotFunction() {
       || element.getAttribute('title')
       || element.getAttribute('name')
       || element.id
-      || element.textContent
+      || readableText(element)
     );
   };
   const roleOf = (element: Element) => {
@@ -371,7 +378,21 @@ export function semanticSnapshotFunction() {
     })
     .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
     .slice(0, 120);
-  const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => trim(element.textContent)).filter(Boolean).slice(0, 60);
+  const visibleText = deepQuery('*', 600)
+    .filter(({ element }) => visible(element)
+      && Array.from(element.children ?? []).length === 0
+      && Boolean(readableText(element)))
+    .map(({ element, context }) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        tag: element.tagName.toLowerCase(),
+        text: readableText(element),
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        context
+      };
+    })
+    .slice(0, 180);
+  const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => readableText(element)).filter(Boolean).slice(0, 60);
   const forms = deepQuery('form', 30).map(({ element: form, context }) => {
     const anyForm = form as HTMLFormElement;
     return {
@@ -397,7 +418,10 @@ export function semanticSnapshotFunction() {
     const pointer = style?.cursor === 'pointer' && style.pointerEvents !== 'none';
     return [{ tag: element.tagName.toLowerCase(), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName)), context }];
   }).slice(0, 120);
-  return { headings, controls, forms, visuals, textExcerpt: trim(document.body?.innerText, 1600) };
+  return {
+    headings, controls, forms, visuals, visibleText,
+    textExcerpt: trim(visibleText.map((item) => item.text).join(' '), 1600)
+  };
 }
 
 export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }) {

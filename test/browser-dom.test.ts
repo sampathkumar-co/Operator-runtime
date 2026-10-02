@@ -16,7 +16,7 @@ class FakeRoot {
   elements: FakeElement[] = [];
   documentElement = {};
   defaultView: any = {
-    getComputedStyle: (element: FakeElement) => ({ visibility: element.visibility, display: element.display, cursor: element.cursor, pointerEvents: element.pointerEvents, backgroundColor: element.backgroundColor, fill: element.fill, stroke: element.stroke, color: element.style.color === 'olive' ? 'rgb(128, 128, 0)' : element.style.color }),
+    getComputedStyle: (element: FakeElement) => ({ visibility: element.visibility, display: element.display, cursor: element.cursor, pointerEvents: element.pointerEvents, opacity: element.style.opacity ?? '1', fontSize: element.style.fontSize ?? '16px', backgroundColor: element.backgroundColor, fill: element.fill, stroke: element.stroke, color: element.style.color === 'olive' ? 'rgb(128, 128, 0)' : element.style.color }),
     Event: FakeEvent,
     InputEvent: FakeEvent,
     MouseEvent: FakeEvent,
@@ -254,6 +254,21 @@ test('pointer-style custom controls are discoverable through shadow roots and sa
   const snapshot = semanticSnapshotFunction() as any;
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Shadow action').context.shadowDepth, 1);
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
+});
+
+test('semantic snapshot exposes rendered leaf text but suppresses visually hidden text', (t) => {
+  const root = new FakeRoot();
+  const visibleCard = new FakeElement('div', '42'); visibleCard.cursor = 'pointer';
+  const hiddenCard = new FakeElement('div', '99'); hiddenCard.cursor = 'pointer'; hiddenCard.style.fontSize = '0px';
+  attach(root, visibleCard, hiddenCard); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  assert.ok(snapshot.controls.some((control: any) => control.name === '42'));
+  assert.equal(snapshot.controls.some((control: any) => control.name === '99'), false);
+  assert.ok(snapshot.visibleText.some((item: any) => item.text === '42'));
+  assert.equal(snapshot.visibleText.some((item: any) => item.text === '99'), false);
+  assert.match(snapshot.textExcerpt, /42/);
+  assert.doesNotMatch(snapshot.textExcerpt, /99/);
 });
 
 test('exact custom-control name disambiguates a containing partial match', (t) => {
