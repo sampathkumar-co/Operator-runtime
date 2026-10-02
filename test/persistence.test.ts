@@ -134,6 +134,75 @@ test('legacy unchained audit records migrate atomically before the next append',
   assert.deepEqual(await log.verifyIntegrity(), { valid: true, count: 3, headHash: events[2].hash });
 });
 
+test('audit rotates bounded segments while preserving one verifiable cross-segment chain', async (t) => {
+  const state = await tempState(t, 'operator-audit-rotation-');
+  const log = new AuditLog(state, { maxSegmentBytes: 256 * 1024 });
+  for (let index = 0; index < 24; index += 1) {
+    await log.append({ capability: `rotate.${index}`, result: 'success', risk: 'read', details: { payload: 'x'.repeat(16_000) } });
+  }
+  const segments = await fs.readdir(path.join(state, 'audit-segments'));
+  assert.ok(segments.length >= 1);
+  const integrity = await new AuditLog(state).verifyIntegrity();
+  assert.equal(integrity.count, 24);
+  const tail = await new AuditLog(state).tail(3);
+  assert.deepEqual(tail.map((item) => item.capability), ['rotate.21', 'rotate.22', 'rotate.23']);
+
+  const firstSegment = path.join(state, 'audit-segments', segments.sort()[0]!);
+  const text = await fs.readFile(firstSegment, 'utf8');
+  await fs.writeFile(firstSegment, text.replace('rotate.0', 'forged.0'));
+  await assert.rejects(() => new AuditLog(state).verifyIntegrity(), (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED');
+});
+
+test('audit rotation serializes concurrent appends without gaps or duplicate chain links', async (t) => {
+  const state = await tempState(t, 'operator-audit-concurrent-rotation-');
+  const log = new AuditLog(state, { maxSegmentBytes: 256 * 1024 });
+  await Promise.all(Array.from({ length: 40 }, (_, index) => log.append({
+    capability: `concurrent.${index}`,
+    result: 'success',
+    risk: 'read',
+    details: { payload: 'x'.repeat(12_000) }
+  })));
+
+  const events = await log.tail(100);
+  assert.equal(events.length, 40);
+  assert.deepEqual(new Set(events.map((event) => event.capability)).size, 40);
+  assert.deepEqual(await log.verifyIntegrity(), { valid: true, count: 40, headHash: events.at(-1)!.hash! });
+});
+
+test('audit restart recovers when rotation finalized the old segment before a new active file exists', async (t) => {
+  const state = await tempState(t, 'operator-audit-rotation-crash-');
+  const log = new AuditLog(state);
+  const event = await log.append({ capability: 'before.rotation', result: 'success', risk: 'read' });
+  const segmentDir = path.join(state, 'audit-segments');
+  await fs.mkdir(segmentDir, { recursive: true });
+  await fs.rename(
+    path.join(state, 'audit.ndjson'),
+    path.join(segmentDir, `0000000000000001-${event.hash}.ndjson`)
+  );
+
+  const restarted = new AuditLog(state, { maxSegmentBytes: 256 * 1024 });
+  assert.deepEqual(await restarted.verifyIntegrity(), { valid: true, count: 1, headHash: event.hash! });
+  await restarted.append({ capability: 'after.restart', result: 'success', risk: 'read' });
+  assert.deepEqual((await restarted.tail(10)).map((item) => item.capability), ['before.rotation', 'after.restart']);
+});
+
+test('audit integrity fails closed when an archived segment is missing', async (t) => {
+  const state = await tempState(t, 'operator-audit-missing-segment-');
+  const log = new AuditLog(state, { maxSegmentBytes: 256 * 1024 });
+  for (let index = 0; index < 36; index += 1) {
+    await log.append({ capability: `missing.${index}`, result: 'success', risk: 'read', details: { payload: 'x'.repeat(16_000) } });
+  }
+  const segmentDir = path.join(state, 'audit-segments');
+  const segments = (await fs.readdir(segmentDir)).sort();
+  assert.ok(segments.length >= 2);
+  await fs.rm(path.join(segmentDir, segments[0]!));
+
+  await assert.rejects(
+    () => new AuditLog(state).verifyIntegrity(),
+    (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED'
+  );
+});
+
 test('device identity is stable and signs challenge payloads', async (t) => {
   const state = await tempState(t, 'operator-id-');
   const store = new DeviceIdentityStore(state, { platform: 'linux' });

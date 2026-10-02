@@ -5,6 +5,14 @@ import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObserv
 import type { Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import {
+  currentProcessInstance,
+  inspectProcessInstance,
+  sameProcessInstance,
+  type ProcessInstanceIdentity,
+  type ProcessInstanceInspector,
+  validProcessInstance
+} from './process-instance.ts';
 
 const MAX_TASK_BYTES = 8 * 1024 * 1024;
 const MAX_LIST = 500;
@@ -27,12 +35,15 @@ const LEASE_OPTIONS = {
 } as const;
 
 type TaskLeaseRecord = {
-  version: 1;
+  version: 2;
   taskId: string;
   ownerId: string;
   pid: number;
+  processInstance: ProcessInstanceIdentity;
   acquiredAt: string;
 };
+type LegacyTaskLeaseRecord = Omit<TaskLeaseRecord, 'version' | 'processInstance'> & { version: 1 };
+type StoredTaskLeaseRecord = TaskLeaseRecord | LegacyTaskLeaseRecord;
 
 export interface TaskExecutionLease {
   readonly taskId: string;
@@ -44,11 +55,15 @@ export interface TaskExecutionLease {
 export class TaskStore {
   #dir: string;
   #leaseDir: string;
+  #inspectProcessInstance: ProcessInstanceInspector;
+  #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'tasks');
     this.#leaseDir = path.join(root, 'task-leases');
+    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#processInstance = options.processInstance;
   }
 
   async init(): Promise<void> {
@@ -119,11 +134,13 @@ export class TaskStore {
     const taskId = validTaskId(taskIdInput);
     await this.#initLeaseDir();
     const leasePath = path.join(this.#leaseDir, `${taskId}.json`);
+    const processInstance = this.#processInstance ?? await currentProcessInstance();
     const record: TaskLeaseRecord = {
-      version: 1,
+      version: 2,
       taskId,
       ownerId: crypto.randomUUID(),
-      pid: process.pid,
+      pid: processInstance.pid,
+      processInstance,
       acquiredAt: new Date().toISOString()
     };
     const serialized = Buffer.from(JSON.stringify(record), 'utf8');
@@ -134,13 +151,14 @@ export class TaskStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
-      let existing: TaskLeaseRecord;
+      let existing: StoredTaskLeaseRecord;
       try { existing = await readTaskLease(leasePath, taskId); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
       }
-      if (processIsAlive(existing.pid)) {
+      const liveIdentity = await this.#inspectProcessInstance(existing.pid);
+      if (existing.version === 1 ? liveIdentity !== null : sameProcessInstance(existing.processInstance, liveIdentity)) {
         throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned by an active executor.`, {
           details: { acquiredAt: existing.acquiredAt }
         });
@@ -177,7 +195,7 @@ function taskExecutionLease(leasePath: string, expected: TaskLeaseRecord): TaskE
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease no longer exists.');
       throw error;
     });
-    if (current.ownerId !== expected.ownerId || current.pid !== expected.pid) {
+    if (current.version !== 2 || current.ownerId !== expected.ownerId || current.pid !== expected.pid || !sameProcessInstance(expected.processInstance, current.processInstance)) {
       throw new OperatorError('TASK_LEASE_LOST', 'Task execution lease ownership changed.');
     }
   };
@@ -195,7 +213,7 @@ function taskExecutionLease(leasePath: string, expected: TaskLeaseRecord): TaskE
   };
 }
 
-async function readTaskLease(file: string, expectedTaskId: string): Promise<TaskLeaseRecord> {
+async function readTaskLease(file: string, expectedTaskId: string): Promise<StoredTaskLeaseRecord> {
   let raw: unknown;
   try { raw = JSON.parse(await readDurableStateText(file, LEASE_OPTIONS)); }
   catch (error) {
@@ -205,25 +223,20 @@ async function readTaskLease(file: string, expectedTaskId: string): Promise<Task
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease must be an object.');
   const value = raw as Record<string, unknown>;
-  if (value.version !== 1 || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
+  if (![1, 2].includes(Number(value.version)) || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
   const ownerId = validLeaseId(value.ownerId, 'ownerId');
   const pid = Number(value.pid);
   if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease PID is invalid.');
-  return { version: 1, taskId: expectedTaskId, ownerId, pid, acquiredAt: validIso(value.acquiredAt, 'lease acquiredAt') };
+  const acquiredAt = validIso(value.acquiredAt, 'lease acquiredAt');
+  if (value.version === 1) return { version: 1, taskId: expectedTaskId, ownerId, pid, acquiredAt };
+  const processInstance = validProcessInstance(value.processInstance);
+  if (!processInstance || processInstance.pid !== pid) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease process identity is invalid.');
+  return { version: 2, taskId: expectedTaskId, ownerId, pid, processInstance, acquiredAt };
 }
 
 function validLeaseId(input: unknown, label: string): string {
   try { return validTaskId(String(input ?? '')); }
   catch { throw new OperatorError('TASK_LEASE_CORRUPT', `Stored task execution lease ${label} is invalid.`); }
-}
-
-function processIsAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ESRCH') return false;
-    return true;
-  }
 }
 
 async function syncLeaseDirectory(directory: string): Promise<void> {

@@ -28,7 +28,7 @@ export function registerPublicTools(
   server.registerTool('project.inspect', {
     title: 'Inspect authorized project',
     description: 'Inspect bounded semantic metadata for an authorized project root.',
-    inputSchema: z.object({ path: z.string().min(1).max(4096) }),
+    inputSchema: z.object({ path: z.string().min(1).max(4096), offset: z.number().int().min(0).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152) }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, async ({ path }) => invoke('project.inspect', 'read', { path }, path));
@@ -55,7 +55,7 @@ export function registerPublicTools(
     inputSchema: z.object({ path: z.string().min(1).max(4096) }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path }) => invoke('file.read', 'read', { path, encoding: 'utf8' }, path));
+  }, async ({ path, offset, maxBytes }) => invoke('file.read', 'read', { path, encoding: 'utf8', offset, maxBytes }, path));
 
   server.registerTool('file.create', {
     title: 'Create project file',
@@ -90,11 +90,14 @@ export function registerPublicTools(
     description: 'Read a bounded Git diff for an authorized project. Secret-bearing paths or detected restricted data are refused by the public boundary.',
     inputSchema: z.object({
       cwd: z.string().min(1).max(4096),
-      paths: z.array(z.string().min(1).max(1000)).min(1).max(100)
+      paths: z.array(z.string().min(1).max(1000)).min(1).max(100),
+      offset: z.number().int().min(0).max(16777216).default(0),
+      maxBytes: z.number().int().min(1024).max(131072).default(49152),
+      summary: z.boolean().default(false)
     }),
     _meta: { securitySchemes: oauthSchemes(auth.readScope) },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd, paths }) => {
+  }, async ({ cwd, paths, offset, maxBytes, summary }) => {
     for (const item of paths) {
       const normalized = item.replace(/\\/g, '/');
       const segments = normalized.split('/').filter(Boolean);
@@ -106,7 +109,7 @@ export function registerPublicTools(
         };
       }
     }
-    return invoke('git.diff', 'read', { cwd, paths, publicLiteralFiles: true }, cwd);
+    return invoke('git.diff', 'read', { cwd, paths, publicLiteralFiles: true, offset, maxBytes, summary }, cwd);
   });
   installPublicToolSecurityProjection(server);
 }

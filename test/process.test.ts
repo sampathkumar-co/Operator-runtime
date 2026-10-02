@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { ProcessProvider } from '../src/capabilities/process.ts';
+import { ProcessProvider, processInstanceFingerprint } from '../src/capabilities/process.ts';
 import type { ActionRisk } from '../src/core/types.ts';
 
 function request(executable: string, args: string[], cwd: string, risk: ActionRisk = 'write') {
@@ -13,6 +13,12 @@ function request(executable: string, args: string[], cwd: string, risk: ActionRi
     input: { executable, args, cwd, timeoutMs: 5000 }, provenance: { kind: 'chatgpt' as const }
   };
 }
+
+test('process instance fingerprint rejects same-PID reuse with a different creation time', () => {
+  const first = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:00:00.000Z');
+  const reused = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:01:00.000Z');
+  assert.notEqual(first, reused);
+});
 
 test('process provider uses allowlisted argv execution', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-'));
@@ -111,6 +117,25 @@ test('process arguments reject NUL and excessive entries before spawn', async (t
   const tooMany = await provider.execute(request('node', Array.from({ length: 201 }, () => 'x'), root));
   assert.equal(tooMany.ok, false);
   assert.equal(tooMany.error?.code, 'PROCESS_INPUT_INVALID');
+});
+
+test('Windows terminal timeout quiesces a detached descendant before returning', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows process-tree containment regression');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-tree-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'survived.txt');
+  const descendant = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'survived'),1500)`;
+  const parent = `const{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:'ignore'});c.unref();setInterval(()=>{},1000)`;
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const result = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'node', args: ['-e', parent], cwd: root, timeoutMs: 200 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'PROCESS_TIMEOUT');
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  await assert.rejects(fs.access(marker));
 });
 
 test('Windows executable lookup ignores an authorized cwd shadow binary', async (t) => {

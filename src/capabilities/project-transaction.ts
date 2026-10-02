@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { GitCheckpointProvider } from './git-checkpoint.ts';
@@ -36,7 +36,7 @@ export class ProjectTransactionProvider implements CapabilityProvider {
   supports(action: ActionRequest): boolean { return action.capability === 'project.transaction.run'; }
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
     try {
       if (action.risk !== 'destructive') {
@@ -85,7 +85,7 @@ export class ProjectTransactionProvider implements CapabilityProvider {
         risk: command.risk,
         input: { path: projectRoot, commandId, expectedRisk: command.risk },
         provenance: { kind: 'trusted_policy', source: action.id }
-      });
+      }, context);
 
       if (commandResult.ok) {
         return {
@@ -151,18 +151,20 @@ export class ProjectTransactionProvider implements CapabilityProvider {
           checkpointId: checkpoint.id,
           rollbackPerformed: true,
           rollbackCoverage: 'Git index + non-ignored working-tree state captured by git.checkpoint',
+          remainingSideEffectState: 'uncertain',
           command: commandResult,
           rollback: restoreResult
         },
         evidence: [
           evidence('transaction_checkpoint', 'pass', 'Created a non-mutating Git checkpoint before the trusted command.', { checkpointId: checkpoint.id }),
           evidence('transaction_command', 'fail', commandResult.error?.message ?? 'Trusted command verification failed.', { commandId, code: commandResult.error?.code }),
-          evidence('transaction_rollback', 'pass', 'Trusted command failed; Git checkpoint restore completed and verified.', { checkpointId: checkpoint.id })
+          evidence('transaction_rollback', 'pass', 'Trusted command failed; covered Git state was restored and verified. Ignored files and external effects remain outside rollback coverage.', { checkpointId: checkpoint.id })
         ],
         error: {
-          code: 'TRANSACTION_FAILED_ROLLED_BACK',
-          message: `Trusted command ${commandId} failed verification and repository state was rolled back to the pre-command checkpoint.`,
-          retryable: true
+          code: 'TRANSACTION_FAILED_GIT_STATE_RESTORED',
+          message: `Trusted command ${commandId} failed verification; covered Git state was restored, but ignored or external side effects require reconciliation.`,
+          retryable: false,
+          sideEffectState: 'uncertain'
         },
         durationMs: Math.round(performance.now() - started)
       };
@@ -202,6 +204,7 @@ function rollbackFailure(
       checkpointId,
       rollbackPerformed: false,
       rollbackCoverage: 'Git index + non-ignored working-tree state captured by git.checkpoint',
+      remainingSideEffectState: 'uncertain',
       command: commandResult,
       rollbackAttempt: rollbackResult
     },
@@ -209,7 +212,7 @@ function rollbackFailure(
       evidence('transaction_command', 'fail', commandResult.error?.message ?? 'Trusted command verification failed.', { code: commandResult.error?.code }),
       evidence('transaction_rollback', 'fail', message, { checkpointId, code: rollbackResult.error?.code })
     ],
-    error: { code: 'TRANSACTION_FAILED_ROLLBACK_FAILED', message, retryable: false },
+    error: { code: 'TRANSACTION_FAILED_ROLLBACK_FAILED', message, retryable: false, sideEffectState: 'uncertain' },
     durationMs: Math.round(performance.now() - started)
   };
 }

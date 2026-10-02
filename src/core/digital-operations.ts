@@ -49,6 +49,9 @@ export interface DigitalOperation {
   selectedProcedureId?: string;
   procedureCapture?: ProcedureCaptureSpec;
   deviceReservationId?: string;
+  deviceReservationSessionId?: string;
+  deviceReservationStatus?: 'active' | 'released' | 'reconciliation_required';
+  deviceReservationErrorCode?: string;
   teamMissionId?: string;
   organizationProgramId?: string;
   lastBlockReason?: string;
@@ -201,9 +204,11 @@ export class DigitalOperationsLayer {
       if (selectedStrategy.startsWith('procedure:')) selectedProcedureId = selectedStrategy.slice('procedure:'.length);
 
       let deviceReservationId: string | undefined;
+      let deviceReservationSessionId: string | undefined;
       if (normalized.device) {
         const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
         deviceReservationId = reservation.id;
+        deviceReservationSessionId = reservation.sessionId;
       }
 
       let teamMissionId: string | undefined;
@@ -259,6 +264,8 @@ export class DigitalOperationsLayer {
         ...(selectedProcedureId ? { selectedProcedureId } : {}),
         ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
         ...(deviceReservationId ? { deviceReservationId } : {}),
+        ...(deviceReservationSessionId ? { deviceReservationSessionId } : {}),
+        ...(deviceReservationId ? { deviceReservationStatus: 'active' as const } : {}),
         ...(teamMissionId ? { teamMissionId } : {}),
         ...(organizationProgramId ? { organizationProgramId } : {}),
         outcomeRecorded: false,
@@ -302,6 +309,23 @@ export class DigitalOperationsLayer {
   async refresh(idInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const current = await this.inspect(id);
+    if (current.deviceReservationId && current.state === 'RUNNING') {
+      if (!current.deviceReservationSessionId) {
+        return await this.#update(id, (operation) => {
+          operation.state = 'BLOCKED';
+          operation.lastBlockReason = 'Device reservation session identity is missing; reconciliation is required.';
+        });
+      }
+      try {
+        await this.#devices.heartbeat(current.deviceReservationId, current.deviceReservationSessionId);
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_HEARTBEAT_FAILED';
+        return await this.#update(id, (operation) => {
+          operation.state = 'BLOCKED';
+          operation.lastBlockReason = `Device reservation renewal failed (${code}); capacity ownership is no longer trusted and requires reconciliation.`;
+        });
+      }
+    }
     let underlyingState: string;
     if (current.mode === 'team') {
       if (!current.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
@@ -380,6 +404,7 @@ export class DigitalOperationsLayer {
       state: operation.state,
       receiptDigest: operation.receiptDigest ?? null
     })).digest('hex');
+    let releaseErrorCode: string | undefined;
     try {
       await this.#optimizer.record(strategyContextFor(operation.scopeKey, operation.mode), operation.selectedStrategy, { verified }, outcomeReceipt);
       let capturedProcedureId: string | undefined;
@@ -404,10 +429,18 @@ export class DigitalOperationsLayer {
       }
     } finally {
       if (operation.deviceReservationId) {
-        try { await this.#devices.release(operation.deviceReservationId); } catch {}
+        try { await this.#devices.release(operation.deviceReservationId); }
+        catch (error) { releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED'; }
       }
     }
-    return await this.#update(operation.id, (current) => { current.outcomeRecorded = true; });
+    return await this.#update(operation.id, (current) => {
+      current.outcomeRecorded = true;
+      if (current.deviceReservationId) {
+        current.deviceReservationStatus = releaseErrorCode ? 'reconciliation_required' : 'released';
+        if (releaseErrorCode) current.deviceReservationErrorCode = releaseErrorCode;
+        else delete current.deviceReservationErrorCode;
+      }
+    });
   }
 
   async #underlyingVerificationDigest(operation: DigitalOperation): Promise<string> {
@@ -643,6 +676,12 @@ function validateOperation(operation: DigitalOperation): void {
   if (operation.selectedProcedureId !== undefined) validUuid(operation.selectedProcedureId, 'selectedProcedureId');
   if (operation.procedureCapture !== undefined) normalizeProcedureCapture(operation.procedureCapture);
   if (operation.deviceReservationId !== undefined) validUuid(operation.deviceReservationId, 'deviceReservationId');
+  if (operation.deviceReservationSessionId !== undefined) validUuid(operation.deviceReservationSessionId, 'deviceReservationSessionId');
+  if (operation.deviceReservationId !== undefined && operation.deviceReservationSessionId === undefined) {
+    // Legacy records are accepted and are blocked safely on their next refresh.
+  }
+  if (operation.deviceReservationStatus !== undefined && !['active', 'released', 'reconciliation_required'].includes(operation.deviceReservationStatus)) throw corrupt('deviceReservationStatus is invalid.');
+  if (operation.deviceReservationErrorCode !== undefined) boundedKey(operation.deviceReservationErrorCode, 'deviceReservationErrorCode');
   if (operation.teamMissionId !== undefined) validUuid(operation.teamMissionId, 'teamMissionId');
   if (operation.organizationProgramId !== undefined) validUuid(operation.organizationProgramId, 'organizationProgramId');
   if (operation.lastBlockReason !== undefined) boundedText(operation.lastBlockReason, 4096, 'lastBlockReason');

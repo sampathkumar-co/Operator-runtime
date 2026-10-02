@@ -20,6 +20,7 @@ export interface OrganizationTarget {
   workItems: TeamWorkInput[];
   missionId?: string;
   updatedAt: string;
+  controlFailure?: { operation: 'pause' | 'cancel'; code: string; message: string; at: string };
 }
 
 export interface OrganizationWave {
@@ -116,7 +117,14 @@ export class OrganizationCoordinator {
     };
     const run = this.#serial.then(async () => {
       const state = await this.#read();
-      if (state.programs.length >= MAX_PROGRAMS) throw new OperatorError('ORGANIZATION_PROGRAM_LIMIT', 'Organization program limit reached.');
+      if (state.programs.length >= MAX_PROGRAMS) {
+        const terminal = state.programs
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => ['VERIFIED', 'FAILED', 'CANCELLED'].includes(item.state))
+          .sort((a, b) => a.item.updatedAt.localeCompare(b.item.updatedAt) || a.item.id.localeCompare(b.item.id))[0];
+        if (!terminal) throw new OperatorError('ORGANIZATION_PROGRAM_LIMIT', 'Organization program limit reached with no terminal program eligible for retention reclamation.');
+        state.programs.splice(terminal.index, 1);
+      }
       state.programs.push(program);
       await this.#write(state);
       return structuredClone(program);
@@ -202,11 +210,19 @@ export class OrganizationCoordinator {
     const id = validUuid(idInput, 'programId');
     return await this.#mutate(id, async (program) => {
       if (!['RUNNING', 'BLOCKED'].includes(program.state)) throw new OperatorError('ORGANIZATION_STATE_INVALID', 'Program is not running.');
+      let failed = false;
       for (const target of program.targets.filter((item) => item.state === 'RUNNING' && item.missionId)) {
-        try { await this.#teams.pause(target.missionId!); } catch {}
-        target.state = 'BLOCKED';
+        try {
+          const mission = await this.#teams.pause(target.missionId!);
+          target.state = mission.state === 'PAUSED' || mission.state === 'BLOCKED' ? 'BLOCKED' : target.state;
+          delete target.controlFailure;
+        } catch (error) {
+          failed = true;
+          target.controlFailure = controlFailure('pause', error, this.#clock());
+        }
+        target.updatedAt = this.#clock().toISOString();
       }
-      program.state = 'PAUSED';
+      program.state = failed ? 'BLOCKED' : 'PAUSED';
       program.updatedAt = this.#clock().toISOString();
     });
   }
@@ -215,11 +231,20 @@ export class OrganizationCoordinator {
     const id = validUuid(idInput, 'programId');
     return await this.#mutate(id, async (program) => {
       if (['CANCELLED', 'FAILED', 'VERIFIED'].includes(program.state)) return;
+      let failed = false;
       for (const target of program.targets.filter((item) => item.missionId && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(item.state))) {
-        try { await this.#teams.cancel(target.missionId!); } catch {}
-        target.state = 'CANCELLED';
+        try {
+          const mission = await this.#teams.cancel(target.missionId!);
+          if (mission.state !== 'CANCELLED') throw new OperatorError('ORGANIZATION_CHILD_CANCEL_UNCONFIRMED', 'Child mission did not confirm terminal cancellation.');
+          target.state = 'CANCELLED';
+          delete target.controlFailure;
+        } catch (error) {
+          failed = true;
+          target.controlFailure = controlFailure('cancel', error, this.#clock());
+        }
+        target.updatedAt = this.#clock().toISOString();
       }
-      program.state = 'CANCELLED';
+      program.state = failed ? 'BLOCKED' : 'CANCELLED';
       program.updatedAt = this.#clock().toISOString();
     });
   }
@@ -362,6 +387,12 @@ function validateProgram(program: OrganizationProgram): void {
     if (!['PENDING', 'RUNNING', 'VERIFIED', 'FAILED', 'BLOCKED', 'CANCELLED'].includes(target.state)) throw corrupt('Target state is invalid.');
     if (!Array.isArray(target.workItems) || target.workItems.length < 1) throw corrupt('Target work items are invalid.');
     if (target.missionId !== undefined) validUuid(target.missionId, 'missionId');
+    if (target.controlFailure !== undefined) {
+      if (!['pause', 'cancel'].includes(target.controlFailure.operation)) throw corrupt('Target control failure operation is invalid.');
+      boundedKey(target.controlFailure.code, 'control failure code');
+      boundedText(target.controlFailure.message, 64 * 1024, 'control failure message');
+      validIso(target.controlFailure.at, 'control failure timestamp');
+    }
     validIso(target.updatedAt, 'target updatedAt');
   }
   for (const wave of program.waves) {
@@ -408,3 +439,12 @@ function validIso(input: unknown, label: string): string {
   return value;
 }
 function corrupt(message: string): OperatorError { return new OperatorError('ORGANIZATION_STATE_CORRUPT', `Organization execution state is invalid. ${message}`); }
+
+function controlFailure(operation: 'pause' | 'cancel', error: unknown, now: Date): NonNullable<OrganizationTarget['controlFailure']> {
+  return {
+    operation,
+    code: typeof (error as any)?.code === 'string' ? boundedKey((error as any).code, 'control failure code') : 'ORGANIZATION_CHILD_CONTROL_FAILED',
+    message: boundedText(error instanceof Error ? error.message : String(error), 64 * 1024, 'control failure message'),
+    at: now.toISOString()
+  };
+}

@@ -26,6 +26,8 @@ class FakeOperations {
   async submit(input: any) {
     this.submitted.push(structuredClone(input));
     const id = input.requestId ?? crypto.randomUUID();
+    const existing = this.operations.get(id);
+    if (existing) return structuredClone(existing);
     const operation = {
       version: 1,
       id,
@@ -149,6 +151,31 @@ test('stage20 contract ids are idempotent and conflicting reuse is rejected', as
     () => controller.create(createInput({ contractId, name: 'Different contract' })),
     (error: any) => error?.code === 'DESIRED_STATE_CONFLICT'
   );
+});
+
+test('stage20 reuses one deterministic remediation after submit succeeds but state persistence fails', async (t) => {
+  const state = await temp(t);
+  const world = new FakeWorld();
+  const operations = new FakeOperations();
+  let failNextPersist = false;
+  const controller = new DesiredStateController(state, {
+    world: world as any, operations: operations as any,
+    beforePersist: () => { if (failNextPersist) { failNextPersist = false; throw new Error('forced desired-state persistence failure'); } }
+  });
+  const contract = await controller.create(createInput({
+    policy: { autoRemediate: true, minRemediationIntervalMs: 0, maxConsecutiveFailures: 3, maxRemediationsPerDay: 10 }
+  }));
+  failNextPersist = true;
+  await assert.rejects(() => controller.reconcile(contract.id), /forced desired-state persistence failure/);
+  assert.equal(operations.operations.size, 1);
+
+  const restarted = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  const recovered = await restarted.reconcile(contract.id);
+  assert.equal(recovered.status, 'REMEDIATING');
+  assert.equal(operations.operations.size, 1);
+  assert.equal(operations.submitted.length, 2);
+  assert.equal(operations.submitted[0].requestId, operations.submitted[1].requestId);
+  assert.equal(recovered.activeOperationId, operations.submitted[0].requestId);
 });
 
 

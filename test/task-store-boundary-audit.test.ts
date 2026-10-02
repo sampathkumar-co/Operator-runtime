@@ -346,6 +346,29 @@ test('TaskStore reclaims an execution lease left by a crashed child process', as
   await recovered.release();
 });
 
+test('TaskStore reclaims a stale execution lease when its PID was reused by a different process instance', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-pid-reuse-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  await fs.writeFile(path.join(leases, `${value.id}.json`), JSON.stringify({
+    version: 2,
+    taskId: value.id,
+    ownerId: crypto.randomUUID(),
+    pid: 42001,
+    processInstance: { pid: 42001, started: 'old-instance' },
+    acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const store = new TaskStore(state, {
+    processInstance: { pid: 42002, started: 'new-owner' },
+    inspectProcessInstance: async (pid) => pid === 42001 ? { pid, started: 'reused-instance' } : null
+  });
+  const lease = await store.acquireExecutionLease(value.id);
+  await lease.assertOwned();
+  await lease.release();
+});
+
 test('TaskStore refuses a symlinked execution-lease directory', async (t) => {
   const state = await tempDir(t, 'operator-task-lease-link-state-');
   const outside = await tempDir(t, 'operator-task-lease-link-outside-');

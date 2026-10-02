@@ -578,9 +578,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
-    inputSchema: z.object({ path: z.string().min(1), encoding: z.enum(['utf8', 'base64']).default('utf8') }),
+    inputSchema: z.object({
+      path: z.string().min(1), encoding: z.enum(['utf8', 'base64']).default('utf8'),
+      offset: z.number().int().min(0).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152)
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path, encoding }) => invoke('file.read', 'read', { path, encoding }, path));
+  }, async ({ path, encoding, offset, maxBytes }) => invoke('file.read', 'read', { path, encoding, offset, maxBytes }, path));
 
   server.registerTool('file.list', {
     title: 'List project directory',
@@ -647,9 +650,13 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   server.registerTool('git.diff', {
     title: 'Git diff',
     description: 'Read a bounded Git diff using Git directly, optionally scoped to paths.',
-    inputSchema: z.object({ cwd: z.string().min(1), paths: z.array(z.string()).max(100).default([]) }),
+    inputSchema: z.object({
+      cwd: z.string().min(1), paths: z.array(z.string()).max(100).default([]),
+      offset: z.number().int().min(0).max(16777216).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152),
+      summary: z.boolean().default(false)
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd, paths }) => invoke('git.diff', 'read', { cwd, paths }, cwd));
+  }, async ({ cwd, paths, offset, maxBytes, summary }) => invoke('git.diff', 'read', { cwd, paths, offset, maxBytes, summary }, cwd));
 
   server.registerTool('git.checkpoint', {
     title: 'Checkpoint or restore Git worktree state',
@@ -751,10 +758,11 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       orderBy: z.array(postgresOrder).max(10).default([]),
       limit: z.number().int().min(1).max(500).default(100),
       offset: z.number().int().min(0).max(10000).default(0),
+      maxBytes: z.number().int().min(1024).max(131072).default(65536),
       timeoutMs: z.number().int().min(100).max(30000).default(5000)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ operation, path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }) => {
+  }, async ({ operation, path, profileId, schema, table, columns, filters, orderBy, limit, offset, maxBytes, timeoutMs }) => {
     if (operation === 'select') {
       if (!profileId || !table) {
         return {
@@ -770,7 +778,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
           }
         };
       }
-      return invoke('postgres.select', 'read', { path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }, path);
+      return invoke('postgres.select', 'read', { path, profileId, schema, table, columns, filters, orderBy, limit, offset, maxBytes, timeoutMs }, path);
     }
     if (operation !== 'profiles' && !profileId) {
       return {
@@ -894,7 +902,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       input: z.string().max(65536).optional(),
       afterCursor: z.number().int().min(0).optional(),
       maxEvents: z.number().int().min(1).max(500).default(100),
-      maxBytes: z.number().int().min(1024).max(2097152).default(262144)
+      maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {

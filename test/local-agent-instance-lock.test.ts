@@ -52,3 +52,26 @@ test('release never removes a lock that has been replaced by another owner', asy
   assert.equal(stored.pid, 41006);
   assert.equal(stored.token, 'f'.repeat(32));
 });
+
+test('local-agent state lock reclaims a reused PID whose process creation identity changed', async (t) => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-instance-lock-pid-reuse-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  await fs.writeFile(path.join(state, 'local-agent.lock'), JSON.stringify({
+    version: 2,
+    pid: 41007,
+    processInstance: { pid: 41007, started: 'old-process-instance' },
+    token: 'g'.repeat(32),
+    createdAt: '2026-09-29T00:00:00.000Z'
+  }));
+
+  const lock = await acquireLocalAgentStateInstanceLock(state, {
+    pid: 41008,
+    processInstance: { pid: 41008, started: 'new-owner' },
+    token: 'h'.repeat(32),
+    inspectProcessInstance: async (pid) => pid === 41007 ? { pid, started: 'reused-process-instance' } : null
+  });
+  const stored = JSON.parse(await fs.readFile(path.join(state, 'local-agent.lock'), 'utf8'));
+  assert.equal(stored.pid, 41008);
+  assert.equal(stored.processInstance.started, 'new-owner');
+  await lock.release();
+});

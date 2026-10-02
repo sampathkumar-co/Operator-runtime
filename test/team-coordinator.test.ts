@@ -33,6 +33,27 @@ test('stage4 requires a verifier that covers every non-verifier work item', asyn
   );
 });
 
+test('team mission lock reclaims a reused PID only when the process instance identity changed', async (t) => {
+  const state = await stateDir(t);
+  const coordinator = new TeamCoordinator(state, {
+    processInstance: { pid: 44002, started: 'new-owner' },
+    inspectProcessInstance: async (pid) => pid === 44001 ? { pid, started: 'reused-instance' } : { pid, started: 'new-owner' }
+  });
+  const mission = await coordinator.submit({
+    objective: 'pid reuse lock recovery',
+    workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+  });
+  await fs.writeFile(path.join(state, 'team-mission-locks', `${mission.id}.lock`), JSON.stringify({
+    id: 'stale-lock',
+    pid: 44001,
+    processInstance: { pid: 44001, started: 'old-instance' },
+    at: new Date().toISOString()
+  }));
+
+  const started = await coordinator.start(mission.id);
+  assert.equal(started.state, 'RUNNING');
+});
+
 test('stage4 deterministically schedules dependencies and parallel independent resources', async (t) => {
   const coordinator = new TeamCoordinator(await stateDir(t));
   const mission = await coordinator.submit({

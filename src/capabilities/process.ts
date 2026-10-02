@@ -102,7 +102,7 @@ export class ProcessProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
-    if (action.capability === 'terminal.session') return await this.#session(action, started);
+    if (action.capability === 'terminal.session') return await this.#session(action, started, context);
     if (action.capability === 'process.inspect') return await this.#inspectProcesses(action, started, context.signal);
     if (action.capability === 'process.manage') return await this.#manageProcess(action, started, context.signal);
     const executable = String(action.input.executable ?? '').trim();
@@ -153,14 +153,18 @@ export class ProcessProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('process', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code, message: op.message, retryable: op.retryable,
+          sideEffectState: action.risk === 'read' ? 'none' : processFailureSideEffectState(op)
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }
   }
 
-  async #session(action: ActionRequest, started: number): Promise<ActionResult> {
+  async #session(action: ActionRequest, started: number, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     this.#pruneSessions();
+    if (context.signal?.aborted) return failure(action, this.name, started, 'EXECUTION_ABORTED', 'Terminal session operation was cancelled before dispatch.');
     const operation = String(action.input.operation ?? '');
     if (operation === 'start') {
       if (this.#sessions.size >= MAX_SESSIONS) return failure(action, this.name, started, 'SESSION_LIMIT_REACHED', `At most ${MAX_SESSIONS} managed terminal sessions may exist.`);
@@ -224,7 +228,7 @@ export class ProcessProvider implements CapabilityProvider {
     if (operation === 'read') {
       const afterCursor = boundedInteger(action.input.afterCursor, 0, 0, Number.MAX_SAFE_INTEGER);
       const maxEvents = boundedInteger(action.input.maxEvents, 100, 1, 500);
-      const maxBytes = boundedInteger(action.input.maxBytes, 256 * 1024, 1024, 2 * 1024 * 1024);
+      const maxBytes = boundedInteger(action.input.maxBytes, 64 * 1024, 1024, 128 * 1024);
       const events: SessionEvent[] = [];
       let bytes = 0;
       for (const event of session.events) {
@@ -266,7 +270,17 @@ export class ProcessProvider implements CapabilityProvider {
 
     if (operation === 'terminate') {
       if (session.state === 'running') {
-        await terminateProcessTree(session.child, session.pid);
+        try {
+          await terminateProcessTree(session.child, session.pid, context.signal);
+        } catch (error) {
+          const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_TREE_TERMINATION_FAILED', error instanceof Error ? error.message : String(error));
+          return {
+            ok: false, capability: action.capability, provider: this.name,
+            evidence: [evidence('process_session_terminate', 'fail', op.message, { sessionId, pid: session.pid, code: op.code })],
+            error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'uncertain' },
+            durationMs: Math.round(performance.now() - started)
+          };
+        }
         session.state = 'terminated';
         session.updatedAt = new Date().toISOString();
         this.#appendSessionEvent(session, 'system', 'termination requested');
@@ -452,11 +466,10 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     let timedOut = false;
     let aborted = false;
     let settled = false;
-    let forceKillTimer: NodeJS.Timeout | undefined;
+    let terminationPromise: Promise<void> | undefined;
 
     const clearTimers = () => {
       clearTimeout(timer);
-      if (forceKillTimer) clearTimeout(forceKillTimer);
       signal?.removeEventListener('abort', onAbort);
     };
     const rejectOnce = (error: unknown) => {
@@ -479,13 +492,11 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     child.once('error', rejectOnce);
 
     const terminateChild = () => {
-      try { child.kill('SIGTERM'); } catch { /* close/error path reports the outcome */ }
-      if (!forceKillTimer) {
-        forceKillTimer = setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch { /* process may already be gone */ }
-        }, 1000);
-        forceKillTimer.unref();
-      }
+      terminationPromise ??= terminateProcessTree(child, child.pid ?? 0).catch((error) => {
+        throw error instanceof OperatorError
+          ? error
+          : new OperatorError('PROCESS_TREE_TERMINATION_FAILED', error instanceof Error ? error.message : String(error), { retryable: false, details: { sideEffectState: 'uncertain' } });
+      });
     };
     const onAbort = () => {
       aborted = true;
@@ -500,16 +511,20 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     }, timeoutMs);
     timer.unref();
 
-    child.once('close', (exitCode, closeSignal) => {
+    child.once('close', async (exitCode, closeSignal) => {
       if (settled) return;
+      if (terminationPromise) {
+        try { await terminationPromise; }
+        catch (error) { rejectOnce(error); return; }
+      }
       settled = true;
       clearTimers();
       if (aborted) {
-        reject(new OperatorError('EXECUTION_ABORTED', 'Process execution was cancelled.', { retryable: false }));
+        reject(new OperatorError('EXECUTION_ABORTED', 'Process execution was cancelled after its owned process tree quiesced.', { retryable: false, details: { sideEffectState: 'uncertain' } }));
         return;
       }
       if (timedOut) {
-        reject(new OperatorError('PROCESS_TIMEOUT', `Process exceeded ${timeoutMs}ms timeout.`, { retryable: true }));
+        reject(new OperatorError('PROCESS_TIMEOUT', `Process exceeded ${timeoutMs}ms timeout and its owned process tree was terminated.`, { retryable: false, details: { sideEffectState: 'uncertain' } }));
         return;
       }
       resolve({
@@ -532,18 +547,44 @@ function requiredSessionId(value: unknown): string {
   return sessionId;
 }
 
-async function terminateProcessTree(child: ChildProcessWithoutNullStreams, pid: number): Promise<void> {
+async function terminateProcessTree(child: ChildProcessWithoutNullStreams, pid: number, signal?: AbortSignal): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Owned process PID is invalid.', { details: { sideEffectState: 'uncertain' } });
   if (process.platform === 'win32') {
     const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
     const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
-    await new Promise<void>((resolve) => {
-      const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
-      killer.once('error', () => { try { child.kill(); } catch {} resolve(); });
-      killer.once('close', () => resolve());
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', env: safeChildEnvironment(process.env) });
+      killer.once('error', reject);
+      killer.once('close', resolve);
     });
+    if (exitCode !== 0 && processAlive(pid)) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', `taskkill exited with ${String(exitCode)} while the owned process remained alive.`, { details: { sideEffectState: 'uncertain' } });
+    await waitForPidExit(pid, signal);
     return;
   }
   try { child.kill('SIGTERM'); } catch {}
+  try { await waitForPidExit(pid, signal, 1_000); }
+  catch {
+    try { child.kill('SIGKILL'); } catch {}
+    await waitForPidExit(pid, signal);
+  }
+}
+
+async function waitForPidExit(pid: number, _signal?: AbortSignal, waitMs = 5_000): Promise<void> {
+  const deadline = performance.now() + waitMs;
+  while (processAlive(pid)) {
+    if (performance.now() >= deadline) throw new OperatorError('PROCESS_TERMINATE_POSTCONDITION_FAILED', 'Owned process remained alive after tree termination.', { retryable: false, details: { sideEffectState: 'uncertain' } });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+function processFailureSideEffectState(error: OperatorError): 'none' | 'known' | 'uncertain' {
+  const state = error.details?.sideEffectState;
+  return state === 'none' || state === 'known' || state === 'uncertain' ? state : 'uncertain';
 }
 
 const CRITICAL_WINDOWS_PROCESSES = new Set([
@@ -553,6 +594,7 @@ const CRITICAL_WINDOWS_PROCESSES = new Set([
 
 type WindowsProcessRow = {
   imageName: string; pid: number; sessionName: string; sessionNumber: number; memoryKb: number;
+  creationTime?: string;
   fingerprint: string;
 };
 
@@ -560,12 +602,13 @@ type WindowsVerboseProcessRow = WindowsProcessRow & {
   status: string; userName: string; cpuTime: string; windowTitle: string;
 };
 
-function processFingerprint(imageName: string, pid: number, sessionName: string, sessionNumber: number): string {
+export function processInstanceFingerprint(imageName: string, pid: number, sessionName: string, sessionNumber: number, creationTime = ''): string {
   return crypto.createHash('sha256')
     .update(imageName.toLowerCase()).update('\0')
     .update(String(pid)).update('\0')
     .update(sessionName.toLowerCase()).update('\0')
-    .update(String(Number.isFinite(sessionNumber) ? sessionNumber : 0))
+    .update(String(Number.isFinite(sessionNumber) ? sessionNumber : 0)).update('\0')
+    .update(creationTime)
     .digest('hex');
 }
 
@@ -577,6 +620,7 @@ async function runTasklist(signal?: AbortSignal, pidFilter?: number): Promise<Wi
   const output = await runProcess(executable, args, process.cwd(), 15_000, 8 * 1024 * 1024, {}, signal);
   if (output.exitCode !== 0) throw new OperatorError('PROCESS_INSPECT_FAILED', `tasklist exited with ${String(output.exitCode)}.`);
   const rows: WindowsProcessRow[] = [];
+  const creationTime = pidFilter === undefined ? undefined : await queryProcessCreationTime(pidFilter, signal);
   for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
     const cols = parseCsvLine(line);
     if (cols.length < 5) continue;
@@ -591,7 +635,8 @@ async function runTasklist(signal?: AbortSignal, pidFilter?: number): Promise<Wi
       imageName, pid, sessionName,
       sessionNumber: normalizedSessionNumber,
       memoryKb: Number.isFinite(memoryKb) ? memoryKb : 0,
-      fingerprint: processFingerprint(imageName, pid, sessionName, normalizedSessionNumber)
+      ...(creationTime ? { creationTime } : {}),
+      fingerprint: processInstanceFingerprint(imageName, pid, sessionName, normalizedSessionNumber, creationTime)
     });
   }
   return rows;
@@ -605,6 +650,7 @@ async function runTasklistVerbose(signal?: AbortSignal, pidFilter?: number): Pro
   const output = await runProcess(executable, args, process.cwd(), 15_000, 512 * 1024, {}, signal);
   if (output.exitCode !== 0) throw new OperatorError('PROCESS_INSPECT_FAILED', `tasklist exited with ${String(output.exitCode)}.`);
   const rows: WindowsVerboseProcessRow[] = [];
+  const creationTime = pidFilter === undefined ? undefined : await queryProcessCreationTime(pidFilter, signal);
   for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
     const cols = parseCsvLine(line);
     if (cols.length < 9) continue;
@@ -623,10 +669,26 @@ async function runTasklistVerbose(signal?: AbortSignal, pidFilter?: number): Pro
       userName: cols[6] ?? '',
       cpuTime: cols[7] ?? '',
       windowTitle: cols.slice(8).join(','),
-      fingerprint: processFingerprint(imageName, pid, sessionName, normalizedSessionNumber)
+      ...(creationTime ? { creationTime } : {}),
+      fingerprint: processInstanceFingerprint(imageName, pid, sessionName, normalizedSessionNumber, creationTime)
     });
   }
   return rows;
+}
+
+async function queryProcessCreationTime(pid: number, signal?: AbortSignal): Promise<string | undefined> {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const executable = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const command = `(Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}').CreationDate.ToUniversalTime().ToString('O')`;
+  const output = await runProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], process.cwd(), 10_000, 64 * 1024, {}, signal);
+  if (output.exitCode !== 0) {
+    if (!processAlive(pid)) return undefined;
+    throw new OperatorError('PROCESS_INSTANCE_IDENTITY_UNAVAILABLE', 'Could not read the process creation timestamp.');
+  }
+  const creationTime = output.stdout.trim();
+  if (!creationTime) return undefined;
+  if (creationTime.length > 128 || Number.isNaN(Date.parse(creationTime))) throw new OperatorError('PROCESS_INSTANCE_IDENTITY_INVALID', 'Process creation timestamp was invalid.');
+  return creationTime;
 }
 
 function parseCsvLine(line: string): string[] {

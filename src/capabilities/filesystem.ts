@@ -98,15 +98,24 @@ export class FilesystemProvider implements CapabilityProvider {
       if (stat.size > this.#maxReadBytes) {
         throw new OperatorError('READ_TOO_LARGE', `File exceeds ${this.#maxReadBytes} byte read limit.`, { details: { size: stat.size } });
       }
-      const data = await fs.readFile(filePath);
       const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
-      const digest = sha256(data);
+      const offset = boundedInteger(action.input.offset, 0, 0, Math.max(0, stat.size));
+      const maxBytes = boundedInteger(action.input.maxBytes, 48 * 1024, 1024, encoding === 'base64' ? 96 * 1024 : 128 * 1024);
+      const returnedBytes = Math.min(maxBytes, Math.max(0, stat.size - offset));
+      const handle = await fs.open(filePath, 'r');
+      let data: Buffer;
+      try {
+        data = Buffer.alloc(returnedBytes);
+        if (returnedBytes > 0) await handle.read(data, 0, returnedBytes, offset);
+      } finally { await handle.close(); }
+      const digest = sha256(await fs.readFile(filePath));
+      const nextOffset = offset + returnedBytes;
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { path: filePath, size: data.byteLength, sha256: digest, content: data.toString(encoding) },
-        evidence: [evidence('file_read', 'pass', 'File read from authorized scope.', { path: filePath, size: data.byteLength, sha256: digest })],
+        output: { path: filePath, size: stat.size, sha256: digest, offset, returnedBytes, content: data.toString(encoding), truncated: nextOffset < stat.size, ...(nextOffset < stat.size ? { nextOffset } : {}) },
+        evidence: [evidence('file_read', 'pass', 'A bounded file range was read from authorized scope.', { path: filePath, size: stat.size, offset, returnedBytes, sha256: digest })],
         durationMs: Math.round(performance.now() - started)
       };
     });

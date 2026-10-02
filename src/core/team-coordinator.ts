@@ -7,6 +7,14 @@ import type { ActionRisk, SideEffectState } from './types.ts';
 import { validSideEffectState } from './side-effect.ts';
 import type { ActionRequest, ActionResult } from './types.ts';
 import { canonicalJson } from './action-identity.ts';
+import {
+  currentProcessInstance,
+  inspectProcessInstance,
+  sameProcessInstance,
+  type ProcessInstanceIdentity,
+  type ProcessInstanceInspector,
+  validProcessInstance
+} from './process-instance.ts';
 
 export type TeamRole = 'supervisor' | 'planner' | 'coder' | 'tester' | 'browser' | 'ui' | 'verifier' | 'general';
 export type TeamMissionState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
@@ -157,8 +165,8 @@ const STORE_OPTIONS = {
 export class TeamCoordinator {
   #store: TeamStore;
 
-  constructor(stateDir: string) {
-    this.#store = new TeamStore(stateDir);
+  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+    this.#store = new TeamStore(stateDir, options);
   }
 
   async submit(input: {
@@ -745,11 +753,15 @@ export class TeamCoordinator {
 class TeamStore {
   #dir: string;
   #lockDir: string;
+  #inspectProcessInstance: ProcessInstanceInspector;
+  #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'team-missions');
     this.#lockDir = path.join(root, 'team-mission-locks');
+    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#processInstance = options.processInstance;
   }
 
   async create(mission: TeamMission): Promise<void> {
@@ -810,7 +822,8 @@ class TeamStore {
 
   async #acquire(id: string): Promise<() => Promise<void>> {
     const file = path.join(this.#lockDir, `${id}.lock`);
-    const owner = { id: crypto.randomUUID(), pid: process.pid, at: new Date().toISOString() };
+    const processInstance = this.#processInstance ?? await currentProcessInstance();
+    const owner = { id: crypto.randomUUID(), pid: processInstance.pid, processInstance, at: new Date().toISOString() };
     for (let attempt = 0; attempt < 80; attempt += 1) {
       try {
         const handle = await fs.open(file, 'wx', 0o600);
@@ -831,9 +844,11 @@ class TeamStore {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       try {
-        const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown };
+        const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
-        if (Number.isSafeInteger(pid) && pid > 0 && !processAlive(pid)) {
+        const storedIdentity = validProcessInstance(current.processInstance);
+        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
+        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
           await fs.rm(file, { force: true });
           continue;
         }
@@ -1042,11 +1057,6 @@ function transitivelyDependsOn(sourceKey: string, targetKey: string, items: Team
     return false;
   };
   return visit(sourceKey);
-}
-
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
 function validRole(input: unknown): TeamRole {

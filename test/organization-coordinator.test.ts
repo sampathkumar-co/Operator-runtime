@@ -165,3 +165,53 @@ test('stage8 compensates already-created missions when a later wave target fails
   assert.equal(persisted.waves[0]?.state, 'PENDING');
   assert.ok(persisted.targets.every((target) => target.missionId === undefined && target.state === 'PENDING'));
 });
+
+test('stage8 child cancel failure keeps target live and program non-terminal across restart', async (t) => {
+  const state = await tempDir(t);
+  let failCancel = true;
+  const missions = new Map<string, string>();
+  const fakeTeams = {
+    async submit() { const id = crypto.randomUUID(); missions.set(id, 'PENDING'); return { id }; },
+    async start(id: string) { missions.set(id, 'RUNNING'); return { id, state: 'RUNNING' }; },
+    async cancel(id: string) {
+      if (failCancel) throw Object.assign(new Error('child still running'), { code: 'TEAM_CANCEL_FAILED' });
+      missions.set(id, 'CANCELLED'); return { id, state: 'CANCELLED' };
+    }
+  };
+  const org = new OrganizationCoordinator(state, fakeTeams as any);
+  const program = await org.create({
+    objective: 'Truthful cancellation', policy: { allowedScopePrefixes: ['org:safe'] },
+    targets: [{ key: 'one', scopeKey: 'org:safe:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  const blocked = await org.cancel(program.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.targets[0]?.state, 'RUNNING');
+  assert.equal(blocked.targets[0]?.controlFailure?.code, 'TEAM_CANCEL_FAILED');
+
+  failCancel = false;
+  const restarted = new OrganizationCoordinator(state, fakeTeams as any);
+  const cancelled = await restarted.cancel(program.id);
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.targets[0]?.state, 'CANCELLED');
+  assert.equal(cancelled.targets[0]?.controlFailure, undefined);
+});
+
+test('stage8 child pause failure keeps program blocked instead of falsely paused', async (t) => {
+  const state = await tempDir(t);
+  const fakeTeams = {
+    async submit() { return { id: crypto.randomUUID() }; },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async pause() { throw Object.assign(new Error('pause failed'), { code: 'TEAM_PAUSE_FAILED' }); }
+  };
+  const org = new OrganizationCoordinator(state, fakeTeams as any);
+  const program = await org.create({
+    objective: 'Truthful pause', policy: { allowedScopePrefixes: ['org:safe'] },
+    targets: [{ key: 'one', scopeKey: 'org:safe:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  const blocked = await org.pause(program.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.targets[0]?.state, 'RUNNING');
+  assert.equal(blocked.targets[0]?.controlFailure?.operation, 'pause');
+});

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import { OperatorError } from './errors.ts';
 import { appendDurableStateText, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
@@ -118,13 +119,17 @@ export interface AuditSummary {
 export class AuditLog {
   #file: string;
   #headFile: string;
+  #segmentDir: string;
+  #maxSegmentBytes: number;
   #head: { count: number; headHash: string | null } | null = null;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { maxSegmentBytes?: number } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'audit.ndjson');
     this.#headFile = path.join(root, 'audit-head.json');
+    this.#segmentDir = path.join(root, 'audit-segments');
+    this.#maxSegmentBytes = Math.min(Math.max(options.maxSegmentBytes ?? 240 * 1024 * 1024, MAX_AUDIT_EVENT_BYTES), MAX_AUDIT_BYTES);
   }
 
   async append(event: AuditEvent): Promise<AuditEvent> {
@@ -141,6 +146,7 @@ export class AuditLog {
       if (Buffer.byteLength(line, 'utf8') > MAX_AUDIT_EVENT_BYTES) {
         throw new OperatorError('AUDIT_EVENT_TOO_LARGE', `Audit event exceeds ${MAX_AUDIT_EVENT_BYTES} UTF-8 bytes after redaction.`);
       }
+      await this.#rotateIfNeeded(head, Buffer.byteLength(line, 'utf8'));
       await appendDurableStateText(this.#file, line, AUDIT_STATE_OPTIONS);
       const next = { count: head.count + 1, headHash: appended.hash! };
       try {
@@ -230,16 +236,18 @@ export class AuditLog {
   }
 
   async #readAndVerify(reconcileAnchor: boolean): Promise<VerifiedAudit> {
-    let text: string;
+    let activeText = '';
     try {
-      text = await readDurableStateText(this.#file, AUDIT_STATE_OPTIONS);
+      activeText = await readDurableStateText(this.#file, AUDIT_STATE_OPTIONS);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        const empty: VerifiedAudit = { events: [], count: 0, headHash: null };
-        if (reconcileAnchor) await this.#reconcileAnchor(empty);
-        return empty;
-      }
-      throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const archived = await this.#readSegments();
+    const text = `${archived}${activeText}`;
+    if (!text) {
+      const empty: VerifiedAudit = { events: [], count: 0, headHash: null };
+      if (reconcileAnchor) await this.#reconcileAnchor(empty);
+      return empty;
     }
 
     const lines = text.split('\n').filter((line) => line.length > 0);
@@ -334,6 +342,45 @@ export class AuditLog {
       updatedAt: new Date().toISOString()
     };
     await writeDurableStateText(this.#headFile, `${JSON.stringify(record, null, 2)}\n`, AUDIT_HEAD_OPTIONS);
+  }
+
+  async #rotateIfNeeded(head: { count: number; headHash: string | null }, incomingBytes: number): Promise<void> {
+    let size = 0;
+    try { size = (await fs.lstat(this.#file)).size; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (size === 0 || size + incomingBytes <= this.#maxSegmentBytes) return;
+    if (!head.headHash || head.count < 1) throw integrityError('Audit segment rotation requires a valid non-empty chain head.');
+    await fs.mkdir(this.#segmentDir, { recursive: true, mode: 0o700 });
+    const dirStat = await fs.lstat(this.#segmentDir);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw integrityError('Audit segment directory must be a real directory.');
+    const name = `${String(head.count).padStart(16, '0')}-${head.headHash}.ndjson`;
+    const destination = path.join(this.#segmentDir, name);
+    try { await fs.lstat(destination); throw integrityError('Audit segment destination already exists.'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    await fs.rename(this.#file, destination);
+  }
+
+  async #readSegments(): Promise<string> {
+    let names: string[];
+    try {
+      const stat = await fs.lstat(this.#segmentDir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw integrityError('Audit segment directory must be a real directory.');
+      names = (await fs.readdir(this.#segmentDir)).filter((name) => name.endsWith('.ndjson')).sort();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+      throw error;
+    }
+    let combined = '';
+    let priorCount = 0;
+    for (const name of names) {
+      const match = /^(\d{16})-([0-9a-f]{64})\.ndjson$/.exec(name);
+      if (!match) throw integrityError('Audit segment filename is invalid.');
+      const count = Number(match[1]);
+      if (!Number.isSafeInteger(count) || count <= priorCount) throw integrityError('Audit segment ordering metadata is invalid.');
+      priorCount = count;
+      combined += await readDurableStateText(path.join(this.#segmentDir, name), AUDIT_STATE_OPTIONS);
+    }
+    return combined;
   }
 }
 

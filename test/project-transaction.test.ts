@@ -87,8 +87,11 @@ gitTest('project transaction restores exact Git state when command exits zero bu
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, 'TRANSACTION_FAILED_ROLLED_BACK');
+  assert.equal(result.error?.code, 'TRANSACTION_FAILED_GIT_STATE_RESTORED');
+  assert.equal(result.error?.retryable, false);
+  assert.equal(result.error?.sideEffectState, 'uncertain');
   assert.equal((result.output as any).rollbackPerformed, true);
+  assert.equal((result.output as any).remainingSideEffectState, 'uncertain');
   assert.equal((result.output as any).command.error.code, 'ARTIFACT_VALIDATION_FAILED');
   assert.equal(await fs.readFile(path.join(projectRoot, 'app.txt'), 'utf8'), 'base\n');
   assert.equal(git(projectRoot, 'status', '--porcelain=v1'), '');

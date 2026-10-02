@@ -38,6 +38,33 @@ test('exclusive lease blocks both readers and writers owned by other executions'
   await exclusive.release();
 });
 
+test('resource leases reap a stale holder when its PID identifies a newer process instance', async (t) => {
+  const state = await temp(t);
+  const key = 'repo:/tmp/reused-pid';
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({
+    version: 1,
+    resources: [{
+      key,
+      holders: [{
+        leaseId: '11111111-1111-4111-8111-111111111111',
+        ownerId: 'stale-owner',
+        pid: 43001,
+        processInstance: { pid: 43001, started: 'old-instance' },
+        mode: 'exclusive',
+        acquiredAt: new Date().toISOString()
+      }]
+    }]
+  }));
+  const store = new ResourceLeaseStore(state, {
+    processInstance: { pid: 43002, started: 'new-owner' },
+    inspectProcessInstance: async (pid) => pid === 43001 ? { pid, started: 'reused-instance' } : { pid, started: 'new-owner' }
+  });
+
+  const replacement = await store.acquire('replacement', [key], 'exclusive');
+  await replacement.assertOwned();
+  await replacement.release();
+});
+
 test('canonical resource identities are deterministic across scheduler layers', () => {
   const root = path.resolve('/tmp/resource-project');
   const fileKeys = resourceKeysForAction({
