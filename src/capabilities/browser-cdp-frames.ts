@@ -113,7 +113,7 @@ async function evaluate(
     : session.send('Runtime.evaluate', params, 8_000, signal);
 }
 
-export function semanticLocatorFunction(target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer = false) {
+export function semanticLocatorFunction(target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer = false) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -227,9 +227,35 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     probe.remove?.();
     return trim(normalized).toLowerCase();
   };
+  const geometryOf = (element: Element, context: { frameDepth: number; shadowDepth: number }) => {
+    const rect = element.getBoundingClientRect();
+    let x = rect.x; let y = rect.y;
+    let owner: Document | null = element.ownerDocument;
+    let convertedDepth = 0;
+    while (owner && owner !== document && convertedDepth < 4) {
+      let frameElement: Element | null = null;
+      try { frameElement = owner.defaultView?.frameElement as Element | null; } catch { frameElement = null; }
+      if (!frameElement) break;
+      const frameRect = frameElement.getBoundingClientRect();
+      x += frameRect.x; y += frameRect.y;
+      owner = frameElement.ownerDocument;
+      convertedDepth += 1;
+    }
+    return {
+      coordinateSpace: owner === document ? 'viewport' : 'frame-viewport',
+      frameDepth: context.frameDepth,
+      x, y, width: rect.width, height: rect.height,
+      center: { x: x + rect.width / 2, y: y + rect.height / 2 }
+    };
+  };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const observed = target.ref ? registry?.refs?.get(target.ref) : undefined;
   const selector = target.css || (desiredColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
-  let matches = deepQuery(selector, 1000).filter(({ element }) => {
+  let matches = (target.ref
+    ? (observed && observed.isConnected !== false ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }] : [])
+    : deepQuery(selector, 1000)).filter(({ element }) => {
     if (!eligible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
     if (target.role && roleOf(element) !== target.role.toLowerCase()) return false;
@@ -241,7 +267,7 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
     }
     return true;
   });
-  if (!matches.length && !target.css && !target.role && !target.renderedColor && (target.text || target.name)) {
+  if (!matches.length && !target.ref && !target.css && !target.role && !target.renderedColor && (target.text || target.name)) {
     const desired = (target.name || target.text || '').toLowerCase();
     matches = deepQuery('*', 1000).filter(({ element }) => {
       if (!eligible(element)) return false;
@@ -264,14 +290,26 @@ export function semanticLocatorFunction(target: { css?: string; text?: string; r
   }
   return {
     count: matches.length,
+    refResolved: target.ref ? Boolean(observed) : undefined,
     matches: matches.slice(0, 3).map(({ element, context }) => {
       const rect = element.getBoundingClientRect();
+      const role = roleOf(element) || (element.ownerDocument?.defaultView?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      const type = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
+      const readableValue = element.tagName === 'INPUT' && type === 'password' ? '' : typeof control.value === 'string' ? control.value.slice(0, 500) : '';
       return {
       tag: element.tagName.toLowerCase(),
-      role: roleOf(element) || (element.ownerDocument?.defaultView?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : ''),
+      role,
       name: nameOf(element),
       identity: identityOf(element),
-      geometry: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      ...(readableValue ? { value: readableValue } : {}),
+      ...(element.hasAttribute('aria-expanded') ? { expanded: element.getAttribute('aria-expanded') === 'true' } : {}),
+      ...(element.hasAttribute('aria-selected') ? { selected: element.getAttribute('aria-selected') === 'true' } : {}),
+      ...(element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
+      ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current')) } : {}),
+      active: element.ownerDocument?.activeElement === element,
+      actionable: contract.stateOf(element).actionable,
+      geometry: geometryOf(element, context),
       context
     }; })
   };
@@ -324,9 +362,59 @@ export async function inspectOopifFrames(session: CdpConnection, signal: AbortSi
   }
 }
 
+
+
+export function observedRelativePointFunction(ref: string, xRatio: number, yRatio: number) {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed browser target is stale.' };
+  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
+    return { ok: false, error: 'Relative pointer ratios must be finite values between 0 and 1.' };
+  }
+  const rect = element.getBoundingClientRect();
+  const localX = rect.x + rect.width * xRatio;
+  const localY = rect.y + rect.height * yRatio;
+  let hit: Element | null = null;
+  try { hit = element.ownerDocument?.elementFromPoint?.(localX, localY) ?? null; } catch { hit = null; }
+  if (!hit) return { ok: false, error: 'Relative pointer point is not hit-testable in the observed document.' };
+  if (hit !== element && !element.contains(hit)) return { ok: false, occluded: true, error: 'Relative pointer point is occluded by another element.' };
+  return { ok: true, local: { x: localX, y: localY }, tag: element.tagName.toLowerCase() };
+}
+
+export async function observeSemanticTargetState(
+  session: CdpConnection,
+  target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string },
+  signal?: AbortSignal
+): Promise<{ status: 'observed' | 'stale' | 'ambiguous'; sample?: JsonMap; totalMatches: number }> {
+  const scope = await attachOopifSessions(session, signal);
+  try {
+    const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
+    const expression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(target)}, (${browserDomContractFunction.toString()})())`;
+    const samples: JsonMap[] = [];
+    let totalMatches = 0;
+    for (const context of contexts) {
+      try {
+        const located = unwrapRuntimeValue(await evaluate(session, context, expression, false, signal)) as JsonMap | undefined;
+        const count = typeof located?.count === 'number' ? located.count : 0;
+        totalMatches += count;
+        const sample = firstLocatedSample(located?.matches);
+        if (sample) samples.push(sample);
+      } catch {
+        if (signal?.aborted) throw abortError();
+      }
+    }
+    if (totalMatches === 0) return { status: 'stale', totalMatches };
+    if (totalMatches !== 1 || samples.length !== 1) return { status: 'ambiguous', totalMatches };
+    return { status: 'observed', sample: samples[0], totalMatches };
+  } finally {
+    await scope.stop();
+  }
+}
+
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number },
+  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; key?: string; keys?: string[]; start?: number; end?: number },
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
@@ -348,6 +436,9 @@ export async function performSemanticInteraction(
 
     const totalMatches = matches.reduce((sum, match) => sum + match.count, 0);
     if (totalMatches === 0) {
+      if (input.target.ref) {
+        throw new OperatorError('BROWSER_TARGET_STALE', 'Observed browser target is stale or no longer belongs to the observed document; re-observe before retrying.', { retryable: true, details: { target: input.target } });
+      }
       throw new OperatorError('BROWSER_ELEMENT_NOT_FOUND', 'No matching semantic element was found.', { retryable: false, details: { target: input.target } });
     }
     if (totalMatches > 1) {
@@ -358,7 +449,49 @@ export async function performSemanticInteraction(
     }
 
     const chosen = matches[0]!.context;
-    if (['click', 'hover', 'drag'].includes(input.operation)) {
+    const sendKey = (params: JsonMap) => chosen.frame
+      ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
+      : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
+    if (input.operation === 'key_press' || input.operation === 'hotkey') {
+      const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
+      const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
+      if (!focused || focused.ok !== true) {
+        throw new OperatorError('BROWSER_INTERACTION_FAILED', typeof focused?.error === 'string' ? focused.error : 'Browser target could not be focused before keyboard input.', { retryable: true, details: { target: input.target } });
+      }
+      const requested = input.operation === 'key_press' ? [String(input.key ?? '')] : Array.isArray(input.keys) ? input.keys.map(String) : [];
+      const allowedKeys = new Set(['Enter','Escape','Tab','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Backspace','Delete','Home','End','PageUp','PageDown','Shift','Control','Alt','Meta','a','c','v','b','i','A','C','V','B','I']);
+      if (!requested.length || requested.length > 4 || requested.some((key) => !allowedKeys.has(key))) {
+        throw new OperatorError('INVALID_BROWSER_KEY', 'Keyboard input must use one supported key or a bounded supported modifier chord.', { retryable: false });
+      }
+      const modifierBit = (key: string) => key === 'Alt' ? 1 : key === 'Control' ? 2 : key === 'Meta' ? 4 : key === 'Shift' ? 8 : 0;
+      const keyMeta = (key: string) => {
+        const upper = key.length === 1 ? key.toUpperCase() : key;
+        const map: Record<string, [string, number]> = {
+          Enter: ['Enter', 13], Escape: ['Escape', 27], Tab: ['Tab', 9], ArrowLeft: ['ArrowLeft', 37], ArrowUp: ['ArrowUp', 38],
+          ArrowRight: ['ArrowRight', 39], ArrowDown: ['ArrowDown', 40], Backspace: ['Backspace', 8], Delete: ['Delete', 46],
+          Home: ['Home', 36], End: ['End', 35], PageUp: ['PageUp', 33], PageDown: ['PageDown', 34],
+          Shift: ['ShiftLeft', 16], Control: ['ControlLeft', 17], Alt: ['AltLeft', 18], Meta: ['MetaLeft', 91]
+        };
+        if (key.length === 1) return { key, code: `Key${upper}`, windowsVirtualKeyCode: upper.charCodeAt(0) };
+        const known = map[key]; return { key, code: known?.[0] ?? key, windowsVirtualKeyCode: known?.[1] ?? 0 };
+      };
+      let modifiers = 0;
+      for (const key of requested) {
+        const meta = keyMeta(key); const bit = modifierBit(key);
+        modifiers |= bit;
+        await sendKey({ type: 'keyDown', ...meta, modifiers });
+      }
+      for (const key of [...requested].reverse()) {
+        const meta = keyMeta(key); const bit = modifierBit(key);
+        await sendKey({ type: 'keyUp', ...meta, modifiers });
+        modifiers &= ~bit;
+      }
+      return {
+        value: { ok: true, matched: firstLocatedSample(matches[0]!.samples), after: { nativeKeyboardDispatched: true, keys: requested } },
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
+    if (['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative'].includes(input.operation)) {
       const first = firstLocatedSample(matches[0]!.samples);
       const prepareExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})(), true)`;
       const preparedResult = unwrapRuntimeValue(await evaluate(session, chosen, prepareExpression, false, signal)) as JsonMap | undefined;
@@ -378,32 +511,91 @@ export async function performSemanticInteraction(
         });
       }
       const geometry = second.geometry as JsonMap;
-      const x = Number(geometry.x) + Number(geometry.width) / 2;
-      const y = Number(geometry.y) + Number(geometry.height) / 2;
+      let x = Number(geometry.x) + Number(geometry.width) / 2;
+      let y = Number(geometry.y) + Number(geometry.height) / 2;
+      if (input.operation === 'click_relative') {
+        if (!input.target.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'click_relative requires an observed target ref.', { retryable: false });
+        const xRatio = Number(input.xRatio); const yRatio = Number(input.yRatio);
+        const pointExpression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(xRatio)}, ${JSON.stringify(yRatio)})`;
+        const point = unwrapRuntimeValue(await evaluate(session, chosen, pointExpression, false, signal)) as JsonMap | undefined;
+        if (!point || point.ok !== true) {
+          throw new OperatorError(point?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE', typeof point?.error === 'string' ? point.error : 'Relative pointer point is not actionable.', {
+            retryable: point?.stale === true,
+            details: { target: input.target, xRatio, yRatio, point }
+          });
+        }
+        x = Number(geometry.x) + Number(geometry.width) * xRatio;
+        y = Number(geometry.y) + Number(geometry.height) * yRatio;
+      }
       if (![x, y, geometry.width, geometry.height].every((value) => Number.isFinite(Number(value))) || Number(geometry.width) <= 0 || Number(geometry.height) <= 0) {
         throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target geometry is not actionable.', { retryable: true });
+      }
+      let dragDestination: { x: number; y: number; sample: JsonMap } | undefined;
+      if (input.operation === 'drag_between') {
+        if (!input.target.ref || !input.toTarget?.ref) {
+          throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs.', { retryable: false });
+        }
+        const destinationExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), true)`;
+        const destinationPrepared = unwrapRuntimeValue(await evaluate(session, chosen, destinationExpression, false, signal)) as JsonMap | undefined;
+        const destinationFirst = firstLocatedSample(destinationPrepared?.matches);
+        if (destinationPrepared?.count !== 1 || !destinationFirst) {
+          throw new OperatorError('BROWSER_TARGET_STALE', 'Observed drag destination is stale, ambiguous, or not actionable in the source frame; re-observe before retrying.', {
+            retryable: true,
+            details: { source: input.target, destination: input.toTarget }
+          });
+        }
+        const sourceReconfirmed = unwrapRuntimeValue(await evaluate(session, chosen, locateExpression, false, signal)) as JsonMap | undefined;
+        const sourceAfterDestinationScroll = firstLocatedSample(sourceReconfirmed?.matches);
+        if (sourceReconfirmed?.count !== 1 || !sourceAfterDestinationScroll || !sameLocatedIdentity(second, sourceAfterDestinationScroll)) {
+          throw new OperatorError('BROWSER_STALE_TARGET', 'Observed drag source changed while preparing the destination; re-observe before retrying.', {
+            retryable: true,
+            details: { source: input.target, destination: input.toTarget, before: second, after: sourceAfterDestinationScroll }
+          });
+        }
+        const destinationConfirmedExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})())`;
+        const destinationConfirmed = unwrapRuntimeValue(await evaluate(session, chosen, destinationConfirmedExpression, false, signal)) as JsonMap | undefined;
+        const destinationSecond = firstLocatedSample(destinationConfirmed?.matches);
+        if (destinationConfirmed?.count !== 1 || !destinationSecond || !sameLocatedTarget(destinationFirst, destinationSecond)) {
+          throw new OperatorError('BROWSER_STALE_TARGET', 'Observed drag destination changed after scroll and before native input dispatch; re-observe before retrying.', {
+            retryable: true,
+            details: { source: input.target, destination: input.toTarget, before: destinationFirst, after: destinationSecond }
+          });
+        }
+        const sourceGeometry = sourceAfterDestinationScroll.geometry as JsonMap | undefined;
+        const destinationGeometry = destinationSecond.geometry as JsonMap | undefined;
+        if (!sourceGeometry || !destinationGeometry) throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is unavailable.', { retryable: true });
+        x = Number(sourceGeometry.x) + Number(sourceGeometry.width) / 2;
+        y = Number(sourceGeometry.y) + Number(sourceGeometry.height) / 2;
+        const destinationX = Number(destinationGeometry.x) + Number(destinationGeometry.width) / 2;
+        const destinationY = Number(destinationGeometry.y) + Number(destinationGeometry.height) / 2;
+        if (![x, y, destinationX, destinationY].every(Number.isFinite)) {
+          throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is invalid.', { retryable: true });
+        }
+        dragDestination = { x: destinationX, y: destinationY, sample: destinationSecond };
       }
       const dispatch = (params: JsonMap) => chosen.frame
         ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
         : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
       if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
-      } else if (input.operation === 'click') {
+      } else if (input.operation === 'click' || input.operation === 'click_relative') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
         await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
         await dispatch({ type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
       } else {
-        const deltaX = Number(input.deltaX); const deltaY = Number(input.deltaY);
+        const targetX = dragDestination ? dragDestination.x : x + Number(input.deltaX);
+        const targetY = dragDestination ? dragDestination.y : y + Number(input.deltaY);
+        const deltaX = targetX - x; const deltaY = targetY - y;
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
         await dispatch({ type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
         const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(deltaX, deltaY) / 20)));
         for (let step = 1; step <= steps; step += 1) {
           await dispatch({ type: 'mouseMoved', x: x + deltaX * step / steps, y: y + deltaY * step / steps, button: 'left', buttons: 1 });
         }
-        await dispatch({ type: 'mouseReleased', x: x + deltaX, y: y + deltaY, button: 'left', buttons: 0, clickCount: 1 });
+        await dispatch({ type: 'mouseReleased', x: targetX, y: targetY, button: 'left', buttons: 0, clickCount: 1 });
       }
       return {
-        value: { ok: true, matched: second, after: { nativeInputDispatched: true } },
+        value: { ok: true, matched: second, ...(dragDestination ? { destination: dragDestination.sample } : {}), after: { nativeInputDispatched: true } },
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }
@@ -418,8 +610,8 @@ export async function performSemanticInteraction(
         const key = String(inputKey);
         const virtualKey = key === 'ArrowLeft' ? 37 : key === 'ArrowRight' ? 39 : key === 'ArrowUp' ? 38 : key === 'ArrowDown' ? 40 : 0;
         if (!virtualKey) throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Slider requested an unsupported keyboard input.', { retryable: false });
-        await session.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
-        await session.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey }, 8_000, signal);
+        await sendKey({ type: 'keyDown', key, code: key, windowsVirtualKeyCode: virtualKey });
+        await sendKey({ type: 'keyUp', key, code: key, windowsVirtualKeyCode: virtualKey });
       }
       const verifyExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'verify_value' })}, (${browserDomContractFunction.toString()})())`;
       const verified = unwrapRuntimeValue(await evaluate(session, chosen, verifyExpression, true, signal));

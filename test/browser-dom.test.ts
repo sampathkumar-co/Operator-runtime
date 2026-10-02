@@ -26,6 +26,7 @@ class FakeRoot {
     HTMLTextAreaElement: undefined
   };
   body = { innerText: '', appendChild: () => undefined };
+  activeElement?: FakeElement;
 
   createElement(tagName: string): FakeElement { const element = new FakeElement(tagName); element.ownerDocument = this; return element; }
 
@@ -69,6 +70,8 @@ class FakeElement {
   tabIndex = -1;
   multiple = false;
   selected = false;
+  selectionStart = 0;
+  selectionEnd = 0;
   options: FakeElement[] = [];
   onKey?: (key: string) => void;
   onEvent?: (event: FakeEvent) => void;
@@ -87,7 +90,8 @@ class FakeElement {
   hasAttribute(name: string): boolean { return this.#attrs.has(name); }
   getRootNode(): FakeRoot { return this.ownerDocument; }
   getBoundingClientRect(): any { return { x: this.x, y: this.y, left: this.x, top: this.y, width: 20, height: 20 }; }
-  focus(): void { /* semantic focus only */ }
+  focus(): void { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  setSelectionRange(start: number, end: number): void { this.selectionStart = start; this.selectionEnd = end; }
   click(): void { this.clicked = true; this.onEvent?.(new FakeEvent('click')); }
   remove(): void { /* synthetic style probe */ }
   contains(element: FakeElement): boolean { return this === element || this.children.includes(element); }
@@ -531,4 +535,148 @@ test('focusable slider widgets expose their container name and use keyboard acti
   handle.setAttribute('aria-valuenow', '8');
   const verified = interactionFunction({ operation: 'verify_value', target: { role: 'slider', name: 'volume-widget' }, value: 8 }) as any;
   assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
+});
+
+
+test('Browser Observation V2 refs are ephemeral, relationship-aware, and fail stale instead of rebinding', (t) => {
+  const root = new FakeRoot();
+  const menu = new FakeElement('div', 'Actions'); menu.setAttribute('role', 'menu');
+  const button = new FakeElement('button', 'Forward');
+  button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-pressed', 'true');
+  button.setAttribute('aria-current', 'page');
+  button.parentElement = menu; menu.children = [button];
+  attach(root, menu, button); installDocument(t, root);
+
+  const first = semanticSnapshotFunction() as any;
+  const menuControl = first.controls.find((control: any) => control.role === 'menu');
+  const observed = first.controls.find((control: any) => control.name === 'Forward');
+  assert.ok(menuControl?.ref);
+  assert.ok(observed?.ref);
+  assert.match(observed.ref, /^b-/);
+  assert.equal(observed.parentRef, menuControl.ref);
+  assert.equal(observed.groupRef, menuControl.ref);
+  assert.deepEqual(menuControl.children, [observed.ref]);
+  assert.equal(observed.expanded, false);
+  assert.equal(observed.pressed, true);
+  assert.equal(observed.current, 'page');
+  assert.equal(observed.geometry.coordinateSpace, 'viewport');
+  assert.deepEqual(observed.geometry.center, { x: 10, y: 10 });
+
+  const clicked = interactionFunction({ operation: 'click', target: { ref: observed.ref }, value: null }) as any;
+  assert.equal(clicked.ok, true);
+  assert.equal(button.clicked, true);
+
+  const second = semanticSnapshotFunction() as any;
+  const refreshed = second.controls.find((control: any) => control.name === 'Forward');
+  assert.ok(refreshed?.ref);
+  assert.notEqual(refreshed.ref, observed.ref);
+  const stale = interactionFunction({ operation: 'click', target: { ref: observed.ref }, value: null }) as any;
+  assert.equal(stale.ok, false);
+  assert.equal(stale.staleRef, true);
+  assert.match(stale.error, /stale/i);
+});
+
+test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts', (t) => {
+  const root = new FakeRoot();
+  const polygon = new FakeElement('polygon');
+  polygon.setAttribute('points', '0,0 10,0 10,10');
+  polygon.setAttribute('aria-rowindex', '2');
+  polygon.setAttribute('aria-colindex', '3');
+  polygon.fill = 'rgb(1, 2, 3)';
+  attach(root, polygon); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const visual = snapshot.visualObjects.find((item: any) => item.tag === 'polygon');
+  assert.ok(visual);
+  assert.equal(visual.primitive, 'polygon');
+  assert.equal(visual.pointCount, 3);
+  assert.deepEqual(visual.points, [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }]);
+  assert.equal(visual.row, 2);
+  assert.equal(visual.column, 3);
+  assert.equal(visual.geometry.coordinateSpace, 'viewport');
+  assert.equal('x1' in visual, false);
+});
+
+
+test('same-origin iframe geometry is converted into the owning CDP target viewport', (t) => {
+  const root = new FakeRoot();
+  const frameDocument = new FakeRoot();
+  const iframe = new FakeElement('iframe'); iframe.x = 100; iframe.y = 200;
+  const button = new FakeElement('button', 'Inside frame'); button.x = 10; button.y = 20;
+  iframe.contentDocument = frameDocument;
+  frameDocument.defaultView.frameElement = iframe;
+  attach(root, iframe);
+  attach(frameDocument, button);
+  installDocument(t, root);
+
+  const located = semanticLocatorFunction({ role: 'button', name: 'Inside frame' }) as any;
+  assert.equal(located.count, 1);
+  assert.equal(located.matches[0].geometry.coordinateSpace, 'viewport');
+  assert.equal(located.matches[0].geometry.frameDepth, 1);
+  assert.equal(located.matches[0].geometry.x, 110);
+  assert.equal(located.matches[0].geometry.y, 220);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Inside frame');
+  assert.equal(observed.geometry.coordinateSpace, 'viewport');
+  assert.equal(observed.geometry.x, 110);
+  assert.equal(observed.geometry.y, 220);
+});
+
+
+test('bounded text selection uses visible control offsets and verifies its postcondition', (t) => {
+  const root = new FakeRoot();
+  const textarea = new FakeElement('textarea'); textarea.setAttribute('aria-label', 'Editor'); textarea.value = 'hello world';
+  attach(root, textarea); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Editor');
+  const selected = interactionFunction({ operation: 'select_text_range', target: { ref: observed.ref }, value: null, start: 0, end: 5 }) as any;
+  assert.equal(selected.ok, true);
+  assert.deepEqual(selected.after.selection, { start: 0, end: 5 });
+  assert.equal(root.activeElement, textarea);
+
+  const invalid = interactionFunction({ operation: 'select_text_range', target: { ref: observed.ref }, value: null, start: 0, end: 50 }) as any;
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /exceeds/i);
+});
+
+
+test('focused Browser Observation V2 ranks a prior observed ref before truncation and refreshes its generation', (t) => {
+  const root = new FakeRoot();
+  const firstButton = new FakeElement('button', 'First'); firstButton.y = 10;
+  const desired = new FakeElement('button', 'Desired'); desired.y = 500;
+  const third = new FakeElement('button', 'Third'); third.y = 20;
+  attach(root, firstButton, desired, third); installDocument(t, root);
+
+  const initial = semanticSnapshotFunction({ maxControls: 3 }) as any;
+  const prior = initial.controls.find((control: any) => control.name === 'Desired');
+  assert.ok(prior?.ref);
+
+  const focused = semanticSnapshotFunction({ maxControls: 1, focusRef: prior.ref }) as any;
+  assert.equal(focused.focus.ref, prior.ref);
+  assert.equal(focused.focus.refResolved, true);
+  assert.equal(focused.controls.length, 1);
+  assert.equal(focused.controls[0].name, 'Desired');
+  assert.notEqual(focused.controls[0].ref, prior.ref);
+
+  const staleFocus = semanticSnapshotFunction({ maxControls: 1, focusRef: prior.ref }) as any;
+  assert.equal(staleFocus.focus.refResolved, false);
+});
+
+test('focused observation can prioritize role, text, and viewport region without enlarging budgets', (t) => {
+  const root = new FakeRoot();
+  const outside = new FakeElement('button', 'Outside'); outside.x = 0; outside.y = 0;
+  const regionMatch = new FakeElement('button', 'Schedule meeting'); regionMatch.x = 400; regionMatch.y = 300;
+  attach(root, outside, regionMatch); installDocument(t, root);
+
+  const focused = semanticSnapshotFunction({
+    maxControls: 1,
+    focusRole: 'button',
+    focusText: 'schedule',
+    focusRegion: { x: 390, y: 290, width: 100, height: 100 }
+  }) as any;
+  assert.equal(focused.controls.length, 1);
+  assert.equal(focused.controls[0].name, 'Schedule meeting');
+  assert.equal(focused.pagination.controls.limit, 1);
 });

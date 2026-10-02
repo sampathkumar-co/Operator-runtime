@@ -58,6 +58,13 @@ export type SemanticTaskGoal =
 export interface TaskPlannerContext {
   task: TaskCapsule;
   goal: SemanticTaskGoal;
+  budget: {
+    maxSteps: number;
+    usedSteps: number;
+    remainingSteps: number;
+    maxAttemptsPerStep: number;
+    activeDeadlineMsRemaining: number;
+  };
 }
 
 /** Stable semantic observation boundary. A future visual provider can populate the
@@ -82,6 +89,7 @@ export interface TaskPlanner {
   readonly id: string;
   supports(goal: SemanticTaskGoal): boolean;
   next(context: TaskPlannerContext): PlannerDecision;
+  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
   accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
   fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
 }
@@ -256,10 +264,36 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
       }
       if (this.#monotonicNow() >= activeDeadline) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
-      const context = { task, goal };
+      const context: TaskPlannerContext = {
+        task,
+        goal,
+        budget: {
+          maxSteps: current.maxSteps,
+          usedSteps: current.stepCount,
+          remainingSteps: Math.max(0, current.maxSteps - current.stepCount),
+          maxAttemptsPerStep: current.maxAttemptsPerStep,
+          activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
+        }
+      };
       let decision: PlannerDecision;
-      try { decision = planner.next(context); }
-      catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
+      let rawDecision: unknown;
+      try {
+        rawDecision = planner.next(context);
+        decision = validatePlannerDecision(rawDecision);
+      } catch (error) {
+        const issue = error instanceof Error ? error.message : String(error);
+        if (!planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
+        try {
+          decision = validatePlannerDecision(planner.repair(context, rawDecision, issue));
+          task.evidence.push(evidence('planner_repair', 'info', 'Planner repaired one malformed typed decision before execution.', {
+            plannerId: planner.id,
+            issue,
+            remainingSteps: context.budget.remainingSteps
+          }));
+        } catch (repairError) {
+          return await this.#fail(task, 'TASK_PLANNER_FAILED', repairError instanceof Error ? repairError.message : String(repairError), assertLease);
+        }
+      }
       if (decision.type === 'complete') {
         const verification = verifyTaskCompletion(task);
         task.evidence.push(verification.evidence);
@@ -1669,6 +1703,25 @@ function sameTaskSubmission(
 function deterministicActionId(taskId: string, stepKey: string, attempt: number, inputHash: string): string {
   return `task-${sha256(`${taskId}\0${stepKey}\0${attempt}\0${inputHash}`)}`;
 }
+function validatePlannerDecision(value: unknown): PlannerDecision {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner decision must be a structured object.');
+  const record = value as Record<string, unknown>;
+  if (record.type === 'complete') {
+    return { type: 'complete', message: boundedText(record.message, 4096, 'planner completion message') };
+  }
+  if (record.type !== 'step') throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner decision type must be complete or step.');
+  const input = record.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner step input must be a structured object.');
+  return {
+    type: 'step',
+    key: boundedText(record.key, 256, 'planner step key'),
+    title: boundedText(record.title, 512, 'planner step title'),
+    capability: boundedText(record.capability, 256, 'planner capability'),
+    input: structuredClone(input as Record<string, unknown>),
+    ...(record.target === undefined ? {} : { target: boundedText(record.target, 4096, 'planner target') })
+  };
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (!value || typeof value !== 'object') return JSON.stringify(value);

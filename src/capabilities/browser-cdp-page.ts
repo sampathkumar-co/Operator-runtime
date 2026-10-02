@@ -13,6 +13,11 @@ export type BrowserObservationOptions = {
   maxText: number;
   maxVisuals: number;
   maxBytes: number;
+  focusRef?: string;
+  focusGroupRef?: string;
+  focusRole?: string;
+  focusText?: string;
+  focusRegion?: { x: number; y: number; width: number; height: number };
 };
 
 export function normalizeObservationOptions(input: unknown): BrowserObservationOptions {
@@ -24,6 +29,18 @@ export function normalizeObservationOptions(input: unknown): BrowserObservationO
     }
     return value;
   };
+  const boundedString = (key: string, max: number) => {
+    if (raw[key] === undefined) return undefined;
+    if (typeof raw[key] !== 'string' || !String(raw[key]).trim()) throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', `${key} must be a non-empty string.`);
+    return String(raw[key]).trim().slice(0, max);
+  };
+  const regionRaw = raw.focusRegion && typeof raw.focusRegion === 'object' && !Array.isArray(raw.focusRegion) ? raw.focusRegion as JsonMap : undefined;
+  const focusRegion = regionRaw ? {
+    x: Number(regionRaw.x), y: Number(regionRaw.y), width: Number(regionRaw.width), height: Number(regionRaw.height)
+  } : undefined;
+  if (focusRegion && (![focusRegion.x, focusRegion.y, focusRegion.width, focusRegion.height].every(Number.isFinite) || focusRegion.width <= 0 || focusRegion.height <= 0 || focusRegion.width > 100_000 || focusRegion.height > 100_000)) {
+    throw new OperatorError('BROWSER_OBSERVATION_FOCUS_INVALID', 'focusRegion must contain finite x/y and positive bounded width/height values.');
+  }
   return {
     controlOffset: integer('controlOffset', 0, 0, 10_000),
     textOffset: integer('textOffset', 0, 0, 10_000),
@@ -31,7 +48,12 @@ export function normalizeObservationOptions(input: unknown): BrowserObservationO
     maxControls: integer('maxControls', 120, 1, 160),
     maxText: integer('maxText', 180, 1, 240),
     maxVisuals: integer('maxVisuals', 120, 1, 160),
-    maxBytes: integer('maxBytes', 64 * 1024, 16 * 1024, 128 * 1024)
+    maxBytes: integer('maxBytes', 64 * 1024, 16 * 1024, 128 * 1024),
+    ...(boundedString('focusRef', 128) ? { focusRef: boundedString('focusRef', 128) } : {}),
+    ...(boundedString('focusGroupRef', 128) ? { focusGroupRef: boundedString('focusGroupRef', 128) } : {}),
+    ...(boundedString('focusRole', 100) ? { focusRole: boundedString('focusRole', 100) } : {}),
+    ...(boundedString('focusText', 500) ? { focusText: boundedString('focusText', 500) } : {}),
+    ...(focusRegion ? { focusRegion } : {})
   };
 }
 
@@ -181,10 +203,10 @@ function isUsefulRole(role: string): boolean {
   return new Set(['button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'slider', 'tab', 'menuitem', 'heading', 'navigation', 'main', 'form', 'dialog', 'alert', 'treeitem', 'option']).has(role.toLowerCase());
 }
 
-export function normalizeTargetSpec(input: unknown): { css?: string; text?: string; role?: string; name?: string; renderedColor?: string } {
+export function normalizeTargetSpec(input: unknown): { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string } {
   const raw = input && typeof input === 'object' ? input as JsonMap : {};
-  const clean = (key: string) => typeof raw[key] === 'string' && String(raw[key]).trim() ? String(raw[key]).trim().slice(0, 500) : undefined;
-  return { css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name'), renderedColor: clean('renderedColor') };
+  const clean = (key: string, max = 500) => typeof raw[key] === 'string' && String(raw[key]).trim() ? String(raw[key]).trim().slice(0, max) : undefined;
+  return { ref: clean('ref', 128), css: clean('css'), text: clean('text'), role: clean('role'), name: clean('name'), renderedColor: clean('renderedColor', 64) };
 }
 
 export async function collectDiagnostics(session: CdpConnection): Promise<{
@@ -331,6 +353,114 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     maxText: integer(options.maxText, 180, 1, 240),
     maxVisuals: integer(options.maxVisuals, 120, 1, 160),
     maxBytes: integer(options.maxBytes, 64 * 1024, 16 * 1024, 128 * 1024)
+  };
+  const focus = {
+    ref: typeof options.focusRef === 'string' ? options.focusRef : '',
+    groupRef: typeof options.focusGroupRef === 'string' ? options.focusGroupRef : '',
+    role: typeof options.focusRole === 'string' ? options.focusRole.toLowerCase() : '',
+    text: typeof options.focusText === 'string' ? options.focusText.toLowerCase() : '',
+    region: options.focusRegion
+  };
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
+  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element> };
+  let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
+  const priorFocusElement = focus.ref && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.ref) : undefined;
+  const priorGroupElement = focus.groupRef && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.groupRef) : undefined;
+  if (!observedRegistry || !(observedRegistry.refs instanceof Map)) {
+    const bytes = new Uint32Array(2);
+    try { globalThis.crypto?.getRandomValues?.(bytes); } catch { bytes[0] = Date.now() >>> 0; bytes[1] = Math.floor(Math.random() * 0xffffffff); }
+    observedRegistry = { nonce: `${bytes[0]!.toString(36)}${bytes[1]!.toString(36)}`, generation: 0, next: 0, refs: new Map() };
+    host[registryKey] = observedRegistry;
+  }
+  observedRegistry.generation += 1;
+  observedRegistry.next = 0;
+  observedRegistry.refs.clear();
+  const observationGeneration = `${observedRegistry.nonce}-${observedRegistry.generation.toString(36)}`;
+  const refByElement = new WeakMap<Element, string>();
+  const observedRefOf = (element: Element) => {
+    const existing = refByElement.get(element);
+    if (existing) return existing;
+    const ref = `b-${observationGeneration}-${(++observedRegistry!.next).toString(36)}`;
+    refByElement.set(element, ref);
+    observedRegistry!.refs.set(ref, element);
+    return ref;
+  };
+  const relationshipOf = (element: Element) => {
+    const parent = element.parentElement;
+    let group: Element | null = parent;
+    for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
+      const groupRole = trim(group.getAttribute('role')).toLowerCase();
+      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(groupRole) || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    }
+    const children = Array.from(element.children ?? []).slice(0, 12).map((child) => observedRefOf(child));
+    return {
+      ...(parent ? { parentRef: observedRefOf(parent) } : {}),
+      ...(group ? { groupRef: observedRefOf(group) } : {}),
+      ...(children.length ? { children } : {}),
+      ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
+      depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()
+    };
+  };
+  const geometryOf = (element: Element, context: { frameDepth: number; shadowDepth: number }) => {
+    const rect = element.getBoundingClientRect();
+    let x = rect.x; let y = rect.y;
+    let owner: Document | null = element.ownerDocument;
+    let convertedDepth = 0;
+    while (owner && owner !== document && convertedDepth < 4) {
+      let frameElement: Element | null = null;
+      try { frameElement = owner.defaultView?.frameElement as Element | null; } catch { frameElement = null; }
+      if (!frameElement) break;
+      const frameRect = frameElement.getBoundingClientRect();
+      x += frameRect.x; y += frameRect.y;
+      owner = frameElement.ownerDocument;
+      convertedDepth += 1;
+    }
+    const coordinateSpace = owner === document ? 'viewport' : 'frame-viewport';
+    return {
+      coordinateSpace,
+      frameDepth: context.frameDepth,
+      x: Math.round(x), y: Math.round(y),
+      width: Math.round(rect.width), height: Math.round(rect.height),
+      center: { x: Math.round(x + rect.width / 2), y: Math.round(y + rect.height / 2) }
+    };
+  };
+  const focusScoreOf = (element: Element, role: string, text: string, geometry: { x: number; y: number; width: number; height: number }) => {
+    let score = 0;
+    if (priorFocusElement === element) score += 1000;
+    try {
+      if (priorGroupElement && (priorGroupElement === element || priorGroupElement.contains(element) || element.contains(priorGroupElement))) score += 650;
+    } catch { /* detached/cross-realm relationship changed */ }
+    if (focus.role && role.toLowerCase() === focus.role) score += 300;
+    if (focus.text && text.toLowerCase().includes(focus.text)) score += 350;
+    const region = focus.region;
+    if (region) {
+      const right = geometry.x + geometry.width; const bottom = geometry.y + geometry.height;
+      const regionRight = region.x + region.width; const regionBottom = region.y + region.height;
+      if (geometry.x < regionRight && right > region.x && geometry.y < regionBottom && bottom > region.y) score += 250;
+    }
+    return score;
+  };
+  const visualFactsOf = (element: Element) => {
+    const tag = element.tagName.toLowerCase();
+    const finiteAttr = (name: string) => { const raw = element.getAttribute(name); if (raw === null || raw.trim() === '') return undefined; const value = Number(raw); return Number.isFinite(value) ? value : undefined; };
+    const grid = {
+      row: finiteAttr('aria-rowindex'),
+      column: finiteAttr('aria-colindex'),
+      rowSpan: finiteAttr('aria-rowspan'),
+      columnSpan: finiteAttr('aria-colspan')
+    };
+    if (tag === 'polygon' || tag === 'polyline') {
+      const nums = trim(element.getAttribute('points'), 2048).split(/[\s,]+/).map(Number).filter(Number.isFinite).slice(0, 128);
+      const points = [];
+      for (let index = 0; index + 1 < nums.length; index += 2) points.push({ x: nums[index], y: nums[index + 1] });
+      return { ...(points.length ? { points, pointCount: points.length } : {}), ...grid };
+    }
+    if (tag === 'line') return { line: { x1: finiteAttr('x1'), y1: finiteAttr('y1'), x2: finiteAttr('x2'), y2: finiteAttr('y2') }, ...grid };
+    if (tag === 'circle') return { circle: { cx: finiteAttr('cx'), cy: finiteAttr('cy'), r: finiteAttr('r') }, ...grid };
+    if (tag === 'ellipse') return { ellipse: { cx: finiteAttr('cx'), cy: finiteAttr('cy'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
+    if (tag === 'rect') return { svgRect: { x: finiteAttr('x'), y: finiteAttr('y'), width: finiteAttr('width'), height: finiteAttr('height'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
+    return grid;
   };
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -494,20 +624,31 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         ? ''
         : ['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(element.tagName) ? String((control as HTMLInputElement).value ?? '').slice(0, 500) : '';
       return {
+        ref: observedRefOf(element),
         tag: element.tagName.toLowerCase(),
         selector: selectorOf(element),
         role,
         name: accessibleName(element),
         type: inputType,
+        semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
         ...(readableValue ? { value: readableValue } : {}),
-        ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : {}),
-        ...(element.tagName === 'OPTION' ? { selected: Boolean((element as HTMLOptionElement).selected) } : {}),
+        ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
+        ...(element.tagName === 'OPTION' ? { selected: Boolean((element as HTMLOptionElement).selected) } : element.hasAttribute('aria-selected') ? { selected: element.getAttribute('aria-selected') === 'true' } : {}),
         ...(element.tagName === 'SELECT' ? { multiple: Boolean((element as HTMLSelectElement).multiple) } : {}),
+        ...(element.hasAttribute('aria-expanded') ? { expanded: element.getAttribute('aria-expanded') === 'true' } : {}),
+        ...(element.hasAttribute('aria-pressed') ? { pressed: element.getAttribute('aria-pressed') === 'true' } : {}),
+        ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current'), 80) } : {}),
+        ...((element as HTMLInputElement).readOnly === true || element.getAttribute('aria-readonly') === 'true' ? { readonly: true } : {}),
+        ...(element.getAttribute('placeholder') ? { placeholder: trim(element.getAttribute('placeholder'), 240) } : {}),
+        active: element.ownerDocument?.activeElement === element,
+        scrollable: (element as HTMLElement).scrollHeight > (element as HTMLElement).clientHeight || (element as HTMLElement).scrollWidth > (element as HTMLElement).clientWidth,
         disabled: state.disabled,
         actionable: state.actionable,
         ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
         ...(state.occluded ? { occluded: true } : {}),
+        ...relationshipOf(element),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        geometry: geometryOf(element, context),
         ...(semanticRole === 'slider' ? {
           min: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).min || element.getAttribute('aria-valuemin') || '' : element.getAttribute('aria-valuemin') || ''),
           max: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).max || element.getAttribute('aria-valuemax') || '' : element.getAttribute('aria-valuemax') || ''),
@@ -515,12 +656,14 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
           value: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).value : element.getAttribute('aria-valuenow') || displayedSliderValue(element))
         } : {}),
         href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
+        _focusScore: focusScoreOf(element, role, accessibleName(element), geometryOf(element, context)),
         context
       };
     })
     .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
     .sort((left, right) => {
-      const score = (item: typeof left) => (item.actionable ? 50 : 0)
+      const score = (item: typeof left) => item._focusScore
+        + (item.actionable ? 50 : 0)
         + (item.role === 'pointer' ? 20 : 40)
         + (item.name ? 10 : 0)
         + (item.href ? 5 : 0)
@@ -530,7 +673,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         || left.rect.x - right.rect.x
         || left.selector.localeCompare(right.selector);
     });
-  const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls);
+  const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls).map(({ _focusScore, ...item }) => item);
   const visibleTextCandidates = deepQuery('*', 600)
     .filter(({ element }) => visible(element)
       && Array.from(element.children ?? []).length === 0
@@ -538,22 +681,26 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     .map(({ element, context }) => {
       const rect = element.getBoundingClientRect();
       return {
+        ref: observedRefOf(element),
         tag: element.tagName.toLowerCase(),
         selector: selectorOf(element),
         text: readableText(element),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        geometry: geometryOf(element, context),
+        _focusScore: focusScoreOf(element, roleOf(element), readableText(element), geometryOf(element, context)),
         context
       };
     })
     .sort((left, right) => {
-      const semanticScore = (item: typeof left) => (/^-?(?:\d+\.?\d*|\.\d+)$/.test(item.text) ? 20 : 0)
+      const semanticScore = (item: typeof left) => item._focusScore
+        + (/^-?(?:\d+\.?\d*|\.\d+)$/.test(item.text) ? 20 : 0)
         + (item.text.length <= 80 ? 5 : 0);
       return semanticScore(right) - semanticScore(left)
         || left.rect.y - right.rect.y
         || left.rect.x - right.rect.x
         || left.selector.localeCompare(right.selector);
     });
-  const visibleText = visibleTextCandidates.slice(budget.textOffset, budget.textOffset + budget.maxText);
+  const visibleText = visibleTextCandidates.slice(budget.textOffset, budget.textOffset + budget.maxText).map(({ _focusScore, ...item }) => item);
   const headings = deepQuery('h1,h2,h3,[role="heading"]', 80).filter(({ element }) => visible(element)).map(({ element }) => readableText(element)).filter(Boolean).slice(0, 60);
   const forms = deepQuery('form', 30).map(({ element: form, context }) => {
     const anyForm = form as HTMLFormElement;
@@ -580,9 +727,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const role = roleOf(element);
     const pointer = style?.cursor === 'pointer' && !state.pointerBlocked;
     const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
-    return [{ tag: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: role || (pointer ? 'pointer' : ''), colors, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), context }];
+    const effectiveRole = role || (pointer ? 'pointer' : '');
+    const geometry = geometryOf(element, context);
+    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
-    const score = (item: typeof left) => (item.actionable ? 50 : 0)
+    const score = (item: typeof left) => item._focusScore
+      + (item.actionable ? 50 : 0)
       + (['circle', 'rect', 'polygon', 'path', 'ellipse', 'svg'].includes(item.tag) ? 40 : 0)
       + (item.role ? 10 : 0)
       + (item.name ? 5 : 0);
@@ -594,7 +744,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       || left.rect.x - right.rect.x
       || left.selector.localeCompare(right.selector);
   });
-  const visualObjects = visualCandidates.slice(budget.visualOffset, budget.visualOffset + budget.maxVisuals);
+  const visualObjects = visualCandidates.slice(budget.visualOffset, budget.visualOffset + budget.maxVisuals).map(({ _focusScore, ...item }) => item);
   const pageMeta = (total: number, offset: number, limit: number, returned: number) => {
     const nextOffset = offset + returned;
     const truncated = nextOffset < total;
@@ -602,6 +752,15 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   return {
     schemaVersion: 2,
+    observationGeneration,
+    coordinateSpace: 'viewport',
+    focus: {
+      ...(focus.ref ? { ref: focus.ref, refResolved: Boolean(priorFocusElement) } : {}),
+      ...(focus.groupRef ? { groupRef: focus.groupRef, groupRefResolved: Boolean(priorGroupElement) } : {}),
+      ...(focus.role ? { role: focus.role } : {}),
+      ...(focus.text ? { text: focus.text } : {}),
+      ...(focus.region ? { region: focus.region } : {})
+    },
     budgets: budget,
     pagination: {
       controls: pageMeta(controlCandidates.length, budget.controlOffset, budget.maxControls, controls.length),
@@ -613,7 +772,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
 }
 
-export function interactionFunction(input: { operation: string; target: { css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number }, contract = browserDomContractFunction()) {
+export function interactionFunction(input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; key?: string; keys?: string[]; start?: number; end?: number }, contract = browserDomContractFunction()) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -730,8 +889,13 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
     return [style?.backgroundColor, style?.fill, style?.stroke].map((value) => trim(value).toLowerCase()).filter((value) => value && value !== 'none' && value !== 'transparent' && value !== 'rgba(0, 0, 0, 0)');
   };
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const observed = input.target.ref ? registry?.refs?.get(input.target.ref) : undefined;
   const selector = input.target.css || (input.target.renderedColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
-  const candidates = deepQuery(selector, 1000);
+  const candidates = input.target.ref
+    ? (observed && observed.isConnected !== false ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }] : [])
+    : deepQuery(selector, 1000);
   const desiredColor = input.target.renderedColor ? normalizeColor(input.target.renderedColor) : '';
   let matching = candidates.filter(({ element }) => {
     if (!visible(element)) return false;
@@ -741,7 +905,7 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     if (desiredColor && !renderedColors(element).includes(desiredColor)) return false;
     return true;
   });
-  if (!matching.length && !input.target.css && !input.target.role && !input.target.renderedColor && (input.target.text || input.target.name)) {
+  if (!matching.length && !input.target.ref && !input.target.css && !input.target.role && !input.target.renderedColor && (input.target.text || input.target.name)) {
     const desired = (input.target.name || input.target.text || '').toLowerCase();
     matching = deepQuery('*', 1000).filter(({ element }) => {
       if (!visible(element)) return false;
@@ -757,7 +921,7 @@ export function interactionFunction(input: { operation: string; target: { css?: 
   }
   if (matching.length > 1) return { ok: false, error: 'Semantic browser target matched multiple elements.', matches: matching.length };
   const match = matching[0];
-  if (!match) return { ok: false, error: 'No matching semantic element was found.' };
+  if (!match) return { ok: false, error: input.target.ref ? 'Observed browser target is stale; re-observe before retrying.' : 'No matching semantic element was found.', staleRef: Boolean(input.target.ref) };
   const { element, context } = match;
   const control = element as Element & {
     value?: string;
@@ -782,6 +946,61 @@ export function interactionFunction(input: { operation: string; target: { css?: 
     if (view.PointerEvent) targetElement.dispatchEvent(new view.PointerEvent(type.replace(/^mouse/, 'pointer'), init));
     targetElement.dispatchEvent(new view.MouseEvent(type, init));
   };
+
+  if (input.operation === 'focus') {
+    control.focus?.();
+    const active = element.ownerDocument?.activeElement;
+    if (active !== element && !element.contains(active)) return { ok: false, error: 'Matched element did not receive focus.' };
+    return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, focused: true } };
+  }
+
+  if (input.operation === 'select_text_range') {
+    const start = Number(input.start);
+    const end = Number(input.end);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > 100000) {
+      return { ok: false, error: 'Text selection requires bounded integer start/end offsets.' };
+    }
+    control.focus?.();
+    if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') {
+      const value = String(control.value ?? '');
+      if (end > value.length) return { ok: false, error: 'Text selection range exceeds the visible control value.', length: value.length };
+      (element as HTMLInputElement | HTMLTextAreaElement).setSelectionRange?.(start, end);
+      const selectedStart = Number((element as HTMLInputElement | HTMLTextAreaElement).selectionStart);
+      const selectedEnd = Number((element as HTMLInputElement | HTMLTextAreaElement).selectionEnd);
+      if (selectedStart !== start || selectedEnd !== end) return { ok: false, error: 'Text selection postcondition failed.', expected: { start, end }, actual: { start: selectedStart, end: selectedEnd } };
+      return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
+    }
+    if (control.isContentEditable === true) {
+      const textNodes: Text[] = [];
+      const visit = (node: Node) => {
+        if (textNodes.length >= 2000) return;
+        if (node.nodeType === 3) { textNodes.push(node as Text); return; }
+        for (const child of Array.from(node.childNodes ?? [])) visit(child);
+      };
+      visit(element);
+      const totalLength = textNodes.reduce((sum, node) => sum + (node.data?.length ?? 0), 0);
+      if (end > totalLength) return { ok: false, error: 'Text selection range exceeds editable text.', length: totalLength };
+      const locate = (offset: number) => {
+        let remaining = offset;
+        for (const node of textNodes) {
+          const length = node.data?.length ?? 0;
+          if (remaining <= length) return { node, offset: remaining };
+          remaining -= length;
+        }
+        const last = textNodes[textNodes.length - 1];
+        return last ? { node: last, offset: last.data?.length ?? 0 } : undefined;
+      };
+      const from = locate(start); const to = locate(end);
+      if (!from || !to) return { ok: false, error: 'Editable text does not contain a selectable text node.' };
+      const range = element.ownerDocument.createRange();
+      range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
+      const selection = element.ownerDocument.getSelection?.();
+      selection?.removeAllRanges(); selection?.addRange(range);
+      if (!selection || selection.rangeCount !== 1 || selection.toString().length !== end - start) return { ok: false, error: 'Editable text selection postcondition failed.' };
+      return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
+    }
+    return { ok: false, error: 'Matched element does not support bounded text selection.' };
+  }
 
   if (input.operation === 'verify_value') {
     const actual = element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'range'

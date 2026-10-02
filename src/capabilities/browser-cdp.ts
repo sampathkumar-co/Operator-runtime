@@ -2,7 +2,7 @@ import type { ActionRequest, ActionResult, CapabilityExecutionContext, Capabilit
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
-import { inspectOopifFrames, performSemanticInteraction } from './browser-cdp-frames.ts';
+import { inspectOopifFrames, observeSemanticTargetState, performSemanticInteraction } from './browser-cdp-frames.ts';
 import {
   assertLoopbackEndpoint,
   collectDiagnostics,
@@ -43,6 +43,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
   #endpoint: URL;
   #sessions = new CdpSessionManager();
   #browserSession?: CdpConnection;
+  #noProgressHistory = new Map<string, number>();
+  #noProgressPrevented = 0;
 
   constructor(endpoint = 'http://127.0.0.1:9222') {
     this.#endpoint = new URL(endpoint);
@@ -50,7 +52,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   supports(action: ActionRequest): boolean {
-    return ['browser.inspect', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close'].includes(action.capability);
+    return ['browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close'].includes(action.capability);
   }
 
   score(): CapabilityScore { return SCORE; }
@@ -60,6 +62,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     try {
       throwIfAborted(context.signal);
       if (action.capability === 'browser.inspect') return await this.#inspect(action, started, context.signal);
+      if (action.capability === 'browser.verify') return await this.#verify(action, started, context.signal);
       if (action.capability === 'browser.navigate') return await this.#navigate(action, started, context.signal);
       if (action.capability === 'browser.interact') return await this.#interact(action, started, context.signal);
       if (action.capability === 'browser.tab.focus') return await this.#focusTab(action, started, context.signal);
@@ -217,20 +220,99 @@ export class BrowserCdpProvider implements CapabilityProvider {
     };
   }
 
+  async #verify(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
+    const targetId = String(action.input.targetId ?? '');
+    if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
+    const rawExpect = action.input.expect && typeof action.input.expect === 'object' && !Array.isArray(action.input.expect)
+      ? action.input.expect as JsonMap
+      : {};
+    const targetProvided = action.input.target && typeof action.input.target === 'object' && !Array.isArray(action.input.target);
+    const targetSpec = targetProvided ? normalizeTargetSpec(action.input.target) : undefined;
+    if (targetSpec && !targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Verification target must use an observed ref, css, text, renderedColor, or role+name.');
+    }
+    const expectationKeys = ['exists', 'value', 'checked', 'selected', 'expanded', 'current', 'active', 'urlContains', 'titleContains', 'textContains'];
+    if (!expectationKeys.some((key) => rawExpect[key] !== undefined)) {
+      throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'At least one bounded verification expectation is required.');
+    }
+
+    const tabs = await this.#listTargets(signal);
+    const target = requireTarget(tabs, targetId);
+    const session = this.#sessions.get(target);
+    await session.send('Runtime.enable');
+    const page = await pageIdentity(session);
+    const checks: Array<{ field: string; expected: unknown; actual: unknown; pass: boolean }> = [];
+    let inconclusive = false;
+    const contains = (actual: string, expected: unknown) => actual.toLowerCase().includes(String(expected ?? '').toLowerCase());
+
+    if (rawExpect.urlContains !== undefined) checks.push({ field: 'urlContains', expected: rawExpect.urlContains, actual: page.url, pass: contains(page.url, rawExpect.urlContains) });
+    if (rawExpect.titleContains !== undefined) checks.push({ field: 'titleContains', expected: rawExpect.titleContains, actual: page.title, pass: contains(page.title, rawExpect.titleContains) });
+    if (rawExpect.textContains !== undefined) {
+      const observation = normalizeObservationOptions({ maxControls: 80, maxText: 160, maxVisuals: 60, maxBytes: 48 * 1024 });
+      const [main, childFrames] = await Promise.all([inspectPage(session, observation), inspectOopifFrames(session, signal, observation)]);
+      const visibleCorpus = boundedObservationCorpus([main.semantic, ...childFrames.frames.map((frame) => frame.semantic)]);
+      checks.push({ field: 'textContains', expected: rawExpect.textContains, actual: visibleCorpus.slice(0, 2000), pass: contains(visibleCorpus, rawExpect.textContains) });
+    }
+
+    const targetFields = ['exists', 'value', 'checked', 'selected', 'expanded', 'current', 'active'];
+    if (targetFields.some((key) => rawExpect[key] !== undefined)) {
+      if (!targetSpec) throw new OperatorError('INVALID_BROWSER_VERIFICATION', 'Target-state expectations require a semantic browser target.');
+      const observed = await observeSemanticTargetState(session, targetSpec, signal);
+      if (observed.status === 'ambiguous') {
+        inconclusive = true;
+        checks.push({ field: 'target', expected: 'unique', actual: 'ambiguous', pass: false });
+      } else if (observed.status === 'stale') {
+        checks.push({ field: 'exists', expected: rawExpect.exists ?? true, actual: false, pass: rawExpect.exists === false });
+      } else {
+        const sample = observed.sample ?? {};
+        if (rawExpect.exists !== undefined) checks.push({ field: 'exists', expected: Boolean(rawExpect.exists), actual: true, pass: Boolean(rawExpect.exists) });
+        for (const field of ['value', 'checked', 'selected', 'expanded', 'current', 'active']) {
+          if (rawExpect[field] === undefined) continue;
+          checks.push({ field, expected: rawExpect[field], actual: sample[field], pass: sample[field] === rawExpect[field] });
+        }
+      }
+    }
+
+    const allPass = checks.length > 0 && checks.every((check) => check.pass);
+    const status = inconclusive ? 'INCONCLUSIVE' : allPass ? 'VERIFIED' : 'NOT_COMPLETE';
+    return {
+      ok: true,
+      capability: action.capability,
+      provider: this.name,
+      output: { targetId, status, page, checks },
+      evidence: [evidence('browser_goal_verification', status === 'VERIFIED' ? 'pass' : 'info', status === 'VERIFIED'
+        ? 'Visible browser state satisfies all requested bounded postconditions.'
+        : status === 'NOT_COMPLETE'
+          ? 'Visible browser state does not yet satisfy all requested bounded postconditions.'
+          : 'Browser verification is inconclusive because the observed target is ambiguous.', { targetId, status, checks })],
+      durationMs: Math.round(performance.now() - started)
+    };
+  }
+
   async #interact(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'hover', 'drag', 'type', 'select', 'set_value'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation must be click, hover, drag, type, select, or set_value.');
+    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
-    if (!targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
-      throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide css, text, renderedColor, or role+name for semantic targeting.');
+    if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'Provide an observed ref, css, text, renderedColor, or role+name for semantic targeting.');
     }
-    const deltaX = operation === 'drag' ? Number(action.input.deltaX) : undefined;
-    const deltaY = operation === 'drag' ? Number(action.input.deltaY) : undefined;
-    if (operation === 'drag' && (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX!) > 2000 || Math.abs(deltaY!) > 2000 || (deltaX === 0 && deltaY === 0))) {
-      throw new OperatorError('INVALID_BROWSER_DRAG', 'Drag requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
+    const toTargetSpec = operation === 'drag_between' ? normalizeTargetSpec(action.input.toTarget) : undefined;
+    if (operation === 'drag_between' && (!targetSpec.ref || !toTargetSpec?.ref)) {
+      throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs from the same current observation context.');
+    }
+    const deltaOperation = ['drag', 'drag_by', 'resize'].includes(operation);
+    const deltaX = deltaOperation ? Number(action.input.deltaX) : undefined;
+    const deltaY = deltaOperation ? Number(action.input.deltaY) : undefined;
+    if (deltaOperation && (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || Math.abs(deltaX!) > 2000 || Math.abs(deltaY!) > 2000 || (deltaX === 0 && deltaY === 0))) {
+      throw new OperatorError('INVALID_BROWSER_DRAG', 'Drag/resize requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
+    }
+    const xRatio = operation === 'click_relative' ? Number(action.input.xRatio) : undefined;
+    const yRatio = operation === 'click_relative' ? Number(action.input.yRatio) : undefined;
+    if (operation === 'click_relative' && (!targetSpec.ref || !Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1)) {
+      throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and finite xRatio/yRatio values between 0 and 1.');
     }
 
     const tabs = await this.#listTargets(signal);
@@ -257,31 +339,82 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const interaction = await performSemanticInteraction(session, {
         operation,
         target: targetSpec,
+        ...(toTargetSpec ? { toTarget: toTargetSpec } : {}),
         value: action.input.value ?? null,
-        ...(operation === 'drag' ? { deltaX, deltaY } : {})
+        ...(deltaOperation ? { deltaX, deltaY } : {}),
+        ...(operation === 'click_relative' ? { xRatio, yRatio } : {}),
+        ...(operation === 'key_press' ? { key: String(action.input.key ?? '') } : {}),
+        ...(operation === 'hotkey' ? { keys: Array.isArray(action.input.keys) ? action.input.keys.map(String) : [] } : {}),
+        ...(operation === 'select_text_range' ? { start: Number(action.input.start), end: Number(action.input.end) } : {})
       }, signal);
       const value = interaction.value;
       if (value.ok !== true) {
         const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
+        if (value.staleRef === true || (targetSpec.ref && /stale/i.test(message))) {
+          throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: targetSpec, frame: interaction.frame } });
+        }
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
       await settleAfterInteraction(session, signal);
       throwIfAborted(signal);
       const after = await pageIdentity(session);
+      const afterTarget = await observeSemanticTargetState(session, targetSpec, signal);
+      const beforeTarget = value.matched && typeof value.matched === 'object' ? value.matched as JsonMap : {};
+      const compactTarget = (sample: JsonMap | undefined) => sample ? {
+        identity: sample.identity, role: sample.role, name: sample.name, value: sample.value,
+        checked: sample.checked, selected: sample.selected, expanded: sample.expanded, current: sample.current,
+        active: sample.active, geometry: sample.geometry
+      } : null;
+      const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget) };
+      const afterRelevant = {
+        page: { url: after.url, title: after.title },
+        target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status }
+      };
+      const semanticAfter = value.after && typeof value.after === 'object' ? value.after as JsonMap : undefined;
+      const directSemanticProgress = ['type', 'select', 'set_value', 'select_text_range'].includes(operation)
+        && semanticAfter !== undefined
+        && JSON.stringify({
+          value: beforeTarget.value, checked: beforeTarget.checked, selected: beforeTarget.selected,
+          selection: (beforeTarget as JsonMap).selection
+        }) !== JSON.stringify({
+          value: semanticAfter.value, checked: semanticAfter.checked, selected: semanticAfter.selected,
+          selection: semanticAfter.selection
+        });
       const downloadResult = download ? await download.done : undefined;
       if (downloadResult?.state === 'canceled') {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
+      const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
+      const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
+      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
+      const noProgressKey = JSON.stringify({ targetId, actionIdentity, beforeRelevant, actionPayload });
+      let repeatedNoProgress = 0;
+      if (operation !== 'hover' && !stateProgress) {
+        repeatedNoProgress = (this.#noProgressHistory.get(noProgressKey) ?? 0) + 1;
+        this.#noProgressHistory.set(noProgressKey, repeatedNoProgress);
+        if (this.#noProgressHistory.size > 256) this.#noProgressHistory.delete(this.#noProgressHistory.keys().next().value as string);
+        if (repeatedNoProgress >= 2) {
+          this.#noProgressPrevented += 1;
+          throw new OperatorError('BROWSER_NO_PROGRESS', 'The same browser action produced no meaningful state delta twice; re-observe and change strategy instead of repeating it.', {
+            retryable: false,
+            details: { sideEffectState: 'known', repeatedAction: actionPayload, target: targetSpec, before: beforeRelevant, after: afterRelevant, repeatedNoProgress, preventedCount: this.#noProgressPrevented }
+          });
+        }
+      } else if (stateProgress) {
+        this.#noProgressHistory.delete(noProgressKey);
+      }
+      const stateDelta = { progress: stateProgress, repeatedNoProgress, before: beforeRelevant, after: afterRelevant, preventedCount: this.#noProgressPrevented };
       const evidenceItems = [
         evidence('browser_interaction', 'pass', `Semantic browser ${operation} executed through CDP after a unique cross-context locate preflight.`, { targetId, matched: value.matched, frame: interaction.frame }),
-        evidence('postcondition', 'pass', 'Element state was re-read after the interaction.', { after: value.after, pageUrl: after.url, frame: interaction.frame })
+        evidence('postcondition', 'pass', 'Element and page state were re-read after the interaction.', { after: value.after, pageUrl: after.url, frame: interaction.frame, stateDelta }),
+        evidence('browser_state_delta', stateProgress ? 'pass' : 'info', stateProgress ? 'Browser interaction produced a meaningful bounded state delta.' : 'Browser interaction produced no meaningful bounded state delta; one equivalent retry remains before forced replanning.', { stateDelta })
       ];
       if (downloadResult) evidenceItems.push(evidence('download_complete', 'pass', 'Browser emitted a completed download event.', downloadResult));
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { targetId, operation, matched: value.matched, ...(interaction.frame ? { frame: interaction.frame } : {}), before, after, ...(downloadResult ? { download: downloadResult } : {}), diagnostics: diagnostics.snapshot() },
+        output: { targetId, operation, matched: value.matched, ...(interaction.frame ? { frame: interaction.frame } : {}), before, after, stateDelta, ...(downloadResult ? { download: downloadResult } : {}), diagnostics: diagnostics.snapshot() },
         evidence: evidenceItems,
         durationMs: Math.round(performance.now() - started)
       };
@@ -498,6 +631,25 @@ export function boundBrowserInspectOutput(output: JsonMap, maxBytes: number): { 
   output.returnedBytes = byteLength();
   output.returnedBytes = byteLength();
   return { output, returnedBytes: Number(output.returnedBytes), truncated };
+}
+
+function boundedObservationCorpus(inputs: unknown[]): string {
+  const values: string[] = [];
+  let used = 0;
+  const visit = (value: unknown, depth = 0) => {
+    if (used >= 32_000 || depth > 8 || value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      const bounded = value.slice(0, Math.max(0, Math.min(1000, 32_000 - used)));
+      values.push(bounded); used += bounded.length + 1; return;
+    }
+    if (Array.isArray(value)) { for (const item of value.slice(0, 240)) visit(item, depth + 1); return; }
+    if (typeof value !== 'object') return;
+    const record = value as JsonMap;
+    for (const key of ['text', 'name', 'value', 'placeholder', 'title']) if (typeof record[key] === 'string') visit(record[key], depth + 1);
+    for (const key of ['controls', 'visibleText', 'visualObjects', 'headings', 'forms']) if (record[key] !== undefined) visit(record[key], depth + 1);
+  };
+  for (const input of inputs) visit(input);
+  return values.join(' ').slice(0, 32_000);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

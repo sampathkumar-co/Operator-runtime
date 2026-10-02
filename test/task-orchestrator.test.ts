@@ -1112,3 +1112,47 @@ test('a durable execution lease prevents a second orchestrator from duplicating 
   assert.equal((await running).state, 'VERIFIED');
   assert.equal((await new TaskStore(state).get(task.id)).execution?.records.length, 1);
 });
+
+
+class RepairingBudgetPlanner implements TaskPlanner {
+  readonly id = 'test.repairing-budget';
+  supports(): boolean { return true; }
+  next(context: TaskPlannerContext): PlannerDecision {
+    assert.equal(context.budget.maxSteps, 4);
+    assert.ok(context.budget.remainingSteps >= 0 && context.budget.remainingSteps <= 4);
+    if (context.task.execution!.plannerState.phase === 'complete') return { type: 'complete', message: 'repaired step verified' };
+    return { reasoning: 'I know what to do but omitted the typed action.' } as unknown as PlannerDecision;
+  }
+  repair(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision {
+    assert.match(issue, /decision type|structured/i);
+    assert.equal(typeof invalidDecision, 'object');
+    assert.equal(context.budget.usedSteps, 0);
+    return { type: 'step', key: 'repaired-read', title: 'Repaired bounded read', capability: 'file.read', input: { path: context.goal.kind === 'controlled-file-change' ? context.goal.path : 'input.txt' } };
+  }
+  accept({ task }: TaskPlannerContext): void { task.execution!.plannerState.phase = 'complete'; }
+}
+
+test('task planner boundary exposes remaining budget and permits one typed repair of malformed output', async (t) => {
+  const root = await tempDir(t, 'operator-task-planner-repair-root-');
+  const state = await tempDir(t, 'operator-task-planner-repair-state-');
+  const target = path.join(root, 'input.txt');
+  await fs.writeFile(target, 'data');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']),
+    planners: [new RepairingBudgetPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Repair one malformed typed planner decision.',
+    authorizedScope: [root],
+    successConditions: ['one bounded read completes'],
+    goal: { kind: 'controlled-file-change', root, path: target, content: 'unused' },
+    maxSteps: 4,
+    maxAttemptsPerStep: 2
+  });
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(completed.execution?.stepCount, 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'planner_repair'));
+});

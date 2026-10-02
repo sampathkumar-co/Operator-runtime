@@ -394,3 +394,147 @@ test('OOPIF discovery cancellation returns promptly and disables auto-attach', a
     assert.ok(FakeWebSocket.autoAttachDisabled >= 1);
   }, '/oopif');
 });
+
+
+test('native browser keyboard actions focus the unique semantic target and dispatch bounded CDP keys', async () => {
+  const keyEvents: any[] = [];
+  const sample = { tag: 'input', role: 'textbox', name: 'Command', identity: '#command', value: 'echo hi', active: false, geometry: { coordinateSpace: 'viewport', x: 10, y: 20, width: 120, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+        if (expression.includes('interactionFunction')) return { result: { value: { ok: true, matched: sample, after: { ...sample, active: true } } } };
+      }
+      if (method === 'Input.dispatchKeyEvent') keyEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+
+  const enter = await performSemanticInteraction(session as any, { operation: 'key_press', target: { role: 'textbox', name: 'Command' }, value: null, key: 'Enter' });
+  assert.equal(enter.value.ok, true);
+  assert.deepEqual(keyEvents.map((event) => [event.type, event.key]), [['keyDown', 'Enter'], ['keyUp', 'Enter']]);
+
+  keyEvents.length = 0;
+  const chord = await performSemanticInteraction(session as any, { operation: 'hotkey', target: { role: 'textbox', name: 'Command' }, value: null, keys: ['Control', 'a'] });
+  assert.equal(chord.value.ok, true);
+  assert.deepEqual(keyEvents.map((event) => [event.type, event.key]), [
+    ['keyDown', 'Control'], ['keyDown', 'a'], ['keyUp', 'a'], ['keyUp', 'Control']
+  ]);
+  assert.equal(keyEvents[1].modifiers & 2, 2);
+});
+
+test('browser provider prevents a second equivalent no-progress action and preserves side-effect truth', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const action = (id: string) => provider.execute({
+      id, capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' } },
+      provenance: { kind: 'runtime' }
+    });
+    const first = await action('no-progress-1');
+    assert.equal(first.ok, true, first.error?.message);
+    assert.equal((first.output as any).stateDelta.progress, false);
+    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
+
+    const second = await action('no-progress-2');
+    assert.equal(second.ok, false);
+    assert.equal(second.error?.code, 'BROWSER_NO_PROGRESS');
+    assert.equal(second.error?.retryable, false);
+    assert.equal(second.error?.sideEffectState, 'known');
+    assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
+  });
+});
+
+test('browser.verify independently reports VERIFIED and NOT_COMPLETE from public semantic state', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const verified = await provider.execute({
+      id: 'verify-1', capability: 'browser.verify', risk: 'read',
+      input: { targetId: 'tab-1', target: { role: 'textbox', name: 'Email' }, expect: { exists: true, titleContains: 'Start' } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(verified.ok, true, verified.error?.message);
+    assert.equal((verified.output as any).status, 'VERIFIED');
+
+    const notComplete = await provider.execute({
+      id: 'verify-2', capability: 'browser.verify', risk: 'read',
+      input: { targetId: 'tab-1', target: { role: 'textbox', name: 'Email' }, expect: { expanded: true } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(notComplete.ok, true, notComplete.error?.message);
+    assert.equal((notComplete.output as any).status, 'NOT_COMPLETE');
+  });
+});
+
+
+test('click_relative stays inside an observed object and dispatches the verified relative point', async () => {
+  const nativeEvents: any[] = [];
+  const sample = { tag: 'div', role: 'pointer', name: 'Canvas cell', identity: '#cell', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 100, y: 200, width: 80, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 20, y: 30 } } } };
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'click_relative',
+    target: { ref: 'b-test-1' },
+    value: null,
+    xRatio: 0.25,
+    yRatio: 0.75
+  });
+  assert.equal(result.value.ok, true);
+  assert.deepEqual(nativeEvents.map((event) => [event.type, event.x, event.y]), [
+    ['mouseMoved', 120, 230],
+    ['mousePressed', 120, 230],
+    ['mouseReleased', 120, 230]
+  ]);
+});
+
+
+test('drag_between revalidates two observed refs and uses native center-to-center input', async () => {
+  const nativeEvents: any[] = [];
+  const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const destination = { tag: 'div', role: 'pointer', name: 'Drop zone', identity: '#destination', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 210, y: 120, width: 60, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        const sample = expression.includes('b-destination') ? destination : source;
+        return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'drag_between',
+    target: { ref: 'b-source' },
+    toTarget: { ref: 'b-destination' },
+    value: null
+  });
+  assert.equal(result.value.ok, true);
+  assert.equal((result.value as any).destination.identity, '#destination');
+  assert.deepEqual(nativeEvents[0], { type: 'mouseMoved', x: 30, y: 30, button: 'none', buttons: 0 });
+  assert.deepEqual(nativeEvents[1], { type: 'mousePressed', x: 30, y: 30, button: 'left', buttons: 1, clickCount: 1 });
+  assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 240, y: 140, button: 'left', buttons: 0, clickCount: 1 });
+  assert.ok(nativeEvents.length > 6);
+});

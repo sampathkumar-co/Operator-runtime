@@ -937,7 +937,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
-    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets and budgets paginate controls, visible text, and visual objects without returning raw HTML or DevTools WebSocket URLs.',
+    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets paginate controls/text/visuals, while focusRef/groupRef/role/text/region rank relevant candidates before truncation and return a fresh observation generation without keeping stale refs alive. Raw HTML and DevTools WebSocket URLs are never returned.'
     inputSchema: z.object({
       targetId: z.string().min(1).optional(),
       observation: z.object({
@@ -947,11 +947,50 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
         maxControls: z.number().int().min(1).max(160).optional(),
         maxText: z.number().int().min(1).max(240).optional(),
         maxVisuals: z.number().int().min(1).max(160).optional(),
-        maxBytes: z.number().int().min(16 * 1024).max(128 * 1024).optional()
+        maxBytes: z.number().int().min(16 * 1024).max(128 * 1024).optional(),
+        focusRef: z.string().min(1).max(128).optional(),
+        focusGroupRef: z.string().min(1).max(128).optional(),
+        focusRole: z.string().min(1).max(100).optional(),
+        focusText: z.string().min(1).max(500).optional(),
+        focusRegion: z.object({
+          x: z.number().finite().min(-100000).max(100000),
+          y: z.number().finite().min(-100000).max(100000),
+          width: z.number().finite().gt(0).max(100000),
+          height: z.number().finite().gt(0).max(100000)
+        }).optional()
       }).optional()
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
   }, async ({ targetId, observation }) => invoke('browser.inspect', 'read', { targetId, observation }));
+
+  server.registerTool('browser.verify', {
+    title: 'Verify browser goal state',
+    description: 'Independently verify bounded visible browser postconditions without using hidden page state or benchmark reward. Returns VERIFIED, NOT_COMPLETE, or INCONCLUSIVE. Target-state checks may use the short-lived observed ref returned by browser.inspect.',
+    inputSchema: z.object({
+      targetId: z.string().min(1),
+      target: z.object({
+        ref: z.string().min(1).max(128).optional(),
+        css: z.string().min(1).max(500).optional(),
+        text: z.string().min(1).max(500).optional(),
+        role: z.string().min(1).max(100).optional(),
+        name: z.string().min(1).max(500).optional(),
+        renderedColor: z.string().min(1).max(64).optional()
+      }).optional(),
+      expect: z.object({
+        exists: z.boolean().optional(),
+        value: z.string().max(100000).optional(),
+        checked: z.boolean().optional(),
+        selected: z.boolean().optional(),
+        expanded: z.boolean().optional(),
+        current: z.string().max(256).optional(),
+        active: z.boolean().optional(),
+        urlContains: z.string().min(1).max(2000).optional(),
+        titleContains: z.string().min(1).max(500).optional(),
+        textContains: z.string().min(1).max(1000).optional()
+      })
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async ({ targetId, target, expect }) => invoke('browser.verify', 'read', { targetId, target, expect }, targetId));
 
   server.registerTool('browser.navigate', {
     title: 'Navigate browser',
@@ -966,26 +1005,41 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Semantically click, hover, drag, type, select, or set a bounded slider value on a browser control by CSS, text, rendered color, or role+accessible name. Drag accepts bounded CSS-pixel deltas. Select accepts one value or a bounded list for native multi-select controls. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Interact with an observed browser target using native pointer/keyboard input or bounded semantic text/select operations. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'hover', 'drag', 'type', 'select', 'set_value']),
+      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range']),
       target: z.object({
+        ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),
         text: z.string().min(1).max(500).optional(),
         role: z.string().min(1).max(100).optional(),
         name: z.string().min(1).max(500).optional(),
         renderedColor: z.string().min(1).max(64).optional()
       }),
+      toTarget: z.object({
+        ref: z.string().min(1).max(128).optional(),
+        css: z.string().min(1).max(500).optional(),
+        text: z.string().min(1).max(500).optional(),
+        role: z.string().min(1).max(100).optional(),
+        name: z.string().min(1).max(500).optional(),
+        renderedColor: z.string().min(1).max(64).optional()
+      }).optional(),
       deltaX: z.number().finite().min(-2000).max(2000).optional(),
       deltaY: z.number().finite().min(-2000).max(2000).optional(),
+      xRatio: z.number().finite().min(0).max(1).optional(),
+      yRatio: z.number().finite().min(0).max(1).optional(),
+      key: z.string().min(1).max(32).optional(),
+      keys: z.array(z.string().min(1).max(32)).min(1).max(4).optional(),
+      start: z.number().int().min(0).max(100000).optional(),
+      end: z.number().int().min(0).max(100000).optional(),
       value: z.union([
         z.string().max(100000),
         z.array(z.string().max(100000)).min(1).max(100)
       ]).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ targetId, operation, target, value, deltaX, deltaY }) => invoke('browser.interact', 'external', { targetId, operation, target, value, deltaX, deltaY }, targetId));
+  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end }) => invoke('browser.interact', 'external', { targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end }, targetId));
 
   const appSelector = z.object({
     name: z.string().min(1).max(512).optional(),
