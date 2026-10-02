@@ -82,11 +82,13 @@ async function runBatch(batchFiles: string[]): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const child = spawn(process.execPath, ['--experimental-strip-types', '--test', ...batchFiles], {
       cwd: root,
-      stdio: 'inherit',
+      stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
       windowsHide: true,
       env: childEnv
     });
+    child.stdout?.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
     child.once('error', reject);
     child.once('close', (code, signal) => {
       if (signal) {
