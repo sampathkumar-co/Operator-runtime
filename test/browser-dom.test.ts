@@ -613,9 +613,23 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
 
   const lineVisual = snapshot.visualObjects.find((item: any) => item.tag === 'line');
   assert.equal(lineVisual.line.coordinateSpace, 'svg-local');
-  assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43 });
+  assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43, vector: { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 } });
+  assert.deepEqual(lineVisual.line.vector, { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 });
 });
 
+
+test('Browser Observation V2 gives repeated controls bounded rendered container context without changing their semantic name', (t) => {
+  const root = new FakeRoot();
+  const row = new FakeElement('div', 'Spicy Thai Peanut Chicken - +');
+  const plus = new FakeElement('span', '+'); plus.cursor = 'pointer'; plus.parentElement = row; row.children.push(plus);
+  attach(root, row, plus); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === '+');
+  assert.ok(control);
+  assert.equal(control.name, '+');
+  assert.equal(control.contextLabel, 'Spicy Thai Peanut Chicken - +');
+});
 
 test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
   const root = new FakeRoot();

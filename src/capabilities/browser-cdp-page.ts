@@ -405,6 +405,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   const relationshipOf = (element: Element) => {
     const parent = element.parentElement;
+    const ownText = trim((element as HTMLElement).innerText ?? element.textContent, 240);
+    let contextLabel = '';
+    for (let current = parent, depth = 0; current && depth < 4; current = current.parentElement, depth += 1) {
+      const candidate = trim((current as HTMLElement).innerText ?? current.textContent, 240);
+      if (candidate && candidate !== ownText && candidate.length <= 240) { contextLabel = candidate; break; }
+    }
     let group: Element | null = parent;
     for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
       const groupRole = trim(group.getAttribute('role')).toLowerCase();
@@ -414,6 +420,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     return {
       ...(parent ? { parentRef: observedRefOf(parent) } : {}),
       ...(group ? { groupRef: observedRefOf(group) } : {}),
+      ...(contextLabel ? { contextLabel } : {}),
       ...(children.length ? { children } : {}),
       ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
       depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()
@@ -502,7 +509,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const line = { coordinateSpace: 'svg-local', x1: finiteAttr('x1'), y1: finiteAttr('y1'), x2: finiteAttr('x2'), y2: finiteAttr('y2') };
       const first = line.x1 === undefined || line.y1 === undefined ? undefined : toViewport({ x: line.x1, y: line.y1 });
       const second = line.x2 === undefined || line.y2 === undefined ? undefined : toViewport({ x: line.x2, y: line.y2 });
-      return { line, ...(first && second ? { viewportLine: { coordinateSpace: 'viewport', x1: first.x, y1: first.y, x2: second.x, y2: second.y } } : {}), ...grid };
+      const localVector = line.x1 === undefined || line.y1 === undefined || line.x2 === undefined || line.y2 === undefined ? undefined : (() => {
+        const dx = line.x2 - line.x1; const dy = line.y2 - line.y1;
+        return { dx, dy, length: Math.round(Math.hypot(dx, dy) * 1000) / 1000, angleDegrees: Math.round((Math.atan2(dy, dx) * 180 / Math.PI) * 1000) / 1000 };
+      })();
+      const viewportLine = first && second ? { coordinateSpace: 'viewport', x1: first.x, y1: first.y, x2: second.x, y2: second.y, vector: { dx: second.x - first.x, dy: second.y - first.y, length: Math.round(Math.hypot(second.x - first.x, second.y - first.y) * 1000) / 1000, angleDegrees: Math.round((Math.atan2(second.y - first.y, second.x - first.x) * 180 / Math.PI) * 1000) / 1000 } } : undefined;
+      return { line: { ...line, ...(localVector ? { vector: localVector } : {}) }, ...(viewportLine ? { viewportLine } : {}), ...grid };
     }
     if (tag === 'circle') {
       const circle = { coordinateSpace: 'svg-local', cx: finiteAttr('cx'), cy: finiteAttr('cy'), r: finiteAttr('r') };
