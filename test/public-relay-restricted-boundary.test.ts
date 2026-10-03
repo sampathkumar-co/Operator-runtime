@@ -217,6 +217,186 @@ test('relay restart recovers a completed mutation with degraded audit evidence w
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
 });
 
+test('transient result submission failure retries in place without replay or transport flap', { timeout: 8_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-result-retry-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Result Retry PC');
+
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      capability: 'file.create',
+      provider: 'filesystem.native',
+      output: { path: 'created-once.txt', created: true },
+      evidence: [],
+      durationMs: 1
+    }));
+  });
+
+  let resultHits = 0;
+  const resultBodies: string[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    resultHits += 1;
+    resultBodies.push(await readBody(req));
+    if (resultHits === 1) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'RESULT_SERVICE_TEMPORARY' } }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const deliveryId = crypto.randomUUID();
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: false,
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+        input: { path: 'created-once.txt', content: 'once' }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  let socketCreations = 0;
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65436/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: 'f'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => {
+      socketCreations += 1;
+      return new ScriptedRelaySocket(url, delivery, resolveAck);
+    }
+  });
+
+  const running = runner.run();
+  await Promise.race([
+    acked,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay result recovery ack timeout')), 5_000))
+  ]);
+  runner.stop();
+  await running;
+
+  assert.equal(localHits, 1, 'destructive local execution must not replay after a result-service outage');
+  assert.equal(resultHits, 2, 'durable result should be retried in place');
+  assert.equal(socketCreations, 1, 'a temporary result-service outage must not flap an otherwise healthy relay transport');
+  assert.deepEqual(JSON.parse(resultBodies[0]!).result, JSON.parse(resultBodies[1]!).result);
+  const outbox = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-outbox', 'relay-results.json'), 'utf8'));
+  assert.deepEqual(outbox.streams, []);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('result 401 escalates to credential reconnect and resubmits durable mutation without replay', { timeout: 8_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-result-auth-recovery-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Result Auth Recovery PC');
+
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      capability: 'file.create',
+      provider: 'filesystem.native',
+      output: { path: 'auth-recovered-once.txt', created: true },
+      evidence: [],
+      durationMs: 1
+    }));
+  });
+
+  let resultHits = 0;
+  const authHeaders: string[] = [];
+  const resultBase = await listen(t, async (req, res) => {
+    resultHits += 1;
+    authHeaders.push(String(req.headers.authorization ?? ''));
+    await readBody(req);
+    if (resultHits === 1) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'SESSION_REVOKED' } }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  let activeToken = 'stale-result-token';
+  let connectionTokens = 0;
+  const sessionCredentials = {
+    async forConnection() {
+      connectionTokens += 1;
+      activeToken = connectionTokens === 1 ? 'stale-result-token' : 'fresh-result-token';
+      return activeToken;
+    },
+    async forRequest() { return activeToken; },
+    stop() {}
+  };
+
+  const deliveryId = crypto.randomUUID();
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      publicBoundary: false,
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+        input: { path: 'auth-recovered-once.txt', content: 'once' }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  let socketCreations = 0;
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65437/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile: path.join(stateDir, 'unused-session.token'),
+    sessionCredentials,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: '1'.repeat(64),
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => {
+      socketCreations += 1;
+      return new ScriptedRelaySocket(url, delivery, resolveAck);
+    }
+  });
+
+  const running = runner.run();
+  await Promise.race([
+    acked,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay auth recovery ack timeout')), 5_000))
+  ]);
+  runner.stop();
+  await running;
+
+  assert.equal(localHits, 1, 'credential recovery must never replay the destructive local action');
+  assert.equal(resultHits, 2);
+  assert.equal(socketCreations, 2, '401 must leave the in-place transient retry path and recover connection credentials');
+  assert.deepEqual(authHeaders, ['Bearer stale-result-token', 'Bearer fresh-result-token']);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
 test('public relay blocks restricted local output and leaves no ACKed outbox payload', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-boundary-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));

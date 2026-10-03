@@ -10,6 +10,9 @@ import { containsRestrictedData } from '../../../src/core/public-restricted-data
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
+const RESULT_SUBMIT_ATTEMPTS = 3;
+const RESULT_SUBMIT_RETRY_BASE_MS = 150;
+const RESULT_SUBMIT_RETRY_MAX_MS = 750;
 
 type JsonObject = Record<string, unknown>;
 
@@ -84,7 +87,7 @@ export class LocalAgentRelayRunner {
       if (stored.deliveryId !== delivery.id || !stored.result) {
         throw new OperatorError('RELAY_RESULT_CONFLICT', 'A durable relay result exists for this sequence but does not match the replayed delivery.');
       }
-      await this.#submitResult(delivery.seq, delivery.id, stored.result);
+      await this.#submitResultWithRetry(delivery.seq, delivery.id, stored.result);
       return;
     }
     let safe: JsonObject;
@@ -103,14 +106,14 @@ export class LocalAgentRelayRunner {
       safe = oversizedRelayResultFallback(error, delivery);
     }
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
-    await this.#submitResult(delivery.seq, delivery.id, safe);
+    await this.#submitResultWithRetry(delivery.seq, delivery.id, safe);
   }
 
   async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, seq);
     if (!stored || stored.deliveryId !== deliveryId) return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
-    await this.#submitResult(seq, deliveryId, stored.result);
+    await this.#submitResultWithRetry(seq, deliveryId, stored.result);
     return 'ack';
   }
 
@@ -239,6 +242,19 @@ export class LocalAgentRelayRunner {
     return boundedResult(bodyValue);
   }
 
+  async #submitResultWithRetry(seq: number, deliveryId: string, result: JsonObject): Promise<void> {
+    for (let attempt = 0; attempt < RESULT_SUBMIT_ATTEMPTS; attempt += 1) {
+      try {
+        await this.#submitResult(seq, deliveryId, result);
+        return;
+      } catch (error) {
+        const lastAttempt = attempt === RESULT_SUBMIT_ATTEMPTS - 1;
+        if (lastAttempt || !canRetryResultSubmissionInPlace(error)) throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, resultSubmitRetryDelay(attempt)));
+      }
+    }
+  }
+
   async #submitResult(seq: number, deliveryId: string, result: JsonObject): Promise<void> {
     const token = await this.#sessionCredentials.forRequest();
     let response: Response;
@@ -250,16 +266,35 @@ export class LocalAgentRelayRunner {
         body: JSON.stringify({ seq, deliveryId, result })
       });
     } catch (error) {
-      throw new OperatorError('RELAY_RESULT_SUBMIT_FAILED', `Relay result submission failed: ${error instanceof Error ? error.message : String(error)}`, { retryable: true });
+      throw new OperatorError('RELAY_RESULT_SUBMIT_FAILED', `Relay result submission failed: ${error instanceof Error ? error.message : String(error)}`, {
+        retryable: true,
+        details: { resultChannel: 'transport' }
+      });
     }
     if (response.status === 200) return;
     let code = 'RELAY_RESULT_SUBMIT_FAILED';
     try { code = String((await response.json() as any)?.error?.code ?? code); } catch { /* bounded generic failure */ }
     const retryable = response.status === 401 || response.status === 408 || response.status === 429 || response.status >= 500;
-    throw new OperatorError(code, `Relay result service rejected result with HTTP ${response.status}.`, { retryable });
+    throw new OperatorError(code, `Relay result service rejected result with HTTP ${response.status}.`, {
+      retryable,
+      details: { resultChannel: 'http', httpStatus: response.status }
+    });
   }
 
 
+}
+
+function canRetryResultSubmissionInPlace(error: unknown): boolean {
+  if (!(error instanceof OperatorError) || !error.retryable) return false;
+  const channel = error.details?.resultChannel;
+  if (channel === 'transport') return true;
+  const status = Number(error.details?.httpStatus);
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function resultSubmitRetryDelay(attemptInput: number): number {
+  const attempt = Math.max(0, Math.min(10, Math.trunc(attemptInput)));
+  return Math.min(RESULT_SUBMIT_RETRY_BASE_MS * 2 ** attempt, RESULT_SUBMIT_RETRY_MAX_MS);
 }
 
 function localResourceProfile() {
