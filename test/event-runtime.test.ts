@@ -57,3 +57,55 @@ test('stage13 wait ids are conflict-safe across retries', async (t) => {
     (error: any) => error?.code === 'EVENT_WAIT_ID_CONFLICT'
   );
 });
+
+
+test('stage13 terminal wait retention prevents lifetime admission exhaustion while active waits remain durable', async (t) => {
+  let nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const runtime = new DurableEventRuntime(await temp(t), {
+    clock,
+    maxWaits: 4,
+    terminalRetentionMs: 1_000
+  });
+
+  const active = await runtime.wait({ eventType: 'device.online' });
+  for (let index = 0; index < 40; index += 1) {
+    const wait = await runtime.wait({ eventType: 'job.completed', correlationKey: `job:${index}` });
+    await runtime.cancel(wait.id);
+    nowMs += 1_001;
+  }
+
+  assert.equal((await runtime.inspect(active.id)).state, 'WAITING');
+  const final = await runtime.wait({ eventType: 'job.completed', correlationKey: 'job:final' });
+  assert.equal(final.state, 'WAITING');
+});
+
+
+test('stage13 terminal waits stay inspectable during retention and are reclaimed only after expiry', async (t) => {
+  let nowMs = Date.parse('2026-10-01T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const runtime = new DurableEventRuntime(await temp(t), {
+    clock,
+    maxWaits: 2,
+    terminalRetentionMs: 1_000
+  });
+
+  const first = await runtime.wait({ eventType: 'timer.elapsed' });
+  await runtime.cancel(first.id);
+  const retained = await runtime.inspect(first.id);
+  assert.equal(retained.state, 'CANCELLED');
+  assert.equal(retained.terminalAt, new Date(nowMs).toISOString());
+
+  await runtime.wait({ eventType: 'device.online' });
+  await assert.rejects(
+    () => runtime.wait({ eventType: 'queue.full' }),
+    (error: any) => error?.code === 'EVENT_WAIT_LIMIT'
+  );
+  nowMs += 1_001;
+  const admitted = await runtime.wait({ eventType: 'queue.recovered' });
+  assert.equal(admitted.state, 'WAITING');
+  await assert.rejects(
+    () => runtime.inspect(first.id),
+    (error: any) => error?.code === 'EVENT_WAIT_NOT_FOUND'
+  );
+});
