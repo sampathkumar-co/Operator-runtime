@@ -339,7 +339,8 @@ export class RelayClient {
           // Once the transport is ending, stop accepting fresh work but let
           // every already-accepted delivery reach its durable result/cursor
           // boundary before a replacement connection or process exit.
-          await messageQueue;
+          try { await messageQueue; }
+          catch { /* the initiating connection/protocol error remains authoritative; accepted parallel work still drains */ }
           while (activeReadTasks.size > 0) {
             await Promise.all([...activeReadTasks.values()]);
           }
@@ -360,8 +361,7 @@ export class RelayClient {
         if (this.#stopped) drainConnection(null);
         else drainConnection(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
       };
-      const processMessage = async (event: any) => {
-        const frame = parseServerFrame(event?.data);
+      const processMessage = async (frame: ServerFrame) => {
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
           const negotiated = await this.#validateWelcome(frame, state, supportedCapabilities);
@@ -371,14 +371,14 @@ export class RelayClient {
           nextAckSeq = frame.resumeFromSeq + 1;
           welcomed = true;
           this.#attempt = 0;
-          this.#lastPongAt = Date.now();
+          this.#lastPongAt = this.#clock().getTime();
           this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
           this.#emitStatus({ state: 'authenticated-ready', capabilityCount: negotiated.capabilities.length });
           this.#emitConnectionState({ state: 'READY', capabilityCount: negotiated.capabilities.length });
           return;
         }
         if (frame.type === 'pong') {
-          this.#lastPongAt = Date.now();
+          this.#lastPongAt = this.#clock().getTime();
           return;
         }
         if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
@@ -436,8 +436,25 @@ export class RelayClient {
         nextAckSeq = durable.lastAckedServerSeq + 1;
       };
       const onMessage = (event: any) => {
-        messageQueue = messageQueue.then(() => processMessage(event));
-        void messageQueue.catch(fail);
+        let frame: ServerFrame;
+        try { frame = parseServerFrame(event?.data); }
+        catch (error) {
+          drainConnection(error instanceof OperatorError
+            ? error
+            : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true }));
+          return;
+        }
+        // Heartbeat control traffic must remain live while a legitimate long
+        // delivery owns the serialized work queue. It carries no execution
+        // authority and does not alter delivery ordering.
+        if (welcomed && frame.type === 'pong') {
+          this.#lastPongAt = this.#clock().getTime();
+          return;
+        }
+        messageQueue = messageQueue.then(() => processMessage(frame));
+        void messageQueue.catch((error) => drainConnection(error instanceof OperatorError
+          ? error
+          : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true })));
       };
 
       socket.addEventListener('message', onMessage);
@@ -573,13 +590,13 @@ export class RelayClient {
   #startHeartbeat(socket: RelaySocketLike, heartbeatMs: number): void {
     this.#clearHeartbeat();
     this.#heartbeatTimer = setInterval(() => {
-      if (Date.now() - this.#lastPongAt > heartbeatMs * 3) {
+      if (this.#clock().getTime() - this.#lastPongAt > heartbeatMs * 3) {
         this.#emitConnectionState({ state: 'DEGRADED', code: 'RELAY_HEARTBEAT_TIMEOUT', recoverable: true });
         try { socket.close(4000, 'heartbeat timeout'); } catch { /* noop */ }
         return;
       }
       const nonce = crypto.randomBytes(12).toString('base64url');
-      try { sendFrame(socket, { type: 'ping', nonce, at: new Date().toISOString() }); } catch { /* close path handles reconnect */ }
+      try { sendFrame(socket, { type: 'ping', nonce, at: this.#clock().toISOString() }); } catch { /* close path handles reconnect */ }
     }, heartbeatMs);
     this.#heartbeatTimer.unref();
   }

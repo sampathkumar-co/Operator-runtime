@@ -786,6 +786,145 @@ test('controlled shutdown waits for an in-flight destructive delivery to reach t
   assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
 });
 
+test('protocol failure waits for accepted destructive work to become durable before failing closed', async (t) => {
+  const state = await stateDir(t, 'operator-relay-protocol-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Protocol Drain PC');
+  const socket = new FakeSocket();
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let runSettled = false;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    socket.server({
+      type: 'welcome',
+      protocol: 1,
+      connectionId: 'protocol-drain',
+      resumeFromSeq: 0,
+      heartbeatMs: 60_000,
+      capabilityBinding: 1,
+      capabilities: ['file.replace']
+    });
+    socket.server({
+      type: 'delivery',
+      seq: 1,
+      id: 'protocol-drain-destructive-1',
+      kind: 'action',
+      payload: { action: { id: 'protocol-drain-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+    });
+  };
+
+  const client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async () => {
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run().finally(() => { runSettled = true; });
+  await deliveryStarted;
+  socket.server({ type: 'not-a-relay-frame' });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(runSettled, false, 'protocol failure must not outrun already-accepted destructive work');
+
+  releaseDelivery();
+  await assert.rejects(run, (error: any) => error?.code === 'RELAY_PROTOCOL_ERROR');
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('heartbeat pong bypasses a long serialized delivery so healthy transport does not false-timeout', { timeout: 7_000 }, async (t) => {
+  const state = await stateDir(t, 'operator-relay-heartbeat-long-delivery-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Heartbeat Long Delivery PC');
+  const socket = new FakeSocket();
+  let nowMs = 0;
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let markPing!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+  const pingObserved = new Promise<void>((resolve) => { markPing = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: 'heartbeat-long-delivery',
+        resumeFromSeq: 0,
+        heartbeatMs: 5_000,
+        capabilityBinding: 1,
+        capabilities: ['file.replace']
+      });
+      socket.server({
+        type: 'delivery',
+        seq: 1,
+        id: 'heartbeat-long-delivery-1',
+        kind: 'action',
+        payload: { action: { id: 'heartbeat-long-delivery-1', capability: 'file.replace', risk: 'destructive' } }
+      });
+      return;
+    }
+    if (frame.type === 'ping') markPing();
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    clock: () => new Date(nowMs),
+    onDelivery: async () => {
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+
+  // Advance the injected clock close to the timeout boundary while the
+  // destructive delivery still owns the serialized message queue. A healthy
+  // pong must update liveness immediately rather than waiting behind delivery.
+  nowMs = 10_000;
+  socket.server({ type: 'pong', nonce: 'healthy-during-long-work' });
+  nowMs = 16_000;
+
+  await Promise.race([
+    pingObserved,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('heartbeat ping was suppressed by a false timeout')), 5_500))
+  ]);
+  assert.equal(socket.readyState, 1, 'healthy relay transport must stay open while long accepted work is still executing');
+
+  releaseDelivery();
+  client.stop();
+  await run;
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+});
+
 test('stage7 relay signs bounded resource profile into authenticated hello', async (t) => {
   const state = await stateDir(t, 'operator-relay-resource-profile-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });
