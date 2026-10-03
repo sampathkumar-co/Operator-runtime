@@ -34,7 +34,12 @@ test('relay 1000-delivery soak survives periodic reloads and reconciles the full
   assert.deepEqual(await store.pending(DEVICE), []);
 
   const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
-  assert.equal(persisted.streams[0].deliveries.length, 1000);
+  assert.equal(persisted.version, 2);
+  assert.equal(persisted.streams[0].baseSeq, 745);
+  assert.equal(persisted.streams[0].highestCompactedAckedSeq, 744);
+  assert.equal(persisted.streams[0].deliveries.length, 256);
+  assert.equal(persisted.streams[0].deliveries[0].seq, 745);
+  assert.equal(persisted.streams[0].deliveries.at(-1).seq, 1000);
   assert.equal(persisted.streams[0].deliveries.every((entry: any) => entry.status === 'acked'), true);
   assert.equal(persisted.streams[0].deliveries.every((entry: any) => Object.keys(entry.payload).length === 0), true);
 
