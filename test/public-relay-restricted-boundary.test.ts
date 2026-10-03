@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { canRetryUncertainRelayDelivery, LocalAgentRelayRunner } from '../apps/local-agent/src/relay-agent.ts';
+import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
+import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayResultStore } from '../src/core/relay-result-store.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
@@ -105,8 +107,13 @@ test('missing crash-window result replays a read through the normal bounded exec
   }, null, 2));
   let localHits = 0;
   const localBase = await listen(t, async (req, res) => {
-    localHits += 1;
     await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      return;
+    }
+    localHits += 1;
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, capability: 'git.diff', provider: 'git.native', output: { files: [] }, evidence: [], durationMs: 1 }));
   });
@@ -394,6 +401,237 @@ test('result 401 escalates to credential reconnect and resubmits durable mutatio
   assert.equal(resultHits, 2);
   assert.equal(socketCreations, 2, '401 must leave the in-place transient retry path and recover connection credentials');
   assert.deepEqual(authHeaders, ['Bearer stale-result-token', 'Bearer fresh-result-token']);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('local action deadline reconciles durable receipt without replaying mutation or flapping relay', { timeout: 6_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-local-action-timeout-recovery-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Local Receipt Recovery PC');
+  const agentToken = '9'.repeat(64);
+  let executions = 0;
+  const runtime = {
+    async execute(action: any) {
+      executions += 1;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return {
+        ok: true,
+        capability: action.capability,
+        provider: 'test.slow-runtime',
+        output: { executions },
+        evidence: [],
+        durationMs: 300
+      };
+    }
+  } as any;
+  const receipts = new LocalActionExecutionStore(stateDir);
+  const agent = createLocalAgentServer({
+    runtime,
+    token: agentToken,
+    permissions: { allowedCapabilities: ['file.*'], allowedRoots: [stateDir] },
+    actionExecutions: receipts
+  });
+  t.after(() => agent.close());
+  const local = await agent.listen('127.0.0.1', 0);
+  const localBase = `http://127.0.0.1:${local.port}`;
+
+  let resultHits = 0;
+  const resultBase = await listen(t, async (req, res) => {
+    resultHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+
+  const deliveryId = crypto.randomUUID();
+  const action = {
+    id: crypto.randomUUID(),
+    capability: 'file.create',
+    risk: 'write',
+    input: { path: 'deadline-receipt.txt', content: 'once' },
+    provenance: { kind: 'chatgpt' }
+  };
+  const approvalAuthority = { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 };
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { approvalAuthority, action }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  let socketCreations = 0;
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65438/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken,
+    localRequestTimeoutMs: 100,
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => {
+      socketCreations += 1;
+      return new ScriptedRelaySocket(url, delivery, resolveAck);
+    }
+  });
+
+  const running = runner.run();
+  await Promise.race([
+    acked,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('local action receipt recovery ack timeout')), 4_000))
+  ]);
+  runner.stop();
+  await running;
+
+  assert.equal(executions, 1, 'timed-out destructive request must not execute twice');
+  assert.equal(socketCreations, 1, 'receipt reconciliation should recover before a healthy relay transport is replaced');
+  assert.equal(resultHits, 1);
+  const receipt = await receipts.lookup(action as any, approvalAuthority);
+  assert.equal(receipt.status, 'completed');
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('durable task request timeout reconnects and retries through task state without indefinite stall', { timeout: 6_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-task-timeout-recovery-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Task Timeout Recovery PC');
+
+  const taskId = crypto.randomUUID();
+  let taskHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    taskHits += 1;
+    if (taskHits === 1) await new Promise((resolve) => setTimeout(resolve, 300));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, task: { id: taskId, state: 'PAUSED' } }));
+  });
+  let resultHits = 0;
+  const resultBase = await listen(t, async (req, res) => {
+    resultHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+
+  const deliveryId = crypto.randomUUID();
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'task',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      task: { operation: 'inspect', taskId }
+    }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  let socketCreations = 0;
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65439/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: '7'.repeat(64),
+    localRequestTimeoutMs: 100,
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => {
+      socketCreations += 1;
+      return new ScriptedRelaySocket(url, delivery, resolveAck);
+    }
+  });
+
+  const running = runner.run();
+  await Promise.race([
+    acked,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('durable task timeout recovery ack timeout')), 4_000))
+  ]);
+  runner.stop();
+  await running;
+
+  assert.equal(taskHits, 2, 'durable task inspection should retry after the bounded local HTTP timeout');
+  assert.equal(socketCreations, 2, 'uncertain durable task should reconnect once and reconcile through its durable state');
+  assert.equal(resultHits, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('result submission timeout retries in place without replaying action or replacing healthy transport', { timeout: 6_000 }, async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-result-timeout-retry-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Result Timeout Retry PC');
+
+  let localHits = 0;
+  const localBase = await listen(t, async (req, res) => {
+    localHits += 1;
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      capability: 'file.create',
+      provider: 'filesystem.native',
+      output: { path: 'result-timeout-once.txt', created: true },
+      evidence: [],
+      durationMs: 1
+    }));
+  });
+  let resultHits = 0;
+  const resultBase = await listen(t, async (req, res) => {
+    resultHits += 1;
+    await readBody(req);
+    if (resultHits === 1) await new Promise((resolve) => setTimeout(resolve, 300));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+
+  const deliveryId = crypto.randomUUID();
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: {
+      approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 },
+      action: {
+        id: crypto.randomUUID(), capability: 'file.create', risk: 'write',
+        input: { path: 'result-timeout-once.txt', content: 'once' }, provenance: { kind: 'chatgpt' }
+      }
+    }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  let socketCreations = 0;
+  const runner = new LocalAgentRelayRunner({
+    stateDir,
+    relayUrl: 'ws://127.0.0.1:65440/device',
+    resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile,
+    identity,
+    localAgentBaseUrl: localBase,
+    agentToken: '8'.repeat(64),
+    resultSubmitTimeoutMs: 100,
+    allowLoopbackInsecure: true,
+    socketFactory: (url) => {
+      socketCreations += 1;
+      return new ScriptedRelaySocket(url, delivery, resolveAck);
+    }
+  });
+
+  const running = runner.run();
+  await Promise.race([
+    acked,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('result submission timeout retry ack timeout')), 4_000))
+  ]);
+  runner.stop();
+  await running;
+
+  assert.equal(localHits, 1, 'result timeout must never replay the local mutation');
+  assert.equal(resultHits, 2, 'timed-out result submission should retry from the durable outbox');
+  assert.equal(socketCreations, 1, 'result-channel timeout must not flap the healthy relay transport');
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
 });
 

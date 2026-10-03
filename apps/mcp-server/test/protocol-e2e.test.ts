@@ -505,7 +505,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       expectedCurrentFingerprint: stagedFingerprint
     }
   });
-  assert.notEqual(committed.isError, true);
+  assert.notEqual(committed.isError, true, JSON.stringify(committed));
   const committedStructured = committed.structuredContent as Record<string, unknown> | undefined;
   assert.equal(committedStructured?.ok, true);
   assert.equal(committedStructured?.provider, 'git.write.native');

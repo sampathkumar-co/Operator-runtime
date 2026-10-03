@@ -20,6 +20,7 @@ import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
 import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.ts';
+import type { LocalActionExecutionStore } from './action-execution-store.ts';
 import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
@@ -199,6 +200,7 @@ export function createLocalAgentServer(options: {
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
+  actionExecutions?: LocalActionExecutionStore;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
@@ -1927,6 +1929,57 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    if (pathname === '/v1/action-receipt' && req.method === 'POST') {
+      if (!options.actionExecutions) {
+        send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPTS_DISABLED', message: 'Local action execution receipts are not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown };
+        if (!body.action || typeof body.action !== 'object') {
+          send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
+          return;
+        }
+        const action = validateActionEnvelope(body.action);
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        const receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        if (receipt.status === 'missing') {
+          send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND', message: 'No durable execution receipt exists for this exact action.' } });
+          return;
+        }
+        if (receipt.status === 'processing') {
+          send(res, 202, {
+            ok: true,
+            receipt: {
+              status: 'processing',
+              actionId: receipt.record.actionId,
+              startedAt: receipt.record.startedAt
+            }
+          });
+          return;
+        }
+        send(res, 200, {
+          ok: true,
+          receipt: {
+            status: 'completed',
+            actionId: receipt.record.actionId,
+            startedAt: receipt.record.startedAt,
+            completedAt: receipt.record.completedAt,
+            resultSha256: receipt.record.resultSha256
+          },
+          result: receipt.result
+        });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'BAD_REQUEST';
+        send(res, code.startsWith('ACTION_EXECUTION_') ? 409 : 400, {
+          ok: false,
+          error: { code, message: error instanceof Error ? error.message : String(error) }
+        });
+      }
+      return;
+    }
+
     if (pathname === '/v1/execute' && req.method === 'POST') {
       try {
         if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
@@ -1947,6 +2000,26 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        if (options.actionExecutions) {
+          const receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (receipt.status === 'completed') {
+            send(res, receipt.result.ok ? 200 : 409, receipt.result);
+            return;
+          }
+          if (receipt.status === 'processing') {
+            send(res, 409, {
+              ok: false,
+              error: {
+                code: 'ACTION_EXECUTION_IN_PROGRESS',
+                message: 'This exact action already has an unfinished durable execution receipt; it will not be replayed blindly.',
+                retryable: true,
+                sideEffectState: 'uncertain'
+              },
+              receipt: { actionId: receipt.record.actionId, startedAt: receipt.record.startedAt }
+            });
+            return;
+          }
+        }
         let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
@@ -2008,11 +2081,14 @@ export function createLocalAgentServer(options: {
         } catch (error) {
           result = resultWithAuditDegradation(result, error);
         }
+        if (options.actionExecutions) await options.actionExecutions.complete(action, result, approvalAuthority);
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'BAD_REQUEST';
-        send(res, code === 'REQUEST_TOO_LARGE' ? 413 : 400, { ok: false, error: { code, message } });
+        const explicitCode = typeof (error as any)?.code === 'string' ? String((error as any).code) : undefined;
+        const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : explicitCode ?? 'BAD_REQUEST';
+        const status = code === 'REQUEST_TOO_LARGE' ? 413 : code.startsWith('ACTION_EXECUTION_') ? 409 : 400;
+        send(res, status, { ok: false, error: { code, message } });
       }
       return;
     }

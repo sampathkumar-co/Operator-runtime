@@ -74,7 +74,14 @@ test('network authority fetches remain redirect-disabled', async () => {
     const source = await fs.readFile(path.join(root, relative), 'utf8');
     const fetchCount = source.match(/\bfetch\s*\(/g)?.length ?? 0;
     const redirectDeniedCount = source.split("redirect: 'error'").length - 1;
-    assert.equal(redirectDeniedCount, fetchCount, `${relative} must reject redirects at every network boundary`);
+    if (relative === 'apps/local-agent/src/relay-agent.ts') {
+      const boundedCallCount = source.match(/await fetchWithDeadline\s*\(/g)?.length ?? 0;
+      assert.equal(fetchCount, 1, `${relative} must centralize outbound HTTP through one bounded fetch helper`);
+      assert.equal(redirectDeniedCount, boundedCallCount, `${relative} must reject redirects at every bounded HTTP call site`);
+      assert.ok(boundedCallCount >= 5, `${relative} must keep all relay HTTP boundaries on the bounded redirect-disabled helper`);
+    } else {
+      assert.equal(redirectDeniedCount, fetchCount, `${relative} must reject redirects at every network boundary`);
+    }
   }
 });
 

@@ -8,6 +8,7 @@ import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
 import { ApprovalStore } from './approval-store.ts';
+import { LocalActionExecutionStore } from './action-execution-store.ts';
 import { SessionApprovalStore } from './session-approval.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
 import { LocalAgentRelayRunner } from './relay-agent.ts';
@@ -99,6 +100,7 @@ const permissions = {
 };
 const emergencyStop = new EmergencyStopStore(stateDir);
 const approvals = new ApprovalStore(stateDir);
+const actionExecutions = new LocalActionExecutionStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
@@ -388,6 +390,7 @@ const agent = createLocalAgentServer({
   recoveryToken,
   emergencyStop,
   approvals,
+  actionExecutions,
   sessionApprovals,
   audit,
   tasks,

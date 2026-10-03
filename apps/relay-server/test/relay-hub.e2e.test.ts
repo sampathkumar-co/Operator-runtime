@@ -1034,6 +1034,7 @@ test('dispatch success is bound to the exact routed session after the final asyn
   highClient.stop();
   releaseHighDelivery();
   await highRun;
+  await waitFor(async () => (await hub.onlineDevices(account.accountId)).length === 0);
 
   let lowDeliveryStarted!: () => void;
   let releaseLowDelivery!: () => void;
@@ -1051,8 +1052,7 @@ test('dispatch success is bound to the exact routed session after the final asyn
       assert.equal(delivery.seq, 1);
       lowDeliveryStarted();
       await lowGate;
-    },
-    sleep: async () => undefined
+    }
   });
   const lowRun = lowClient.run();
   t.after(() => { releaseLowDelivery(); lowClient.stop(); });

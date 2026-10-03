@@ -13,6 +13,11 @@ const MAX_RESULT_BYTES = 256 * 1024;
 const RESULT_SUBMIT_ATTEMPTS = 3;
 const RESULT_SUBMIT_RETRY_BASE_MS = 150;
 const RESULT_SUBMIT_RETRY_MAX_MS = 750;
+const LOCAL_ACTION_DEFAULT_TIMEOUT_MS = 2 * 60_000;
+const LOCAL_ACTION_MAX_TIMEOUT_MS = 10 * 60_000;
+const LOCAL_ACTION_RECEIPT_TIMEOUT_MS = 10_000;
+const LOCAL_ACTION_RECEIPT_RECOVERY_WINDOW_MS = 5_000;
+const RESULT_SUBMIT_TIMEOUT_MS = 30_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -31,6 +36,8 @@ export interface LocalAgentRelayRunnerOptions {
   socketFactory?: RelaySocketFactory;
   onStatus?: (status: RelayClientStatus) => void;
   onConnectionState?: (status: RelayConnectionState) => void;
+  localRequestTimeoutMs?: number;
+  resultSubmitTimeoutMs?: number;
 }
 
 export class LocalAgentRelayRunner {
@@ -41,7 +48,10 @@ export class LocalAgentRelayRunner {
   #resultUrl: string;
   #localAgentBaseUrl: string;
   #localExecuteUrl: string;
+  #localActionReceiptUrl: string;
   #agentToken: string;
+  #localRequestTimeoutMs: number;
+  #resultSubmitTimeoutMs: number;
 
   constructor(options: LocalAgentRelayRunnerOptions) {
     this.#identity = options.identity;
@@ -55,7 +65,10 @@ export class LocalAgentRelayRunner {
     this.#resultUrl = validateResultUrl(options.resultUrl ?? deriveResultUrl(options.relayUrl), options.relayUrl, Boolean(options.allowLoopbackInsecure));
     this.#localAgentBaseUrl = ensureHttpBase(options.localAgentBaseUrl);
     this.#localExecuteUrl = new URL('/v1/execute', this.#localAgentBaseUrl).toString();
+    this.#localActionReceiptUrl = new URL('/v1/action-receipt', this.#localAgentBaseUrl).toString();
     this.#agentToken = options.agentToken;
+    this.#localRequestTimeoutMs = boundedLocalRequestTimeout(options.localRequestTimeoutMs ?? LOCAL_ACTION_DEFAULT_TIMEOUT_MS);
+    this.#resultSubmitTimeoutMs = boundedResultSubmitTimeout(options.resultSubmitTimeoutMs ?? RESULT_SUBMIT_TIMEOUT_MS);
     this.#client = new RelayClient({
       stateDir: options.stateDir,
       url: options.relayUrl,
@@ -112,14 +125,70 @@ export class LocalAgentRelayRunner {
   async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, seq);
-    if (!stored || stored.deliveryId !== deliveryId) return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
-    await this.#submitResultWithRetry(seq, deliveryId, stored.result);
-    return 'ack';
+    if (stored && stored.deliveryId === deliveryId) {
+      await this.#submitResultWithRetry(seq, deliveryId, stored.result);
+      return 'ack';
+    }
+    if (delivery?.kind === 'action') {
+      const recovered = await this.#recoverLocalActionReceipt(delivery.payload);
+      if (recovered.state === 'completed') {
+        const safe = boundedResult(recovered.result);
+        await this.#outbox.put(identity.deviceId, seq, deliveryId, safe);
+        await this.#submitResultWithRetry(seq, deliveryId, safe);
+        return 'ack';
+      }
+      if (recovered.state === 'processing') return 'stop';
+    }
+    return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
 
   async #discardStoredResult(seq: number, deliveryId: string): Promise<void> {
     const identity = await this.#identity.loadOrCreate();
     await this.#outbox.removeExact(identity.deviceId, seq, deliveryId);
+  }
+
+  async #recoverLocalActionReceipt(payload: JsonObject): Promise<{ state: 'missing' } | { state: 'processing' } | { state: 'completed'; result: JsonObject }> {
+    const action = validateRemoteAction(payload.action);
+    const approvalAuthority = validateApprovalAuthority(payload.approvalAuthority);
+    const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
+    const deadline = Date.now() + LOCAL_ACTION_RECEIPT_RECOVERY_WINDOW_MS;
+    let attempt = 0;
+    while (true) {
+      let response: Response;
+      try {
+        response = await fetchWithDeadline(this.#localActionReceiptUrl, {
+          redirect: 'error',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.#agentToken}`,
+            ...relayRequestHeaders(enterpriseContext)
+          },
+          body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
+        }, Math.min(LOCAL_ACTION_RECEIPT_TIMEOUT_MS, Math.max(50, deadline - Date.now())), 'local action receipt');
+      } catch (error) {
+        if (error instanceof OperatorError && error.code === 'RELAY_LOCAL_HTTP_TIMEOUT') return { state: 'processing' };
+        throw error;
+      }
+      let body: any;
+      try { body = await response.json(); }
+      catch { throw new OperatorError('RELAY_LOCAL_RECEIPT_INVALID', 'Local action receipt endpoint returned non-JSON data.', { retryable: true }); }
+      if (response.status === 404) return { state: 'missing' };
+      if (response.status === 202) {
+        if (Date.now() >= deadline) return { state: 'processing' };
+        const delay = Math.min(750, 100 * 2 ** Math.min(attempt++, 3), Math.max(1, deadline - Date.now()));
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      if (response.status !== 200) {
+        const code = typeof body?.error?.code === 'string' ? body.error.code : 'RELAY_LOCAL_RECEIPT_FAILED';
+        throw new OperatorError(code, `Local action receipt lookup failed with HTTP ${response.status}.`, { retryable: response.status >= 500 });
+      }
+      if (!body?.receipt) return { state: 'missing' };
+      if (body.receipt.status !== 'completed') return { state: 'processing' };
+      if (payload.publicBoundary === true && containsRestrictedData(body.result)) return { state: 'completed', result: restrictedDataBlockedResult(action.capability) };
+      return { state: 'completed', result: boundedResult(body.result) };
+    }
   }
 
   async #executeActionPayload(payload: JsonObject): Promise<JsonObject> {
@@ -128,22 +197,40 @@ export class LocalAgentRelayRunner {
     const enterpriseContext = validateRelayEnterpriseContext(payload.enterpriseContext, approvalAuthority);
     const publicBoundary = payload.publicBoundary === true;
     if (publicBoundary && containsRestrictedData(action.input)) return restrictedDataBlockedResult(action.capability);
-    const response = await fetch(this.#localExecuteUrl, {
-      redirect: 'error',
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.#agentToken}`,
-        ...relayRequestHeaders(enterpriseContext)
-      },
-      body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
-    });
-    let body: unknown;
+    let response: Response;
+    try {
+      response = await fetchWithDeadline(this.#localExecuteUrl, {
+        redirect: 'error',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${this.#agentToken}`,
+          ...relayRequestHeaders(enterpriseContext)
+        },
+        body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
+      }, actionRequestTimeoutMs(action, this.#localRequestTimeoutMs), 'local action execution');
+    } catch (error) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local action request did not complete cleanly: ${error instanceof Error ? error.message : String(error)}`, {
+        retryable: true,
+        details: { actionId: action.id, sideEffectState: 'uncertain' }
+      });
+    }
+    let body: any;
     try { body = await response.json(); }
     catch { throw new OperatorError('RELAY_LOCAL_RESULT_INVALID', 'Local agent returned a non-JSON execution response.', { retryable: false }); }
+    if (response.status === 409 && body?.error?.code === 'ACTION_EXECUTION_IN_PROGRESS') {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', 'Local action has a durable in-progress receipt and will not be replayed blindly.', {
+        retryable: true,
+        details: { actionId: action.id, sideEffectState: 'uncertain' }
+      });
+    }
     if (publicBoundary && containsRestrictedData(body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
-      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: false });
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: true });
     }
     return boundedResult(body);
   }
@@ -190,11 +277,11 @@ export class LocalAgentRelayRunner {
   }
 
   async #callAbsoluteOperationApi(url: URL, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
-    const response = await fetch(url, {
+    const response = await fetchWithDeadline(url.toString(), {
       redirect: 'error', method,
       headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
-    });
+    }, this.#localRequestTimeoutMs, 'local knowledge/operation request');
     let bodyValue: unknown;
     try { bodyValue = await response.json(); }
     catch { throw new OperatorError('RELAY_LOCAL_KNOWLEDGE_RESULT_INVALID', 'Local agent returned a non-JSON knowledge response.', { retryable: false }); }
@@ -225,11 +312,11 @@ export class LocalAgentRelayRunner {
   }
 
   async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
-    const response = await fetch(new URL(pathname, this.#localAgentBaseUrl), {
+    const response = await fetchWithDeadline(new URL(pathname, this.#localAgentBaseUrl).toString(), {
       redirect: 'error', method,
       headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
-    });
+    }, this.#localRequestTimeoutMs, 'local durable task request');
     let bodyValue: unknown;
     try { bodyValue = await response.json(); }
     catch { throw new OperatorError('RELAY_LOCAL_TASK_RESULT_INVALID', 'Local agent returned a non-JSON durable task response.', { retryable: false }); }
@@ -259,12 +346,12 @@ export class LocalAgentRelayRunner {
     const token = await this.#sessionCredentials.forRequest();
     let response: Response;
     try {
-      response = await fetch(this.#resultUrl, {
+      response = await fetchWithDeadline(this.#resultUrl, {
         redirect: 'error',
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ seq, deliveryId, result })
-      });
+      }, this.#resultSubmitTimeoutMs, 'relay result submission');
     } catch (error) {
       throw new OperatorError('RELAY_RESULT_SUBMIT_FAILED', `Relay result submission failed: ${error instanceof Error ? error.message : String(error)}`, {
         retryable: true,
@@ -295,6 +382,44 @@ function canRetryResultSubmissionInPlace(error: unknown): boolean {
 function resultSubmitRetryDelay(attemptInput: number): number {
   const attempt = Math.max(0, Math.min(10, Math.trunc(attemptInput)));
   return Math.min(RESULT_SUBMIT_RETRY_BASE_MS * 2 ** attempt, RESULT_SUBMIT_RETRY_MAX_MS);
+}
+
+function actionRequestTimeoutMs(action: ActionRequest, fallbackMs: number): number {
+  const candidate = Number((action.input as Record<string, unknown>).timeoutMs);
+  if (Number.isFinite(candidate) && candidate > 0) {
+    return Math.min(LOCAL_ACTION_MAX_TIMEOUT_MS, Math.max(30_000, Math.floor(candidate) + 15_000));
+  }
+  return fallbackMs;
+}
+
+function boundedLocalRequestTimeout(value: number): number {
+  if (!Number.isFinite(value)) throw new OperatorError('RELAY_LOCAL_TIMEOUT_INVALID', 'Local relay request timeout must be finite.', { retryable: false });
+  return Math.max(50, Math.min(LOCAL_ACTION_MAX_TIMEOUT_MS, Math.floor(value)));
+}
+
+function boundedResultSubmitTimeout(value: number): number {
+  if (!Number.isFinite(value)) throw new OperatorError('RELAY_RESULT_TIMEOUT_INVALID', 'Relay result submission timeout must be finite.', { retryable: false });
+  return Math.max(50, Math.min(5 * 60_000, Math.floor(value)));
+}
+
+async function fetchWithDeadline(url: string, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
+  const bounded = Math.max(50, Math.min(LOCAL_ACTION_MAX_TIMEOUT_MS, Math.floor(timeoutMs)));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), bounded);
+  timer.unref();
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new OperatorError('RELAY_LOCAL_HTTP_TIMEOUT', `${label} exceeded its bounded ${bounded}ms request deadline.`, {
+        retryable: true,
+        details: { timeoutMs: bounded }
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function localResourceProfile() {
