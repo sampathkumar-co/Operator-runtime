@@ -276,6 +276,91 @@ test('task API requires separate recovery authority for the exact blocked action
   assert.equal(await fs.readFile(marker, 'utf8'), 'approved');
 });
 
+test('approved local task continuation survives agent restart and resumes without a live waiter', async (t) => {
+  const root = await tempDir(t, 'operator-task-approval-restart-root-');
+  const authority = await tempDir(t, 'operator-task-approval-restart-authority-');
+  const state = await tempDir(t, 'operator-task-approval-restart-state-');
+  const markerPath = path.join(root, 'restart.marker');
+  const registryPath = path.join(authority, 'commands.json');
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'approval-restart-fixture' }));
+  await fs.writeFile(registryPath, JSON.stringify({
+    version: 1,
+    projects: [{ root, commands: [{
+      id: 'restart-build', kind: 'build', executable: 'node',
+      args: ['-e', `require('fs').writeFileSync(${JSON.stringify(markerPath)},'resumed')`],
+      cwd: '.', risk: 'external', artifacts: [{ path: 'restart.marker', kind: 'file', minBytes: 1, mustChange: true }]
+    }] }]
+  }));
+
+  const runtime = createRuntime({
+    allowedRoots: [root], allowedExecutables: ['node'], terminalAllowedExecutables: [],
+    projectCommandRegistryPath: registryPath
+  });
+  t.after(() => runtime.close());
+  const tasks = new TaskStore(state);
+  const permissions = {
+    allowedCapabilities: ['project.inspect', 'project.command.inspect', 'project.command.run'],
+    allowedRoots: [root], allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const token = 'z'.repeat(64);
+  const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+  const firstApprovals = new ApprovalStore(state);
+  const firstOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const firstAgent = createLocalAgentServer({
+    runtime, token, permissions, tasks, taskOrchestrator: firstOrchestrator, approvals: firstApprovals
+  });
+  const firstBound = await firstAgent.listen('127.0.0.1', 0);
+  const firstBase = `http://127.0.0.1:${firstBound.port}`;
+  const blockedResponse = await fetch(`${firstBase}/v1/tasks`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      objective: 'Resume this approved build after restart.',
+      successConditions: ['validated restart artifact'],
+      run: true,
+      goal: { kind: 'trusted-project-command', root, commandKind: 'build' }
+    })
+  });
+  const blocked = await blockedResponse.json() as any;
+  assert.equal(blocked.task.state, 'BLOCKED');
+  const pending = (await firstApprovals.list()).find((item) => item.status === 'pending');
+  assert.ok(pending);
+  assert.equal(pending!.continuationTaskId, blocked.task.id);
+  await firstAgent.close();
+
+  const restartedApprovals = new ApprovalStore(state);
+  const restartedOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const recoveryToken = 'y'.repeat(64);
+  const restartedAgent = createLocalAgentServer({
+    runtime, token, recoveryToken, permissions, tasks,
+    taskOrchestrator: restartedOrchestrator, approvals: restartedApprovals
+  });
+  t.after(() => restartedAgent.close());
+  const restartedBound = await restartedAgent.listen('127.0.0.1', 0);
+  const restartedBase = `http://127.0.0.1:${restartedBound.port}`;
+
+  const approvalResponse = await fetch(`${restartedBase}/v1/approvals/${encodeURIComponent(pending!.actionId)}`, {
+    method: 'POST',
+    headers: { ...headers, 'x-operator-recovery-token': recoveryToken },
+    body: JSON.stringify({ decision: 'approve', approvalRequestId: pending!.approvalRequestId })
+  });
+  const approvalBody = await approvalResponse.json() as any;
+  assert.equal(approvalResponse.status, 200, JSON.stringify(approvalBody));
+
+  const deadline = Date.now() + 5_000;
+  let final: any;
+  while (Date.now() < deadline) {
+    const current = await fetch(`${restartedBase}/v1/tasks/${blocked.task.id}`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    final = await current.json();
+    if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(final.task?.state)) break;
+    await delay(20);
+  }
+  assert.equal(final.task.state, 'VERIFIED');
+  assert.equal(await fs.readFile(markerPath, 'utf8'), 'resumed');
+});
+
 test('allow-session resumes the same blocked task request and suppresses the next task prompt', async (t) => {
   const root = await tempDir(t, 'operator-task-session-root-');
   const state = await tempDir(t, 'operator-task-session-state-');

@@ -254,16 +254,19 @@ export function createLocalAgentServer(options: {
     }
   };
 
-  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision) => {
+  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision): number => {
     const waiters = approvalWaiters.get(actionId);
-    if (!waiters) return;
+    if (!waiters) return 0;
+    let notified = 0;
     for (const waiter of [...waiters]) {
       if (waiter.approvalRequestId !== approvalRequestId) continue;
       clearTimeout(waiter.timer);
       waiters.delete(waiter);
       waiter.resolve(decision);
+      notified += 1;
     }
     if (waiters.size === 0) approvalWaiters.delete(actionId);
+    return notified;
   };
 
   const waitForApprovalDecision = (
@@ -1848,7 +1851,34 @@ export function createLocalAgentServer(options: {
           send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve, session, or deny.' } });
           return;
         }
-        notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
+        const notifiedWaiters = notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
+        if ((decision === 'approve' || decision === 'session')
+          && notifiedWaiters === 0
+          && record.continuationTaskId
+          && options.taskOrchestrator
+          && options.tasks) {
+          const continuation = await options.tasks.get(record.continuationTaskId).catch(() => null);
+          const blocked = continuation?.execution?.records.find((item) => item.state === 'BLOCKED' && item.actionId === actionId);
+          if (continuation?.state === 'BLOCKED' && blocked) {
+            void options.taskOrchestrator.resume(
+              record.continuationTaskId,
+              [],
+              taskAuthorization(undefined, options.permissions)
+            ).catch(async (error) => {
+              try {
+                await options.audit?.append({
+                  traceId: record.continuationTaskId,
+                  taskId: record.continuationTaskId,
+                  actionId,
+                  capability: 'task.approval.continuation',
+                  result: 'failure',
+                  risk: 'read',
+                  details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_APPROVAL_CONTINUATION_FAILED' }
+                });
+              } catch { /* blocked task remains durable and explicitly resumable */ }
+            });
+          }
+        }
         send(res, 200, {
           ok: true,
           approval: {

@@ -35,6 +35,7 @@ export type ApprovalRecord = {
   deniedAt?: string;
   executionLeaseId?: string;
   executionLeaseExpiresAt?: string;
+  continuationTaskId?: string;
 };
 
 type State = { version: 2; records: ApprovalRecord[] };
@@ -88,6 +89,7 @@ export class ApprovalStore {
         capability: action.capability,
         risk: action.risk,
         target: action.target,
+        ...(authority === undefined && action.taskId && isUuid(action.taskId) ? { continuationTaskId: action.taskId } : {}),
         status: 'pending',
         createdAt: now.toISOString(),
         pendingExpiresAt: new Date(now.getTime() + PENDING_TTL_MS).toISOString()
@@ -98,7 +100,8 @@ export class ApprovalStore {
         consumedAt: undefined,
         deniedAt: undefined,
         executionLeaseId: undefined,
-        executionLeaseExpiresAt: undefined
+        executionLeaseExpiresAt: undefined,
+        continuationTaskId: record.continuationTaskId
       });
       else {
         if (state.records.length >= MAX_RECORDS) throw new OperatorError('APPROVAL_STORE_LIMIT', 'Approval store is full.');
@@ -386,6 +389,7 @@ function validateState(input: State): State {
     const deniedAt = raw.deniedAt === undefined ? undefined : validIso(raw.deniedAt, 'deniedAt');
     const executionLeaseId = raw.executionLeaseId === undefined ? undefined : String(raw.executionLeaseId);
     const executionLeaseExpiresAt = raw.executionLeaseExpiresAt === undefined ? undefined : validIso(raw.executionLeaseExpiresAt, 'executionLeaseExpiresAt');
+    const continuationTaskId = raw.continuationTaskId === undefined ? undefined : validUuid(raw.continuationTaskId, 'continuationTaskId');
     if (Boolean(executionLeaseId) !== Boolean(executionLeaseExpiresAt)) throw corrupt('Approval execution lease metadata is incomplete.');
     if (executionLeaseId && !isUuid(executionLeaseId)) throw corrupt('Approval execution lease ID is invalid.');
 
@@ -402,7 +406,7 @@ function validateState(input: State): State {
       actionId, actionHash: actionHashValue, authorityHash, approvalRequestId,
       capability, risk: risk as ActionRequest['risk'], target, status: status as ApprovalStatus,
       createdAt, pendingExpiresAt, approvedAt, approvalExpiresAt, consumedAt, deniedAt,
-      executionLeaseId, executionLeaseExpiresAt
+      executionLeaseId, executionLeaseExpiresAt, continuationTaskId
     } satisfies ApprovalRecord;
   });
   return { version: 2, records };
