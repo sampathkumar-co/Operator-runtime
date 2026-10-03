@@ -396,3 +396,24 @@ test('TaskStore fails closed on malformed execution-lease ownership', async (t) 
     (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /ownerId/.test(error.message)
   );
 });
+
+
+test('TaskStore recent listing sorts by updatedAt before applying the page limit', async (t) => {
+  const state = await tempDir(t, 'operator-task-recency-');
+  const store = new TaskStore(state);
+  const tasks: TaskCapsule[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    const value = task();
+    value.userObjective = `task-${index}`;
+    tasks.push(value);
+    await store.put(value);
+  }
+
+  const lexicallyLast = tasks.slice().sort((a, b) => a.id.localeCompare(b.id)).at(-1)!;
+  lexicallyLast.updatedAt = '2099-01-01T00:00:00.000Z';
+  await store.put(lexicallyLast);
+
+  const recent = await store.list(10);
+  assert.equal(recent[0]?.id, lexicallyLast.id);
+  assert.ok(recent.some((item) => item.id === lexicallyLast.id));
+});

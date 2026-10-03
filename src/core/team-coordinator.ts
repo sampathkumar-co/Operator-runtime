@@ -802,11 +802,14 @@ class TeamStore {
     const limit = boundedInteger(limitInput, 1, 500, 'limit');
     const names = (await fs.readdir(this.#dir)).filter((name) => name.endsWith('.json')).sort();
     const missions: TeamMission[] = [];
-    for (const name of names.slice(0, limit)) {
+    for (const name of names) {
       const id = validUuid(name.slice(0, -5), 'missionId');
       missions.push(await this.get(id));
     }
-    return missions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, objective, state, updatedAt }) => ({ id, objective, state, updatedAt }));
+    return missions
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map(({ id, objective, state, updatedAt }) => ({ id, objective, state, updatedAt }));
   }
 
   async #init(): Promise<void> {

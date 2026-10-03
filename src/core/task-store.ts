@@ -108,8 +108,7 @@ export class TaskStore {
     const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(Math.trunc(parsedLimit), 1), MAX_LIST) : 100;
     const entries = (await fs.readdir(this.#dir))
       .filter((name) => name.endsWith('.json'))
-      .sort()
-      .slice(0, limit);
+      .sort();
     const tasks: TaskCapsule[] = [];
     for (const name of entries) {
       const candidateId = storedTaskIdFromFilename(name);
@@ -120,7 +119,8 @@ export class TaskStore {
       tasks.push(task);
     }
     return tasks
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit)
       .map(({ id, userObjective, state, updatedAt }) => ({ id, userObjective, state, updatedAt }));
   }
 

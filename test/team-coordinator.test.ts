@@ -263,3 +263,21 @@ test('stage4 shared blackboard uses lease-bound CAS revisions to prevent lost up
   assert.equal(second.blackboard[0]?.revision, 2);
   assert.deepEqual(second.blackboard[0]?.value, { choice: 'A', approved: true });
 });
+
+
+test('stage4 recent mission listing sorts by updatedAt before applying the page limit', async (t) => {
+  const coordinator = new TeamCoordinator(await stateDir(t));
+  const missions = [];
+  for (let index = 0; index < 20; index += 1) {
+    missions.push(await coordinator.submit({
+      objective: `mission-${index}`,
+      workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+    }));
+  }
+
+  const lexicallyLast = missions.slice().sort((a, b) => a.id.localeCompare(b.id)).at(-1)!;
+  await coordinator.start(lexicallyLast.id);
+  const recent = await coordinator.list(10);
+  assert.equal(recent[0]?.id, lexicallyLast.id);
+  assert.ok(recent.some((item) => item.id === lexicallyLast.id));
+});
