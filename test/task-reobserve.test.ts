@@ -108,7 +108,54 @@ test('pre-dispatch stale target reobserves without consuming environment step or
   assert.equal(completed.state, 'VERIFIED');
   assert.equal(provider.calls, 2);
   assert.equal(completed.execution?.stepCount, 1);
+  assert.equal(completed.execution?.dispatchedActions, 1);
+  assert.equal(completed.execution?.preDispatchReobserves, 1);
+  assert.equal(completed.execution?.plannerIterations, 3);
   assert.equal(completed.execution?.records.length, 1);
   assert.equal(completed.execution?.records[0]?.state, 'SUCCEEDED');
+  assert.equal(completed.execution?.records[0]?.executionPhase, 'effect_observed');
   assert.ok(completed.evidence.some((item) => item.kind === 'strategy_reobserve'));
+});
+
+test('pre-dispatch approval wait does not consume environment-action budget', async (t) => {
+  const root = await tempDir(t, 'operator-task-approval-budget-root-');
+  const state = await tempDir(t, 'operator-task-approval-budget-state-');
+  let executions = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new StaleThenSuccessBrowserProvider()),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.interact'],
+      allowedRoots: [root],
+      allowExternalWrites: true
+    },
+    planners: [new OneBrowserStepPlanner()],
+    executeAction: async (action) => {
+      executions += 1;
+      if (executions === 1) {
+        return {
+          ok: false, capability: action.capability, provider: 'approval-probe', evidence: [], durationMs: 0,
+          error: {
+            code: 'APPROVAL_REQUIRED', message: 'approval is needed before dispatch', retryable: false,
+            sideEffectState: 'none', executionPhase: 'pre_dispatch'
+          }
+        };
+      }
+      return { ok: true, capability: action.capability, provider: 'approval-probe', output: { dispatched: true }, evidence: [], durationMs: 0 };
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Approve then execute exactly one environment action.',
+    authorizedScope: [root],
+    successConditions: ['one approved interaction succeeds'],
+    goal: { kind: 'controlled-file-change', root, path: 'unused.txt', content: 'unused' },
+    maxSteps: 1,
+    maxAttemptsPerStep: 1
+  });
+  const completed = await orchestrator.run(task.id, [], { onApprovalRequired: () => 'retry' });
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(executions, 2);
+  assert.equal(completed.execution?.stepCount, 1);
+  assert.equal(completed.execution?.dispatchedActions, 1);
+  assert.equal(completed.execution?.records.length, 1);
 });

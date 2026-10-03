@@ -322,13 +322,27 @@ function validateExecution(input: unknown): TaskExecution {
   const maxAttemptsPerStep = boundedInteger(raw.maxAttemptsPerStep, 1, 20, 'execution maxAttemptsPerStep');
   const timeoutMs = boundedInteger(raw.timeoutMs, 100, 24 * 60 * 60 * 1000, 'execution timeoutMs');
   const stepCount = boundedInteger(raw.stepCount, 0, maxSteps, 'execution stepCount');
+  const plannerIterations = raw.plannerIterations === undefined
+    ? stepCount
+    : boundedInteger(raw.plannerIterations, 0, 1_000_000, 'execution plannerIterations');
+  const preDispatchReobserves = raw.preDispatchReobserves === undefined
+    ? 0
+    : boundedInteger(raw.preDispatchReobserves, 0, 1_000_000, 'execution preDispatchReobserves');
+  const dispatchedActions = raw.dispatchedActions === undefined
+    ? stepCount
+    : boundedInteger(raw.dispatchedActions, 0, maxSteps, 'execution dispatchedActions');
+  if (dispatchedActions !== stepCount) throw corrupt('execution dispatchedActions must equal the charged environment stepCount.');
   const startedAt = raw.startedAt === undefined ? undefined : validIso(raw.startedAt, 'execution startedAt');
   const deadlineAt = raw.deadlineAt === undefined ? undefined : validIso(raw.deadlineAt, 'execution deadlineAt');
   if ((startedAt === undefined) !== (deadlineAt === undefined)) throw corrupt('execution timing fields must appear together.');
   if (startedAt && deadlineAt && Date.parse(deadlineAt) <= Date.parse(startedAt)) throw corrupt('execution deadline must follow start.');
   if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
   const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
-  return { schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount, ...(startedAt ? { startedAt, deadlineAt } : {}), records };
+  return {
+    schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
+    plannerIterations, preDispatchReobserves, dispatchedActions,
+    ...(startedAt ? { startedAt, deadlineAt } : {}), records
+  };
 }
 
 function validateActionRecord(input: unknown, index: number): TaskActionRecord {
@@ -342,6 +356,10 @@ function validateActionRecord(input: unknown, index: number): TaskActionRecord {
   if (!['read', 'write', 'external', 'system', 'destructive'].includes(risk)) throw corrupt(`Action record ${index} risk is invalid.`);
   const sideEffectState = raw.sideEffectState === undefined ? undefined : String(raw.sideEffectState);
   if (sideEffectState !== undefined && !['none', 'known', 'uncertain'].includes(sideEffectState)) throw corrupt(`Action record ${index} sideEffectState is invalid.`);
+  const executionPhase = raw.executionPhase === undefined ? undefined : String(raw.executionPhase);
+  if (executionPhase !== undefined && !['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(executionPhase)) {
+    throw corrupt(`Action record ${index} executionPhase is invalid.`);
+  }
   const startedAt = validIso(raw.startedAt, `action record ${index} startedAt`);
   const finishedAt = raw.finishedAt === undefined ? undefined : validIso(raw.finishedAt, `action record ${index} finishedAt`);
   if (state === 'STARTED' && finishedAt !== undefined) throw corrupt(`Action record ${index} cannot finish while STARTED.`);
@@ -359,6 +377,7 @@ function validateActionRecord(input: unknown, index: number): TaskActionRecord {
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(raw.errorCode === undefined ? {} : { errorCode: boundedText(raw.errorCode, 256, `action record ${index} errorCode`) }),
     ...(sideEffectState === undefined ? {} : { sideEffectState: sideEffectState as TaskActionRecord['sideEffectState'] }),
+    ...(executionPhase === undefined ? {} : { executionPhase: executionPhase as TaskActionRecord['executionPhase'] }),
     ...(raw.observation === undefined ? {} : { observation: validateObservation(raw.observation, index) }),
     evidence: validateEvidenceArray(raw.evidence, MAX_EVIDENCE, `action record ${index} evidence`)
   };

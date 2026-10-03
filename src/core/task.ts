@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ActionRisk, Evidence, SideEffectState, TaskState } from './types.ts';
+import type { ActionRisk, Evidence, ExecutionPhase, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 export interface TaskNode {
@@ -29,6 +29,7 @@ export interface TaskActionRecord {
   finishedAt?: string;
   errorCode?: string;
   sideEffectState?: SideEffectState;
+  executionPhase?: ExecutionPhase;
   observation?: TaskObservationSummary;
   evidence: Evidence[];
 }
@@ -70,7 +71,11 @@ export interface TaskExecution {
   maxSteps: number;
   maxAttemptsPerStep: number;
   timeoutMs: number;
+  /** Backwards-compatible environment-action count. Pre-dispatch failures do not consume it. */
   stepCount: number;
+  plannerIterations?: number;
+  preDispatchReobserves?: number;
+  dispatchedActions?: number;
   startedAt?: string;
   deadlineAt?: string;
   records: TaskActionRecord[];

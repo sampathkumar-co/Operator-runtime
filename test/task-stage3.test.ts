@@ -47,7 +47,9 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.deepEqual(classifyTaskFailure({ code: 'APPROVAL_REQUIRED', message: 'approval' }), {
     class: 'approval', strategy: 'block', retryable: false, code: 'APPROVAL_REQUIRED'
   });
-  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'pre_dispatch' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'dispatched' }).strategy, 'repair');
+  assert.equal(classifyTaskFailure({ code: 'NETWORK_TIMEOUT', message: 'uncertain', retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched' }).strategy, 'reconcile');
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
   assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
@@ -244,7 +246,11 @@ test('stage3 crash recovery refreshes active deadline without resetting step or 
   task.execution!.plannerState.phase = 'create';
   task.execution!.startedAt = new Date(Date.now() - 60_000).toISOString();
   task.execution!.deadlineAt = new Date(Date.now() - 30_000).toISOString();
-  task.execution!.stepCount = 1;
+  // Environment-action accounting is charged only once dispatch is known. The
+  // interrupted STARTED record below is reconciled conservatively as dispatched.
+  task.execution!.stepCount = 0;
+  task.execution!.dispatchedActions = 0;
+  task.execution!.plannerIterations = 1;
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ content, path: target })).digest('hex');
   task.execution!.records.push({
     stepKey: 'create-file',
@@ -309,11 +315,14 @@ test('stage3 never blindly replays a retryable mutating action with uncertain si
   task.execution!.plannerState.phase = 'create';
   await new TaskStore(state).put(task);
 
-  const failed = await orchestrator.run(task.id);
-  assert.equal(failed.state, 'FAILED');
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
   assert.equal(provider.calls, 1);
-  assert.equal(failed.failures.at(-1)?.code, 'TEMPORARY_WRITE_FAILURE');
-  assert.ok(failed.evidence.some((item) => item.kind === 'strategy_fail_closed'));
+  assert.equal(blocked.execution?.stepCount, 1);
+  assert.equal(blocked.execution?.dispatchedActions, 1);
+  assert.equal(blocked.execution?.records.at(-1)?.state, 'BLOCKED');
+  assert.equal(blocked.execution?.records.at(-1)?.executionPhase, 'dispatched');
+  assert.ok(blocked.evidence.some((item) => item.kind === 'strategy_reconcile'));
 });
 
 test('stage3 quality gate fails closed when a required trusted check is unavailable', async (t) => {

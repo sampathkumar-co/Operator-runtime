@@ -301,6 +301,9 @@ export function failure(action: ActionRequest, provider: string, started: number
       message: op.message,
       retryable: op.retryable,
       ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+      ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase))
+        ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' }
+        : {}),
       ...(op.details ? { details: structuredClone(op.details) } : {})
     },
     durationMs: Math.round(performance.now() - started)

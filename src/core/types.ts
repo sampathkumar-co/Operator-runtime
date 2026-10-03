@@ -1,5 +1,6 @@
 export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
 export type SideEffectState = 'none' | 'known' | 'uncertain';
+export type ExecutionPhase = 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type ProvenanceKind =
@@ -46,6 +47,7 @@ export interface ActionResult {
     message: string;
     retryable?: boolean;
     sideEffectState?: SideEffectState;
+    executionPhase?: ExecutionPhase;
     details?: Record<string, unknown>;
   };
   durationMs: number;

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, PermissionProfile, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -11,7 +11,7 @@ import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
 import { verifyTaskCompletion } from './task-verifier.ts';
-import { conservativeSideEffectState, retrySafeWithoutReconciliation, validSideEffectState } from './side-effect.ts';
+import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
 
@@ -62,6 +62,9 @@ export interface TaskPlannerContext {
     maxSteps: number;
     usedSteps: number;
     remainingSteps: number;
+    plannerIterations: number;
+    preDispatchReobserves: number;
+    dispatchedActions: number;
     maxAttemptsPerStep: number;
     activeDeadlineMsRemaining: number;
   };
@@ -195,6 +198,9 @@ export class TaskOrchestrator {
       maxAttemptsPerStep: normalized.maxAttemptsPerStep,
       timeoutMs: normalized.timeoutMs,
       stepCount: 0,
+      plannerIterations: 0,
+      preDispatchReobserves: 0,
+      dispatchedActions: 0,
       records: []
     };
     if (!requestId) {
@@ -265,6 +271,7 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
       }
       if (this.#monotonicNow() >= activeDeadline) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
+      current.plannerIterations = (current.plannerIterations ?? 0) + 1;
       const context: TaskPlannerContext = {
         task,
         goal,
@@ -272,6 +279,9 @@ export class TaskOrchestrator {
           maxSteps: current.maxSteps,
           usedSteps: current.stepCount,
           remainingSteps: Math.max(0, current.maxSteps - current.stepCount),
+          plannerIterations: current.plannerIterations ?? 0,
+          preDispatchReobserves: current.preDispatchReobserves ?? 0,
+          dispatchedActions: current.dispatchedActions ?? current.stepCount,
           maxAttemptsPerStep: current.maxAttemptsPerStep,
           activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
         }
@@ -347,12 +357,19 @@ export class TaskOrchestrator {
         state: 'STARTED', startedAt: new Date().toISOString(), evidence: []
       };
       if (!blockedReplay) current.records.push(record);
-      else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
-      current.stepCount += 1;
+      else {
+        record.state = 'STARTED';
+        record.startedAt = new Date().toISOString();
+        delete record.finishedAt;
+        delete record.errorCode;
+        delete record.sideEffectState;
+        delete record.executionPhase;
+        delete record.observation;
+        record.evidence = [];
+      }
       const preDispatchControl = await this.#persistRunState(task, assertLease);
       if (preDispatchControl === 'PAUSED') {
         current.records = current.records.filter((candidate) => candidate !== record);
-        current.stepCount = Math.max(0, current.stepCount - 1);
         setNodeState(task, node.id, 'PENDING');
         await this.#persistRunState(task, assertLease);
         return task;
@@ -362,6 +379,7 @@ export class TaskOrchestrator {
         record.finishedAt = new Date().toISOString();
         record.errorCode = 'EXECUTION_ABORTED';
         record.sideEffectState = 'none';
+        record.executionPhase = 'pre_dispatch';
         setNodeState(task, node.id, 'SKIPPED');
         task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
         await this.#persistRunState(task, assertLease);
@@ -406,7 +424,8 @@ export class TaskOrchestrator {
             code,
             message: error instanceof Error ? error.message : String(error),
             retryable: error instanceof OperatorError ? error.retryable : false,
-            sideEffectState: executorExceptionSideEffectState(risk, error, executionDispatched)
+            sideEffectState: executorExceptionSideEffectState(risk, error, executionDispatched),
+            executionPhase: executorExceptionExecutionPhase(error, executionDispatched)
           }
         };
       } finally {
@@ -424,7 +443,8 @@ export class TaskOrchestrator {
                 code: 'RESOURCE_LEASE_RELEASE_FAILED',
                 message: error instanceof Error ? error.message : String(error),
                 retryable: false,
-                sideEffectState: risk === 'read' ? 'none' : result!?.ok ? 'known' : (result!?.error?.sideEffectState ?? 'uncertain')
+                sideEffectState: risk === 'read' ? 'none' : result!?.ok ? 'known' : (result!?.error?.sideEffectState ?? 'uncertain'),
+                executionPhase: result ? conservativeExecutionPhase(result) : executionDispatched ? 'dispatched' : 'pre_dispatch'
               }
             };
           }
@@ -444,7 +464,8 @@ export class TaskOrchestrator {
               code: 'APPROVAL_SETTLEMENT_FAILED',
               message: error instanceof Error ? error.message : String(error),
               retryable: false,
-              sideEffectState: result.ok ? 'known' : (result.error?.sideEffectState ?? 'uncertain')
+              sideEffectState: result.ok ? 'known' : (result.error?.sideEffectState ?? 'uncertain'),
+              executionPhase: conservativeExecutionPhase(result)
             }
           };
         }
@@ -456,6 +477,12 @@ export class TaskOrchestrator {
         : this.#controlRequests.get(taskId);
       task = latest;
       const latestExecution = task.execution!;
+      const resultExecutionPhase = conservativeExecutionPhase(result);
+      if (resultExecutionPhase !== 'pre_dispatch') {
+        const dispatchedBefore = latestExecution.dispatchedActions ?? latestExecution.stepCount;
+        latestExecution.stepCount += 1;
+        latestExecution.dispatchedActions = dispatchedBefore + 1;
+      }
       const postActionContext: TaskPlannerContext = {
         task,
         goal,
@@ -463,6 +490,9 @@ export class TaskOrchestrator {
           maxSteps: latestExecution.maxSteps,
           usedSteps: latestExecution.stepCount,
           remainingSteps: Math.max(0, latestExecution.maxSteps - latestExecution.stepCount),
+          plannerIterations: latestExecution.plannerIterations ?? 0,
+          preDispatchReobserves: latestExecution.preDispatchReobserves ?? 0,
+          dispatchedActions: latestExecution.dispatchedActions ?? latestExecution.stepCount,
           maxAttemptsPerStep: latestExecution.maxAttemptsPerStep,
           activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
         }
@@ -477,6 +507,7 @@ export class TaskOrchestrator {
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
       latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
+      latestRecord.executionPhase = resultExecutionPhase;
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
@@ -543,7 +574,6 @@ export class TaskOrchestrator {
           latestRecord.state = 'BLOCKED';
           setNodeState(task, latestNode.id, 'BLOCKED');
           task.state = 'RUNNING';
-          latestExecution.stepCount = Math.max(0, latestExecution.stepCount - 1);
           await this.#persistRunState(task, assertLease);
           continue;
         }
@@ -575,23 +605,52 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'reobserve') {
+      const retrySafe = retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain');
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'reobserve'
+        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')) {
         setNodeState(task, latestNode.id, 'SKIPPED');
         latestExecution.records = latestExecution.records.filter((candidate) => candidate !== latestRecord);
-        latestExecution.stepCount = Math.max(0, latestExecution.stepCount - 1);
+        latestExecution.preDispatchReobserves = (latestExecution.preDispatchReobserves ?? 0) + 1;
         task.evidence.push(evidence('strategy_reobserve', 'info', 'Superseded a pre-dispatch stale-state attempt and returned control for fresh observation without charging an environment-action step.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
           actionId: latestRecord.actionId,
-          sideEffectState: latestRecord.sideEffectState ?? 'none'
+          sideEffectState: latestRecord.sideEffectState ?? 'none',
+          executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
         }));
         await this.#persistRunState(task, assertLease);
         continue;
       }
-      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'retry') {
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'repair') {
         setNodeState(task, latestNode.id, 'SKIPPED');
-        task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
+        task.evidence.push(evidence('strategy_repair', 'info', 'Returned control to the planner after a proven no-side-effect target/precondition drift so it can deterministically repair the next action.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          actionId: latestRecord.actionId,
+          executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
+      if (failureDecision.strategy === 'reconcile') {
+        latestRecord.state = 'BLOCKED';
+        setNodeState(task, latestNode.id, 'BLOCKED');
+        task.state = 'BLOCKED';
+        task.evidence.push(evidence('strategy_reconcile', 'info', 'Paused automatic execution because dispatch may have occurred and side effects are uncertain; durable reconciliation is required before retry.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          actionId: latestRecord.actionId,
+          risk,
+          sideEffectState: latestRecord.sideEffectState ?? 'uncertain',
+          executionPhase: latestRecord.executionPhase ?? 'dispatched'
+        }));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'retry') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_retry', 'info', 'Scheduled a bounded retry because the failed attempt is proven safe to retry under the same authority boundary.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
@@ -749,6 +808,12 @@ export class TaskOrchestrator {
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
       record.sideEffectState = record.risk === 'read' ? 'none' : 'uncertain';
+      if (record.executionPhase === undefined) {
+        record.executionPhase = 'dispatched';
+        const dispatchedBefore = execution.dispatchedActions ?? execution.stepCount;
+        execution.stepCount = Math.min(execution.maxSteps, execution.stepCount + 1);
+        execution.dispatchedActions = Math.min(execution.maxSteps, dispatchedBefore + 1);
+      }
       const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
       if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
         node.state = 'SKIPPED';
@@ -772,6 +837,13 @@ export class TaskOrchestrator {
     else await this.#store.put(task);
     return task;
   }
+}
+
+function executorExceptionExecutionPhase(error: unknown, dispatched: boolean): ExecutionPhase {
+  if (error instanceof OperatorError && error.details?.executionPhase !== undefined) {
+    try { return validExecutionPhase(error.details.executionPhase); } catch { /* fail closed below */ }
+  }
+  return dispatched ? 'dispatched' : 'pre_dispatch';
 }
 
 function executorExceptionSideEffectState(risk: ActionRisk, error: unknown, dispatched: boolean): SideEffectState {

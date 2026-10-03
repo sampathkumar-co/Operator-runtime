@@ -1,10 +1,10 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
-import { conservativeSideEffectState, retrySafeWithoutReconciliation, validSideEffectState } from './side-effect.ts';
+import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 
 export class OperatorRuntime {
   readonly router: CapabilityRouter;
@@ -56,7 +56,7 @@ export class OperatorRuntime {
         capability: action.capability,
         provider: 'policy',
         evidence: [evidence('policy', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: false },
+        error: { code: op.code, message: op.message, retryable: false, executionPhase: 'pre_dispatch' },
         durationMs: Math.round(performance.now() - start)
       };
     }
@@ -73,7 +73,7 @@ export class OperatorRuntime {
         capability: action.capability,
         provider: 'router',
         evidence: [evidence('routing', 'fail', 'Provider ranking failed closed before execution.', { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: false },
+        error: { code: op.code, message: op.message, retryable: false, executionPhase: 'pre_dispatch' },
         durationMs: Math.round(performance.now() - start)
       };
     }
@@ -83,7 +83,7 @@ export class OperatorRuntime {
         capability: action.capability,
         provider: 'router',
         evidence: [evidence('routing', 'fail', `No provider supports ${action.capability}.`)],
-        error: { code: 'CAPABILITY_UNAVAILABLE', message: `No provider supports ${action.capability}.`, retryable: false },
+        error: { code: 'CAPABILITY_UNAVAILABLE', message: `No provider supports ${action.capability}.`, retryable: false, executionPhase: 'pre_dispatch' },
         durationMs: Math.round(performance.now() - start)
       };
     }
@@ -96,10 +96,12 @@ export class OperatorRuntime {
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
         result.durationMs = Math.round(performance.now() - start);
         if (result.ok) return result;
+        const executionPhase = conservativeExecutionPhase(result);
         const sideEffectState = conservativeSideEffectState(canonicalAction.risk, result);
         const failure = {
           ...(result.error ?? { code: 'PROVIDER_FAILED', message: `${provider.name} failed.` }),
-          sideEffectState
+          sideEffectState,
+          executionPhase
         };
         failures.push(failure);
         if (canonicalAction.risk !== 'read'
@@ -111,8 +113,9 @@ export class OperatorRuntime {
         const op = error instanceof OperatorError
           ? error
           : new OperatorError('PROVIDER_EXCEPTION', error instanceof Error ? error.message : String(error), { retryable: true });
-        const sideEffectState = thrownSideEffectState(canonicalAction.risk, op);
-        const failure = { code: op.code, message: op.message, retryable: op.retryable, sideEffectState };
+        const executionPhase = thrownExecutionPhase(op);
+        const sideEffectState = executionPhase === 'pre_dispatch' ? 'none' : thrownSideEffectState(canonicalAction.risk, op);
+        const failure = { code: op.code, message: op.message, retryable: op.retryable, sideEffectState, executionPhase };
         failures.push(failure);
         if (canonicalAction.risk !== 'read'
           && (op.retryable !== true || !retrySafeWithoutReconciliation(canonicalAction.risk, sideEffectState))) {
@@ -150,6 +153,15 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || error.message === 'The operation was aborted');
 }
 
+function thrownExecutionPhase(error: OperatorError): ExecutionPhase {
+  try {
+    if (error.details?.executionPhase !== undefined) return validExecutionPhase(error.details.executionPhase);
+  } catch {
+    // Malformed exception metadata cannot prove that dispatch was avoided.
+  }
+  return 'dispatched';
+}
+
 function thrownSideEffectState(risk: ActionRequest['risk'], error: OperatorError): SideEffectState {
   if (risk === 'read') return 'none';
   try {
@@ -161,13 +173,14 @@ function thrownSideEffectState(risk: ActionRequest['risk'], error: OperatorError
 }
 
 function abortedResult(action: ActionRequest, start: number, afterDispatch = false): ActionResult {
-  const sideEffectState = action.risk === 'read' || !afterDispatch ? 'none' : 'uncertain';
+  const executionPhase: ExecutionPhase = afterDispatch ? 'dispatched' : 'pre_dispatch';
+  const sideEffectState = action.risk === 'read' || executionPhase === 'pre_dispatch' ? 'none' : 'uncertain';
   return {
     ok: false,
     capability: action.capability,
     provider: 'runtime',
     evidence: [evidence('execution', 'fail', 'Execution was cancelled before completion.', { code: 'EXECUTION_ABORTED' })],
-    error: { code: 'EXECUTION_ABORTED', message: 'Execution was cancelled before completion.', retryable: false, sideEffectState },
+    error: { code: 'EXECUTION_ABORTED', message: 'Execution was cancelled before completion.', retryable: false, sideEffectState, executionPhase },
     durationMs: Math.round(performance.now() - start)
   };
 }

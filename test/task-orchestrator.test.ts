@@ -190,7 +190,9 @@ test('task executor recovers an interrupted create without duplicating the mutat
   task.execution!.plannerState.phase = 'create';
   task.execution!.startedAt = new Date().toISOString();
   task.execution!.deadlineAt = new Date(Date.now() + 60_000).toISOString();
-  task.execution!.stepCount = 1;
+  task.execution!.stepCount = 0;
+  task.execution!.dispatchedActions = 0;
+  task.execution!.plannerIterations = 1;
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ content, path: target })).digest('hex');
   task.execution!.records.push({
     stepKey: 'create-file', actionId: `task-${'a'.repeat(64)}`, capability: 'file.create', risk: 'write',
