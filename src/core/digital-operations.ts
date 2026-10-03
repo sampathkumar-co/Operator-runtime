@@ -10,6 +10,7 @@ import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coo
 import { OrganizationCoordinator, type OrganizationPolicy } from './organization-coordinator.ts';
 import { OutcomePlanner } from './outcome-planner.ts';
 import type { ActionRisk } from './types.ts';
+import { DurableCompensationJournal, type DurableCompensationIntent } from './compensation-journal.ts';
 
 const MAX_OPERATIONS = 2000;
 const MAX_CONDITIONS = 200;
@@ -119,6 +120,7 @@ export class DigitalOperationsLayer {
   #planner: OutcomePlanner;
   #availableCapabilities: string[];
   #clock: () => Date;
+  #compensations: DurableCompensationJournal;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, dependencies: {
@@ -131,6 +133,7 @@ export class DigitalOperationsLayer {
     planner?: OutcomePlanner;
     availableCapabilities?: string[];
     clock?: () => Date;
+    compensations?: DurableCompensationJournal;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'digital-operations.json');
     this.#procedures = dependencies.procedures;
@@ -142,9 +145,12 @@ export class DigitalOperationsLayer {
     this.#planner = dependencies.planner ?? new OutcomePlanner();
     this.#availableCapabilities = [...new Set(dependencies.availableCapabilities ?? [])].sort();
     this.#clock = dependencies.clock ?? (() => new Date());
+    this.#compensations = dependencies.compensations ?? new DurableCompensationJournal(stateDir, { clock: this.#clock });
   }
 
   async submit(input: DigitalOperationSubmit): Promise<DigitalOperation> {
+    const recovery = await this.recoverPendingCompensations();
+    if (recovery.pending > 0) throw new OperatorError('COMPENSATION_BLOCKED', 'Digital operations has unresolved durable compensation work.', { retryable: true, details: recovery });
     const normalized = normalizeSubmit(input);
     const generatedPlan = normalized.execution ? undefined : this.#planner.plan({
       objective: normalized.objective,
@@ -205,24 +211,38 @@ export class DigitalOperationsLayer {
 
       let deviceReservationId: string | undefined;
       let deviceReservationSessionId: string | undefined;
+      const compensationIds: string[] = [];
       if (normalized.device) {
         const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
         deviceReservationId = reservation.id;
         deviceReservationSessionId = reservation.sessionId;
+        compensationIds.push(await this.#prepareCompensation(operationId, 'release-device-reservation', reservation.id));
       }
 
       let teamMissionId: string | undefined;
       let organizationProgramId: string | undefined;
-      const compensateCreatedExecution = async () => {
+      const compensateCreatedExecution = async (): Promise<string[]> => {
+        const failed: string[] = [];
         if (teamMissionId) {
-          try { await this.#teams.cancel(teamMissionId); } catch {}
+          try { await this.#teams.cancel(teamMissionId); }
+          catch { failed.push('cancel-team-mission'); }
         }
         if (organizationProgramId) {
-          try { await this.#organizations.cancel(organizationProgramId); } catch {}
+          try { await this.#organizations.cancel(organizationProgramId); }
+          catch { failed.push('cancel-organization-program'); }
         }
         if (deviceReservationId) {
-          try { await this.#devices.release(deviceReservationId); } catch {}
+          try { await this.#devices.release(deviceReservationId); }
+          catch (error) { if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') failed.push('release-device-reservation'); }
         }
+        for (const id of compensationIds) {
+          const intent = (await this.#compensations.pending('digital-operation')).find((item) => item.id === id);
+          if (intent && !failed.includes(intent.operation)) {
+            try { await this.#compensations.complete(id); }
+            catch { failed.push(intent.operation); }
+          }
+        }
+        return failed;
       };
       try {
         if (resolved.execution.kind === 'team') {
@@ -232,6 +252,7 @@ export class DigitalOperationsLayer {
             ...(resolved.execution.budget ? { budget: resolved.execution.budget } : {})
           });
           teamMissionId = mission.id;
+          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', mission.id));
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
           const program = await this.#organizations.create({
@@ -240,10 +261,12 @@ export class DigitalOperationsLayer {
             ...(resolved.execution.policy ? { policy: resolved.execution.policy } : {})
           });
           organizationProgramId = program.id;
+          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', program.id));
           if (normalized.run) await this.#organizations.start(program.id);
         }
       } catch (error) {
-        await compensateCreatedExecution();
+        const failed = await compensateCreatedExecution();
+        if (failed.length > 0) throw new OperatorError('COMPENSATION_BLOCKED', 'Operation creation failed and durable compensation could not be completed safely.', { retryable: true, details: { failed, cause: error instanceof Error ? error.message : String(error) } });
         throw error;
       }
 
@@ -277,13 +300,68 @@ export class DigitalOperationsLayer {
         await this.#write(state);
       } catch (error) {
         state.operations.pop();
-        await compensateCreatedExecution();
+        const failed = await compensateCreatedExecution();
+        if (failed.length > 0) throw new OperatorError('COMPENSATION_BLOCKED', 'Operation persistence failed and durable compensation could not be completed safely.', { retryable: true, details: { failed, cause: error instanceof Error ? error.message : String(error) } });
         throw error;
+      }
+      // The operation now durably owns these resources. Journal cleanup is
+      // best-effort here: a retained intent is resolved as committed by restart
+      // recovery and must never trigger compensation of a persisted operation.
+      for (const id of compensationIds) {
+        try { await this.#compensations.complete(id); } catch { /* durable committed intent remains recoverable */ }
       }
       return structuredClone(operation);
     });
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
+  }
+
+  async recoverPendingCompensations(): Promise<{ recovered: number; pending: number }> {
+    const run = this.#serial.then(async () => {
+      const intents = await this.#compensations.pending('digital-operation');
+      if (intents.length === 0) return { recovered: 0, pending: 0 };
+      const state = await this.#read();
+      let recovered = 0;
+      for (const intent of intents) {
+        const operation = state.operations.find((item) => item.id === intent.ownerId);
+        if (this.#compensationWasCommitted(intent, operation)) {
+          await this.#compensations.complete(intent.id);
+          recovered += 1;
+          continue;
+        }
+        try {
+          if (intent.operation === 'cancel-team-mission') await this.#teams.cancel(intent.targetId);
+          else if (intent.operation === 'cancel-organization-program') await this.#organizations.cancel(intent.targetId);
+          else if (intent.operation === 'release-device-reservation') await this.#devices.release(intent.targetId);
+          else continue;
+          await this.#compensations.complete(intent.id);
+          recovered += 1;
+        } catch (error) {
+          const code = error instanceof OperatorError ? error.code : '';
+          if (['TEAM_NOT_FOUND', 'ORGANIZATION_PROGRAM_NOT_FOUND', 'DEVICE_POOL_RESERVATION_NOT_FOUND'].includes(code)) {
+            await this.#compensations.complete(intent.id);
+            recovered += 1;
+          }
+        }
+      }
+      return { recovered, pending: (await this.#compensations.pending('digital-operation')).length };
+    });
+    this.#serial = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
+    const id = crypto.createHash('sha256').update(`digital-operation\0${ownerId}\0${operation}\0${targetId}`).digest('hex');
+    await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
+    return id;
+  }
+
+  #compensationWasCommitted(intent: DurableCompensationIntent, operation: DigitalOperation | undefined): boolean {
+    if (!operation) return false;
+    if (intent.operation === 'cancel-team-mission') return operation.teamMissionId === intent.targetId;
+    if (intent.operation === 'cancel-organization-program') return operation.organizationProgramId === intent.targetId;
+    if (intent.operation === 'release-device-reservation') return operation.deviceReservationId === intent.targetId;
+    return false;
   }
 
   async start(idInput: string): Promise<DigitalOperation> {

@@ -13,6 +13,7 @@ import { ExecutionOptimizerStore } from '../src/core/execution-optimizer.ts';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
 import { DigitalOperationsLayer } from '../src/core/digital-operations.ts';
+import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-digital-ops-'));
@@ -136,6 +137,43 @@ test('stage10 refuses to create execution when declared world precondition is co
     }),
     (error: any) => error?.code === 'OPERATIONS_WORLD_CONDITION_FAILED'
   );
+});
+
+test('stage10 creation cleanup persists compensation failure and restart recovery completes it', async (t) => {
+  const base = await setup(t);
+  const reservationId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
+  let failRelease = true;
+  let releases = 0;
+  const devices = {
+    async reserve() {
+      return {
+        id: reservationId, sessionId, deviceId: crypto.randomUUID(), state: 'ACTIVE',
+        acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString()
+      };
+    },
+    async release(id: string) {
+      assert.equal(id, reservationId);
+      releases += 1;
+      if (failRelease) throw Object.assign(new Error('release unavailable'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
+      return { id, state: 'RELEASED' };
+    }
+  };
+  const teams = { async submit() { throw new Error('mission creation failed'); } };
+  const compensations = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, teams: teams as any, compensations });
+  await assert.rejects(() => ops.submit({
+    objective: 'Fail after reservation', scopeKey: 'project:compensation', successConditions: ['not leaked'],
+    execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'job:cleanup' }, advertisements: [] }
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
+  assert.equal((await compensations.pending('digital-operation')).length, 1);
+  assert.equal(releases, 1);
+
+  failRelease = false;
+  const recovered = await ops.recoverPendingCompensations();
+  assert.deepEqual(recovered, { recovered: 1, pending: 0 });
+  assert.equal(releases, 2);
 });
 
 test('stage10 cancellation records failed strategy outcome exactly once', async (t) => {
