@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { normalizeCoordinateTransform, type CoordinateTransform } from './coordinate-transform.ts';
 
 export type PerceptionChannel = 'dom' | 'accessibility' | 'uia' | 'visual' | 'application' | 'runtime';
 
@@ -26,6 +27,8 @@ export interface PerceptionObservation {
   confidence: number;
   ttlMs?: number;
   evidenceDigest: string;
+  correlationKey?: string;
+  coordinates?: CoordinateTransform;
 }
 
 export interface PerceptionClaim {
@@ -39,6 +42,8 @@ export interface PerceptionClaim {
   state: Record<string, string | number | boolean | null>;
   confidence: number;
   evidenceDigest: string;
+  correlationKey: string;
+  coordinates?: CoordinateTransform;
   observedAt: string;
   expiresAt: string;
 }
@@ -66,6 +71,7 @@ export interface GroundedTarget {
   bounds?: PerceptionBounds;
   state: Record<string, string | number | boolean | null>;
   channels: PerceptionChannel[];
+  coordinates?: CoordinateTransform;
 }
 
 const MAX_NODES = 20_000;
@@ -123,9 +129,13 @@ export class PerceptionGraphStore {
         state: normalized.state,
         confidence: normalized.confidence,
         evidenceDigest: normalized.evidenceDigest,
+        correlationKey: normalized.correlationKey,
+        ...(normalized.coordinates ? { coordinates: normalized.coordinates } : {}),
         observedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + normalized.ttlMs).toISOString()
       };
+      const correlated = node.claims.findIndex((existing) => existing.correlationKey === claim.correlationKey);
+      if (correlated >= 0) node.claims.splice(correlated, 1);
       node.claims.push(claim);
       node.claims.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
       if (node.claims.length > MAX_CLAIMS) node.claims.length = MAX_CLAIMS;
@@ -230,7 +240,10 @@ function normalizeObservation(input: PerceptionObservation) {
     state: structuredClone(state),
     confidence: confidence(input.confidence),
     ttlMs,
-    evidenceDigest: input.evidenceDigest.toLowerCase()
+    evidenceDigest: input.evidenceDigest.toLowerCase(),
+    correlationKey: optional(input.correlationKey, 512, 'correlationKey')
+      ?? `${input.channel}:${bounded(input.source, 512, 'source')}:${input.evidenceDigest.toLowerCase()}`,
+    coordinates: input.coordinates ? normalizeCoordinateTransform(input.coordinates) : undefined
   };
 }
 
@@ -264,7 +277,8 @@ function fuse(node: PerceptionNode, now: number): GroundedTarget | undefined {
   if (claims.length === 0) return undefined;
   const ranked = claims.slice().sort((a, b) => channelWeight(b.channel) * b.confidence - channelWeight(a.channel) * a.confidence || b.observedAt.localeCompare(a.observedAt));
   const best = ranked[0]!;
-  const confidenceValue = 1 - ranked.reduce((remaining, claim) => remaining * (1 - Math.min(0.99, claim.confidence * channelWeight(claim.channel))), 1);
+  const independent = [...new Map(ranked.map((claim) => [claim.correlationKey, claim])).values()];
+  const confidenceValue = 1 - independent.reduce((remaining, claim) => remaining * (1 - Math.min(0.99, claim.confidence * channelWeight(claim.channel))), 1);
   return {
     node: structuredClone(node),
     confidence: Math.min(1, confidenceValue),
@@ -273,7 +287,8 @@ function fuse(node: PerceptionNode, now: number): GroundedTarget | undefined {
     ...(best.text ? { text: best.text } : {}),
     ...(best.bounds ? { bounds: structuredClone(best.bounds) } : {}),
     state: structuredClone(best.state),
-    channels: [...new Set(ranked.map((claim) => claim.channel))].sort()
+    channels: [...new Set(ranked.map((claim) => claim.channel))].sort(),
+    ...(best.coordinates ? { coordinates: structuredClone(best.coordinates) } : {})
   };
 }
 
@@ -324,6 +339,9 @@ function validateState(input: unknown): PerceptionState {
     if (!Array.isArray(node.claims) || node.claims.length > MAX_CLAIMS) throw new OperatorError('PERCEPTION_STATE_CORRUPT', 'Perception claims are invalid.');
     for (const claim of node.claims) {
       if (!/^[0-9a-f-]{36}$/i.test(claim.id) || !/^[0-9a-f]{64}$/i.test(claim.evidenceDigest)) throw new OperatorError('PERCEPTION_STATE_CORRUPT', 'Perception claim identity is invalid.');
+      if (claim.correlationKey === undefined) claim.correlationKey = `${claim.channel}:${claim.source}:${claim.evidenceDigest}`;
+      bounded(claim.correlationKey, 512, 'correlationKey');
+      if (claim.coordinates) claim.coordinates = normalizeCoordinateTransform(claim.coordinates);
       confidence(claim.confidence);
       if (!Number.isFinite(Date.parse(claim.observedAt)) || !Number.isFinite(Date.parse(claim.expiresAt))) throw new OperatorError('PERCEPTION_STATE_CORRUPT', 'Perception claim timestamp is invalid.');
     }

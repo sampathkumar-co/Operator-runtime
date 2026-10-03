@@ -84,3 +84,37 @@ test('stage11 rejects secret-bearing observation state', async (t) => {
     (error: any) => error?.code === 'PERCEPTION_SECRET_REJECTED'
   );
 });
+
+test('correlated observations do not manufacture confidence through repetition', async (t) => {
+  const graph = new PerceptionGraphStore(await temp(t));
+  const observation = {
+    sceneKey: 'desktop:window:0x2a',
+    channel: 'visual' as const,
+    source: 'vision-model',
+    semanticId: 'save',
+    role: 'button',
+    name: 'Save',
+    bounds: { x: 10, y: 10, width: 80, height: 30 },
+    state: {},
+    confidence: 0.8,
+    evidenceDigest: perceptionDigest('one-frame'),
+    correlationKey: 'capture:one-frame'
+  };
+  await graph.observe(observation);
+  await graph.observe(observation);
+  await graph.observe(observation);
+  let target = await graph.ground({ sceneKey: observation.sceneKey, semanticId: 'save' });
+  assert.equal(target.node.claims.length, 1);
+  assert.ok(Math.abs(target.confidence - 0.64) < Number.EPSILON);
+
+  await graph.observe({
+    ...observation,
+    channel: 'uia',
+    source: 'windows.uia',
+    confidence: 0.9,
+    evidenceDigest: perceptionDigest('independent-uia'),
+    correlationKey: 'uia:runtime:42'
+  });
+  target = await graph.ground({ sceneKey: observation.sceneKey, semanticId: 'save' });
+  assert.ok(target.confidence > 0.96);
+});
