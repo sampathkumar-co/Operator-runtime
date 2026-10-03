@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { persistentDataForCategory, validatePersistentDataCatalog, type PersistentDataCategory } from '../../../src/core/persistent-data-catalog.ts';
 
-export type PrivacyCategory = 'activity' | 'tasks' | 'session-state';
+export type PrivacyCategory = Extract<PersistentDataCategory, 'activity' | 'tasks' | 'session-state'>;
 
 export interface PrivacyCategoryStatus {
   category: PrivacyCategory | 'device-identity' | 'pairing-state';
@@ -18,26 +19,23 @@ export class LocalPrivacyDataStore {
 
   constructor(stateDir: string) {
     this.#stateDir = path.resolve(stateDir);
+    validatePersistentDataCatalog();
   }
 
   async inventory(): Promise<PrivacyCategoryStatus[]> {
     return [
-      await this.#status('activity', ['audit.ndjson', 'audit-head.json', 'provider-learning.json'], true),
-      await this.#status('tasks', ['tasks', 'task-leases'], true),
-      await this.#status('session-state', ['relay-client.json', 'device-sessions.json', 'relay-session.token'], true),
-      await this.#status('device-identity', ['device-identity.json'], false),
-      await this.#status('pairing-state', ['device-registry.json', 'device-routing.json'], false)
+      await this.#status('activity', catalogLocations('activity'), true),
+      await this.#status('tasks', catalogLocations('tasks'), true),
+      await this.#status('session-state', catalogLocations('session-state'), true),
+      await this.#status('device-identity', catalogLocations('device-identity'), false),
+      await this.#status('pairing-state', catalogLocations('pairing-state'), false)
     ];
   }
 
   async purge(category: PrivacyCategory): Promise<{ category: PrivacyCategory; removedBytes: number; removedEntries: number }> {
     const before = (await this.inventory()).find((item) => item.category === category);
     if (!before) throw new Error('Unknown privacy category.');
-    const targets = category === 'activity'
-      ? ['audit.ndjson', 'audit-head.json', 'provider-learning.json']
-      : category === 'tasks'
-        ? ['tasks', 'task-leases']
-        : ['relay-client.json', 'device-sessions.json', 'relay-session.token'];
+    const targets = catalogLocations(category);
 
     for (const relative of targets) {
       const target = this.#target(relative);
@@ -79,6 +77,10 @@ export class LocalPrivacyDataStore {
       throw error;
     }
   }
+}
+
+function catalogLocations(category: PersistentDataCategory): string[] {
+  return persistentDataForCategory(category).filter((item) => item.participatesInDeletion).map((item) => item.location);
 }
 
 async function countKnownPath(target: string): Promise<{ bytes: number; entries: number }> {
