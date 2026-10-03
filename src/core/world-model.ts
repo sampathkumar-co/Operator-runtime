@@ -95,11 +95,13 @@ const STORE_OPTIONS = {
 export class WorldModelStore {
   #file: string;
   #clock: () => Date;
+  #maxEntities: number;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: { clock?: () => Date; maxEntities?: number } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'world-model.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#maxEntities = boundedInteger(options.maxEntities ?? MAX_ENTITIES, 1, MAX_ENTITIES, 'maxEntities');
   }
 
   async observe(input: {
@@ -117,13 +119,14 @@ export class WorldModelStore {
       const state = await this.#read();
       const now = this.#clock();
       const nowIso = now.toISOString();
+      pruneExpired(state, now.getTime(), normalized.entity.key);
       // Preserve the immediately previous source claim while applying a new
       // observation so temporal history can record the transition even when the
       // old claim expires at this exact instant. Expired claims are pruned after
       // the replacement observation has been committed.
       let entity = state.entities.find((item) => item.key === normalized.entity.key);
       if (!entity) {
-        if (state.entities.length >= MAX_ENTITIES) throw new OperatorError('WORLD_MODEL_LIMIT', 'World entity limit reached.');
+        if (state.entities.length >= this.#maxEntities) throw new OperatorError('WORLD_MODEL_LIMIT', `World entity limit of ${this.#maxEntities} active entities reached.`);
         entity = {
           id: crypto.randomUUID(),
           key: normalized.entity.key,
@@ -390,12 +393,24 @@ export function validateWorldObservation(input: {
   };
 }
 
-function pruneExpired(state: WorldModelState, now: number): void {
+function pruneExpired(state: WorldModelState, now: number, preserveEntityKey?: string): void {
   for (const entity of state.entities) {
+    if (entity.key === preserveEntityKey) continue;
     for (const fact of entity.facts) fact.claims = fact.claims.filter((claim) => Date.parse(claim.expiresAt) > now);
     entity.facts = entity.facts.filter((fact) => fact.claims.length > 0);
   }
   state.relations = state.relations.filter((relation) => Date.parse(relation.expiresAt) > now);
+  const referenced = new Set<string>();
+  for (const relation of state.relations) {
+    referenced.add(relation.fromKey);
+    referenced.add(relation.toKey);
+  }
+  state.entities = state.entities.filter((entity) =>
+    entity.key === preserveEntityKey
+    || entity.facts.length > 0
+    || referenced.has(entity.key)
+    || Date.parse(entity.updatedAt) >= now
+  );
 }
 
 function validateState(input: unknown): WorldModelState {
