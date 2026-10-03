@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, PermissionProfile, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
@@ -10,7 +11,8 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
-import { verifyTaskCompletion } from './task-verifier.ts';
+import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
+import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
@@ -271,6 +273,21 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
       }
       if (this.#monotonicNow() >= activeDeadline) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
+      if (current.plannerId === 'operator.semantic.v1'
+        && current.plannerState.phase !== 'complete'
+        && current.plannerState.phase !== 'physical-complete') {
+        const outcomeTruth = verifyGoalOutcomeTruth(task);
+        if (outcomeTruth.supported && outcomeTruth.ok) {
+          const priorPhase = String(current.plannerState.phase ?? 'start');
+          current.plannerState.phase = 'complete';
+          task.evidence.push(evidence('early_outcome_completion', 'pass', 'Stopped before another environment action because the typed goal outcome is already proven true by durable machine state.', {
+            goalKind: current.goalKind,
+            priorPhase,
+            supportingStateVersions: outcomeTruth.stateVersions
+          }));
+          await this.#persistRunState(task, assertLease);
+        }
+      }
       current.plannerIterations = (current.plannerIterations ?? 0) + 1;
       const context: TaskPlannerContext = {
         task,
@@ -1000,11 +1017,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
       };
       if (phase === 'select') return {
         type: 'step', key: 'select-postgres-rows', title: 'Read bounded PostgreSQL rows',
-        capability: 'postgres.select', input: {
-          path: goal.root, profileId: goal.profileId, schema: goal.schema ?? 'public', table: goal.table,
-          columns: goal.columns ?? [], filters: goal.filters ?? [], orderBy: goal.orderBy ?? [],
-          limit: goal.limit ?? 100, offset: goal.offset ?? 0, timeoutMs: goal.timeoutMs ?? 5_000
-        },
+        capability: 'postgres.select', input: postgresSelectActionInput(goal),
         target: goal.root
       };
       return { type: 'complete', message: 'PostgreSQL task satisfied trusted-profile, current-column, and bounded read-only SELECT postconditions.' };
@@ -1839,12 +1852,6 @@ function validatePlannerDecision(value: unknown): PlannerDecision {
   };
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  const input = value as Record<string, unknown>;
-  return `{${Object.keys(input).sort().filter((key) => input[key] !== undefined).map((key) => `${JSON.stringify(key)}:${canonicalJson(input[key])}`).join(',')}}`;
-}
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function observe(result: ActionResult): TaskObservation {
   const channel: TaskObservation['channel'] = result.capability === 'visual.capture' || result.capability === 'input.operate' ? 'visual' : 'semantic';

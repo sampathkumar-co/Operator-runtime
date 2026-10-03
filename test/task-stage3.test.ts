@@ -118,6 +118,68 @@ test('stage3 independent verifier rejects in-flight graph state and emits a stab
   assert.ok(verdict.bundle.checks.some((check) => check.name === 'no-inflight-actions' && !check.ok));
 });
 
+test('independent typed outcome verification rejects planner completion when machine state is false', () => {
+  const task = createTask({
+    userObjective: 'prove exact content independently',
+    interpretedObjective: 'controlled-file-change:prove exact content independently',
+    authorizedScope: ['/tmp/project'],
+    prohibitedScope: [],
+    successConditions: ['exact requested content is present']
+  });
+  const node = addTaskNode(task, 'Verify file', { key: 'verify-file', stepKey: 'verify-file', actionId: 'task-' + 'd'.repeat(64) });
+  node.state = 'VERIFIED';
+  const expected = 'expected content\n';
+  task.execution = {
+    schemaVersion: 1,
+    plannerId: 'operator.semantic.v1',
+    goalKind: 'controlled-file-change',
+    plannerState: {
+      phase: 'complete',
+      goal: { kind: 'controlled-file-change', root: '/tmp/project', path: '/tmp/project/a.txt', content: expected }
+    },
+    maxSteps: 5,
+    maxAttemptsPerStep: 2,
+    timeoutMs: 1000,
+    stepCount: 1,
+    dispatchedActions: 1,
+    plannerIterations: 2,
+    preDispatchReobserves: 0,
+    records: [{
+      stepKey: 'verify-file',
+      actionId: 'task-' + 'd'.repeat(64),
+      capability: 'file.read',
+      risk: 'read',
+      inputHash: 'e'.repeat(64),
+      attempt: 1,
+      state: 'SUCCEEDED',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      sideEffectState: 'none',
+      executionPhase: 'effect_observed',
+      observation: {
+        schemaVersion: 2,
+        channel: 'semantic',
+        domain: 'filesystem',
+        provider: 'test',
+        capability: 'file.read',
+        entityId: 'filesystem:test',
+        observedAt: new Date().toISOString(),
+        stateVersion: 'f'.repeat(64),
+        importantState: { ok: true, sha256: crypto.createHash('sha256').update('wrong content\n').digest('hex') },
+        ambiguous: false,
+        confidence: 1,
+        evidenceRefs: []
+      },
+      evidence: [{ kind: 'read', status: 'pass', message: 'read file', timestamp: new Date().toISOString() }]
+    }]
+  };
+
+  const verdict = verifyTaskCompletion(task);
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.bundle.checks.some((check) => check.name === 'typed-goal-outcome-truth' && !check.ok));
+  assert.ok(verdict.bundle.checks.some((check) => check.name === 'declared-condition-1' && !check.ok));
+});
+
 test('stage3 repairs wrong existing file content with SHA precondition, explicit approval, and fresh verification', async (t) => {
   if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
   const root = await tempDir(t, 'operator-stage3-repair-root-');

@@ -400,7 +400,8 @@ class DelayedProvider implements CapabilityProvider {
 
 class SemanticBrowserProvider implements CapabilityProvider {
   readonly name = 'test.browser.semantic';
-  #url = 'https://example.test/start';
+  #url: string;
+  constructor(initialUrl = 'https://example.test/start') { this.#url = initialUrl; }
   supports(action: ActionRequest): boolean { return ['browser.inspect', 'browser.navigate'].includes(action.capability); }
   score(): CapabilityScore { return SCORE; }
   async execute(action: ActionRequest): Promise<ActionResult> {
@@ -446,6 +447,32 @@ test('task executor navigates and re-observes a semantic browser target before c
   ]);
   assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'browser'));
   assert.equal(completed.execution?.plannerState.targetId, 'tab-1');
+});
+
+test('typed outcome truth stops browser navigation when the destination is already satisfied', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-early-state-');
+  const destination = 'https://example.test/already?mode=verified#ignored';
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new SemanticBrowserProvider(destination)),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Do not navigate when the requested browser destination is already true.',
+    authorizedScope: ['browser:https://example.test'],
+    successConditions: ['selected page already reaches the requested destination'],
+    goal: { kind: 'browser-navigation', url: destination }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['browser.inspect']);
+  assert.equal(completed.execution?.dispatchedActions, 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'early_outcome_completion'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
 });
 
 test('semantic workflow composes multiple verified browser goals durably', async (t) => {
@@ -536,12 +563,17 @@ class SemanticDockerProvider implements CapabilityProvider {
   manageCalls = 0;
   failStateChangedOnce = false;
   #failed = false;
+  #revision = 0;
 
   supports(action: ActionRequest): boolean { return ['docker.inspect', 'docker.manage'].includes(action.capability); }
   score(): CapabilityScore { return SCORE; }
 
+  #fingerprint(): string {
+    return crypto.createHash('sha256').update(`${this.state}:${this.#revision}`).digest('hex');
+  }
+
   async execute(action: ActionRequest): Promise<ActionResult> {
-    const fingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    const fingerprint = this.#fingerprint();
     if (action.capability === 'docker.inspect') {
       return {
         ok: true, capability: action.capability, provider: this.name,
@@ -555,17 +587,24 @@ class SemanticDockerProvider implements CapabilityProvider {
     this.manageCalls += 1;
     if (this.failStateChangedOnce && !this.#failed) {
       this.#failed = true;
-      this.state = 'exited';
+      this.#revision += 1;
       return {
         ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 0,
-        error: { code: 'DOCKER_STATE_CHANGED', message: 'state changed after inspection', retryable: true }
+        error: {
+          code: 'DOCKER_STATE_CHANGED',
+          message: 'state changed after inspection',
+          retryable: true,
+          sideEffectState: 'none',
+          executionPhase: 'pre_dispatch'
+        }
       };
     }
     assert.equal(action.input.expectedCurrentFingerprint, fingerprint);
     assert.deepEqual(action.input.services, ['web']);
     assert.equal(action.input.operation, 'stop');
     this.state = 'exited';
-    const afterFingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    this.#revision += 1;
+    const afterFingerprint = this.#fingerprint();
     return {
       ok: true, capability: action.capability, provider: this.name,
       output: {

@@ -115,7 +115,12 @@ export class DockerProvider implements CapabilityProvider {
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('DOCKER_STATE_CHANGED', 'Docker project state changed after the supplied precondition was captured.', {
           retryable: true,
-          details: { expectedCurrentFingerprint, actualCurrentFingerprint: before.fingerprint }
+          details: {
+            expectedCurrentFingerprint,
+            actualCurrentFingerprint: before.fingerprint,
+            sideEffectState: 'none',
+            executionPhase: 'pre_dispatch'
+          }
         });
       }
 
@@ -159,7 +164,17 @@ export class DockerProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('docker', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code,
+          message: op.message,
+          retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState))
+            ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' }
+            : {}),
+          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase))
+            ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' }
+            : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }

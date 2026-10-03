@@ -6,7 +6,7 @@ const SAFE_STATE_KEYS = new Set([
   'sha256', 'size', 'bytes', 'count', 'clean', 'operation', 'verified',
   'exitCode', 'state', 'healthy', 'selected', 'expand_collapse_state', 'truncated',
   'events_truncated', 'waited_ms', 'observed_ms', 'max_nodes', 'max_depth',
-  'afterCaptured', 'captureLeaseConsumed', 'changed', 'windowStable', 'afterSha256'
+  'afterCaptured', 'captureLeaseConsumed', 'changed', 'windowStable', 'afterSha256', 'dispatched'
 ]);
 const AMBIGUOUS_ERROR = /AMBIGUOUS|MULTIPLE_MATCH|TARGET_NOT_UNIQUE/i;
 
@@ -75,6 +75,16 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
   for (const [key, value] of Object.entries(output)) {
     if (SAFE_STATE_KEYS.has(key) && isSafeScalar(value)) state[key] = value;
   }
+  if (result.capability === 'git.status') {
+    const entries = Array.isArray(output.entries) ? output.entries.map(record).slice(0, 500) : [];
+    const pathHashes = entries.flatMap((entry) => {
+      const rawPath = text(entry.path);
+      if (!rawPath) return [];
+      const normalized = rawPath.replace(/\\/g, '/').replace(/^\.\//, '');
+      return [sha256(normalized)];
+    });
+    if (pathHashes.length) state.gitPathHashes = [...new Set(pathHashes)].sort();
+  }
   if (result.capability.startsWith('docker.')) {
     const scope = text(output.scope);
     if (scope === 'project' || scope === 'daemon') state.scope = scope;
@@ -84,6 +94,69 @@ function importantStateFromResult(result: ActionResult): Record<string, unknown>
     }
     const services = normalizeDockerServices(output.services ?? output.states);
     if (services.length) state.services = services;
+  }
+  if (result.capability.startsWith('browser.')) {
+    const tabs: Array<Record<string, unknown>> = [];
+    if (Array.isArray(output.tabs)) tabs.push(...output.tabs.map(record));
+    const target = record(output.target);
+    if (Object.keys(target).length > 0) tabs.push(target);
+    const safeTabs = tabs.slice(0, 50).flatMap((tab) => {
+      const id = text(tab.id);
+      const type = text(tab.type);
+      const url = text(tab.url);
+      const destinationDigest = url ? browserDestinationDigest(url) : undefined;
+      if (!id && !destinationDigest) return [];
+      return [{
+        ...(id ? { id: bounded(id, 256) } : {}),
+        ...(type && /^[a-z][a-z0-9_-]{0,31}$/i.test(type) ? { type } : {}),
+        ...(destinationDigest ? { destinationDigest } : {})
+      }];
+    });
+    if (safeTabs.length) state.browserTargets = safeTabs;
+    const targetId = text(output.targetId);
+    const directUrl = text(output.url);
+    if (targetId) state.targetId = bounded(targetId, 256);
+    if (directUrl) state.destinationDigest = browserDestinationDigest(directUrl);
+  }
+  if (result.capability.startsWith('app.')) {
+    const elements = Array.isArray(output.elements) ? output.elements.map(record).slice(0, 5) : [];
+    const safeElements = elements.map((element) => {
+      const item: Record<string, unknown> = {};
+      for (const [source, destination] of [
+        ['name', 'nameHash'], ['automationId', 'automationIdHash'], ['automation_id', 'automationIdHash'],
+        ['className', 'classNameHash'], ['class_name', 'classNameHash'],
+        ['controlType', 'controlTypeHash'], ['control_type', 'controlTypeHash']
+      ] as const) {
+        const value = text(element[source]);
+        if (value && item[destination] === undefined) item[destination] = sha256(value);
+      }
+      const value = text(element.value);
+      if (value !== undefined) item.valueHash = sha256(value);
+      const processId = Number(element.processId ?? element.process_id);
+      if (Number.isSafeInteger(processId) && processId > 0 && processId <= 0x7fffffff) item.processId = processId;
+      for (const [source, destination] of [
+        ['enabled', 'enabled'], ['isEnabled', 'enabled'], ['offscreen', 'offscreen'],
+        ['isOffscreen', 'offscreen'], ['focused', 'focused'], ['hasKeyboardFocus', 'focused'],
+        ['selected', 'selected'], ['isSelected', 'selected']
+      ] as const) {
+        const value = element[source];
+        if (typeof value === 'boolean' && item[destination] === undefined) item[destination] = value;
+      }
+      const expandCollapseState = text(element.expandCollapseState ?? element.expand_collapse_state);
+      if (expandCollapseState && /^[a-z_]{1,32}$/i.test(expandCollapseState)) item.expandCollapseState = expandCollapseState.toLowerCase();
+      return item;
+    }).filter((item) => Object.keys(item).length > 0);
+    if (safeElements.length) state.uiaElements = safeElements;
+  }
+  if (result.capability === 'project.command.run' || result.capability === 'project.transaction.run') {
+    const command = record(output.command);
+    const validation = record(output.validation);
+    const execution = record(output.execution);
+    const commandKind = text(command.kind);
+    if (commandKind && /^[a-z][a-z0-9_-]{0,63}$/i.test(commandKind)) state.commandKind = commandKind;
+    if (typeof validation.passed === 'boolean') state.validationPassed = validation.passed;
+    const exitCode = Number(execution.exitCode);
+    if (Number.isSafeInteger(exitCode) && exitCode >= -1_000_000 && exitCode <= 1_000_000) state.exitCode = exitCode;
   }
   if (result.capability.startsWith('postgres.')) {
     const profileId = text(output.profileId);
@@ -148,6 +221,16 @@ function text(value: unknown): string | undefined {
 }
 function bounded(value: string, max: number): string {
   return value.slice(0, max).replace(/[\r\n\0]/g, ' ');
+}
+function browserDestinationDigest(raw: string): string | undefined {
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    const pathname = parsed.pathname === '/' ? '/' : parsed.pathname.replace(/\/$/, '');
+    return sha256(`${parsed.origin}${pathname}${parsed.search}`);
+  } catch {
+    return undefined;
+  }
 }
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
