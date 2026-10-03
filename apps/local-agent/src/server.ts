@@ -2383,6 +2383,18 @@ function withinAuthorizedRoots(input: string, roots: string[]): boolean {
 
 function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] | null {
   if (!goal || typeof goal !== 'object') return null;
+  if (goal.kind === 'autonomous-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) return null;
+    const selectedRoots = Array.isArray(goal.roots) ? goal.roots : [];
+    if (selectedRoots.some((root) => typeof root !== 'string' || !withinAuthorizedRoots(root, roots))) return null;
+    const browserOrigins = Array.isArray(goal.browserOrigins) ? goal.browserOrigins : [];
+    const scopes = [
+      ...selectedRoots.map((root) => path.resolve(root)),
+      ...browserOrigins.map((origin) => `browser:${origin}`),
+      ...(goal.application === true ? ['application:uia'] : [])
+    ];
+    return scopes.length > 0 ? [...new Set(scopes)].sort() : null;
+  }
   if (goal.kind === 'semantic-workflow') {
     if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) return null;
     const scopes: string[] = [];

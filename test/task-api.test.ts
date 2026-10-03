@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -462,6 +463,47 @@ test('task API accepts a browser-scoped semantic goal without a filesystem root'
   assert.equal(payload.task.state, 'VERIFIED');
   assert.deepEqual(payload.task.authorizedScope, ['browser:https://example.test']);
   assert.deepEqual(payload.task.execution.records.map((record: any) => record.observation.domain), ['browser', 'browser', 'browser']);
+});
+
+test('task API exposes the generic autonomous workflow with bounded browser scope', async (t) => {
+  const state = await tempDir(t, 'operator-task-api-autonomous-state-');
+  const runtime = new OperatorRuntime().register(new ApiBrowserProvider());
+  const tasks = new TaskStore(state);
+  const permissions = {
+    allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+    allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+  };
+  const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
+  const token = 'a'.repeat(64);
+  const agent = createLocalAgentServer({ runtime, token, permissions, tasks, taskOrchestrator });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const destination = 'https://example.test/autonomous';
+  const destinationDigest = crypto.createHash('sha256').update(destination).digest('hex');
+  const response = await fetch(`http://127.0.0.1:${port}/v1/tasks`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      objective: 'Navigate through a generic bounded plan.', run: true,
+      successConditions: ['destination independently re-observed'],
+      goal: {
+        kind: 'autonomous-workflow', browserOrigins: ['https://example.test'], steps: [{
+          key: 'navigate', title: 'Navigate and verify',
+          observe: { capability: 'browser.inspect', input: {} },
+          action: { capability: 'browser.navigate', input: { url: destination } },
+          verify: {
+            capability: 'browser.inspect', input: {},
+            assertions: [{ path: 'browserTargets', operator: 'includes', value: { id: 'tab-api', type: 'page', destinationDigest } }]
+          }
+        }]
+      }
+    })
+  });
+  const payload = await response.json() as any;
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.task.state, 'VERIFIED');
+  assert.deepEqual(payload.task.authorizedScope, ['browser:https://example.test']);
+  assert.equal(payload.task.execution.plannerId, 'operator.autonomous-workflow.v1');
 });
 
 test('task API executes an application-scoped UIA goal without requiring a filesystem root', async (t) => {

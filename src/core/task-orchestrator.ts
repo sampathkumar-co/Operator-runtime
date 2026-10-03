@@ -20,6 +20,7 @@ import type { IntentRegistry } from './intent-registry.ts';
 import type { ActionTransitionJournal } from './action-transition-journal.ts';
 import { validIntentBinding } from './intent-registry.ts';
 import { plannerEventFromResult, type TaskPlannerEvent } from './task-planner-event.ts';
+import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -38,6 +39,14 @@ export type AppPhysicalFallback = {
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 export type ProjectQualityCheck = 'lint' | 'test' | 'build';
+export type AutonomousTaskAction = { capability: string; input: Record<string, unknown>; target?: string };
+export type AutonomousTaskStep = {
+  key: string;
+  title: string;
+  observe: AutonomousTaskAction;
+  action: AutonomousTaskAction;
+  verify: AutonomousTaskAction & { assertions: TaskStateAssertion[] };
+};
 
 export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
@@ -59,7 +68,8 @@ export type AtomicSemanticTaskGoal =
 export type SemanticTaskGoal =
   | AtomicSemanticTaskGoal
   | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
-  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
+  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] }
+  | { kind: 'autonomous-workflow'; roots?: string[]; browserOrigins?: string[]; application?: boolean; steps: AutonomousTaskStep[] };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
@@ -189,7 +199,7 @@ export class TaskOrchestrator {
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
+    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner(), new AutonomousWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
@@ -1135,6 +1145,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
     if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a project quality gate envelope.');
+    if (goal.kind === 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute an autonomous workflow envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
@@ -1253,6 +1264,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
     if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a project quality gate envelope.');
+    if (goal.kind === 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept an autonomous workflow envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
@@ -1441,6 +1453,72 @@ export class SemanticTaskPlanner implements TaskPlanner {
   }
 }
 
+export class AutonomousWorkflowPlanner implements TaskPlanner {
+  readonly id = 'operator.autonomous-workflow.v1';
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'autonomous-workflow'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
+    const state = task.execution!.plannerState;
+    const index = workflowIndex(state, goal.steps.length);
+    if (index === goal.steps.length) return { type: 'complete', message: `Autonomous workflow completed ${goal.steps.length} independently verified step(s).` };
+    const phase = String(state.autonomousPhase ?? 'observe');
+    const item = goal.steps[index]!;
+    const selected = phase === 'observe' ? item.observe : phase === 'action' ? item.action : phase === 'verify' ? item.verify : undefined;
+    if (!selected) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow phase is invalid.');
+    return {
+      type: 'step', key: `autonomous:${index}:${phase}`,
+      title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.title}`,
+      capability: selected.capability, input: structuredClone(selected.input),
+      ...(selected.target ? { target: selected.target } : {})
+    };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>): void {
+    if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
+    const state = task.execution!.plannerState;
+    const index = workflowIndex(state, goal.steps.length);
+    const item = goal.steps[index];
+    if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no current step.');
+    if (step.key === `autonomous:${index}:observe`) {
+      state.autonomousPhase = 'action';
+      return;
+    }
+    if (step.key === `autonomous:${index}:action`) {
+      state.autonomousPhase = 'verify';
+      return;
+    }
+    if (step.key !== `autonomous:${index}:verify`) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow decision does not match its durable phase.');
+    const record = [...task.execution!.records].reverse().find((candidate) => candidate.stepKey === step.key && candidate.observation?.schemaVersion === 2);
+    if (!record?.observation || record.observation.schemaVersion !== 2) throw new OperatorError('TASK_AUTONOMOUS_VERIFICATION_FAILED', 'Autonomous verification did not produce durable machine state.');
+    assertTaskMachineState(record.observation.importantState, item.verify.assertions);
+    state.workflowIndex = index + 1;
+    state.autonomousPhase = 'observe';
+    task.evidence.push(evidence('autonomous_step_verified', 'pass', 'Independent read-only observation satisfied the declared machine-state assertions.', {
+      stepKey: item.key, index, stateVersion: record.observation.stateVersion
+    }));
+  }
+
+  fallback({ task, goal, recentEvents }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    if (goal.kind !== 'autonomous-workflow') return false;
+    const state = task.execution!.plannerState;
+    const index = workflowIndex(state, goal.steps.length);
+    if (step.key === `autonomous:${index}:action`) {
+      const phase = observation.error?.executionPhase;
+      const sideEffect = observation.error?.sideEffectState;
+      const reobserve = recentEvents.some((event) => event.decision === 'REOBSERVE' || event.decision === 'REPLAN');
+      if (phase === 'pre_dispatch' && sideEffect === 'none' && reobserve) {
+        state.autonomousPhase = 'observe';
+        task.evidence.push(evidence('autonomous_reobserve', 'info', 'Action was proven not dispatched; returning to fresh observation before replanning the same bounded step.', { stepKey: goal.steps[index]?.key }));
+        return true;
+      }
+      return false;
+    }
+    return observation.error?.sideEffectState === 'none' && observation.error?.retryable === true;
+  }
+}
+
 
 export class SemanticWorkflowPlanner implements TaskPlanner {
   readonly id = 'operator.semantic-workflow.v1';
@@ -1622,6 +1700,36 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     goal.limit = boundedInteger(goal.limit, 1, 500, 100);
     goal.offset = boundedInteger(goal.offset, 0, 10_000, 0);
     goal.timeoutMs = boundedInteger(goal.timeoutMs, 100, 30_000, 5_000);
+  } else if (goal.kind === 'autonomous-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow requires 1-20 bounded steps.');
+    if (goal.roots !== undefined && (!Array.isArray(goal.roots) || goal.roots.length > 20)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow roots are invalid.');
+    goal.roots = [...new Set((goal.roots ?? []).map((root, index) => path.resolve(boundedText(root, 4096, `autonomous roots[${index}]`))))].sort();
+    if (goal.browserOrigins !== undefined && (!Array.isArray(goal.browserOrigins) || goal.browserOrigins.length > 20)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow browserOrigins are invalid.');
+    goal.browserOrigins = [...new Set((goal.browserOrigins ?? []).map((origin, index) => {
+      let parsed: URL;
+      try { parsed = new URL(boundedText(origin, 2048, `autonomous browserOrigins[${index}]`)); } catch { throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous browser origin is invalid.'); }
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.origin !== parsed.toString().replace(/\/$/, '')) {
+        throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous browserOrigins must be credential-free HTTP(S) origins.');
+      }
+      return parsed.origin;
+    }))].sort();
+    if (goal.application !== undefined && typeof goal.application !== 'boolean') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow application must be boolean.');
+    if (goal.roots.length === 0 && goal.browserOrigins.length === 0 && goal.application !== true) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow must declare at least one bounded root, browser origin, or application scope.');
+    const keys = new Set<string>();
+    goal.steps = goal.steps.map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${index} is invalid.`);
+      const raw = step as unknown as Record<string, unknown>;
+      const key = boundedText(raw.key, 128, `autonomous steps[${index}].key`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key) || keys.has(key)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous step keys must be unique bounded identifiers.');
+      keys.add(key);
+      const title = boundedText(raw.title, 512, `autonomous steps[${index}].title`);
+      const observe = normalizeAutonomousAction(raw.observe, `autonomous steps[${index}].observe`, true);
+      const action = normalizeAutonomousAction(raw.action, `autonomous steps[${index}].action`, false);
+      const verifyRaw = raw.verify && typeof raw.verify === 'object' && !Array.isArray(raw.verify) ? raw.verify as Record<string, unknown> : undefined;
+      if (!verifyRaw) throw new OperatorError('TASK_GOAL_INVALID', `autonomous steps[${index}].verify is invalid.`);
+      const verify = { ...normalizeAutonomousAction(verifyRaw, `autonomous steps[${index}].verify`, true), assertions: normalizeTaskStateAssertions(verifyRaw.assertions, `autonomous steps[${index}].verify.assertions`) };
+      return { key, title, observe, action, verify };
+    });
   } else if (goal.kind === 'app-operation') {
     goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
     if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');
@@ -1640,6 +1748,19 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (goal.physicalFallback !== undefined) goal.physicalFallback = normalizeAppPhysicalFallback(goal.physicalFallback, 'app physicalFallback');
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
+}
+
+function normalizeAutonomousAction(input: unknown, label: string, requireRead: boolean): AutonomousTaskAction {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} is invalid.`);
+  const raw = input as Record<string, unknown>;
+  const capability = boundedText(raw.capability, 256, `${label}.capability`);
+  const risk = capabilityRiskRule(capability);
+  if (requireRead && risk !== 'read') throw new OperatorError('TASK_GOAL_INVALID', `${label} must use a canonically read-only capability.`);
+  if (!raw.input || typeof raw.input !== 'object' || Array.isArray(raw.input)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.input must be an object.`);
+  const actionInput = structuredClone(raw.input as Record<string, unknown>);
+  if (Buffer.byteLength(canonicalJson(actionInput)) > 256 * 1024) throw new OperatorError('TASK_GOAL_INVALID', `${label}.input is too large.`);
+  const target = raw.target === undefined ? undefined : boundedText(raw.target, 4096, `${label}.target`);
+  return { capability, input: actionInput, ...(target ? { target } : {}) };
 }
 
 function postgresIdentifier(input: unknown, label: string): string {

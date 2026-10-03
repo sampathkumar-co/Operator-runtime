@@ -127,6 +127,59 @@ test('task executor completes and durably verifies a real semantic multi-action 
   assert.deepEqual(await store.get(submitted.id), completed);
 });
 
+test('generic autonomous workflow observes, mutates through the kernel boundary, and independently verifies durable machine state', async (t) => {
+  const root = await tempDir(t, 'operator-task-autonomous-root-');
+  const state = await tempDir(t, 'operator-task-autonomous-state-');
+  const target = path.join(root, 'autonomous.txt');
+  const content = 'general bounded workflow\n';
+  const expectedSha256 = crypto.createHash('sha256').update(content).digest('hex');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.info'])
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Perform a capability-agnostic bounded workflow.',
+    authorizedScope: [root],
+    successConditions: ['fresh observation precedes mutation', 'independent read proves exact bytes'],
+    goal: {
+      kind: 'autonomous-workflow', roots: [root], steps: [{
+        key: 'create-output', title: 'Create and verify output',
+        observe: { capability: 'file.list', input: { path: root } },
+        action: { capability: 'file.create', input: { path: target, content } },
+        verify: { capability: 'file.info', input: { path: target }, assertions: [{ path: 'sha256', operator: 'equals', value: expectedSha256 }] }
+      }]
+    }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.stepKey), [
+    'autonomous:0:observe', 'autonomous:0:action', 'autonomous:0:verify'
+  ]);
+  assert.equal(completed.execution?.plannerState.workflowIndex, 1);
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.ok(completed.evidence.some((item) => item.kind === 'autonomous_step_verified'));
+});
+
+test('autonomous workflow rejects mutating observation or verification contracts', async (t) => {
+  const root = await tempDir(t, 'operator-task-autonomous-invalid-root-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(await tempDir(t, 'operator-task-autonomous-invalid-state-')),
+    permissions: permissions(root, ['file.write'])
+  });
+  await assert.rejects(() => orchestrator.submit({
+    objective: 'Invalid verifier.', authorizedScope: [root], successConditions: ['must reject'],
+    goal: {
+      kind: 'autonomous-workflow', roots: [root], steps: [{
+        key: 'invalid', title: 'Invalid',
+        observe: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' } },
+        action: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' } },
+        verify: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' }, assertions: [{ path: 'ok', operator: 'equals', value: true }] }
+      }]
+    }
+  }), (error: any) => error?.code === 'TASK_GOAL_INVALID');
+});
+
 test('task executor discovers and runs only a trusted registered project command', async (t) => {
   const root = await tempDir(t, 'operator-task-command-project-');
   const authority = await tempDir(t, 'operator-task-command-authority-');

@@ -6,6 +6,7 @@ import type { Evidence } from './types.ts';
 import type { TaskActionRecord, TaskCapsule } from './task.ts';
 import { VerificationKernel } from './verification-kernel.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
+import { assertTaskMachineState, type TaskStateAssertion } from './task-state-assertion.ts';
 
 export interface TaskVerificationBundle {
   version: 1;
@@ -190,6 +191,21 @@ function structuredOutcomeTruth(task: TaskCapsule): TaskOutcomeTruth {
   }
   if (execution.plannerId === 'operator.project-quality-gate.v1') {
     return evaluateQualityGate(execution.records, execution.plannerState);
+  }
+  if (execution.plannerId === 'operator.autonomous-workflow.v1') {
+    const steps = Array.isArray(goal.steps) ? goal.steps.map(asRecord) : [];
+    if (steps.length === 0) return outcome(true, false, 'Autonomous workflow has no bounded steps to verify.', []);
+    const records: Array<TaskActionRecord | undefined> = [];
+    for (let index = 0; index < steps.length; index += 1) {
+      const record = lastSucceeded(execution.records, `autonomous:${index}:verify`);
+      records.push(record);
+      if (!record?.observation || record.observation.schemaVersion !== 2) return outcome(true, false, `Autonomous step ${index + 1} lacks durable verification state.`, mergeRecordVersions(records));
+      const verify = asRecord(steps[index]!.verify);
+      const assertions = Array.isArray(verify.assertions) ? verify.assertions as TaskStateAssertion[] : [];
+      try { assertTaskMachineState(record.observation.importantState, assertions); }
+      catch { return outcome(true, false, `Autonomous step ${index + 1} machine-state assertions are not satisfied.`, mergeRecordVersions(records)); }
+    }
+    return outcome(true, true, `All ${steps.length} autonomous steps are independently proven by read-only durable machine observations.`, mergeRecordVersions(records));
   }
   return outcome(false, false, 'Planner does not use a built-in typed goal-outcome contract.', []);
 }
@@ -426,6 +442,13 @@ function builtinPlannerStateIsTerminal(task: TaskCapsule): boolean {
     const steps = (goal as Record<string, unknown>).steps;
     const index = Number(state.workflowIndex ?? 0);
     return Array.isArray(steps) && Number.isSafeInteger(index) && index === steps.length;
+  }
+  if (execution.plannerId === 'operator.autonomous-workflow.v1') {
+    const goal = state.goal;
+    if (!goal || typeof goal !== 'object' || Array.isArray(goal)) return false;
+    const steps = (goal as Record<string, unknown>).steps;
+    const index = Number(state.workflowIndex ?? 0);
+    return Array.isArray(steps) && Number.isSafeInteger(index) && index === steps.length && state.autonomousPhase === 'observe';
   }
   // Custom/test planners remain extensible; they are still constrained by graph,
   // action-record, observation and success-condition verification above.

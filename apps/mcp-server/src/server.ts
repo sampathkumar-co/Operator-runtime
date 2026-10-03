@@ -26,6 +26,7 @@ import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-page
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 import { TOOL_NAMES } from './tool-surface.ts';
+import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -328,6 +329,20 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       physicalFallback: taskPhysicalFallback.optional()
     })
   ]);
+  const autonomousCapability = z.enum(Object.keys(CAPABILITY_RISK_RULES) as [string, ...string[]]);
+  const autonomousAction = z.object({
+    capability: autonomousCapability,
+    input: z.record(z.string(), z.unknown()),
+    target: z.string().min(1).max(4096).optional()
+  });
+  const autonomousReadAction = autonomousAction.refine((action) => CAPABILITY_RISK_RULES[action.capability] === 'read', 'Observation and verification actions must be canonically read-only.');
+  const autonomousAssertion = z.object({
+    path: z.string().regex(/^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,15}$/).max(256),
+    operator: z.enum(['exists', 'equals', 'not_equals', 'includes']),
+    value: z.unknown().optional()
+  });
+  const autonomousVerifyAction = autonomousAction.extend({ assertions: z.array(autonomousAssertion).min(1).max(20) })
+    .refine((action) => CAPABILITY_RISK_RULES[action.capability] === 'read', 'Verification actions must be canonically read-only.');
   const taskGoal = z.union([
     atomicTaskGoal,
     z.object({
@@ -336,7 +351,20 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       checks: z.array(z.enum(['lint', 'test', 'build'])).min(1).max(3).optional(),
       requireAll: z.boolean().optional()
     }),
-    z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) })
+    z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) }),
+    z.object({
+      kind: z.literal('autonomous-workflow'),
+      roots: z.array(z.string().min(1).max(4096)).max(20).optional(),
+      browserOrigins: z.array(z.url().max(2048)).max(20).optional(),
+      application: z.boolean().optional(),
+      steps: z.array(z.object({
+        key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+        title: z.string().min(1).max(512),
+        observe: autonomousReadAction,
+        action: autonomousAction,
+        verify: autonomousVerifyAction
+      })).min(1).max(20)
+    })
   ]);
 
   const operationCondition = z.object({
@@ -478,7 +506,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('task.submit', {
     title: 'Submit durable semantic task',
-    description: 'Create one durable, UUID-addressed semantic task or bounded semantic workflow and optionally start it. The UUID makes submission retry-safe. Workflow children remain typed and every action still passes local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
+    description: 'Create one durable, UUID-addressed semantic task, typed workflow, or capability-agnostic autonomous workflow and optionally start it. Autonomous steps require fresh read-only observation plus independent read-only machine-state verification. Every action still passes intent, local capability, policy, approval, lease, reconciliation, budget, and postcondition checks; this tool cannot grant approval.',
     inputSchema: z.object({
       requestId: taskUuid, objective: z.string().min(1).max(16_384), successConditions: z.array(z.string().min(1).max(16_384)).min(1).max(1000),
       prohibitedScope: z.array(z.string().min(1).max(4096)).max(1000).optional(), goal: taskGoal,
