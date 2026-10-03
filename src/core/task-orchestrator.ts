@@ -416,7 +416,7 @@ export class TaskOrchestrator {
         approvedActionIds: [...new Set([...(basePermissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       const learningContext = semanticLearningContext(goal, task);
-      let result: ActionResult;
+      let result: ActionResult | undefined;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
       let executionDispatched = false;
       try {
@@ -450,22 +450,39 @@ export class TaskOrchestrator {
           try {
             await resourceLease.release();
           } catch (error) {
+            const priorResult = result;
             result = {
               ok: false,
               capability: action.capability,
               provider: 'scheduler',
-              evidence: result!?.evidence ?? [],
-              durationMs: result!?.durationMs ?? 0,
+              evidence: priorResult?.evidence ?? [],
+              durationMs: priorResult?.durationMs ?? 0,
               error: {
                 code: 'RESOURCE_LEASE_RELEASE_FAILED',
                 message: error instanceof Error ? error.message : String(error),
                 retryable: false,
-                sideEffectState: risk === 'read' ? 'none' : result!?.ok ? 'known' : (result!?.error?.sideEffectState ?? 'uncertain'),
-                executionPhase: result ? conservativeExecutionPhase(result) : executionDispatched ? 'dispatched' : 'pre_dispatch'
+                sideEffectState: risk === 'read' ? 'none' : priorResult?.ok ? 'known' : (priorResult?.error?.sideEffectState ?? 'uncertain'),
+                executionPhase: priorResult ? conservativeExecutionPhase(priorResult) : executionDispatched ? 'dispatched' : 'pre_dispatch'
               }
             };
           }
         }
+      }
+      if (!result) {
+        result = {
+          ok: false,
+          capability: action.capability,
+          provider: 'task-executor',
+          evidence: [],
+          durationMs: 0,
+          error: {
+            code: 'TASK_EXECUTOR_RESULT_MISSING',
+            message: 'Task action completed without a durable execution result.',
+            retryable: false,
+            sideEffectState: executionDispatched && risk !== 'read' ? 'uncertain' : 'none',
+            executionPhase: executionDispatched ? 'dispatched' : 'pre_dispatch'
+          }
+        };
       }
       if (authorization.onActionResult) {
         try {
