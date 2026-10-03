@@ -18,6 +18,7 @@ export type TaskFailureStrategy =
   | 'cancel'
   | 'reobserve'
   | 'repair'
+  | 'replan'
   | 'reconcile'
   | 'retry'
   | 'fail';
@@ -41,6 +42,9 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   }
   if (code === 'EXECUTION_ABORTED' || code === 'TASK_CANCELLED') {
     return { class: 'cancelled', strategy: 'cancel', retryable: false, code };
+  }
+  if (/NO_PROGRESS/i.test(code)) {
+    return { class: 'postcondition', strategy: 'replan', retryable: false, code };
   }
   if (/TARGET_NOT_UNIQUE|AMBIGUOUS/i.test(code)) {
     if (error?.retryable !== true) return { class: 'target-drift', strategy: 'fail', retryable: false, code };

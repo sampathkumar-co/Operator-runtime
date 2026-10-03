@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
 import { validIntentBinding } from './intent-registry.ts';
 import type { Evidence, TaskState } from './types.ts';
+import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from './task-planner-event.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
@@ -341,11 +342,50 @@ function validateExecution(input: unknown): TaskExecution {
   if (startedAt && deadlineAt && Date.parse(deadlineAt) <= Date.parse(startedAt)) throw corrupt('execution deadline must follow start.');
   if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
   const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
+  const plannerEvents = raw.plannerEvents === undefined ? [] : validatePlannerEvents(raw.plannerEvents);
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
     plannerIterations, preDispatchReobserves, dispatchedActions,
-    ...(startedAt ? { startedAt, deadlineAt } : {}), records
+    ...(startedAt ? { startedAt, deadlineAt } : {}), records,
+    ...(plannerEvents.length > 0 ? { plannerEvents } : {})
   };
+}
+
+function validatePlannerEvents(input: unknown): TaskPlannerEvent[] {
+  if (!Array.isArray(input) || input.length > 100) throw corrupt('execution plannerEvents must contain at most 100 entries.');
+  const kinds = new Set<PlannerEventKind>(['STALE_TARGET', 'AMBIGUOUS_TARGET', 'ACTION_SUCCEEDED_BUT_NO_PROGRESS', 'SETTLE_TIMEOUT', 'UI_CHANGED', 'RESOURCE_BUSY', 'STATE_CHANGED', 'RECONCILIATION_REQUIRED', 'PROVIDER_TEMPORARILY_UNAVAILABLE']);
+  const decisions = new Set<PlannerEventDecision>(['REOBSERVE', 'REPLAN', 'REPAIR', 'RECONCILE', 'WAIT', 'FAIL']);
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw corrupt(`planner event ${index} must be an object.`);
+    const raw = entry as Record<string, unknown>;
+    const kind = String(raw.kind) as PlannerEventKind;
+    const decision = String(raw.decision) as PlannerEventDecision;
+    if (!kinds.has(kind) || !decisions.has(decision)) throw corrupt(`planner event ${index} kind/decision is invalid.`);
+    const event: TaskPlannerEvent = {
+      kind, decision,
+      code: boundedText(raw.code, 256, `planner event ${index} code`),
+      at: validIso(raw.at, `planner event ${index} at`),
+      provider: boundedText(raw.provider, 512, `planner event ${index} provider`),
+      capability: boundedText(raw.capability, 256, `planner event ${index} capability`)
+    };
+    if (raw.settled !== undefined) {
+      if (typeof raw.settled !== 'boolean') throw corrupt(`planner event ${index} settled is invalid.`);
+      event.settled = raw.settled;
+    }
+    for (const field of ['elapsedMs', 'lastMutationVersion', 'busy', 'dialogs'] as const) {
+      if (raw[field] !== undefined) event[field] = boundedInteger(raw[field], 0, Number.MAX_SAFE_INTEGER, `planner event ${index} ${field}`);
+    }
+    if (raw.reason !== undefined) event.reason = boundedText(raw.reason, 1024, `planner event ${index} reason`);
+    if (raw.deltaSummary !== undefined) {
+      const delta = raw.deltaSummary;
+      if (!delta || typeof delta !== 'object' || Array.isArray(delta) || typeof (delta as any).progress !== 'boolean') throw corrupt(`planner event ${index} deltaSummary is invalid.`);
+      event.deltaSummary = {
+        progress: (delta as any).progress,
+        repeatedNoProgress: boundedInteger((delta as any).repeatedNoProgress, 0, Number.MAX_SAFE_INTEGER, `planner event ${index} repeatedNoProgress`)
+      };
+    }
+    return event;
+  });
 }
 
 function validateActionRecord(input: unknown, index: number): TaskActionRecord {

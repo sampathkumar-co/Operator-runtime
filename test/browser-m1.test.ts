@@ -232,6 +232,9 @@ test('browser interact returns element-state verification after unique semantic 
     assert.equal(result.ok, true);
     assert.equal((result.output as any).matched.name, 'Email');
     assert.equal((result.output as any).frame, undefined);
+    assert.equal((result.output as any).settle.settled, true);
+    assert.equal((result.output as any).settle.reason, 'quiet');
+    assert.equal(typeof (result.output as any).settle.lastMutationVersion, 'number');
     assert.equal(result.evidence.some((item) => item.kind === 'postcondition'), true);
   });
 });

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ActionRisk, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
+import type { TaskPlannerEvent } from './task-planner-event.ts';
 
 export interface TaskNode {
   id: string;
@@ -79,6 +80,7 @@ export interface TaskExecution {
   startedAt?: string;
   deadlineAt?: string;
   records: TaskActionRecord[];
+  plannerEvents?: TaskPlannerEvent[];
 }
 
 export interface TaskCapsule {

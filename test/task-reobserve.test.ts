@@ -80,6 +80,38 @@ class OneBrowserStepPlanner implements TaskPlanner {
   }
 }
 
+class NoProgressThenSuccessProvider implements CapabilityProvider {
+  readonly name = 'test.no-progress-then-success';
+  calls = 0;
+  supports(action: ActionRequest): boolean { return action.capability === 'browser.interact'; }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.calls += 1;
+    if (this.calls === 1) return {
+      ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 1,
+      error: {
+        code: 'BROWSER_NO_PROGRESS', message: 'Action completed without a meaningful delta.', retryable: false,
+        sideEffectState: 'known', executionPhase: 'effect_observed'
+      }
+    };
+    return { ok: true, capability: action.capability, provider: this.name, output: { stateDelta: { progress: true } }, evidence: [], durationMs: 1 };
+  }
+}
+
+class EventAwarePlanner implements TaskPlanner {
+  readonly id = 'test.event-aware';
+  supports(): boolean { return true; }
+  next({ task, recentEvents }: TaskPlannerContext): PlannerDecision {
+    if (task.execution!.plannerState.phase === 'complete') return { type: 'complete', message: 'replanned' };
+    const replanning = recentEvents.some((event) => event.kind === 'ACTION_SUCCEEDED_BUT_NO_PROGRESS' && event.decision === 'REPLAN');
+    return {
+      type: 'step', key: replanning ? 'alternate-action' : 'stuck-action', title: replanning ? 'Use alternate action' : 'Try initial action',
+      capability: 'browser.interact', input: { operation: replanning ? 'key_press' : 'click', target: { ref: 'current' }, ...(replanning ? { key: 'Enter' } : {}) }
+    };
+  }
+  accept({ task }: TaskPlannerContext): void { task.execution!.plannerState.phase = 'complete'; }
+}
+
 test('pre-dispatch stale target reobserves without consuming environment step or attempt budget', async (t) => {
   const root = await tempDir(t, 'operator-task-reobserve-root-');
   const state = await tempDir(t, 'operator-task-reobserve-state-');
@@ -158,4 +190,31 @@ test('pre-dispatch approval wait does not consume environment-action budget', as
   assert.equal(completed.execution?.stepCount, 1);
   assert.equal(completed.execution?.dispatchedActions, 1);
   assert.equal(completed.execution?.records.length, 1);
+});
+
+test('no-progress becomes a durable planner event and triggers bounded replanning without blind mutation retry', async (t) => {
+  const root = await tempDir(t, 'operator-task-planner-event-root-');
+  const state = await tempDir(t, 'operator-task-planner-event-state-');
+  const provider = new NoProgressThenSuccessProvider();
+  const store = new TaskStore(state);
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store,
+    permissions: { allowedCapabilities: ['browser.interact'], allowedRoots: [root], allowExternalWrites: true },
+    planners: [new EventAwarePlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Replan after a no-progress interaction.', authorizedScope: [root],
+    successConditions: ['alternate interaction succeeds'],
+    goal: { kind: 'controlled-file-change', root, path: 'unused.txt', content: 'unused' },
+    maxSteps: 2, maxAttemptsPerStep: 1
+  });
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(provider.calls, 2);
+  assert.deepEqual(completed.execution?.records.map((record) => record.stepKey), ['stuck-action', 'alternate-action']);
+  assert.equal(completed.execution?.plannerEvents?.[0]?.kind, 'ACTION_SUCCEEDED_BUT_NO_PROGRESS');
+  assert.equal(completed.execution?.plannerEvents?.[0]?.decision, 'REPLAN');
+  assert.ok(completed.evidence.some((item) => item.kind === 'strategy_replan'));
+  const persisted = await store.get(task.id);
+  assert.equal(persisted.execution?.plannerEvents?.[0]?.code, 'BROWSER_NO_PROGRESS');
 });

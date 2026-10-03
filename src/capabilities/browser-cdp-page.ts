@@ -159,7 +159,18 @@ export async function waitForDestinationReady(
   });
 }
 
-export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal, initialDelayMs = 50): Promise<void> {
+export interface BrowserSettleResult {
+  settled: boolean;
+  elapsedMs: number;
+  reason: 'quiet' | 'timeout';
+  lastMutationVersion: number;
+  busy: number;
+  dialogs: number;
+  readyState: string;
+}
+
+export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal, initialDelayMs = 50): Promise<BrowserSettleResult> {
+  const started = Date.now();
   const initialDelay = Math.max(0, Math.min(500, initialDelayMs));
   const quietWindowMs = initialDelay >= 300 ? 180 : 80;
   const maxSettleMs = initialDelay >= 300 ? 1_800 : 1_000;
@@ -208,8 +219,17 @@ export async function settleAfterInteraction(session: CdpConnection, signal?: Ab
       continue;
     }
     const ready = current.readyState === 'interactive' || current.readyState === 'complete';
-    if (ready && current.busy === 0 && Date.now() - quietSince >= quietWindowMs) return;
+    if (ready && current.busy === 0 && Date.now() - quietSince >= quietWindowMs) {
+      return {
+        settled: true, elapsedMs: Date.now() - started, reason: 'quiet',
+        lastMutationVersion: current.mutationVersion, busy: current.busy, dialogs: current.dialogs, readyState: current.readyState
+      };
+    }
   }
+  return {
+    settled: false, elapsedMs: Date.now() - started, reason: 'timeout',
+    lastMutationVersion: previous.mutationVersion, busy: previous.busy, dialogs: previous.dialogs, readyState: previous.readyState
+  };
 }
 
 export async function inspectPage(session: CdpConnection, observation: BrowserObservationOptions): Promise<{
