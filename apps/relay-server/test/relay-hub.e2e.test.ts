@@ -849,12 +849,16 @@ test('dispatch queued behind in-flight work revalidates a downgraded route befor
   let releaseHighDelivery!: () => void;
   const highStarted = new Promise<void>((resolve) => { highDeliveryStarted = resolve; });
   const highGate = new Promise<void>((resolve) => { releaseHighDelivery = resolve; });
+  let highSocket!: WebSocket;
   const highClient = new RelayClient({
     stateDir: highState,
     url: `ws://127.0.0.1:${port}/device`,
     allowLoopbackInsecureWs: true,
     identity: deviceIdentity,
-    socketFactory,
+    socketFactory: (url) => {
+      highSocket = new WebSocket(url);
+      return highSocket as unknown as RelaySocketLike;
+    },
     getSessionToken: async () => token,
     supportedCapabilities: ['file.read', 'git.write'],
     onDelivery: async () => { highDeliveryStarted(); await highGate; },
@@ -902,6 +906,9 @@ test('dispatch queued behind in-flight work revalidates a downgraded route befor
   const rejected = assert.rejects(delayed, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
   await gitEnqueueEntered;
 
+  // This scenario needs an abrupt transport loss so sequence 1 stays pending
+  // on the relay. Graceful stop now drains and ACKs accepted work by design.
+  highSocket.terminate();
   highClient.stop();
   releaseHighDelivery();
   await highRun;
@@ -954,6 +961,7 @@ test('dispatch success is bound to the exact routed session after the final asyn
   const account = await accounts.resolveOrCreateAccount({ issuer: 'operator-test', subject: 'final-session-user' });
   await accounts.bindDevice(account.accountId, device.deviceId);
 
+  let highSocket!: WebSocket;
   let holdFinalCheck = false;
   let enteredFinalCheck!: () => void;
   let releaseFinalCheck!: () => void;
@@ -986,7 +994,10 @@ test('dispatch success is bound to the exact routed session after the final asyn
     url: `ws://127.0.0.1:${port}/device`,
     allowLoopbackInsecureWs: true,
     identity: deviceIdentity,
-    socketFactory,
+    socketFactory: (url) => {
+      highSocket = new WebSocket(url);
+      return highSocket as unknown as RelaySocketLike;
+    },
     getSessionToken: async () => token,
     supportedCapabilities: ['file.read', 'git.write'],
     onDelivery: async () => { highDeliveryStarted(); await highGate; },
@@ -1019,6 +1030,7 @@ test('dispatch success is bound to the exact routed session after the final asyn
   const rejected = assert.rejects(delayed, (error: any) => error?.code === 'RELAY_AUTHORITY_CHANGED');
   await finalCheckEntered;
 
+  highSocket.terminate();
   highClient.stop();
   releaseHighDelivery();
   await highRun;

@@ -49,6 +49,13 @@ class StubbornCloseSocket extends FakeSocket {
   }
 }
 
+class StrictSocket extends FakeSocket {
+  override send(data: string): void {
+    if (this.readyState !== 1) throw new Error(`socket is not open (readyState=${this.readyState})`);
+    super.send(data);
+  }
+}
+
 async function stateDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -633,6 +640,150 @@ test('explicit reconnect drains an in-flight destructive delivery before opening
   assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
   assert.ok(events.indexOf('delivery-durable') < events.indexOf('ack-1'));
   assert.ok(events.indexOf('ack-1') < events.indexOf('hello-2-resume-1'));
+});
+
+test('unexpected network loss drains an in-flight destructive delivery before reconnecting', async (t) => {
+  const state = await stateDir(t, 'operator-relay-network-loss-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Network Loss Drain PC');
+  const sockets: FakeSocket[] = [];
+  const events: string[] = [];
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket: FakeSocket = connectionNumber === 1 ? new StrictSocket() : new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type !== 'hello') return;
+      events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: `network-loss-${connectionNumber}`,
+        resumeFromSeq: frame.payload.resumeAfterSeq,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: ['file.replace']
+      });
+      if (connectionNumber === 1) {
+        socket.server({
+          type: 'delivery',
+          seq: 1,
+          id: 'network-loss-destructive-1',
+          kind: 'action',
+          payload: { action: { id: 'network-loss-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+        });
+      } else {
+        setTimeout(() => { client.stop(); socket.close(); }, 0);
+      }
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      events.push('delivery-start');
+      markStarted();
+      await deliveryGate;
+      events.push('delivery-durable');
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+  sockets[0]!.close(1006, 'simulated network loss');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(sockets.length, 1, 'natural reconnect must wait for accepted destructive work to become durable');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+  assert.ok(events.indexOf('delivery-durable') < events.indexOf('hello-2-resume-1'));
+  assert.equal(sockets[0]!.sent.some((frame) => frame.type === 'ack' && frame.seq === 1), false, 'dead transport must not turn a lost ACK frame into a delivery failure');
+});
+
+test('controlled shutdown waits for an in-flight destructive delivery to reach the durable boundary', async (t) => {
+  const state = await stateDir(t, 'operator-relay-shutdown-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Shutdown Drain PC');
+  const socket = new FakeSocket();
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let runSettled = false;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    socket.server({
+      type: 'welcome',
+      protocol: 1,
+      connectionId: 'shutdown-drain',
+      resumeFromSeq: 0,
+      heartbeatMs: 60_000,
+      capabilityBinding: 1,
+      capabilities: ['file.replace']
+    });
+    socket.server({
+      type: 'delivery',
+      seq: 1,
+      id: 'shutdown-destructive-1',
+      kind: 'action',
+      payload: { action: { id: 'shutdown-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+    });
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run().finally(() => { runSettled = true; });
+  await deliveryStarted;
+  client.stop();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(runSettled, false, 'shutdown must not let the process owner exit while accepted destructive work is still running');
+  assert.equal(socket.readyState, 1, 'transport remains open only while the accepted delivery drains');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(runSettled, true);
+  assert.equal(socket.readyState, 3);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
 });
 
 test('stage7 relay signs bounded resource profile into authenticated hello', async (t) => {

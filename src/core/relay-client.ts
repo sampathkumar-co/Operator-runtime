@@ -164,7 +164,7 @@ export class RelayClient {
   #attempt = 0;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #lastPongAt = 0;
-  #interruptConnection: (() => void) | null = null;
+  #interruptConnection: ((mode?: 'reconnect' | 'shutdown') => void) | null = null;
 
   constructor(options: RelayClientOptions) {
     this.#stateFile = path.join(path.resolve(options.stateDir), 'relay-client.json');
@@ -233,6 +233,11 @@ export class RelayClient {
     this.#stopped = true;
     this.#emitConnectionState({ state: 'SHUTTING_DOWN' });
     this.#clearHeartbeat();
+    const interrupt = this.#interruptConnection;
+    if (interrupt) {
+      interrupt('shutdown');
+      return;
+    }
     try { this.#socket?.close(1000, 'operator stopping'); } catch { /* already closed */ }
     this.#socket = null;
   }
@@ -241,7 +246,7 @@ export class RelayClient {
     if (this.#stopped) return;
     const interrupt = this.#interruptConnection;
     if (interrupt) {
-      interrupt();
+      interrupt('reconnect');
       return;
     }
     try { this.#socket?.close(1012, 'session refresh recovery'); } catch { /* reconnect loop handles the next attempt */ }
@@ -292,9 +297,10 @@ export class RelayClient {
       let welcomed = false;
       let settled = false;
       let messageQueue: Promise<void> = Promise.resolve();
-      let interrupt: (() => void) | null = null;
+      let interrupt: ((mode?: 'reconnect' | 'shutdown') => void) | null = null;
       let reconnectRequested = false;
-      let reconnectDrain: Promise<void> | null = null;
+      let drainRequested = false;
+      let connectionDrain: Promise<void> | null = null;
       let readConcurrency = 1;
       let nextReceiveSeq = state.lastAckedServerSeq + 1;
       let nextAckSeq = state.lastAckedServerSeq + 1;
@@ -323,13 +329,36 @@ export class RelayClient {
         try { socket.close(4002, 'protocol/recovery error'); } catch { /* noop */ }
         reject(error instanceof OperatorError ? error : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true }));
       };
+      const drainConnection = (error: OperatorError | null, explicitReconnect = false) => {
+        if (settled || drainRequested) return;
+        drainRequested = true;
+        if (explicitReconnect) reconnectRequested = true;
+        socket.removeEventListener?.('message', onMessage);
+        this.#clearHeartbeat();
+        connectionDrain = (async () => {
+          // Once the transport is ending, stop accepting fresh work but let
+          // every already-accepted delivery reach its durable result/cursor
+          // boundary before a replacement connection or process exit.
+          await messageQueue;
+          while (activeReadTasks.size > 0) {
+            await Promise.all([...activeReadTasks.values()]);
+          }
+          await readAckQueue;
+          if (error) {
+            fail(error);
+            return;
+          }
+          try { socket.close(1000, 'operator stopping'); } catch { /* already closed */ }
+          succeed();
+        })();
+        void connectionDrain.catch(fail);
+      };
       const onError = () => {
-        if (reconnectRequested) return;
-        fail(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
+        drainConnection(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
       };
       const onClose = () => {
-        if (this.#stopped) succeed();
-        else if (!reconnectRequested) fail(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
+        if (this.#stopped) drainConnection(null);
+        else drainConnection(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
       };
       const processMessage = async (event: any) => {
         const frame = parseServerFrame(event?.data);
@@ -358,7 +387,7 @@ export class RelayClient {
           const durable = await this.#readState();
           if (delivery.seq <= durable.lastAckedServerSeq) {
             await this.#notifyAcknowledged(delivery);
-            sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
+            sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
             return;
           }
           if (delivery.seq !== nextReceiveSeq) {
@@ -383,7 +412,7 @@ export class RelayClient {
                 }
                 await this.#writeState({ version: 1, lastAckedServerSeq: completed.seq });
                 await this.#notifyAcknowledged(completed);
-                sendFrame(socket, { type: 'ack', seq: completed.seq, id: completed.id });
+                sendAckFrame(socket, { type: 'ack', seq: completed.seq, id: completed.id });
                 completedReads.delete(completed.seq);
                 activeReads.delete(completed.seq);
                 nextAckSeq = completed.seq + 1;
@@ -414,23 +443,13 @@ export class RelayClient {
       socket.addEventListener('message', onMessage);
       socket.addEventListener('error', onError);
       socket.addEventListener('close', onClose);
-      interrupt = () => {
+      interrupt = (mode = 'reconnect') => {
         if (settled || reconnectRequested) return;
-        reconnectRequested = true;
-        socket.removeEventListener?.('message', onMessage);
-        this.#clearHeartbeat();
-        reconnectDrain = (async () => {
-          // Stop accepting fresh work on this transport, but let everything
-          // already accepted reach a durable result/ACK boundary before the
-          // credential or transport handoff begins.
-          await messageQueue;
-          while (activeReadTasks.size > 0) {
-            await Promise.all([...activeReadTasks.values()]);
-          }
-          await readAckQueue;
-          fail(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested after in-flight work drained.', { retryable: true }));
-        })();
-        void reconnectDrain.catch(fail);
+        if (mode === 'shutdown') {
+          drainConnection(null);
+          return;
+        }
+        drainConnection(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested after in-flight work drained.', { retryable: true }), true);
       };
       this.#interruptConnection = interrupt;
     });
@@ -508,7 +527,7 @@ export class RelayClient {
 
     if (delivery.seq <= state.lastAckedServerSeq) {
       await this.#notifyAcknowledged(delivery);
-      sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
+      sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
       return;
     }
     if (delivery.seq !== state.lastAckedServerSeq + 1) {
@@ -531,7 +550,7 @@ export class RelayClient {
         const completed = { version: 1 as const, lastAckedServerSeq: delivery.seq };
         await this.#writeState(completed);
         await this.#notifyAcknowledged(delivery);
-        sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, recovered: true });
+        sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, recovered: true });
         return;
       } else {
         throw new OperatorError('RELAY_RECOVERY_REQUIRED', 'Recovery callback returned an invalid decision.', { retryable: false });
@@ -543,7 +562,7 @@ export class RelayClient {
     await this.#onDelivery(delivery);
     await this.#writeState({ version: 1, lastAckedServerSeq: delivery.seq });
     await this.#notifyAcknowledged(delivery);
-    sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id });
+    sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id });
   }
 
   async #notifyAcknowledged(delivery: Pick<RelayDelivery, 'seq' | 'id'>): Promise<void> {
@@ -723,6 +742,14 @@ function parseServerFrame(raw: unknown): ServerFrame {
   if (parsed.type === 'delivery') return parsed as DeliveryFrame;
   if (parsed.type === 'pong' && typeof parsed.nonce === 'string') return parsed as PongFrame;
   throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay frame type is unsupported.');
+}
+
+function sendAckFrame(socket: RelaySocketLike, frame: JsonObject): void {
+  // The durable cursor/result is authoritative. If the transport disappeared
+  // after that commit, the next hello reconciles the cursor instead of turning
+  // a harmless lost ACK frame into a delivery failure.
+  if (socket.readyState !== 1) return;
+  sendFrame(socket, frame);
 }
 
 function sendFrame(socket: RelaySocketLike, frame: JsonObject): void {
