@@ -409,16 +409,18 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
-  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: MutationObserver[] };
+  type ObservedFingerprint = { tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string };
+  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: MutationObserver[] };
   let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
   const priorFocusElement = focus.ref && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.ref) : undefined;
   const priorGroupElement = focus.groupRef && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.groupRef) : undefined;
   if (!observedRegistry || !(observedRegistry.refs instanceof Map)) {
     const bytes = new Uint32Array(2);
     try { globalThis.crypto?.getRandomValues?.(bytes); } catch { bytes[0] = Date.now() >>> 0; bytes[1] = Math.floor(Math.random() * 0xffffffff); }
-    observedRegistry = { nonce: `${bytes[0]!.toString(36)}${bytes[1]!.toString(36)}`, generation: 0, next: 0, refs: new Map(), mutationVersion: 0, observedDocs: new WeakSet(), observers: [] };
+    observedRegistry = { nonce: `${bytes[0]!.toString(36)}${bytes[1]!.toString(36)}`, generation: 0, next: 0, refs: new Map(), history: new Map(), mutationVersion: 0, observedDocs: new WeakSet(), observers: [] };
     host[registryKey] = observedRegistry;
   }
+  if (!(observedRegistry.history instanceof Map)) observedRegistry.history = new Map();
   if (!Number.isSafeInteger(observedRegistry.mutationVersion)) observedRegistry.mutationVersion = 0;
   if (!(observedRegistry.observedDocs instanceof WeakSet)) observedRegistry.observedDocs = new WeakSet();
   if (!Array.isArray(observedRegistry.observers)) observedRegistry.observers = [];
@@ -438,6 +440,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   observedRegistry.generation += 1;
   observedRegistry.next = 0;
   observedRegistry.refs.clear();
+  while (observedRegistry.history.size > 512) observedRegistry.history.delete(observedRegistry.history.keys().next().value as string);
   const observationGeneration = `${observedRegistry.nonce}-${observedRegistry.generation.toString(36)}`;
   const refByElement = new WeakMap<Element, string>();
   const observedRefOf = (element: Element) => {
@@ -447,6 +450,15 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const ref = `b-${observationGeneration}-${(++observedRegistry!.next).toString(36)}`;
     refByElement.set(element, ref);
     observedRegistry!.refs.set(ref, element);
+    observedRegistry!.history.set(ref, {
+      tag: element.tagName.toLowerCase(),
+      id: trim(element.id, 160),
+      role: trim(element.getAttribute('role'), 80).toLowerCase(),
+      semanticName: '',
+      ariaLabel: trim(element.getAttribute('aria-label'), 240),
+      name: trim(element.getAttribute('name'), 240),
+      text: trim(element.textContent, 240)
+    });
     return ref;
   };
   const relationshipOf = (element: Element) => {
@@ -726,6 +738,10 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const state = contract.stateOf(element);
       const semanticRole = roleOf(element);
       const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      const semanticName = accessibleName(element);
+      const ref = observedRefOf(element);
+      const priorFingerprint = observedRegistry!.history.get(ref)!;
+      observedRegistry!.history.set(ref, { ...priorFingerprint, role, semanticName });
       const rect = element.getBoundingClientRect();
       const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLOptionElement;
@@ -742,11 +758,11 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const popupId = trim(element.getAttribute('aria-controls') || element.getAttribute('aria-owns') || element.getAttribute('list'), 240);
       const scroll = scrollStateOf(element);
       return {
-        ref: observedRefOf(element),
+        ref,
         tag: element.tagName.toLowerCase(),
         selector: selectorOf(element),
         role,
-        name: accessibleName(element),
+        name: semanticName,
         type: inputType,
         semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
         ...(readableValue ? { value: readableValue } : {}),
@@ -775,7 +791,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
           value: trim(element.tagName === 'INPUT' ? (element as HTMLInputElement).value : element.getAttribute('aria-valuenow') || displayedSliderValue(element))
         } : {}),
         href: element.tagName === 'A' ? trim((element as HTMLAnchorElement).href, 500) : '',
-        _focusScore: focusScoreOf(element, role, accessibleName(element), geometryOf(element, context)),
+        _focusScore: focusScoreOf(element, role, semanticName, geometryOf(element, context)),
         context
       };
     })
@@ -1017,11 +1033,26 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     return [style?.backgroundColor, style?.fill, style?.stroke].map((value) => trim(value).toLowerCase()).filter((value) => value && value !== 'none' && value !== 'transparent' && value !== 'rgba(0, 0, 0, 0)');
   };
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
-  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string };
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; history?: Map<string, HistoricalFingerprint> } | undefined })[registryKey];
   const observed = input.target.ref ? registry?.refs?.get(input.target.ref) : undefined;
+  const historical = input.target.ref && !observed ? registry?.history?.get(input.target.ref) : undefined;
+  const matchesHistorical = (element: Element, fingerprint: HistoricalFingerprint) => {
+    if (fingerprint.tag && element.tagName.toLowerCase() !== fingerprint.tag) return false;
+    if (fingerprint.id && element.id !== fingerprint.id) return false;
+    if (fingerprint.ariaLabel && trim(element.getAttribute('aria-label')) !== fingerprint.ariaLabel) return false;
+    if (fingerprint.name && trim(element.getAttribute('name')) !== fingerprint.name) return false;
+    if (fingerprint.role && roleOf(element) !== fingerprint.role) return false;
+    if (fingerprint.semanticName && nameOf(element) !== fingerprint.semanticName) return false;
+    const strongSignals = [fingerprint.id, fingerprint.ariaLabel, fingerprint.name, fingerprint.semanticName].filter(Boolean).length;
+    if (strongSignals > 0) return true;
+    return Boolean(fingerprint.role && fingerprint.text && trim(element.textContent) === fingerprint.text);
+  };
   const selector = input.target.css || (input.target.renderedColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   const candidates = input.target.ref
-    ? (observed && observed.isConnected !== false ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }] : [])
+    ? (observed && observed.isConnected !== false
+      ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }]
+      : historical ? deepQuery('*', 1000).filter(({ element }) => matchesHistorical(element, historical)) : [])
     : deepQuery(selector, 1000);
   const desiredColor = input.target.renderedColor ? normalizeColor(input.target.renderedColor) : '';
   let matching = candidates.filter(({ element }) => {
@@ -1045,6 +1076,9 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
   if (matching.length > 1) {
     const exact = matching.filter(({ element }) => nameOf(element).toLowerCase() === (input.target.name || input.target.text || '').toLowerCase());
     if (exact.length === 1) matching = exact;
+  }
+  if (input.target.ref && !observed && matching.length === 1 && registry?.refs instanceof Map) {
+    registry.refs.set(input.target.ref, matching[0]!.element);
   }
   if (matching.length > 1) return { ok: false, error: 'Semantic browser target matched multiple elements.', matches: matching.length };
   const match = matching[0];

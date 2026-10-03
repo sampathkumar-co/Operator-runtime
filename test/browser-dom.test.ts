@@ -546,7 +546,7 @@ test('focusable slider widgets expose their container name and use keyboard acti
 });
 
 
-test('Browser Observation V2 refs are ephemeral, relationship-aware, and fail stale instead of rebinding', (t) => {
+test('Browser Observation V2 refs are ephemeral, relationship-aware, and heal only a unique semantic replacement', (t) => {
   const root = new FakeRoot();
   const menu = new FakeElement('div', 'Actions'); menu.setAttribute('role', 'menu');
   const button = new FakeElement('button', 'Forward');
@@ -579,10 +579,33 @@ test('Browser Observation V2 refs are ephemeral, relationship-aware, and fail st
   const refreshed = second.controls.find((control: any) => control.name === 'Forward');
   assert.ok(refreshed?.ref);
   assert.notEqual(refreshed.ref, observed.ref);
-  const stale = interactionFunction({ operation: 'click', target: { ref: observed.ref }, value: null }) as any;
-  assert.equal(stale.ok, false);
-  assert.equal(stale.staleRef, true);
-  assert.match(stale.error, /stale/i);
+  button.clicked = false;
+  const healed = interactionFunction({ operation: 'click', target: { ref: observed.ref }, value: null }) as any;
+  assert.equal(healed.ok, true);
+  assert.equal(button.clicked, true);
+});
+
+test('Browser Observation V2 stale-ref healing fails closed when semantic replacement is ambiguous', (t) => {
+  const root = new FakeRoot();
+  const button = new FakeElement('button', 'Forward');
+  attach(root, button); installDocument(t, root);
+
+  const first = semanticSnapshotFunction() as any;
+  const observed = first.controls.find((control: any) => control.name === 'Forward');
+  assert.ok(observed?.ref);
+
+  semanticSnapshotFunction();
+  root.elements.length = 0;
+  const firstReplacement = new FakeElement('button', 'Forward');
+  const secondReplacement = new FakeElement('button', 'Forward');
+  attach(root, firstReplacement, secondReplacement);
+
+  const ambiguous = interactionFunction({ operation: 'click', target: { ref: observed.ref }, value: null }) as any;
+  assert.equal(ambiguous.ok, false);
+  assert.equal(ambiguous.matches, 2);
+  assert.match(ambiguous.error, /multiple/i);
+  assert.equal(firstReplacement.clicked, false);
+  assert.equal(secondReplacement.clicked, false);
 });
 
 test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts with explicit coordinate spaces', (t) => {

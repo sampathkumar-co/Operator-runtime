@@ -260,11 +260,26 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
-  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; mutationVersion?: number } | undefined })[registryKey];
+  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string };
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; history?: Map<string, HistoricalFingerprint>; mutationVersion?: number } | undefined })[registryKey];
   const observed = target.ref ? registry?.refs?.get(target.ref) : undefined;
+  const historical = target.ref && !observed ? registry?.history?.get(target.ref) : undefined;
+  const matchesHistorical = (element: Element, fingerprint: HistoricalFingerprint) => {
+    if (fingerprint.tag && element.tagName.toLowerCase() !== fingerprint.tag) return false;
+    if (fingerprint.id && element.id !== fingerprint.id) return false;
+    if (fingerprint.ariaLabel && trim(element.getAttribute('aria-label')) !== fingerprint.ariaLabel) return false;
+    if (fingerprint.name && trim(element.getAttribute('name')) !== fingerprint.name) return false;
+    if (fingerprint.role && roleOf(element) !== fingerprint.role) return false;
+    if (fingerprint.semanticName && nameOf(element) !== fingerprint.semanticName) return false;
+    const strongSignals = [fingerprint.id, fingerprint.ariaLabel, fingerprint.name, fingerprint.semanticName].filter(Boolean).length;
+    if (strongSignals > 0) return true;
+    return Boolean(fingerprint.role && fingerprint.text && trim(element.textContent) === fingerprint.text);
+  };
   const selector = target.css || (desiredColor ? '*' : 'button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]');
   let matches = (target.ref
-    ? (observed && observed.isConnected !== false ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }] : [])
+    ? (observed && observed.isConnected !== false
+      ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }]
+      : historical ? deepQuery('*', 1000).filter(({ element }) => matchesHistorical(element, historical)) : [])
     : deepQuery(selector, 1000)).filter(({ element }) => {
     if (!eligible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
@@ -292,6 +307,9 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const exact = matches.filter(({ element }) => nameOf(element).toLowerCase() === desired);
     if (exact.length === 1) matches = exact;
   }
+  if (target.ref && !observed && matches.length === 1 && registry?.refs instanceof Map) {
+    registry.refs.set(target.ref, matches[0]!.element);
+  }
   if (prepareForPointer && matches.length === 1) {
     const element = matches[0]!.element;
     (element as HTMLElement).scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
@@ -300,7 +318,8 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   }
   return {
     count: matches.length,
-    refResolved: target.ref ? Boolean(observed) : undefined,
+    refResolved: target.ref ? Boolean(observed || matches.length === 1) : undefined,
+    refHealed: target.ref ? Boolean(!observed && historical && matches.length === 1) : undefined,
     matches: matches.slice(0, 3).map(({ element, context }) => {
       const rect = element.getBoundingClientRect();
       const role = roleOf(element) || (element.ownerDocument?.defaultView?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
