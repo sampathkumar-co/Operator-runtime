@@ -124,6 +124,57 @@ test('visual capture remains a Windows-only provider capability', () => {
   windows.close();
 });
 
+test('visual capture emits Observation V3 rendered evidence and target-local after evidence', async () => {
+  const before = Buffer.alloc(32, 1).toString('base64');
+  const after = Buffer.alloc(32, 2).toString('base64');
+  let captureCalls = 0;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call(method) {
+        if (method === 'input') return { dispatched: true };
+        assert.equal(method, 'capture');
+        captureCalls += 1;
+        return {
+          png_base64: captureCalls < 3 ? before : after,
+          source: 'region', origin_x: -200, origin_y: 50,
+          source_width: 400, source_height: 200,
+          returned_width: 200, returned_height: 100,
+          scale_x: 2, scale_y: 2, window_id: '0xABC'
+        };
+      },
+      close() {}
+    }
+  });
+  const capture = await provider.execute({
+    id: 'roi-capture', capability: 'visual.capture', risk: 'read', provenance,
+    input: {
+      source: 'region', region: { x: -200, y: 50, width: 400, height: 200 },
+      evidenceTier: 'target-roi', targetAssociation: 'uia:save'
+    }
+  });
+  assert.equal(capture.ok, true);
+  const captureOutput = capture.output as any;
+  assert.equal(captureOutput.renderedEvidence.tier, 'target-roi');
+  assert.equal(captureOutput.renderedEvidence.sceneKey, 'desktop:window:0xabc');
+  assert.equal(captureOutput.renderedEvidence.targetAssociation, 'uia:save');
+  assert.equal(captureOutput.renderedEvidence.transform.originX, -200);
+
+  const operated = await provider.execute({
+    id: 'roi-click', capability: 'input.operate', risk: 'external', provenance,
+    input: {
+      operation: 'click', captureId: captureOutput.captureId,
+      expectedSha256: captureOutput.sha256, x: 20, y: 10
+    }
+  });
+  assert.equal(operated.ok, true);
+  const operation = operated.output as any;
+  assert.equal(operation.renderedDelta.scope, 'target-local');
+  assert.equal(operation.renderedDelta.changed, true);
+  assert.equal(operation.postcondition.regionStable, true);
+  provider.close();
+});
+
 test('mutating UIA transport timeout is uncertain and is never replayed after late success', async () => {
   let calls = 0;
   let lateSuccess = false;

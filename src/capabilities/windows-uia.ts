@@ -6,6 +6,7 @@ import type { ActionRequest, ActionResult, CapabilityExecutionContext, Capabilit
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
+import { createRenderedDeltaEvidence, createRenderedEvidence, type RenderedEvidence, type RenderedEvidenceTier } from '../core/rendered-evidence.ts';
 
 const SCORE: CapabilityScore = {
   reliability: 0.95,
@@ -47,6 +48,10 @@ type CaptureLease = {
   scaleY: number;
   captureParams: Record<string, unknown>;
   windowId?: string;
+  sceneKey: string;
+  tier: RenderedEvidenceTier;
+  targetAssociation?: string;
+  renderedEvidence: RenderedEvidence;
 };
 
 type Pending = {
@@ -313,18 +318,43 @@ export class WindowsUiaProvider implements CapabilityProvider {
     const sha256 = crypto.createHash('sha256').update(png).digest('hex');
     const captureId = crypto.randomUUID();
     const now = Date.now();
+    const originX = boundedCaptureInteger(raw.origin_x, -100_000, 100_000, 'origin_x');
+    const originY = boundedCaptureInteger(raw.origin_y, -100_000, 100_000, 'origin_y');
+    const sourceWidth = boundedCaptureInteger(raw.source_width, 1, 100_000, 'source_width');
+    const sourceHeight = boundedCaptureInteger(raw.source_height, 1, 100_000, 'source_height');
+    const returnedWidth = boundedCaptureInteger(raw.returned_width, 1, 1280, 'returned_width');
+    const returnedHeight = boundedCaptureInteger(raw.returned_height, 1, 720, 'returned_height');
+    const scaleX = boundedCaptureNumber(raw.scale_x, 0.0001, 1000, 'scale_x');
+    const scaleY = boundedCaptureNumber(raw.scale_y, 0.0001, 1000, 'scale_y');
+    const windowId = typeof raw.window_id === 'string' && raw.window_id ? raw.window_id : undefined;
+    const sceneKey = windowId ? `desktop:window:${windowId.toLocaleLowerCase()}` : 'visual:screen';
+    const tier = renderedTier(action.input.evidenceTier, String(captureParams.source));
+    const targetAssociation = optionalCaptureText(action.input.targetAssociation, 'targetAssociation', 512);
+    const renderedEvidence = createRenderedEvidence({
+      tier,
+      sceneKey,
+      captureId,
+      captureGeneration: sha256,
+      observedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + CAPTURE_LEASE_MS).toISOString(),
+      region: { x: originX, y: originY, width: sourceWidth, height: sourceHeight },
+      sourceDimensions: { width: sourceWidth, height: sourceHeight },
+      returnedDimensions: { width: returnedWidth, height: returnedHeight },
+      transform: {
+        from: 'capture-image', to: 'native-screen', originX, originY, scaleX, scaleY,
+        sourceWidth: returnedWidth, sourceHeight: returnedHeight,
+        targetWidth: sourceWidth, targetHeight: sourceHeight,
+        generation: sha256,
+        provenance: `${this.name}:visual.capture:${captureId}`
+      },
+      ...(targetAssociation ? { targetAssociation } : {})
+    });
     const lease: CaptureLease = {
       captureId, sha256, createdAt: now, expiresAt: now + CAPTURE_LEASE_MS,
-      originX: boundedCaptureInteger(raw.origin_x, -100_000, 100_000, 'origin_x'),
-      originY: boundedCaptureInteger(raw.origin_y, -100_000, 100_000, 'origin_y'),
-      sourceWidth: boundedCaptureInteger(raw.source_width, 1, 100_000, 'source_width'),
-      sourceHeight: boundedCaptureInteger(raw.source_height, 1, 100_000, 'source_height'),
-      returnedWidth: boundedCaptureInteger(raw.returned_width, 1, 1280, 'returned_width'),
-      returnedHeight: boundedCaptureInteger(raw.returned_height, 1, 720, 'returned_height'),
-      scaleX: boundedCaptureNumber(raw.scale_x, 0.0001, 1000, 'scale_x'),
-      scaleY: boundedCaptureNumber(raw.scale_y, 0.0001, 1000, 'scale_y'),
+      originX, originY, sourceWidth, sourceHeight, returnedWidth, returnedHeight, scaleX, scaleY,
       captureParams: structuredClone(captureParams),
-      ...(typeof raw.window_id === 'string' && raw.window_id ? { windowId: raw.window_id } : {})
+      ...(windowId ? { windowId } : {}),
+      sceneKey, tier, ...(targetAssociation ? { targetAssociation } : {}), renderedEvidence
     };
     this.#captureLeases.set(captureId, lease);
     while (this.#captureLeases.size > MAX_CAPTURE_LEASES) {
@@ -346,6 +376,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       scaleX: lease.scaleX,
       scaleY: lease.scaleY,
       ...(lease.windowId ? { windowId: lease.windowId } : {}),
+      renderedEvidence,
       mimeType: 'image/png',
       imageBase64: pngBase64
     };
@@ -436,6 +467,7 @@ export class WindowsUiaProvider implements CapabilityProvider {
       throw new OperatorError('INPUT_AFTER_CAPTURE_INVALID', 'Physical input was dispatched but AFTER capture returned an invalid PNG payload.', { retryable: false });
     }
     const afterSha256 = crypto.createHash('sha256').update(afterPng).digest('hex');
+    const afterObservedAt = Date.now();
     const after = {
       sha256: afterSha256,
       changed: afterSha256 !== lease.sha256,
@@ -453,18 +485,43 @@ export class WindowsUiaProvider implements CapabilityProvider {
     if (lease.windowId && after.windowId !== lease.windowId) {
       throw new OperatorError('INPUT_AFTER_WINDOW_CHANGED', 'Physical input was dispatched but AFTER capture resolved to a different window.', { retryable: false });
     }
+    const afterRenderedEvidence = createRenderedEvidence({
+      tier: lease.tier,
+      sceneKey: lease.sceneKey,
+      captureId: `${captureId}:after`,
+      captureGeneration: afterSha256,
+      observedAt: new Date(afterObservedAt).toISOString(),
+      expiresAt: new Date(afterObservedAt + CAPTURE_LEASE_MS).toISOString(),
+      region: { x: after.originX, y: after.originY, width: after.sourceWidth, height: after.sourceHeight },
+      sourceDimensions: { width: after.sourceWidth, height: after.sourceHeight },
+      returnedDimensions: { width: after.width, height: after.height },
+      transform: {
+        from: 'capture-image', to: 'native-screen', originX: after.originX, originY: after.originY,
+        scaleX: after.sourceWidth / after.width, scaleY: after.sourceHeight / after.height,
+        sourceWidth: after.width, sourceHeight: after.height,
+        targetWidth: after.sourceWidth, targetHeight: after.sourceHeight,
+        generation: afterSha256,
+        provenance: `${this.name}:input.operate:${captureId}:after`
+      },
+      ...(lease.targetAssociation ? { targetAssociation: lease.targetAssociation } : {})
+    });
+    const regionStable = sameCaptureRegion(lease.renderedEvidence, afterRenderedEvidence);
+    const renderedDelta = regionStable ? createRenderedDeltaEvidence(lease.renderedEvidence, afterRenderedEvidence) : undefined;
     return {
       operation,
-      before,
+      before: { ...before, renderedEvidence: lease.renderedEvidence },
       native,
-      after,
+      after: { ...after, renderedEvidence: afterRenderedEvidence },
+      ...(renderedDelta ? { renderedDelta } : {}),
       postcondition: {
         dispatched: true,
         captureLeaseConsumed: true,
         afterCaptured: true,
         afterSha256,
         changed: after.changed,
-        windowStable: lease.windowId ? after.windowId === lease.windowId : true
+        windowStable: lease.windowId ? after.windowId === lease.windowId : true,
+        regionStable,
+        verificationScope: renderedDelta?.scope ?? 'capture-region-changed'
       }
     };
   }
@@ -597,6 +654,24 @@ function boundedCaptureNumber(value: unknown, min: number, max: number, label: s
 function requiredCaptureText(value: unknown, label: string, max: number): string {
   if (typeof value !== 'string' || !value || value.length > max || value.includes('\0')) throw new OperatorError('VISUAL_INPUT_INVALID', `${label} is invalid.`);
   return value;
+}
+
+function optionalCaptureText(value: unknown, label: string, max: number): string | undefined {
+  return value === undefined ? undefined : requiredCaptureText(value, label, max);
+}
+
+function renderedTier(value: unknown, source: string): RenderedEvidenceTier {
+  if (value === undefined) return source === 'region' ? 'target-roi' : 'full-capture';
+  if (value === 'target-roi' || value === 'changed-region' || value === 'full-capture') return value;
+  throw new OperatorError('VISUAL_INPUT_INVALID', 'evidenceTier must be target-roi, changed-region, or full-capture.');
+}
+
+function sameCaptureRegion(before: RenderedEvidence, after: RenderedEvidence): boolean {
+  return before.sceneKey === after.sceneKey
+    && before.region.x === after.region.x
+    && before.region.y === after.region.y
+    && before.region.width === after.region.width
+    && before.region.height === after.region.height;
 }
 
 

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { ActionRequest, ActionResult } from './types.ts';
 import { perceptionDigest, type PerceptionBounds, type PerceptionGraphStore, type PerceptionObservation } from './perception-graph.ts';
+import { validateRenderedEvidence, type RenderedEvidence } from './rendered-evidence.ts';
 
 const MAX_ELEMENTS = 1500;
 
@@ -95,6 +96,9 @@ async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionR
   const height = safeInteger(output.height, 0, 720);
   if (!captureId || !sha256 || !/^[0-9a-f]{64}$/.test(sha256) || width < 1 || height < 1) return 0;
   const source = safeString(output.source, 64) ?? 'unknown';
+  const rendered = output.renderedEvidence === undefined
+    ? undefined
+    : validateRenderedEvidence(output.renderedEvidence as RenderedEvidence);
   const windowId = safeString(output.windowId, 256);
   const originX = finite(output.originX) ?? 0;
   const originY = finite(output.originY) ?? 0;
@@ -106,16 +110,18 @@ async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionR
     captureId,
     sha256,
     source,
+    ...(rendered ? { renderedTier: rendered.tier, renderedEvidenceDigest: rendered.evidenceDigest } : {}),
+    ...(rendered?.targetAssociation ? { targetAssociation: rendered.targetAssociation } : {}),
     ...(windowId ? { windowId } : {})
   };
   await graph.observe({
-    sceneKey: windowId ? windowSceneKey(windowId) : 'visual:screen',
+    sceneKey: rendered?.sceneKey ?? (windowId ? windowSceneKey(windowId) : 'visual:screen'),
     channel: 'visual',
     source: result.provider,
     semanticId: `capture:${captureId}`,
     role: 'capture',
     name: source,
-    bounds: { x: 0, y: 0, width, height },
+    bounds: rendered?.region ?? { x: 0, y: 0, width, height },
     state,
     confidence: 1,
     ttlMs: 90_000,
@@ -127,10 +133,11 @@ async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionR
       source,
       windowId,
       width,
-      height
+      height,
+      renderedEvidenceDigest: rendered?.evidenceDigest
     }),
     correlationKey: `capture:${captureId}:${sha256}`,
-    coordinates: {
+    coordinates: rendered?.transform ?? {
       from: 'capture-image',
       to: 'native-screen',
       originX,
