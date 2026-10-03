@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { resourceKeysConflict } from './resource-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   currentProcessInstance,
@@ -75,16 +76,21 @@ export class ResourceLeaseStore {
     await this.#mutate(async (state) => {
       await reapDeadHolders(state, this.#inspectProcessInstance);
       for (const key of keys) {
-        const entry = state.resources.find((item) => item.key === key);
-        if (!entry) continue;
-        const conflicts = entry.holders.filter((holder) =>
-          holder.ownerId !== ownerId && (mode === 'exclusive' || holder.mode === 'exclusive')
-        );
-        if (conflicts.length > 0) {
-          throw new OperatorError('RESOURCE_BUSY', `Resource ${key} is owned by another active execution.`, {
-            retryable: true,
-            details: { key, holders: conflicts.map((holder) => ({ ownerId: holder.ownerId, mode: holder.mode })) }
-          });
+        const conflictingEntries = state.resources.filter((item) => resourceKeysConflict(item.key, key));
+        for (const entry of conflictingEntries) {
+          const conflicts = entry.holders.filter((holder) =>
+            holder.ownerId !== ownerId && (mode === 'exclusive' || holder.mode === 'exclusive')
+          );
+          if (conflicts.length > 0) {
+            throw new OperatorError('RESOURCE_BUSY', `Resource ${key} conflicts with another active execution.`, {
+              retryable: true,
+              details: {
+                key,
+                conflictingKey: entry.key,
+                holders: conflicts.map((holder) => ({ ownerId: holder.ownerId, mode: holder.mode }))
+              }
+            });
+          }
         }
       }
       const now = new Date().toISOString();

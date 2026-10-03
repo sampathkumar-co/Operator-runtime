@@ -40,6 +40,10 @@ import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
+import { AgentKernel } from '../../../src/core/agent-kernel.ts';
+import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
+import { IntentRegistry } from '../../../src/core/intent-registry.ts';
+import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -92,7 +96,7 @@ if (remoteLauncherIpc) {
   });
 }
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -105,7 +109,9 @@ const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
 const resourceLeases = new ResourceLeaseStore(stateDir);
-const teams = new TeamCoordinator(stateDir);
+const actionJournal = new ActionTransitionJournal(stateDir);
+const intentRegistry = new IntentRegistry(stateDir);
+const teams = new TeamCoordinator(stateDir, { requireKernelVerification: true, intentRegistry, actionJournal });
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
 const perception = new PerceptionGraphStore(stateDir);
@@ -119,8 +125,16 @@ const semanticMigration = new SemanticCheckpointManager(stateDir, {
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
 const organizations = new OrganizationCoordinator(stateDir, teams);
+const organizationRecovery = await organizations.recoverPendingCompensations();
+if (organizationRecovery.pending > 0) {
+  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+}
 const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const teachMode = new TeachModeStore(stateDir);
+const teachMode = new TeachModeStore(stateDir, {
+  journal: actionJournal,
+  requireKernelVerification: true,
+  intentRegistry
+});
 const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
@@ -162,11 +176,37 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+const agentKernel = new AgentKernel({
+  stateDir,
+  runtime,
+  leases: resourceLeases,
+  journal: actionJournal,
+  intents: intentRegistry,
+  observeResult: async (action, result) => {
+    try {
+      await publishPerceptionFromActionResult(perception, action, result);
+    } catch (error) {
+      await audit.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id,
+        providerId: 'perception.graph',
+        capability: 'perception.publish',
+        result: 'failure',
+        risk: 'write',
+        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+      });
+      throw error;
+    }
+  }
+});
+const sagas = new DurableSagaKernel(stateDir, { kernel: agentKernel, permissions });
 const studioExecutor = new StudioWorkflowExecutor(stateDir, {
   teach: teachMode,
   runtime,
   leases: resourceLeases,
-  permissions
+  permissions,
+  agentKernel,
+  intentRegistry
 });
 const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
@@ -340,7 +380,8 @@ const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
   permissions,
-  resourceLeases,
+  intentRegistry,
+  actionJournal,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
@@ -352,20 +393,11 @@ const taskOrchestrator = new TaskOrchestrator({
         durationMs: 0
       };
     }
-    const result = await runtime.execute(action, actionPermissions, context);
-    try {
-      await publishPerceptionFromActionResult(perception, action, result);
-    } catch (error) {
-      await audit.append({
-        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-        actionId: action.id,
-        providerId: 'perception.graph',
-        capability: 'perception.publish',
-        result: 'failure',
-        risk: 'write',
-        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
-      });
-    }
+    const result = await agentKernel.execute(action, actionPermissions, {
+      ...context,
+      ownerKind: 'task',
+      ownerId: action.taskId ?? action.id
+    });
     await audit.append({
       ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
       actionId: action.id,
@@ -386,6 +418,9 @@ const taskOrchestrator = new TaskOrchestrator({
 
 const agent = createLocalAgentServer({
   runtime,
+  agentKernel,
+  intentRegistry,
+  sagas,
   token,
   recoveryToken,
   emergencyStop,

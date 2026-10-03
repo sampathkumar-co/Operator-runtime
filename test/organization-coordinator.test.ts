@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
+import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-org-'));
@@ -257,4 +258,59 @@ test('stage8 child pause failure keeps program blocked instead of falsely paused
   assert.equal(blocked.state, 'BLOCKED');
   assert.equal(blocked.targets[0]?.state, 'RUNNING');
   assert.equal(blocked.targets[0]?.controlFailure?.operation, 'pause');
+});
+
+
+test('stage8 restart recovery cancels a child mission created before parent rollout state was committed', async (t) => {
+  const state = await tempDir(t);
+  const teams = new TeamCoordinator(state);
+  const org = new OrganizationCoordinator(state, teams);
+  const program = await org.create({
+    objective: 'Crash-safe rollout',
+    policy: { allowedScopePrefixes: ['org:crash'] },
+    targets: [{ key: 'canary', scopeKey: 'org:crash:canary', workItems: work('canary') }]
+  });
+
+  const orphanMissionId = crypto.randomUUID();
+  const orphan = await teams.submit({
+    missionId: orphanMissionId,
+    objective: 'Crash-safe rollout [canary]',
+    workItems: work('canary')
+  });
+  await teams.start(orphan.id);
+
+  const journal = new DurableCompensationJournal(state);
+  await journal.prepare({
+    id: `test-orphan:${program.id}`,
+    ownerKind: 'organization',
+    ownerId: program.id,
+    operation: 'cancel-team-mission',
+    targetId: orphan.id,
+    subjectKey: 'canary'
+  });
+
+  const restarted = new OrganizationCoordinator(state, teams);
+  const recovery = await restarted.recoverPendingCompensations();
+  assert.equal(recovery.recovered, 1);
+  assert.equal(recovery.pending, 0);
+  assert.equal((await teams.inspect(orphan.id)).state, 'CANCELLED');
+
+  const persisted = await restarted.inspect(program.id);
+  assert.equal(persisted.state, 'PENDING');
+  assert.equal(persisted.targets[0]?.missionId, undefined);
+});
+
+test('stage8 successful parent commit clears durable child compensation intent', async (t) => {
+  const state = await tempDir(t);
+  const teams = new TeamCoordinator(state);
+  const org = new OrganizationCoordinator(state, teams);
+  const program = await org.create({
+    objective: 'Committed rollout',
+    policy: { allowedScopePrefixes: ['org:commit'] },
+    targets: [{ key: 'canary', scopeKey: 'org:commit:canary', workItems: work('canary') }]
+  });
+  const started = await org.start(program.id);
+  assert.ok(started.targets[0]?.missionId);
+  const pending = await new DurableCompensationJournal(state).pending('organization');
+  assert.equal(pending.length, 0);
 });

@@ -2,7 +2,7 @@ import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'n
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
@@ -161,6 +161,49 @@ export class ProcessProvider implements CapabilityProvider {
         durationMs: Math.round(performance.now() - started)
       };
     }
+  }
+
+  async reconcile(
+    request: ProviderReconciliationRequest,
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    const action = request.action;
+    if (action.capability === 'process.manage' && String(action.input.operation ?? '') === 'terminate') {
+      if (process.platform !== 'win32') return processReconciliation('uncertain', 'Process reconciliation is certified only on Windows.');
+      const pid = boundedInteger(action.input.pid, 0, 1, 0x7fff_ffff);
+      const expectedFingerprint = String(action.input.expectedFingerprint ?? '').toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(expectedFingerprint)) {
+        return processReconciliation('uncertain', 'Process termination reconciliation requires the original fingerprint.');
+      }
+      try {
+        const rows = await runTasklistVerbose(context.signal, pid);
+        const exact = rows.find((entry) => entry.pid === pid && entry.fingerprint === expectedFingerprint);
+        if (exact) return processReconciliation('not_applied', 'The exact inspected process identity is still present.');
+        return processReconciled(action, this.name, 'The exact inspected process identity is no longer present.', {
+          operation: 'terminate',
+          pid,
+          fingerprint: expectedFingerprint
+        });
+      } catch (error) {
+        return processReconciliation('uncertain', error instanceof Error ? error.message : 'Process reconciliation failed.');
+      }
+    }
+
+    if (action.capability === 'terminal.session' && String(action.input.operation ?? '') === 'terminate') {
+      let sessionId: string;
+      try { sessionId = requiredSessionId(action.input.sessionId); }
+      catch { return processReconciliation('uncertain', 'Managed-session termination reconciliation requires a valid sessionId.'); }
+      const session = this.#sessions.get(sessionId);
+      if (!session) {
+        return processReconciliation('uncertain', 'Managed session is not present in this provider instance; restart history cannot be inferred.');
+      }
+      if (session.state === 'running') {
+        return processReconciliation('not_applied', 'Managed session is still running.');
+      }
+      return processReconciled(action, this.name, 'Managed session is no longer running.', this.#sessionSummary(session));
+    }
+
+    return processReconciliation('uncertain', 'Process provider cannot prove the outcome of this mutation from current state.');
   }
 
   async #session(action: ActionRequest, started: number, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
@@ -419,6 +462,37 @@ export class ProcessProvider implements CapabilityProvider {
     }));
     this.#sessions.clear();
   }
+}
+
+function processReconciliation(
+  status: ProviderReconciliationResult['status'],
+  message: string
+): ProviderReconciliationResult {
+  return {
+    status,
+    evidence: [evidence('process_reconciliation', status === 'completed' ? 'pass' : 'info', message)]
+  };
+}
+
+function processReconciled(
+  action: ActionRequest,
+  provider: string,
+  message: string,
+  output: Record<string, unknown>
+): ProviderReconciliationResult {
+  const reconciledEvidence = [
+    evidence('process_reconciliation', 'pass', message, output),
+    evidence('postcondition', 'pass', 'Process reconciliation used current identity state.', output)
+  ];
+  const result: ActionResult = {
+    ok: true,
+    capability: action.capability,
+    provider,
+    output: { ...output, reconciled: true },
+    evidence: reconciledEvidence,
+    durationMs: 0
+  };
+  return { status: 'completed', result, evidence: reconciledEvidence };
 }
 
 function failure(action: ActionRequest, provider: string, started: number, codeOrError: string | OperatorError, message?: string): ActionResult {

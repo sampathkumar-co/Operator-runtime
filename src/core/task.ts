@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ActionRisk, Evidence, ExecutionPhase, SideEffectState, TaskState } from './types.ts';
+import type { ActionRisk, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 export interface TaskNode {
@@ -88,6 +88,7 @@ export interface TaskCapsule {
   authorizedScope: string[];
   prohibitedScope: string[];
   successConditions: string[];
+  intent?: IntentBinding;
   state: TaskState;
   nodes: TaskNode[];
   evidence: Evidence[];

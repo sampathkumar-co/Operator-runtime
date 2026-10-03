@@ -594,14 +594,33 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('file.write', {
     title: 'Write project file',
-    description: 'Atomically write a file inside an authorized root. Supply expectedSha256 after reading an existing file to prevent stale overwrites.',
+    description: 'Write an authorized file using one of three closed semantics: write (atomic write, optional SHA precondition), create (create-only and refuse overwrite), or replace (destructive SHA-guarded replacement of an existing file).',
     inputSchema: z.object({
+      mode: z.enum(['write', 'create', 'replace']).default('write'),
       path: z.string().min(1),
       content: z.string(),
       expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i).optional()
     }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path, content, expectedSha256 }) => invoke('file.write', 'write', { path, content, expectedSha256 }, path));
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  }, async ({ mode, path, content, expectedSha256 }) => {
+    if (mode === 'replace' && !expectedSha256) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'file.write replace requires expectedSha256 from a fresh file.read.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'file.replace',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'PRECONDITION_REQUIRED', message: 'file.replace requires expectedSha256.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    const capability = mode === 'create' ? 'file.create' : mode === 'replace' ? 'file.replace' : 'file.write';
+    const risk = mode === 'replace' ? 'destructive' : 'write';
+    return invoke(capability, risk, { path, content, expectedSha256 }, path);
+  });
 
   server.registerTool('file.info', {
     title: 'Inspect file or directory metadata',
@@ -641,14 +660,17 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   });
 
   server.registerTool('git.status', {
-    title: 'Git status',
-    description: 'Read repository status using the Git CLI directly rather than visual UI automation.',
+    title: 'Inspect Git repository state',
+    description: 'Read structured repository status or resolve the canonical repository root using Git directly rather than visual UI automation.',
     inputSchema: z.object({
+      operation: z.enum(['status', 'root']).default('status'),
       cwd: z.string().min(1), offset: z.number().int().min(0).max(1000000).default(0),
       maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd, offset, maxBytes }) => invoke('git.status', 'read', { cwd, offset, maxBytes }, cwd));
+  }, async ({ operation, cwd, offset, maxBytes }) => operation === 'root'
+    ? invoke('git.rev-parse', 'read', { cwd }, cwd)
+    : invoke('git.status', 'read', { cwd, offset, maxBytes }, cwd));
 
   server.registerTool('git.diff', {
     title: 'Git diff',
@@ -738,6 +760,25 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedCurrentFingerprint,
     timeoutMs
   }, path));
+
+  server.registerTool('compute.run', {
+    title: 'Run isolated sandboxed compute',
+    description: 'Execute bounded JavaScript or Python in a local Docker sandbox with no network, no host mounts, a read-only root filesystem, dropped Linux capabilities, no privilege escalation, and bounded CPU/memory/PID/output limits. Images are locally configured by Operator and are never caller-selected.',
+    inputSchema: z.object({
+      language: z.enum(['javascript', 'python']),
+      code: z.string().min(1).max(256 * 1024),
+      timeoutMs: z.number().int().min(1000).max(120000).default(30000),
+      memoryMb: z.number().int().min(32).max(512).default(128),
+      cpu: z.number().min(0.1).max(2).default(0.5)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ language, code, timeoutMs, memoryMb, cpu }) => invoke('compute.run', 'write', {
+    language,
+    code,
+    timeoutMs,
+    memoryMb,
+    cpu
+  }));
 
   const postgresIdentifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/);
   const postgresFilter = z.object({
@@ -1005,10 +1046,10 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations, or focus/close an exact observed tab. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Optional expect binds an explicit post-state contract so uncertain transport loss can be reconciled without replay. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range']),
+      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range', 'tab_focus', 'tab_close']),
       target: z.object({
         ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),
@@ -1016,7 +1057,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
         role: z.string().min(1).max(100).optional(),
         name: z.string().min(1).max(500).optional(),
         renderedColor: z.string().min(1).max(64).optional()
-      }),
+      }).optional(),
       toTarget: z.object({
         ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),
@@ -1036,10 +1077,36 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       value: z.union([
         z.string().max(100000),
         z.array(z.string().max(100000)).min(1).max(100)
-      ]).optional()
+      ]).optional(),
+      expect: z.object({
+        exists: z.boolean().optional(),
+        value: z.string().max(100000).optional(),
+        checked: z.boolean().optional(),
+        selected: z.boolean().optional(),
+        expanded: z.boolean().optional(),
+        current: z.string().max(256).optional(),
+        active: z.boolean().optional(),
+        urlContains: z.string().min(1).max(2000).optional(),
+        titleContains: z.string().min(1).max(500).optional(),
+        textContains: z.string().min(1).max(1000).optional()
+      }).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end }) => invoke('browser.interact', 'external', { targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end }, targetId));
+  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, expect }) => {
+    if (operation === 'tab_focus') return invoke('browser.tab.focus', 'write', { targetId }, targetId);
+    if (operation === 'tab_close') return invoke('browser.tab.close', 'write', { targetId }, targetId);
+    if (!target) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'Browser control interaction requires an observed semantic target.' }],
+        structuredContent: {
+          ok: false, capability: 'browser.interact', provider: 'mcp.validation', evidence: [],
+          error: { code: 'BROWSER_TARGET_REQUIRED', message: 'Browser control interaction requires target.', retryable: false }, durationMs: 0
+        }
+      };
+    }
+    return invoke('browser.interact', 'external', { targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, expect }, targetId);
+  });
 
   const appSelector = z.object({
     name: z.string().min(1).max(512).optional(),

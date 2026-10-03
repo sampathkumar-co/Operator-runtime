@@ -237,3 +237,45 @@ test('managed browser ignores healthy non-managed profile endpoints unless expli
   t.after(() => launcher.close());
   await assert.rejects(launcher.ensureEndpoint(), /managed auto-launch is disabled/);
 });
+
+
+test('managed browser delegates reconciliation without replay or launcher recovery', async () => {
+  let reconciliations = 0;
+  let launches = 0;
+  const delegate: CapabilityProvider = {
+    name: 'fake.cdp.reconcile',
+    supports: () => true,
+    score: () => FAKE_SCORE,
+    execute: async () => { throw new Error('execute must not be called during reconciliation'); },
+    reconcile: async ({ action }) => {
+      reconciliations += 1;
+      const result: ActionResult = {
+        ok: true,
+        capability: action.capability,
+        provider: 'fake.cdp.reconcile',
+        output: { targetId: 'tab-1', closed: true },
+        evidence: [{ kind: 'browser_reconciliation', status: 'pass', message: 'Target is absent.', timestamp: new Date().toISOString() }],
+        durationMs: 0
+      };
+      return { status: 'completed', result, evidence: result.evidence };
+    }
+  };
+  const provider = new ManagedBrowserProvider({
+    endpoint: 'http://127.0.0.1:9222',
+    delegate,
+    launcher: { async ensureEndpoint() { launches += 1; return 'http://127.0.0.1:9222'; }, close() {} }
+  });
+  const outcome = await provider.reconcile!({
+    action: {
+      id: 'managed-reconcile-close',
+      capability: 'browser.tab.close',
+      risk: 'write',
+      input: { targetId: 'tab-1' },
+      provenance: { kind: 'runtime' }
+    }
+  });
+  assert.equal(outcome.status, 'completed');
+  assert.equal(outcome.result?.provider, 'browser.managed');
+  assert.equal(reconciliations, 1);
+  assert.equal(launches, 0);
+});

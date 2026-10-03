@@ -311,3 +311,44 @@ test('Windows process.manage requires fresh identity fingerprint and terminates 
   });
   assert.equal(terminated.ok, true, terminated.error?.message);
 });
+
+
+test('Windows process termination reconciliation distinguishes still-present from completed exact identity', async (ctx) => {
+  if (process.platform !== 'win32') return ctx.skip('Windows-only process reconciliation');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-reconcile-'));
+  ctx.after(() => fs.rm(root, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, windowsHide: true, stdio: 'ignore' });
+  assert.ok(child.pid);
+  ctx.after(() => { try { child.kill(); } catch {} });
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+
+  let inspected: any;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = await provider.execute({
+      id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+      input: { pid: child.pid, limit: 10 }, provenance: { kind: 'runtime' as const }
+    });
+    if (result.ok && (result.output as any).processes.length) { inspected = (result.output as any).processes[0]; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(inspected);
+
+  const action = {
+    id: 'process-reconcile-terminate',
+    capability: 'process.manage',
+    risk: 'destructive' as const,
+    input: { operation: 'terminate', pid: child.pid, expectedFingerprint: inspected.fingerprint },
+    provenance: { kind: 'runtime' as const }
+  };
+
+  const before = await provider.reconcile({ action });
+  assert.equal(before.status, 'not_applied');
+
+  const terminated = await provider.execute(action);
+  assert.equal(terminated.ok, true, terminated.error?.message);
+
+  const after = await provider.reconcile({ action });
+  assert.equal(after.status, 'completed');
+  assert.equal(after.result?.ok, true);
+  assert.equal((after.result?.output as any).fingerprint, inspected.fingerprint);
+});

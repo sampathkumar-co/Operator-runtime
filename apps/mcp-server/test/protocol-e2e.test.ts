@@ -246,6 +246,28 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
 
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
+  const browserInteract = tools.tools.find((tool) => tool.name === 'browser.interact');
+  assert.ok(browserInteract, 'browser.interact must remain on the private Developer MCP surface');
+  const browserSchema = browserInteract.inputSchema as any;
+  assert.equal(browserSchema.required.includes('target'), false, 'tab focus/close must not require an element selector');
+  assert.equal(browserSchema.properties.operation.enum.includes('tab_focus'), true);
+  assert.equal(browserSchema.properties.operation.enum.includes('tab_close'), true);
+  assert.ok(browserSchema.properties.expect, 'browser.interact must expose an explicit post-state reconciliation contract');
+  const computeRun = tools.tools.find((tool) => tool.name === 'compute.run');
+  assert.ok(computeRun, 'sandboxed compute runtime must be reachable from the private Developer MCP surface');
+  const computeSchema = computeRun.inputSchema as any;
+  assert.deepEqual(computeSchema.properties.language.enum, ['javascript', 'python']);
+  assert.equal(computeSchema.properties.code.maxLength, 256 * 1024);
+  assert.equal(computeSchema.properties.memoryMb.maximum, 512);
+  assert.equal(computeSchema.properties.cpu.maximum, 2);
+  const fileWrite = tools.tools.find((tool) => tool.name === 'file.write');
+  assert.ok(fileWrite, 'file write modes must remain on the private Developer MCP surface');
+  const fileWriteSchema = fileWrite.inputSchema as any;
+  assert.deepEqual(fileWriteSchema.properties.mode.enum, ['write', 'create', 'replace']);
+  const gitStatus = tools.tools.find((tool) => tool.name === 'git.status');
+  assert.ok(gitStatus, 'Git root resolution must remain reachable through the Git status surface');
+  const gitStatusSchema = gitStatus.inputSchema as any;
+  assert.deepEqual(gitStatusSchema.properties.operation.enum, ['status', 'root']);
 
   const durableTaskId = crypto.randomUUID();
   const submittedTask = await client.callTool({

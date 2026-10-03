@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { PathScope } from './path-scope.ts';
@@ -87,6 +87,88 @@ export class FilesystemProvider implements CapabilityProvider {
         durationMs: Math.round(performance.now() - started)
       };
     }
+  }
+
+  async reconcile({ action }: { action: ActionRequest; priorResult?: ActionResult }): Promise<ProviderReconciliationResult> {
+    if (['file.write', 'file.create', 'file.replace'].includes(action.capability)) {
+      const requested = requiredString(action.input.path, 'path');
+      if (typeof action.input.content !== 'string') return reconciliation('uncertain', 'File write content is unavailable for reconciliation.');
+      const expectedSha = sha256(Buffer.from(action.input.content, 'utf8'));
+      try {
+        return await this.#scope.withExisting(requested, async (filePath) => {
+          await this.#pathLeaseHook?.(action.capability, filePath);
+          const stat = await fs.lstat(filePath);
+          if (!stat.isFile() || stat.isSymbolicLink()) return reconciliation('uncertain', 'Write target is not a regular file during reconciliation.');
+          const actualSha = sha256(await fs.readFile(filePath));
+          if (actualSha !== expectedSha) return reconciliation('not_applied', 'Current file bytes do not match the requested write.');
+          const result: ActionResult = {
+            ok: true,
+            capability: action.capability,
+            provider: this.name,
+            output: { path: filePath, afterSha256: actualSha, reconciled: true },
+            evidence: [evidence('filesystem_reconciliation', 'pass', 'Current file bytes prove the requested write is present.', { afterSha256: actualSha })],
+            durationMs: 0
+          };
+          return { status: 'completed', result, evidence: result.evidence };
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error instanceof OperatorError && error.code === 'TARGET_MISSING')) {
+          return reconciliation('not_applied', 'Write target is absent during reconciliation.');
+        }
+        throw error;
+      }
+    }
+
+    if (action.capability === 'file.manage') {
+      const operation = String(action.input.operation ?? '');
+      if (operation === 'mkdir') {
+        const requested = requiredString(action.input.path, 'path');
+        try {
+          return await this.#scope.withExisting(requested, async (target) => {
+            const stat = await fs.lstat(target);
+            return stat.isDirectory() && !stat.isSymbolicLink()
+              ? reconciliation('completed', 'Requested directory exists after uncertain execution.', action, this.name)
+              : reconciliation('uncertain', 'Requested mkdir target exists but is not a real directory.');
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error instanceof OperatorError && error.code === 'TARGET_MISSING')) {
+            return reconciliation('not_applied', 'Requested directory does not exist.');
+          }
+          throw error;
+        }
+      }
+      if (operation === 'remove') {
+        const requested = requiredString(action.input.path, 'path');
+        try {
+          await this.#scope.withExisting(requested, async () => undefined);
+          return reconciliation('not_applied', 'Remove target still exists.');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error instanceof OperatorError && error.code === 'TARGET_MISSING')) {
+            return reconciliation('completed', 'Remove target is absent after uncertain execution.', action, this.name);
+          }
+          throw error;
+        }
+      }
+      if (operation === 'copy' || operation === 'move') {
+        const sourceInput = requiredString(action.input.source, 'source');
+        const destinationInput = requiredString(action.input.destination, 'destination');
+        const source = await pathSnapshot(this.#scope, sourceInput);
+        const destination = await pathSnapshot(this.#scope, destinationInput);
+        if (operation === 'copy') {
+          if (!destination.exists) return reconciliation('not_applied', 'Copy destination is absent.');
+          if (source.exists && source.sha256 && destination.sha256 === source.sha256) {
+            return reconciliation('completed', 'Copy destination matches current source bytes.', action, this.name);
+          }
+          return reconciliation('uncertain', 'Copy destination cannot be proven to match the source.');
+        }
+        if (!source.exists && destination.exists) {
+          return reconciliation('completed', 'Move source is absent and destination exists.', action, this.name);
+        }
+        if (source.exists && !destination.exists) return reconciliation('not_applied', 'Move source remains and destination is absent.');
+        return reconciliation('uncertain', 'Move state is ambiguous and requires explicit review.');
+      }
+    }
+    return reconciliation('uncertain', 'Filesystem provider has no reconciliation contract for this action.');
   }
 
   async #read(action: ActionRequest, started: number): Promise<ActionResult> {
@@ -465,6 +547,41 @@ export class FilesystemProvider implements CapabilityProvider {
         durationMs: Math.round(performance.now() - started)
       };
     });
+  }
+}
+
+function reconciliation(
+  status: ProviderReconciliationResult['status'],
+  message: string,
+  action?: ActionRequest,
+  provider = 'filesystem.native'
+): ProviderReconciliationResult {
+  const item = evidence('filesystem_reconciliation', status === 'completed' ? 'pass' : 'info', message);
+  if (status !== 'completed' || !action) return { status, evidence: [item] };
+  const result: ActionResult = {
+    ok: true,
+    capability: action.capability,
+    provider,
+    output: { reconciled: true },
+    evidence: [item],
+    durationMs: 0
+  };
+  return { status, result, evidence: result.evidence };
+}
+
+async function pathSnapshot(scope: PathScope, requested: string): Promise<{ exists: boolean; sha256?: string }> {
+  try {
+    return await scope.withExisting(requested, async (target) => {
+      const stat = await fs.lstat(target);
+      if (stat.isSymbolicLink()) return { exists: true };
+      if (stat.isFile()) return { exists: true, sha256: sha256(await fs.readFile(target)) };
+      return { exists: true };
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' || (error instanceof OperatorError && error.code === 'TARGET_MISSING')) {
+      return { exists: false };
+    }
+    throw error;
   }
 }
 

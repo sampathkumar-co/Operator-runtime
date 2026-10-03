@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
@@ -37,6 +37,38 @@ type DownloadTracker = {
   done: Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>;
   stop(): void;
 };
+
+function browserReconciliation(
+  status: ProviderReconciliationResult['status'],
+  message: string
+): ProviderReconciliationResult {
+  return {
+    status,
+    evidence: [evidence('browser_reconciliation', status === 'completed' ? 'pass' : 'info', message)]
+  };
+}
+
+function browserReconciled(
+  action: ActionRequest,
+  provider: string,
+  message: string,
+  output: Record<string, unknown>,
+  extraEvidence: ReturnType<typeof evidence>[] = []
+): ProviderReconciliationResult {
+  const reconciledEvidence = [
+    evidence('browser_reconciliation', 'pass', message, output),
+    ...extraEvidence
+  ];
+  const result: ActionResult = {
+    ok: true,
+    capability: action.capability,
+    provider,
+    output: { ...output, reconciled: true },
+    evidence: reconciledEvidence,
+    durationMs: 0
+  };
+  return { status: 'completed', result, evidence: reconciledEvidence };
+}
 
 export class BrowserCdpProvider implements CapabilityProvider {
   readonly name = 'browser.cdp';
@@ -87,6 +119,94 @@ export class BrowserCdpProvider implements CapabilityProvider {
     this.#sessions.closeAll();
     this.#browserSession?.close();
     this.#browserSession = undefined;
+  }
+
+  async reconcile(
+    { action }: { action: ActionRequest; priorResult?: ActionResult },
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    try {
+      if (action.capability === 'browser.navigate') {
+        const requestedUrl = validateNavigationUrl(String(action.input.url ?? ''));
+        const tabs = await this.#listTargets(context.signal);
+        const requestedTargetId = typeof action.input.targetId === 'string' ? action.input.targetId : undefined;
+        if (requestedTargetId) {
+          const target = tabs.find((item) => item.id === requestedTargetId);
+          if (target && typeof target.url === 'string' && sameDestination(target.url, requestedUrl)) {
+            return browserReconciled(action, this.name, 'Fresh target discovery proves the requested browser destination.', {
+              targetId: target.id, url: target.url, title: target.title
+            });
+          }
+          return browserReconciliation('uncertain', 'The requested browser target does not currently prove the navigation outcome.');
+        }
+        const matches = tabs.filter((item) => item.type === 'page' && typeof item.url === 'string' && sameDestination(item.url, requestedUrl));
+        if (matches.length === 1) {
+          const target = matches[0]!;
+          return browserReconciled(action, this.name, 'Fresh browser discovery found one page at the requested destination.', {
+            targetId: target.id, url: target.url, title: target.title
+          });
+        }
+        return browserReconciliation('uncertain', matches.length === 0
+          ? 'No current page proves the requested navigation outcome.'
+          : 'Multiple pages match the requested destination, so the original navigation target is ambiguous.');
+      }
+
+      if (action.capability === 'browser.tab.close') {
+        const targetId = String(action.input.targetId ?? '');
+        if (!targetId) return browserReconciliation('uncertain', 'Tab-close reconciliation requires targetId.');
+        const exists = (await this.#listTargets(context.signal)).some((item) => item.id === targetId);
+        return exists
+          ? browserReconciliation('not_applied', 'The exact browser target still exists.')
+          : browserReconciled(action, this.name, 'Fresh target discovery proves the requested browser target is closed.', { targetId, closed: true });
+      }
+
+      if (action.capability === 'browser.tab.focus') {
+        const targetId = String(action.input.targetId ?? '');
+        if (!targetId) return browserReconciliation('uncertain', 'Tab-focus reconciliation requires targetId.');
+        const tabs = await this.#listTargets(context.signal);
+        const target = tabs.find((item) => item.id === targetId);
+        if (!target) return browserReconciliation('uncertain', 'Focused target no longer exists.');
+        const session = this.#sessions.get(target);
+        const evaluated = await session.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true });
+        const visibilityState = unwrapRuntimeValue(evaluated);
+        return visibilityState === 'visible'
+          ? browserReconciled(action, this.name, 'Target document reports visible state during reconciliation.', { targetId, visibilityState })
+          : browserReconciliation('not_applied', 'Target document is not visible during reconciliation.');
+      }
+
+      if (action.capability === 'browser.interact') {
+        const targetId = String(action.input.targetId ?? '');
+        const expect = action.input.expect;
+        if (!targetId || !expect || typeof expect !== 'object' || Array.isArray(expect)) {
+          return browserReconciliation('uncertain', 'Generic browser interaction has no explicit post-state verification contract.');
+        }
+        const verificationAction: ActionRequest = {
+          id: `${action.id}:reconcile`,
+          capability: 'browser.verify',
+          risk: 'read',
+          input: {
+            targetId,
+            ...(action.input.target !== undefined ? { target: action.input.target } : {}),
+            expect
+          },
+          provenance: { kind: 'runtime', source: 'provider-reconciliation' },
+          ...(action.taskId ? { taskId: action.taskId } : {}),
+          ...(action.intent ? { intent: action.intent } : {})
+        };
+        const verification = await this.execute(verificationAction, context);
+        if (!verification.ok) {
+          return browserReconciliation('uncertain', 'Explicit browser post-state verification did not prove the interaction outcome.');
+        }
+        return browserReconciled(action, this.name, 'Explicit browser verification proves the interaction post-state.', {
+          targetId,
+          verification: verification.output ?? null
+        }, verification.evidence);
+      }
+
+      return browserReconciliation('uncertain', 'Browser provider has no reconciliation contract for this capability.');
+    } catch (error) {
+      return browserReconciliation('uncertain', error instanceof Error ? error.message : 'Browser reconciliation failed.');
+    }
   }
 
   async #inspect(action: ActionRequest, started: number, signal?: AbortSignal): Promise<ActionResult> {

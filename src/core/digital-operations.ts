@@ -448,7 +448,11 @@ export class DigitalOperationsLayer {
     if (operation.mode === 'team') {
       if (!operation.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Verified team operation has no mission.');
       const mission = await this.#teams.inspect(operation.teamMissionId);
-      const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.state === 'COMPLETED' && item.result?.verificationPassed === true);
+      const verifier = mission.workItems.find((item) => item.role === 'verifier'
+        && item.state === 'COMPLETED'
+        && item.result?.verificationPassed === true
+        && typeof item.result.verificationDigest === 'string'
+        && /^[0-9a-f]{64}$/i.test(item.result.verificationDigest));
       if (!verifier?.result) throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Verified team operation has no accepted verifier result.');
       evidence = { missionId: mission.id, verifierWorkItemId: verifier.id, result: verifier.result };
     } else {
@@ -464,7 +468,11 @@ export class DigitalOperationsLayer {
         if (mission.state !== 'VERIFIED') {
           throw new OperatorError('OPERATIONS_VERIFIER_MISSING', `Organization target ${target.key} mission is not verified.`);
         }
-        const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.state === 'COMPLETED' && item.result?.verificationPassed === true);
+        const verifier = mission.workItems.find((item) => item.role === 'verifier'
+          && item.state === 'COMPLETED'
+          && item.result?.verificationPassed === true
+          && typeof item.result.verificationDigest === 'string'
+          && /^[0-9a-f]{64}$/i.test(item.result.verificationDigest));
         if (!verifier?.result) {
           throw new OperatorError('OPERATIONS_VERIFIER_MISSING', `Organization target ${target.key} has no accepted verifier result.`);
         }

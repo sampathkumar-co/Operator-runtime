@@ -157,3 +157,49 @@ gitTest('Git checkpoint fails closed before a repository-local content filter ca
   assert.equal(result.error?.code, 'GIT_LOCAL_FILTER_DENIED');
   await assert.rejects(fs.access(marker));
 });
+
+
+gitTest('Git checkpoint restore reconciliation proves not-applied and completed states without replay', async (t) => {
+  const root = await createRepo(t);
+  const provider = new GitCheckpointProvider({ allowedRoots: [root] });
+
+  await fs.writeFile(path.join(root, 'base.txt'), 'checkpoint target\n');
+  const created = await provider.execute({
+    id: 'reconcile-checkpoint-create',
+    capability: 'git.checkpoint.create',
+    risk: 'write',
+    input: { cwd: root },
+    provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(created.ok, true, created.error?.message);
+  const checkpointId = String((created.output as any).id);
+
+  await fs.writeFile(path.join(root, 'base.txt'), 'pre-restore state\n');
+  const inspected = await provider.execute({
+    id: 'reconcile-checkpoint-inspect',
+    capability: 'git.checkpoint.inspect',
+    risk: 'read',
+    input: { cwd: root },
+    provenance: { kind: 'runtime' }
+  });
+  assert.equal(inspected.ok, true);
+  const preRestoreFingerprint = String((inspected.output as any).current.fingerprint);
+  const restoreAction = {
+    id: 'reconcile-checkpoint-restore',
+    capability: 'git.checkpoint.restore',
+    risk: 'destructive' as const,
+    input: { cwd: root, checkpointId, expectedCurrentFingerprint: preRestoreFingerprint },
+    provenance: { kind: 'chatgpt' as const }
+  };
+
+  const before = await provider.reconcile({ action: restoreAction });
+  assert.equal(before.status, 'not_applied');
+
+  const restored = await provider.execute(restoreAction);
+  assert.equal(restored.ok, true, restored.error?.message);
+
+  const after = await provider.reconcile({ action: restoreAction, priorResult: restored });
+  assert.equal(after.status, 'completed');
+  assert.equal(after.result?.ok, true);
+  assert.equal(await fs.readFile(path.join(root, 'base.txt'), 'utf8'), 'checkpoint target\n');
+});

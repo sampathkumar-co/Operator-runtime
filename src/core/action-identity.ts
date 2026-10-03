@@ -11,7 +11,8 @@ export function actionHash(action: ActionRequest): string {
     risk: action.risk,
     input: action.input,
     provenance: action.provenance,
-    target: action.target ?? null
+    target: action.target ?? null,
+    intent: action.intent ?? null
   }), 'utf8').digest('hex');
 }
 

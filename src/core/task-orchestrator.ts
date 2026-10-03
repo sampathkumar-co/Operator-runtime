@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -16,6 +16,9 @@ import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
+import type { IntentRegistry } from './intent-registry.ts';
+import type { ActionTransitionJournal } from './action-transition-journal.ts';
+import { validIntentBinding } from './intent-registry.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -118,6 +121,7 @@ export interface SubmitTaskOptions {
   maxSteps?: number;
   maxAttemptsPerStep?: number;
   timeoutMs?: number;
+  intent?: IntentBinding;
 }
 
 export class TaskOrchestrator {
@@ -131,6 +135,8 @@ export class TaskOrchestrator {
   #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
   #resourceLeases?: ResourceLeaseStore;
+  #intentRegistry?: IntentRegistry;
+  #actionJournal?: ActionTransitionJournal;
   #wallNow: () => number;
   #monotonicNow: () => number;
 
@@ -141,6 +147,8 @@ export class TaskOrchestrator {
     planners?: TaskPlanner[];
     executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
     resourceLeases?: ResourceLeaseStore;
+    intentRegistry?: IntentRegistry;
+    actionJournal?: ActionTransitionJournal;
     wallNow?: () => number;
     monotonicNow?: () => number;
   }) {
@@ -151,6 +159,8 @@ export class TaskOrchestrator {
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
     this.#resourceLeases = options.resourceLeases;
+    this.#intentRegistry = options.intentRegistry;
+    this.#actionJournal = options.actionJournal;
     this.#wallNow = options.wallNow ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
   }
@@ -168,8 +178,13 @@ export class TaskOrchestrator {
       successConditions: boundedTextArray(input.successConditions, 1000, 16_384, 'successConditions'),
       maxSteps: boundedInteger(input.maxSteps, 1, 100, 20),
       maxAttemptsPerStep: boundedInteger(input.maxAttemptsPerStep, 1, 5, 2),
-      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000)
+      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000),
+      ...(input.intent ? { intent: validIntentBinding(input.intent) } : {})
     };
+    if (normalized.intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Task intent binding requires an IntentRegistry.');
+      await this.#intentRegistry.assertExecutable(normalized.intent);
+    }
     const requestId = input.requestId === undefined ? undefined : validTaskRequestId(input.requestId);
     if (requestId) {
       try {
@@ -188,7 +203,8 @@ export class TaskOrchestrator {
       interpretedObjective: `${goal.kind}:${normalized.userObjective}`,
       authorizedScope: normalized.authorizedScope,
       prohibitedScope: normalized.prohibitedScope,
-      successConditions: normalized.successConditions
+      successConditions: normalized.successConditions,
+      ...(normalized.intent ? { intent: normalized.intent } : {})
     });
     if (requestId) task.id = requestId;
     task.execution = {
@@ -245,6 +261,23 @@ export class TaskOrchestrator {
   async #run(taskId: string, approvedActionIds: string[], authorization: TaskRunAuthorization, assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
+    if (task.intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Task intent binding requires an IntentRegistry.');
+      try {
+        await this.#intentRegistry.assertExecutable(task.intent);
+      } catch (error) {
+        if (error instanceof OperatorError && (error.code === 'INTENT_STALE' || error.code === 'INTENT_NOT_EXECUTABLE')) {
+          task.state = 'CANCELLED';
+          task.evidence.push(evidence('intent_superseded', 'info', 'Task was cancelled because a newer conversation intent superseded its durable binding.', {
+            conversationId: task.intent.conversationId,
+            intentVersion: task.intent.intentVersion
+          }));
+          await this.#store.put(task);
+          return task;
+        }
+        throw error;
+      }
+    }
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
     if (task.state === 'PAUSED') return task;
     const execution = task.execution;
@@ -264,8 +297,24 @@ export class TaskOrchestrator {
       task = await this.#store.get(task.id);
       await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
+      if (task.intent) {
+        try {
+          await this.#intentRegistry!.assertExecutable(task.intent);
+        } catch (error) {
+          if (error instanceof OperatorError && (error.code === 'INTENT_STALE' || error.code === 'INTENT_NOT_EXECUTABLE')) {
+            task.state = 'CANCELLED';
+            task.evidence.push(evidence('intent_superseded', 'info', 'Task stopped before the next environment action because a newer intent superseded this execution.', {
+              conversationId: task.intent.conversationId,
+              intentVersion: task.intent.intentVersion
+            }));
+            await this.#persistRunState(task, assertLease);
+            return task;
+          }
+          throw error;
+        }
+      }
       const current = task.execution!;
-      const interrupted = this.#markInterrupted(task);
+      const interrupted = await this.#markInterrupted(task);
       if (interrupted > 0) {
         current.deadlineAt = new Date(this.#wallNow() + current.timeoutMs).toISOString();
         activeDeadline = this.#monotonicNow() + current.timeoutMs;
@@ -336,18 +385,22 @@ export class TaskOrchestrator {
       if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
 
       const inputHash = sha256(canonicalJson(decision.input));
-      if (detectPlannerLoop(current.records, decision.key, inputHash)) {
+      const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
+      const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
+      if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
         return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, assertLease);
       }
-      const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
-      const priorAttempts = current.records.filter((record) => record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED').length;
-      if (priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      const priorAttempts = current.records.filter((record) =>
+        record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED' && record.state !== 'STARTED'
+      ).length;
+      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
       catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
-      const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
-      const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
+      const replayRecord = blockedReplay ?? recoveryReplay;
+      const attempt = replayRecord?.attempt ?? priorAttempts + 1;
+      const actionId = replayRecord?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
       const executionNodeKey = stableTaskExecutionNodeKey(decision.key, attempt, inputHash);
       const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
       let node = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId);
@@ -369,11 +422,11 @@ export class TaskOrchestrator {
         dependsOn: priorNode ? [priorNode.id] : []
       });
       setNodeState(task, node.id, 'RUNNING');
-      const record: TaskActionRecord = blockedReplay ?? {
+      const record: TaskActionRecord = replayRecord ?? {
         stepKey: decision.key, actionId, capability: decision.capability, risk, inputHash, attempt,
         state: 'STARTED', startedAt: new Date().toISOString(), evidence: []
       };
-      if (!blockedReplay) current.records.push(record);
+      if (!replayRecord) current.records.push(record);
       else {
         record.state = 'STARTED';
         record.startedAt = new Date().toISOString();
@@ -406,7 +459,8 @@ export class TaskOrchestrator {
       const action: ActionRequest = {
         id: actionId, taskId: task.id, capability: decision.capability, risk,
         input: structuredClone(decision.input), provenance: { kind: 'trusted_policy', source: `task-planner:${planner.id}` },
-        ...(decision.target ? { target: decision.target } : {})
+        ...(decision.target ? { target: decision.target } : {}),
+        ...(task.intent ? { intent: task.intent } : {})
       };
       const basePermissions = authorization.permissionProvider
         ? await authorization.permissionProvider(action)
@@ -833,11 +887,26 @@ export class TaskOrchestrator {
     }
   }
 
-  #markInterrupted(task: TaskCapsule): number {
+  async #markInterrupted(task: TaskCapsule): Promise<number> {
     const execution = task.execution;
     if (!execution) return 0;
     let count = 0;
     for (const record of execution.records) if (record.state === 'STARTED') {
+      if (this.#actionJournal) {
+        try {
+          const entry = await this.#actionJournal.inspect(record.actionId);
+          record.evidence.push(evidence(
+            'task_recovery_journal',
+            'info',
+            'Preserved the original action identity for crash recovery through the central transition journal.',
+            { actionId: record.actionId, journalState: entry.state }
+          ));
+          count += 1;
+          continue;
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'ACTION_JOURNAL_NOT_FOUND') throw error;
+        }
+      }
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
@@ -1830,6 +1899,7 @@ function sameTaskSubmission(
     maxSteps: number;
     maxAttemptsPerStep: number;
     timeoutMs: number;
+    intent?: IntentBinding;
   }
 ): boolean {
   const execution = task.execution;
@@ -1839,6 +1909,7 @@ function sameTaskSubmission(
     && canonicalJson(task.authorizedScope) === canonicalJson(normalized.authorizedScope)
     && canonicalJson(task.prohibitedScope) === canonicalJson(normalized.prohibitedScope)
     && canonicalJson(task.successConditions) === canonicalJson(normalized.successConditions)
+    && canonicalJson(task.intent ?? null) === canonicalJson(normalized.intent ?? null)
     && execution.plannerId === plannerId
     && execution.goalKind === goal.kind
     && canonicalJson(execution.plannerState.goal) === canonicalJson(goal)
@@ -1881,7 +1952,9 @@ function observe(result: ActionResult): TaskObservation {
   };
 }
 function detectPlannerLoop(records: TaskActionRecord[], stepKey: string, inputHash: string): boolean {
-  const signatures = records.filter((record) => record.state !== 'BLOCKED').map((record) => `${record.stepKey}:${record.inputHash}`);
+  const signatures = records
+    .filter((record) => record.state !== 'BLOCKED' && record.state !== 'STARTED')
+    .map((record) => `${record.stepKey}:${record.inputHash}`);
   signatures.push(`${stepKey}:${inputHash}`);
   for (const width of [1, 2, 3]) {
     if (signatures.length < 3 * width) continue;

@@ -6,6 +6,9 @@ import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '..
 import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import type { ActionRequest, ActionResult, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
+import type { AgentKernel } from '../../../src/core/agent-kernel.ts';
+import { validIntentBinding, type IntentRegistry } from '../../../src/core/intent-registry.ts';
+import type { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
@@ -92,6 +95,7 @@ function validateActionEnvelope(value: unknown): ActionRequest {
   const source = provenanceRaw.source === undefined ? undefined : boundedString(provenanceRaw.source, 'action.provenance.source', 512);
   const taskId = raw.taskId === undefined ? undefined : boundedString(raw.taskId, 'action.taskId', 256);
   const target = raw.target === undefined ? undefined : boundedString(raw.target, 'action.target', 4096);
+  const intent = raw.intent === undefined ? undefined : validIntentBinding(raw.intent);
   return {
     id,
     capability,
@@ -99,7 +103,8 @@ function validateActionEnvelope(value: unknown): ActionRequest {
     input: raw.input as Record<string, unknown>,
     provenance: { kind: provenanceRaw.kind as ActionRequest['provenance']['kind'], source },
     taskId,
-    target
+    target,
+    ...(intent ? { intent } : {})
   };
 }
 
@@ -196,6 +201,9 @@ function sendControlCenter(res: http.ServerResponse): void {
 
 export function createLocalAgentServer(options: {
   runtime: OperatorRuntime;
+  agentKernel?: AgentKernel;
+  intentRegistry?: IntentRegistry;
+  sagas?: DurableSagaKernel;
   token: string;
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
@@ -338,7 +346,9 @@ export function createLocalAgentServer(options: {
       : sessionPermissions;
     let result: ActionResult;
     try {
-      result = await options.runtime.execute(action, permissions, { signal });
+      result = options.agentKernel
+        ? await options.agentKernel.execute(action, permissions, { signal })
+        : await options.runtime.execute(action, permissions, { signal });
     } catch (error) {
       if (approvalLeaseId) {
         await options.approvals!.settle(action, approvalLeaseId, 'consume', approvalAuthority);
@@ -349,7 +359,7 @@ export function createLocalAgentServer(options: {
       const outcome = !result.ok && result.error?.sideEffectState === 'none' ? 'release' : 'consume';
       await options.approvals!.settle(action, approvalLeaseId, outcome, approvalAuthority);
     }
-    if (options.perception) {
+    if (options.perception && !options.agentKernel) {
       try {
         await publishPerceptionFromActionResult(options.perception, action, result);
       } catch (error) {
@@ -526,6 +536,138 @@ export function createLocalAgentServer(options: {
       return;
     }
     const requestPermissions = requestPermissionDecision.permissions;
+
+    const intentRoute = /^\/v1\/intents\/([A-Za-z0-9._:-]{1,128})$/.exec(pathname);
+    if (intentRoute && req.method === 'GET') {
+      if (!options.intentRegistry) {
+        send(res, 503, { ok: false, error: { code: 'INTENT_REGISTRY_NOT_CONFIGURED', message: 'Intent registry is not configured.' } });
+        return;
+      }
+      try {
+        const intent = await options.intentRegistry.current(intentRoute[1]!);
+        send(res, intent ? 200 : 404, intent
+          ? { ok: true, intent }
+          : { ok: false, error: { code: 'INTENT_NOT_FOUND', message: 'No current intent exists for this conversation.' } });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'INTENT_READ_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (intentRoute && req.method === 'POST') {
+      if (!options.intentRegistry) {
+        send(res, 503, { ok: false, error: { code: 'INTENT_REGISTRY_NOT_CONFIGURED', message: 'Intent registry is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const directive = String(body.directive ?? 'continue');
+        if (!['continue','refine','extend','pause','cancel','redirect','authorize','revoke'].includes(directive)) {
+          throw new OperatorError('INTENT_INPUT_INVALID', 'Intent directive is invalid.');
+        }
+        const intent = await options.intentRegistry.update(intentRoute[1]!, {
+          objective: String(body.objective ?? ''),
+          authorizedScope: Array.isArray(body.authorizedScope) ? body.authorizedScope.map(String) : [],
+          prohibitedScope: Array.isArray(body.prohibitedScope) ? body.prohibitedScope.map(String) : [],
+          directive: directive as 'continue' | 'refine' | 'extend' | 'pause' | 'cancel' | 'redirect' | 'authorize' | 'revoke',
+          sourceTurnId: String(body.sourceTurnId ?? '')
+        });
+        send(res, 200, {
+          ok: true,
+          intent,
+          binding: {
+            conversationId: intent.conversationId,
+            intentVersion: intent.intentVersion,
+            digest: intent.digest
+          }
+        });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'INTENT_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/sagas' && req.method === 'GET') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, sagas: await options.sagas.list(limit) });
+      return;
+    }
+
+    if (pathname === '/v1/sagas' && req.method === 'POST') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const rawSteps = Array.isArray(body.steps) ? body.steps : [];
+        const steps = rawSteps.map((value, index) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`steps[${index}] must be an object.`);
+          const raw = value as Record<string, unknown>;
+          return {
+            key: boundedString(raw.key, `steps[${index}].key`, 128),
+            action: validateActionEnvelope(raw.action),
+            ...(raw.compensation === undefined ? {} : { compensation: validateActionEnvelope(raw.compensation) })
+          };
+        });
+        const submitted = await options.sagas.submit({
+          ...(body.sagaId === undefined ? {} : { sagaId: String(body.sagaId) }),
+          objective: String(body.objective ?? ''),
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {}),
+          steps
+        });
+        if (body.run === true) {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Saga execution is disabled by the local emergency stop.' } });
+            return;
+          }
+          const saga = await options.sagas.run(submitted.id);
+          send(res, 200, { ok: true, saga });
+          return;
+        }
+        send(res, 202, { ok: true, saga: submitted });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_SUBMISSION_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const sagaRoute = /^\/v1\/sagas\/([0-9a-f-]{36})$/.exec(pathname);
+    if (sagaRoute && req.method === 'GET') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, saga: await options.sagas.inspect(sagaRoute[1]!) });
+      } catch (error) {
+        send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const sagaRunRoute = /^\/v1\/sagas\/([0-9a-f-]{36})\/run$/.exec(pathname);
+    if (sagaRunRoute && req.method === 'POST') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+        send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Saga execution is disabled by the local emergency stop.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, saga: await options.sagas.run(sagaRunRoute[1]!) });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_EXECUTION_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
 
     if (pathname === '/v1/enterprise-policy' && req.method === 'GET') {
       if (!options.enterprisePolicy) {
@@ -853,7 +995,8 @@ export function createLocalAgentServer(options: {
           ...(body.sessionId === undefined ? {} : { sessionId: String(body.sessionId) }),
           title: String(body.title ?? ''),
           objective: String(body.objective ?? ''),
-          scopeKey: String(body.scopeKey ?? '')
+          scopeKey: String(body.scopeKey ?? ''),
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {})
         });
         send(res, 201, { ok: true, session });
       } catch (error) {
@@ -938,7 +1081,8 @@ export function createLocalAgentServer(options: {
           const run = await options.studioExecutor.submit(
             workflowRoute[1]!,
             values,
-            body.runId === undefined ? undefined : String(body.runId)
+            body.runId === undefined ? undefined : String(body.runId),
+            body.intent && typeof body.intent === 'object' ? validIntentBinding(body.intent) : undefined
           );
           send(res, 201, { ok: true, run });
           return;
@@ -1257,7 +1401,8 @@ export function createLocalAgentServer(options: {
         const mission = await options.teams.submit({
           objective: body.objective as string,
           workItems: body.workItems as TeamWorkInput[],
-          budget: body.budget as any
+          budget: body.budget as any,
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {})
         });
         const result = body.run === true ? await options.teams.start(mission.id) : mission;
         send(res, body.run === true ? 200 : 202, { ok: true, mission: result });
@@ -1388,7 +1533,12 @@ export function createLocalAgentServer(options: {
         const ownedLease = authorization.workItem.lease;
         if (!ownedLease) throw new Error('Authorized team work lost its lease before execution.');
         const remainingLeaseMs = Math.max(1, Date.parse(ownedLease.expiresAt) - Date.now());
-        const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
+        const { intent: _workerIntent, ...actionWithoutIntent } = action;
+        const teamAction: ActionRequest = {
+          ...actionWithoutIntent,
+          taskId: teamExecuteRoute[1]!,
+          ...(authorization.mission.intent ? { intent: authorization.mission.intent } : {})
+        };
         const receipt = await options.teams.beginActionExecution(teamExecuteRoute[1]!, {
           workerId, workItemId: teamExecuteRoute[2]!, leaseId, action: teamAction
         });
@@ -1477,7 +1627,9 @@ export function createLocalAgentServer(options: {
         const workItemId = worldPublishRoute[2]!;
         const mission = await options.teams.inspect(missionId);
         const item = mission.workItems.find((candidate) => candidate.id === workItemId);
-        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true
+          || typeof item.result.verificationDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+          || !item.result.worldObservationDigest) {
           throw Object.assign(new Error('Completed verifier world-observation commitment is required.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
         }
         const prepared = prepareVerifierWorldObservations(body.worldObservations, missionId, workItemId);
@@ -1592,7 +1744,8 @@ export function createLocalAgentServer(options: {
           goal,
           maxSteps: body.maxSteps,
           maxAttemptsPerStep: body.maxAttemptsPerStep,
-          timeoutMs: body.timeoutMs
+          timeoutMs: body.timeoutMs,
+          ...(body.intent && typeof body.intent === 'object' ? { intent: body.intent } : {})
         } as SubmitTaskOptions);
         if (body.run === true && relayRequest) {
           const authorization = taskAuthorization(approvalAuthority, requestPermissions);
@@ -2197,7 +2350,9 @@ async function publishVerifierWorldObservations(
   item: Awaited<ReturnType<TeamCoordinator['inspect']>>['workItems'][number],
   observations: Array<ReturnType<typeof validateWorldObservation>>
 ): Promise<number> {
-  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true
+    || typeof item.result.verificationDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+    || !item.result.worldObservationDigest) {
     throw Object.assign(new Error('World publication requires a completed passing verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
   }
   const evidenceDigest = crypto.createHash('sha256').update(JSON.stringify({
@@ -2206,6 +2361,7 @@ async function publishVerifierWorldObservations(
     workerId: item.result.workerId,
     completedAt: item.result.completedAt,
     verificationPassed: true,
+    verificationDigest: item.result.verificationDigest,
     worldObservationDigest: item.result.worldObservationDigest,
     evidence: item.result.evidence
   })).digest('hex');

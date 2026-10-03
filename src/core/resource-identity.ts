@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ActionRequest } from './types.ts';
 
@@ -52,4 +53,106 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     keys.add(`cap:${action.capability.toLowerCase()}`);
   }
   return [...keys].sort();
+}
+
+
+export async function resolvePhysicalResourceKeysForAction(action: ActionRequest): Promise<string[]> {
+  const keys = new Set<string>(resourceKeysForAction(action));
+  const input = action.input;
+  const paths = new Set<string>();
+  const addPath = (value: unknown) => {
+    if (typeof value === 'string' && value && !value.includes('\0')) paths.add(value);
+  };
+
+  if (action.capability.startsWith('file.')) {
+    addPath(input.path); addPath(input.source); addPath(input.destination);
+  } else if (action.capability.startsWith('git.')) {
+    addPath(input.cwd);
+  } else if (action.capability.startsWith('project.')) {
+    addPath(input.path ?? input.cwd);
+  } else if (action.capability.startsWith('docker.')) {
+    addPath(input.path);
+  } else if (action.capability.startsWith('postgres.')) {
+    addPath(input.path);
+  } else if (action.capability.startsWith('vscode.')) {
+    addPath(input.path); addPath(input.leftPath); addPath(input.rightPath);
+  } else if (action.capability === 'terminal.execute' || (action.capability === 'terminal.session' && input.operation === 'start')) {
+    addPath(input.cwd);
+  }
+
+  for (const candidate of paths) {
+    const physical = await physicalPathIdentity(candidate);
+    keys.add(physical.pathKey);
+    if (physical.objectKey) keys.add(physical.objectKey);
+  }
+
+  if (action.capability.startsWith('postgres.')) {
+    const rootPath = [...keys].find((key) => key.startsWith('fs-path:'));
+    if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${escapeSegment(String(input.profileId ?? 'profiles').toLowerCase())}`);
+  }
+
+  if (action.capability.startsWith('browser.')) {
+    const session = escapeSegment(String(input.sessionId ?? 'default').toLowerCase());
+    const target = escapeSegment(String(input.targetId ?? 'global').toLowerCase());
+    const frame = input.frameId === undefined ? undefined : escapeSegment(String(input.frameId).toLowerCase());
+    keys.add(`browser:session:${session}/target:${target}${frame ? `/frame:${frame}` : ''}`);
+  }
+
+  if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
+    keys.add(`process:windows/${escapeSegment(String(input.pid ?? 'global'))}`);
+  }
+
+  if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') {
+    keys.add('desktop:windows');
+  }
+  return [...keys].sort();
+}
+
+export function resourceKeysConflict(left: string, right: string): boolean {
+  if (left === right) return true;
+  const hierarchicalPrefixes = ['fs-path:', 'browser:', 'database:', 'process:'];
+  for (const prefix of hierarchicalPrefixes) {
+    if (!left.startsWith(prefix) || !right.startsWith(prefix)) continue;
+    const a = left.slice(prefix.length);
+    const b = right.slice(prefix.length);
+    return isHierarchyPrefix(a, b) || isHierarchyPrefix(b, a);
+  }
+  return false;
+}
+
+async function physicalPathIdentity(input: string): Promise<{ pathKey: string; objectKey?: string }> {
+  const requested = path.resolve(input);
+  let probe = requested;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      const real = await fs.realpath(probe);
+      const stat = await fs.stat(real);
+      const suffix = missing.length === 0 ? '' : '/' + missing.reverse().map(escapeSegment).join('/');
+      const canonical = normalizePhysicalPath(real) + suffix;
+      return {
+        pathKey: `fs-path:${canonical}`,
+        ...(missing.length === 0 ? { objectKey: `fs-object:${String(stat.dev)}:${String(stat.ino)}` } : {})
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(probe);
+      if (parent === probe) return { pathKey: `fs-path:${normalizePhysicalPath(requested)}` };
+      missing.push(path.basename(probe));
+      probe = parent;
+    }
+  }
+}
+
+function normalizePhysicalPath(value: string): string {
+  const normalized = path.resolve(value).replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function escapeSegment(value: string): string {
+  return encodeURIComponent(value).replace(/%2F/gi, '%252F');
+}
+
+function isHierarchyPrefix(parent: string, child: string): boolean {
+  return child.startsWith(parent.endsWith('/') ? parent : parent + '/');
 }

@@ -216,3 +216,38 @@ test('Docker adapter rejects remote contexts and invalid service tokens', async 
   assert.equal(invalid.ok, false);
   assert.equal(invalid.error?.code, 'INVALID_DOCKER_SERVICE');
 });
+
+test('Docker reconciliation proves start and stop from current project state and refuses to infer restart history', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-docker-reconcile-');
+  const fake = await makeFakeDocker(t, {
+    host: 'unix:///var/run/docker.sock',
+    version: '27.5.1',
+    containers: [container(projectRoot, 'running')]
+  });
+  const provider = new DockerProvider({ allowedRoots: [projectRoot], dockerExecutable: fake.executable, dockerArgsPrefix: fake.prefix });
+  const baseAction = {
+    capability: 'docker.manage' as const,
+    risk: 'system' as const,
+    input: { path: projectRoot, services: ['web'], expectedCurrentFingerprint: '0'.repeat(64) },
+    provenance: { kind: 'runtime' as const }
+  };
+
+  const start = await provider.reconcile({ action: { ...baseAction, id: 'reconcile-start', input: { ...baseAction.input, operation: 'start' } } });
+  assert.equal(start.status, 'completed');
+  assert.equal(start.result?.ok, true);
+  assert.deepEqual((start.result?.output as any).states, [{ service: 'web', containers: 1, states: ['running'] }]);
+
+  const stopWhileRunning = await provider.reconcile({ action: { ...baseAction, id: 'reconcile-stop-not-applied', input: { ...baseAction.input, operation: 'stop' } } });
+  assert.equal(stopWhileRunning.status, 'not_applied');
+
+  const state = JSON.parse(await fs.readFile(fake.statePath, 'utf8')) as FakeState;
+  state.containers[0]!.state = 'exited';
+  await fs.writeFile(fake.statePath, JSON.stringify(state, null, 2));
+
+  const stop = await provider.reconcile({ action: { ...baseAction, id: 'reconcile-stop', input: { ...baseAction.input, operation: 'stop' } } });
+  assert.equal(stop.status, 'completed');
+  assert.equal(stop.result?.ok, true);
+
+  const restart = await provider.reconcile({ action: { ...baseAction, id: 'reconcile-restart', input: { ...baseAction.input, operation: 'restart' } } });
+  assert.equal(restart.status, 'uncertain', 'final running/exited state alone cannot prove restart history');
+});

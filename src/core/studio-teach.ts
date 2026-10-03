@@ -5,7 +5,10 @@ import { canonicalJson } from './action-identity.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
-import type { ActionRequest, ActionResult, ActionRisk } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, IntentBinding } from './types.ts';
+import type { ActionTransitionJournal } from './action-transition-journal.ts';
+import { kernelVerificationDigest } from './action-verification.ts';
+import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
 
 export type TeachSessionState = 'RECORDING' | 'STOPPED' | 'COMPILED' | 'CANCELLED';
 
@@ -20,6 +23,7 @@ export interface TeachCapturedStep {
   resourceKeys: string[];
   provider: string;
   evidenceDigest: string;
+  verificationDigest?: string;
   capturedAt: string;
 }
 
@@ -29,6 +33,7 @@ export interface TeachSession {
   title: string;
   objective: string;
   scopeKey: string;
+  intent?: IntentBinding;
   state: TeachSessionState;
   steps: TeachCapturedStep[];
   createdAt: string;
@@ -61,6 +66,7 @@ export interface TeachWorkflow {
   title: string;
   objective: string;
   scopeKey: string;
+  sourceIntent?: IntentBinding;
   steps: TeachWorkflowStep[];
   parameters: TeachWorkflowParameter[];
   verificationDigest: string;
@@ -98,27 +104,46 @@ export class TeachModeStore {
   #workflowDir: string;
   #clock: () => Date;
   #maxWorkflows: number;
+  #journal?: ActionTransitionJournal;
+  #requireKernelVerification: boolean;
+  #intentRegistry?: IntentRegistry;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date; maxWorkflows?: number } = {}) {
+  constructor(stateDir: string, options: {
+    clock?: () => Date;
+    maxWorkflows?: number;
+    journal?: ActionTransitionJournal;
+    requireKernelVerification?: boolean;
+    intentRegistry?: IntentRegistry;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'studio-teach.json');
     this.#workflowDir = path.join(root, 'studio-workflows');
     this.#clock = options.clock ?? (() => new Date());
     this.#maxWorkflows = boundedStoreInteger(options.maxWorkflows ?? MAX_WORKFLOWS, 2, MAX_WORKFLOWS, 'maxWorkflows');
+    this.#journal = options.journal;
+    this.#requireKernelVerification = options.requireKernelVerification === true;
+    this.#intentRegistry = options.intentRegistry;
   }
 
-  async start(input: { sessionId?: string; title: string; objective: string; scopeKey: string }): Promise<TeachSession> {
+  async start(input: { sessionId?: string; title: string; objective: string; scopeKey: string; intent?: IntentBinding }): Promise<TeachSession> {
+    const intent = input.intent ? validIntentBinding(input.intent) : undefined;
+    if (intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Teach sessions require an intent registry.');
+      await this.#intentRegistry.assertExecutable(intent);
+    }
     return await this.#mutate((state, now) => {
       const id = input.sessionId ? uuid(input.sessionId, 'sessionId') : crypto.randomUUID();
       const existing = state.sessions.find((item) => item.id === id);
       const normalized = {
         title: bounded(input.title, 4096, 'title'),
         objective: bounded(input.objective, 16_384, 'objective'),
-        scopeKey: contextKey(input.scopeKey, 'scopeKey')
+        scopeKey: contextKey(input.scopeKey, 'scopeKey'),
+        ...(intent ? { intent } : {})
       };
       if (existing) {
-        if (existing.title !== normalized.title || existing.objective !== normalized.objective || existing.scopeKey !== normalized.scopeKey) {
+        if (existing.title !== normalized.title || existing.objective !== normalized.objective || existing.scopeKey !== normalized.scopeKey
+          || canonicalJson(existing.intent ?? null) !== canonicalJson(normalized.intent ?? null)) {
           throw new OperatorError('TEACH_SESSION_CONFLICT', 'sessionId is already bound to a different teaching contract.');
         }
         return existing;
@@ -143,8 +168,22 @@ export class TeachModeStore {
     result: ActionResult;
     resourceKeys?: string[];
   }): Promise<TeachSession> {
-    return await this.#mutate((state, now) => {
+    const verificationDigest = kernelVerificationDigest(input.result);
+    if (this.#requireKernelVerification && !verificationDigest) {
+      throw new OperatorError('TEACH_KERNEL_VERIFICATION_REQUIRED', 'Teach Mode records only Agent Kernel-verified successful actions in production mode.');
+    }
+    if (verificationDigest && this.#journal) {
+      const entry = await this.#journal.inspect(input.action.id);
+      if (entry.state !== 'COMPLETED') {
+        throw new OperatorError('TEACH_KERNEL_VERIFICATION_REQUIRED', 'Teach action journal entry is not durably completed.');
+      }
+    }
+    return await this.#mutate(async (state, now) => {
       const session = requireSession(state, sessionIdInput);
+      await this.#assertSessionIntent(session);
+      if (canonicalJson(input.action.intent ?? null) !== canonicalJson(session.intent ?? null)) {
+        throw new OperatorError('TEACH_INTENT_MISMATCH', 'Demonstrated action intent does not match the durable Teach session intent.');
+      }
       if (session.state !== 'RECORDING') throw new OperatorError('TEACH_SESSION_NOT_RECORDING', 'Only recording sessions can accept demonstrated actions.');
       if (!input.result.ok) throw new OperatorError('TEACH_ACTION_UNSUCCESSFUL', 'Failed actions are not eligible for workflow teaching.');
       if (input.action.capability !== input.result.capability) throw new OperatorError('TEACH_ACTION_MISMATCH', 'Action/result capability mismatch.');
@@ -164,6 +203,7 @@ export class TeachModeStore {
         resourceKeys,
         provider: bounded(input.result.provider, 256, 'provider'),
         evidenceDigest: digest(input.result.evidence),
+        ...(verificationDigest ? { verificationDigest } : {}),
         capturedAt: now.toISOString()
       };
       session.steps.push(step);
@@ -173,8 +213,9 @@ export class TeachModeStore {
   }
 
   async stop(sessionIdInput: string): Promise<TeachSession> {
-    return await this.#mutate((state, now) => {
+    return await this.#mutate(async (state, now) => {
       const session = requireSession(state, sessionIdInput);
+      await this.#assertSessionIntent(session);
       if (session.state === 'CANCELLED' || session.state === 'COMPILED') throw new OperatorError('TEACH_SESSION_TERMINAL', 'Terminal teaching session cannot be stopped.');
       if (session.state === 'STOPPED') return session;
       if (session.steps.length < 1) throw new OperatorError('TEACH_EMPTY_SESSION', 'At least one successful demonstrated action is required.');
@@ -198,12 +239,25 @@ export class TeachModeStore {
   async verify(sessionIdInput: string, checks: VerificationCheck[]): Promise<VerificationReceipt> {
     await this.#serial;
     const session = requireSession(await this.#read(), sessionIdInput);
+    await this.#assertSessionIntent(session);
     if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before verification.');
+    const canonicalProofs = !this.#requireKernelVerification || session.steps.every((step) => Boolean(step.verificationDigest));
     return new VerificationKernel().verify({
       subjectKind: 'teach-session',
       subjectId: session.id,
       contract: teachVerificationContract(session),
-      checks
+      checks: [
+        ...checks,
+        {
+          name: 'kernel-action-proofs',
+          ok: canonicalProofs,
+          detail: canonicalProofs
+            ? this.#requireKernelVerification
+              ? 'Every demonstrated action is bound to an Agent Kernel verification digest.'
+              : 'Legacy Teach mode is not configured to require Agent Kernel proofs.'
+            : 'One or more demonstrated actions lacks an Agent Kernel verification digest.'
+        }
+      ]
     });
   }
 
@@ -213,6 +267,7 @@ export class TeachModeStore {
   }): Promise<TeachWorkflow> {
     return await this.#mutate(async (state, now) => {
       const session = requireSession(state, sessionIdInput);
+      await this.#assertSessionIntent(session);
       if (session.state === 'COMPILED' && session.compiledWorkflowId) return await this.#loadWorkflow(state, session.compiledWorkflowId);
       if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before compilation.');
       const verification = validateTeachVerificationReceipt(session, input.verificationReceipt);
@@ -234,6 +289,7 @@ export class TeachModeStore {
         title: session.title,
         objective: session.objective,
         scopeKey: session.scopeKey,
+        ...(session.intent ? { sourceIntent: session.intent } : {}),
         steps,
         parameters,
         verificationDigest,
@@ -282,6 +338,14 @@ export class TeachModeStore {
       setJsonPointer(steps[stepIndex]!.inputTemplate, parameter.jsonPointer, secretFreeClone(supplied[parameter.name], `parameter.${parameter.name}`));
     }
     return steps;
+  }
+
+  async #assertSessionIntent(session: TeachSession): Promise<void> {
+    if (!session.intent) return;
+    if (!this.#intentRegistry) {
+      throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Teach sessions require an intent registry.');
+    }
+    await this.#intentRegistry.assertExecutable(session.intent);
   }
 
   async #archiveOldestWorkflow(state: TeachState): Promise<void> {
@@ -381,6 +445,7 @@ function teachVerificationContract(session: TeachSession): Record<string, unknow
     title: session.title,
     objective: session.objective,
     scopeKey: session.scopeKey,
+    intent: session.intent ?? null,
     steps: session.steps.map((step) => ({
       id: step.id,
       seq: step.seq,
@@ -390,7 +455,8 @@ function teachVerificationContract(session: TeachSession): Record<string, unknow
       inputDigest: step.inputDigest,
       resourceKeys: [...step.resourceKeys],
       provider: step.provider,
-      evidenceDigest: step.evidenceDigest
+      evidenceDigest: step.evidenceDigest,
+      verificationDigest: step.verificationDigest ?? null
     }))
   };
 }
@@ -516,16 +582,19 @@ function validateState(input: unknown): TeachState {
     bounded(session.title, 4096, 'session.title');
     bounded(session.objective, 16_384, 'session.objective');
     contextKey(session.scopeKey, 'session.scopeKey');
+    if (session.intent !== undefined) validIntentBinding(session.intent);
     if (!['RECORDING', 'STOPPED', 'COMPILED', 'CANCELLED'].includes(session.state) || !Array.isArray(session.steps) || session.steps.length > MAX_STEPS) throw new OperatorError('TEACH_STATE_CORRUPT', 'Teach session state is invalid.');
     session.steps.forEach((step, index) => {
       uuid(step.id, 'step.id');
       if (step.seq !== index + 1) throw new OperatorError('TEACH_STATE_CORRUPT', 'Teach step sequence is invalid.');
       validRisk(step.risk); sha(step.inputDigest, 'inputDigest'); sha(step.evidenceDigest, 'evidenceDigest');
+      if (step.verificationDigest) sha(step.verificationDigest, 'verificationDigest');
       secretFreeClone(step.inputTemplate, 'stored step input');
     });
   }
   for (const workflow of state.workflows) {
     uuid(workflow.id, 'workflow.id'); uuid(workflow.sourceSessionId, 'workflow.sourceSessionId');
+    if (workflow.sourceIntent !== undefined) validIntentBinding(workflow.sourceIntent);
     sha(workflow.verificationDigest, 'workflow.verificationDigest'); sha(workflow.verificationContractDigest, 'workflow.verificationContractDigest'); sha(workflow.digest, 'workflow.digest');
   }
   return state;

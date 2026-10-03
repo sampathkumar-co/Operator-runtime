@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
+import { validIntentBinding } from './intent-registry.ts';
 import type { Evidence, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -286,6 +287,7 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
   const authorizedScope = boundedTextArray(raw.authorizedScope, MAX_SCOPE_ITEMS, 4096, 'authorizedScope');
   const prohibitedScope = boundedTextArray(raw.prohibitedScope, MAX_SCOPE_ITEMS, 4096, 'prohibitedScope');
   const successConditions = boundedTextArray(raw.successConditions, MAX_CONDITIONS, 16_384, 'successConditions');
+  const intent = raw.intent === undefined ? undefined : validIntentBinding(raw.intent);
   const state = validTaskState(raw.state, 'task state');
   const nodes = validateNodes(raw.nodes);
   const evidence = validateEvidenceArray(raw.evidence, MAX_EVIDENCE, 'task evidence');
@@ -301,6 +303,7 @@ function validateTaskCapsule(input: unknown): TaskCapsule {
     authorizedScope,
     prohibitedScope,
     successConditions,
+    ...(intent ? { intent } : {}),
     state,
     nodes,
     evidence,

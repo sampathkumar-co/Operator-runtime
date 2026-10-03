@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveSupportedGitExecutable } from '../core/trusted-executable.ts';
@@ -84,6 +84,76 @@ export class GitCheckpointProvider implements CapabilityProvider {
         evidence: [evidence('git_checkpoint', 'fail', op.message, { code: op.code })],
         error: { code: op.code, message: op.message, retryable: op.retryable },
         durationMs: Math.round(performance.now() - started)
+      };
+    }
+  }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    const action = request.action;
+    if (action.capability !== 'git.checkpoint.restore') {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('git_checkpoint_reconciliation', 'info', 'Only checkpoint restore has a deterministic post-state reconciliation contract.')]
+      };
+    }
+    try {
+      const cwd = String(action.input.cwd ?? '');
+      const checkpointId = validateCheckpointId(String(action.input.checkpointId ?? ''));
+      const expectedCurrentFingerprint = String(action.input.expectedCurrentFingerprint ?? '');
+      const current = await this.#captureState(cwd);
+      const target = await this.#readCheckpoint(current.root, checkpointId);
+
+      const matchesTarget = current.head === target.head
+        && current.indexTree === target.indexTree
+        && current.worktreeTree === target.worktreeTree;
+      if (matchesTarget) {
+        const result: ActionResult = {
+          ok: true,
+          capability: action.capability,
+          provider: this.name,
+          output: { checkpointId, restored: current, reconciled: true },
+          evidence: [evidence(
+            'git_checkpoint_reconciliation',
+            'pass',
+            'Current repository HEAD, index tree, and working-tree tree exactly match the requested checkpoint.',
+            { checkpointId, fingerprint: current.fingerprint }
+          )],
+          durationMs: 0
+        };
+        return { status: 'completed', result, evidence: structuredClone(result.evidence) };
+      }
+
+      if (/^[0-9a-f]{64}$/i.test(expectedCurrentFingerprint)
+        && current.fingerprint.toLowerCase() === expectedCurrentFingerprint.toLowerCase()) {
+        return {
+          status: 'not_applied',
+          evidence: [evidence(
+            'git_checkpoint_reconciliation',
+            'info',
+            'Repository still exactly matches the pre-restore fingerprint, proving the requested restore was not applied.',
+            { checkpointId, fingerprint: current.fingerprint }
+          )]
+        };
+      }
+
+      return {
+        status: 'uncertain',
+        evidence: [evidence(
+          'git_checkpoint_reconciliation',
+          'info',
+          'Repository matches neither the checkpoint nor the supplied pre-restore fingerprint; explicit reconciliation is required.',
+          { checkpointId, fingerprint: current.fingerprint }
+        )]
+      };
+    } catch (error) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence(
+          'git_checkpoint_reconciliation',
+          'info',
+          'Checkpoint restore post-state could not be proven during reconciliation.',
+          { code: error instanceof OperatorError ? error.code : 'GIT_CHECKPOINT_RECONCILIATION_FAILED' }
+        )]
       };
     }
   }

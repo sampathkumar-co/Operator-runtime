@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
@@ -352,6 +352,24 @@ export class ManagedBrowserProvider implements CapabilityProvider {
         durationMs: Math.round(performance.now() - started)
       };
     }
+  }
+
+  async reconcile(
+    request: ProviderReconciliationRequest,
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    if (!this.#delegate.reconcile) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('browser_reconciliation', 'info', 'Managed browser delegate does not implement reconciliation.')]
+      };
+    }
+    const outcome = await this.#delegate.reconcile(request, context);
+    return {
+      ...outcome,
+      ...(outcome.result ? { result: { ...outcome.result, provider: this.name } } : {}),
+      evidence: outcome.evidence
+    };
   }
 
   close(): void {

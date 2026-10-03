@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, ExecutionPhase, PermissionProfile, ProviderReconciliationResult, SideEffectState } from './types.ts';
 import { AuthorityKernel } from './authority-kernel.ts';
 import { CapabilityRouter } from './router.ts';
 import { evidence } from './evidence.ts';
@@ -92,6 +92,7 @@ export class OperatorRuntime {
     for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
+        await context.onProviderDispatch?.(provider.name);
         const result = await provider.execute(canonicalAction, context);
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
         result.durationMs = Math.round(performance.now() - start);
@@ -142,6 +143,25 @@ export class OperatorRuntime {
       error: last,
       durationMs: Math.round(performance.now() - start)
     };
+  }
+
+  async reconcile(
+    action: ActionRequest,
+    providerName: string,
+    priorResult?: ActionResult,
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    const provider = await this.router.provider(providerName);
+    if (!provider || !await provider.supports(action)) {
+      throw new OperatorError('PROVIDER_RECONCILIATION_UNAVAILABLE', `Provider ${providerName} is not available for reconciliation.`);
+    }
+    if (!provider.reconcile) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('reconciliation', 'info', 'Selected provider does not implement an action reconciliation contract.', { provider: providerName })]
+      };
+    }
+    return await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
   }
 
   async close(): Promise<void> {
