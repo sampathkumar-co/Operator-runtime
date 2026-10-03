@@ -69,7 +69,17 @@ export class BrowserCdpProvider implements CapabilityProvider {
       if (action.capability === 'browser.tab.close') return await this.#closeTab(action, started, context.signal);
       throw new OperatorError('UNSUPPORTED_ACTION', action.capability);
     } catch (error) {
-      return failure(action, this.name, started, context.signal?.aborted ? abortError() : error);
+      const caught = context.signal?.aborted ? abortError() : error;
+      const normalized = action.capability === 'browser.interact'
+        && caught instanceof OperatorError
+        && ['BROWSER_TARGET_STALE', 'BROWSER_STALE_TARGET', 'BROWSER_TARGET_NOT_FOUND'].includes(caught.code)
+        && caught.details?.sideEffectState === undefined
+        ? new OperatorError(caught.code, caught.message, {
+            retryable: caught.retryable,
+            details: { ...(caught.details ?? {}), sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+          })
+        : caught;
+      return failure(action, this.name, started, normalized);
     }
   }
 

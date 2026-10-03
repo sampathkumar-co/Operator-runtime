@@ -575,6 +575,20 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
+      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'reobserve') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        latestExecution.records = latestExecution.records.filter((candidate) => candidate !== latestRecord);
+        latestExecution.stepCount = Math.max(0, latestExecution.stepCount - 1);
+        task.evidence.push(evidence('strategy_reobserve', 'info', 'Superseded a pre-dispatch stale-state attempt and returned control for fresh observation without charging an environment-action step.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy,
+          actionId: latestRecord.actionId,
+          sideEffectState: latestRecord.sideEffectState ?? 'none'
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
       if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'retry') {
         setNodeState(task, latestNode.id, 'SKIPPED');
         task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
