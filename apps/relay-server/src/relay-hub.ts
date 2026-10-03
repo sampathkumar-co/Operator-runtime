@@ -22,6 +22,9 @@ const DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES = 60;
 const DEFAULT_MAX_LIVE_CONNECTIONS = 5_000;
 const DEFAULT_MAX_LIVE_CONNECTIONS_PER_CLIENT = 64;
 const MAX_NEGOTIATED_CONCURRENT_READS = 16;
+const DEFAULT_MAX_QUEUED_MESSAGES = 64;
+const DEFAULT_MAX_QUEUED_BYTES = 1024 * 1024;
+const DEFAULT_MAX_QUEUED_AGE_MS = 15_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -59,6 +62,9 @@ export interface RelayHubOptions {
   deviceHelloLimitPerFiveMinutes?: number;
   maxLiveConnections?: number;
   maxLiveConnectionsPerClient?: number;
+  maxQueuedMessagesPerConnection?: number;
+  maxQueuedBytesPerConnection?: number;
+  maxQueuedAgeMs?: number;
 }
 
 export interface RelayDispatchRequest {
@@ -95,6 +101,9 @@ export class RelayHub {
   #deviceHelloLimiter: FixedWindowRateLimiter;
   #maxLiveConnections: number;
   #maxLiveConnectionsPerClient: number;
+  #maxQueuedMessagesPerConnection: number;
+  #maxQueuedBytesPerConnection: number;
+  #maxQueuedAgeMs: number;
   #liveByClientKey = new Map<string, number>();
   #socketWork = new Set<Promise<void>>();
 
@@ -112,6 +121,9 @@ export class RelayHub {
     const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
     this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
     this.#maxLiveConnectionsPerClient = boundedPositiveInt(options.maxLiveConnectionsPerClient, DEFAULT_MAX_LIVE_CONNECTIONS_PER_CLIENT, this.#maxLiveConnections, 'maxLiveConnectionsPerClient');
+    this.#maxQueuedMessagesPerConnection = boundedPositiveInt(options.maxQueuedMessagesPerConnection, DEFAULT_MAX_QUEUED_MESSAGES, 10_000, 'maxQueuedMessagesPerConnection');
+    this.#maxQueuedBytesPerConnection = boundedPositiveInt(options.maxQueuedBytesPerConnection, DEFAULT_MAX_QUEUED_BYTES, 64 * 1024 * 1024, 'maxQueuedBytesPerConnection');
+    this.#maxQueuedAgeMs = boundedPositiveInt(options.maxQueuedAgeMs, DEFAULT_MAX_QUEUED_AGE_MS, 5 * 60_000, 'maxQueuedAgeMs');
     this.#upgradeLimiter = new FixedWindowRateLimiter({ limit: upgradeLimit, windowMs: 60_000 });
     this.#deviceHelloLimiter = new FixedWindowRateLimiter({ limit: helloLimit, windowMs: 5 * 60_000 });
   }
@@ -360,18 +372,36 @@ export class RelayHub {
     let authenticated = false;
     let connection: Connection | null = null;
     let messageQueue: Promise<void> = Promise.resolve();
+    let queuedMessages = 0;
+    let queuedBytes = 0;
+    let closed = false;
     const timer = setTimeout(() => {
       if (!authenticated) socket.close(4008, 'hello timeout');
     }, HANDSHAKE_TIMEOUT_MS);
     timer.unref();
 
     const fail = (error: unknown) => {
+      closed = true;
       const code = error instanceof OperatorError ? error.code : 'RELAY_PROTOCOL_ERROR';
       try { socket.close(4002, code.slice(0, 120)); } catch { /* noop */ }
     };
 
     socket.on('message', (data, isBinary) => {
+      if (closed) return;
+      const bytes = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data.toString());
+      if (queuedMessages + 1 > this.#maxQueuedMessagesPerConnection || queuedBytes + bytes > this.#maxQueuedBytesPerConnection) {
+        closed = true;
+        try { socket.close(4009, 'RELAY_INGRESS_BACKPRESSURE'); } catch { /* bounded rejection already decided */ }
+        return;
+      }
+      queuedMessages += 1;
+      queuedBytes += bytes;
+      const receivedAt = this.#clock().getTime();
       const work = messageQueue.then(async () => {
+        if (closed) return;
+        if (this.#clock().getTime() - receivedAt > this.#maxQueuedAgeMs) {
+          throw new OperatorError('RELAY_INGRESS_EXPIRED', 'Relay frame exceeded its bounded ingress processing age.', { retryable: true });
+        }
         if (isBinary) throw new OperatorError('RELAY_FRAME_INVALID', 'Binary relay frames are not accepted.');
         const frame = parseFrame(data.toString('utf8'));
         if (!authenticated) {
@@ -401,11 +431,16 @@ export class RelayHub {
       });
       messageQueue = work;
       this.#socketWork.add(work);
-      void work.finally(() => this.#socketWork.delete(work)).catch(() => undefined);
+      void work.finally(() => {
+        queuedMessages = Math.max(0, queuedMessages - 1);
+        queuedBytes = Math.max(0, queuedBytes - bytes);
+        this.#socketWork.delete(work);
+      }).catch(() => undefined);
       void work.catch(fail);
     });
 
     socket.on('close', () => {
+      closed = true;
       clearTimeout(timer);
       if (connection && this.#connections.get(connection.deviceId)?.sessionId === connection.sessionId) {
         this.#connections.delete(connection.deviceId);

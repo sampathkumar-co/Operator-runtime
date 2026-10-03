@@ -1512,6 +1512,39 @@ test('relay caps unauthenticated live WebSocket population per client before hel
   await closed;
 });
 
+test('relay applies bounded per-connection ingress backpressure while authentication is stalled', async (t) => {
+  const state = await tempDir(t, 'operator-relay-ingress-backpressure-');
+  let releaseVerification!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseVerification = resolve; });
+  const sessions = { async verify() { await gate; throw new Error('verification released'); } };
+  const hub = new RelayHub({
+    stateDir: state,
+    sessions: sessions as any,
+    upgradeLimitPerMinute: 100,
+    maxQueuedMessagesPerConnection: 2,
+    maxQueuedBytesPerConnection: 1024 * 1024
+  });
+  const { port } = await hub.listen('127.0.0.1', 0);
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const socket = await openBareSocket(`ws://127.0.0.1:${port}/device`);
+  const closed = new Promise<{ code: number; reason: string }>((resolve) => socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
+  const hello = JSON.stringify({
+    type: 'hello', payload: {
+      protocol: 1, deviceId: '123e4567-e89b-42d3-a456-426614174000', fingerprint: 'f',
+      resumeAfterSeq: 0, sentAt: new Date().toISOString(), nonce: 'abcdefghijklmnop'
+    },
+    signature: 'a'.repeat(40), sessionToken: 'invalid'
+  });
+  socket.send(hello);
+  socket.send(JSON.stringify({ type: 'ping', nonce: 'abcdefghijklmnop' }));
+  socket.send(JSON.stringify({ type: 'ping', nonce: 'qrstuvwxyzabcdef' }));
+  const outcome = await closed;
+  releaseVerification();
+  assert.equal(outcome.code, 4009);
+  assert.equal(outcome.reason, 'RELAY_INGRESS_BACKPRESSURE');
+});
+
 test('relay caps unauthenticated WebSocket connection churn before allocating more clients', async (t) => {
   const state = await tempDir(t, 'operator-relay-churn-cap-');
   const hub = new RelayHub({ stateDir: state, upgradeLimitPerMinute: 2, maxLiveConnectionsPerClient: 10 });
