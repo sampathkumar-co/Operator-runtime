@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
-import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
 import type { ActionRequest, ActionResult, ActionRisk } from './types.ts';
@@ -86,15 +87,25 @@ const STORE_OPTIONS = {
   errorCode: 'TEACH_STATE_CORRUPT',
   invalidMessage: 'Teach/Studio state is invalid.'
 } as const;
+const WORKFLOW_OPTIONS = {
+  maxBytes: MAX_STATE_BYTES,
+  errorCode: 'TEACH_WORKFLOW_CORRUPT',
+  invalidMessage: 'Archived Teach/Studio workflow is invalid.'
+} as const;
 
 export class TeachModeStore {
   #file: string;
+  #workflowDir: string;
   #clock: () => Date;
+  #maxWorkflows: number;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
-    this.#file = path.join(path.resolve(stateDir), 'studio-teach.json');
+  constructor(stateDir: string, options: { clock?: () => Date; maxWorkflows?: number } = {}) {
+    const root = path.resolve(stateDir);
+    this.#file = path.join(root, 'studio-teach.json');
+    this.#workflowDir = path.join(root, 'studio-workflows');
     this.#clock = options.clock ?? (() => new Date());
+    this.#maxWorkflows = boundedStoreInteger(options.maxWorkflows ?? MAX_WORKFLOWS, 2, MAX_WORKFLOWS, 'maxWorkflows');
   }
 
   async start(input: { sessionId?: string; title: string; objective: string; scopeKey: string }): Promise<TeachSession> {
@@ -200,9 +211,9 @@ export class TeachModeStore {
     verificationReceipt: VerificationReceipt;
     parameters?: TeachWorkflowParameter[];
   }): Promise<TeachWorkflow> {
-    return await this.#mutate((state, now) => {
+    return await this.#mutate(async (state, now) => {
       const session = requireSession(state, sessionIdInput);
-      if (session.state === 'COMPILED' && session.compiledWorkflowId) return requireWorkflow(state, session.compiledWorkflowId);
+      if (session.state === 'COMPILED' && session.compiledWorkflowId) return await this.#loadWorkflow(state, session.compiledWorkflowId);
       if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before compilation.');
       const verification = validateTeachVerificationReceipt(session, input.verificationReceipt);
       const verificationDigest = verification.digest;
@@ -234,7 +245,7 @@ export class TeachModeStore {
         digest: digest(workflowCore),
         createdAt: now.toISOString()
       };
-      if (state.workflows.length >= MAX_WORKFLOWS) throw new OperatorError('TEACH_WORKFLOW_LIMIT', 'Teach/Studio workflow retention limit reached.');
+      if (state.workflows.length >= this.#maxWorkflows) await this.#archiveOldestWorkflow(state);
       state.workflows.push(workflow);
       session.state = 'COMPILED';
       session.compiledWorkflowId = workflow.id;
@@ -250,12 +261,13 @@ export class TeachModeStore {
 
   async inspectWorkflow(workflowIdInput: string): Promise<TeachWorkflow> {
     await this.#serial;
-    return structuredClone(requireWorkflow(await this.#read(), workflowIdInput));
+    const state = await this.#read();
+    return structuredClone(await this.#loadWorkflow(state, workflowIdInput));
   }
 
   async instantiate(workflowIdInput: string, values: Record<string, unknown>): Promise<TeachWorkflowStep[]> {
     await this.#serial;
-    const workflow = requireWorkflow(await this.#read(), workflowIdInput);
+    const workflow = await this.#loadWorkflow(await this.#read(), workflowIdInput);
     const supplied = values && typeof values === 'object' && !Array.isArray(values) ? values : {};
     const expected = new Set(workflow.parameters.map((parameter) => parameter.name));
     for (const key of Object.keys(supplied)) if (!expected.has(key)) throw new OperatorError('TEACH_PARAMETER_UNKNOWN', `Unknown workflow parameter ${key}.`);
@@ -270,6 +282,72 @@ export class TeachModeStore {
       setJsonPointer(steps[stepIndex]!.inputTemplate, parameter.jsonPointer, secretFreeClone(supplied[parameter.name], `parameter.${parameter.name}`));
     }
     return steps;
+  }
+
+  async #archiveOldestWorkflow(state: TeachState): Promise<void> {
+    const workflow = state.workflows
+      .slice()
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))[0];
+    if (!workflow) throw new OperatorError('TEACH_WORKFLOW_LIMIT', 'Teach/Studio workflow hot-window limit reached without an archive candidate.');
+    await this.#persistArchivedWorkflow(workflow);
+    const index = state.workflows.findIndex((item) => item.id === workflow.id);
+    if (index < 0) throw new OperatorError('TEACH_STATE_CORRUPT', 'Workflow archive candidate disappeared before compaction.');
+    state.workflows.splice(index, 1);
+  }
+
+  async #persistArchivedWorkflow(workflow: TeachWorkflow): Promise<void> {
+    await this.#ensureWorkflowDir();
+    const file = this.#workflowFile(workflow.id);
+    const bytes = Buffer.from(JSON.stringify(workflow, null, 2), 'utf8');
+    try {
+      await createDurableStateBytes(file, bytes, WORKFLOW_OPTIONS);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const existing = await this.#readArchivedWorkflow(workflow.id);
+    if (canonicalJson(existing) !== canonicalJson(workflow)) {
+      throw new OperatorError('TEACH_WORKFLOW_ARCHIVE_CONFLICT', 'Archived workflow ID is already bound to different immutable content.');
+    }
+  }
+
+  async #loadWorkflow(state: TeachState, workflowIdInput: string): Promise<TeachWorkflow> {
+    const id = uuid(workflowIdInput, 'workflowId');
+    const hot = state.workflows.find((item) => item.id === id);
+    if (hot) return hot;
+    try {
+      return await this.#readArchivedWorkflow(id);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new OperatorError('TEACH_WORKFLOW_NOT_FOUND', 'Compiled workflow was not found.');
+      }
+      throw error;
+    }
+  }
+
+  async #readArchivedWorkflow(workflowIdInput: string): Promise<TeachWorkflow> {
+    const id = uuid(workflowIdInput, 'workflowId');
+    await this.#ensureWorkflowDir();
+    try {
+      const parsed = JSON.parse(await readDurableStateText(this.#workflowFile(id), WORKFLOW_OPTIONS));
+      return validateArchivedWorkflow(parsed);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw error;
+      if (error instanceof OperatorError) throw error;
+      throw new OperatorError('TEACH_WORKFLOW_CORRUPT', 'Archived Teach/Studio workflow could not be read.');
+    }
+  }
+
+  async #ensureWorkflowDir(): Promise<void> {
+    await fs.mkdir(this.#workflowDir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(this.#workflowDir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new OperatorError('TEACH_WORKFLOW_CORRUPT', 'Teach/Studio workflow archive must be a real directory.');
+    }
+  }
+
+  #workflowFile(workflowIdInput: string): string {
+    return path.join(this.#workflowDir, `${uuid(workflowIdInput, 'workflowId')}.json`);
   }
 
   async #mutate<T>(fn: (state: TeachState, now: Date) => T | Promise<T>): Promise<T> {
@@ -420,6 +498,13 @@ function requireWorkflow(state: TeachState, idInput: string): TeachWorkflow {
   return workflow;
 }
 
+function validateArchivedWorkflow(input: unknown): TeachWorkflow {
+  const state = validateState({ version: 1, sessions: [], workflows: [input] });
+  const workflow = state.workflows[0];
+  if (!workflow) throw new OperatorError('TEACH_WORKFLOW_CORRUPT', 'Archived workflow is missing.');
+  return workflow;
+}
+
 function validateState(input: unknown): TeachState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TEACH_STATE_CORRUPT', 'Teach state must be an object.');
   const state = input as TeachState;
@@ -451,6 +536,14 @@ function reclaimTerminal<T extends { state?: string }>(items: T[], max: number, 
   if (index < 0) throw new OperatorError(code, 'Teach/Studio retention limit reached.');
   items.splice(index, 1);
   if (items.length >= max) throw new OperatorError(code, 'Teach/Studio retention limit reached.');
+}
+
+function boundedStoreInteger(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new OperatorError('TEACH_STORE_CONFIG_INVALID', `${label} must be an integer between ${min} and ${max}.`);
+  }
+  return value;
 }
 
 function stableStepId(sessionId: string, seq: number): string {
