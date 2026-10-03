@@ -247,7 +247,19 @@ export class DesiredStateController {
     const state = await this.#read();
     return state.contracts
       .slice()
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map((item) => structuredClone(item));
+  }
+
+  async listForReconciliation(limitInput = 100): Promise<DesiredStateContract[]> {
+    await this.#serial;
+    const limit = integer(limitInput, 1, 500, 'limit');
+    const state = await this.#read();
+    return state.contracts
+      .filter((contract) => contract.status !== 'PAUSED')
+      .slice()
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id))
       .slice(0, limit)
       .map((item) => structuredClone(item));
   }

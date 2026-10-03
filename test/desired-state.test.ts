@@ -200,3 +200,37 @@ test('stage20 persisted contract tampering cannot widen remediation authority', 
     (error: any) => error?.code === 'DESIRED_STATE_CORRUPT'
   );
 });
+
+
+test('stage20 reconciliation scheduling rotates oldest active contracts without changing recent-list ordering', async (t) => {
+  let nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const world = new FakeWorld();
+  const operations = new FakeOperations();
+  const controller = new DesiredStateController(await temp(t), {
+    world: world as any, operations: operations as any, clock
+  });
+
+  const first = await controller.create(createInput({
+    contractId: '00000000-0000-4000-8000-000000000001', name: 'first'
+  }));
+  nowMs += 1_000;
+  const second = await controller.create(createInput({
+    contractId: '00000000-0000-4000-8000-000000000002', name: 'second'
+  }));
+  nowMs += 1_000;
+  const third = await controller.create(createInput({
+    contractId: '00000000-0000-4000-8000-000000000003', name: 'third'
+  }));
+
+  assert.deepEqual((await controller.list(3)).map((item) => item.id), [third.id, second.id, first.id]);
+  assert.deepEqual((await controller.listForReconciliation(1)).map((item) => item.id), [first.id]);
+
+  nowMs += 1_000;
+  await controller.reconcile(first.id);
+  assert.deepEqual((await controller.listForReconciliation(1)).map((item) => item.id), [second.id]);
+
+  nowMs += 1_000;
+  await controller.pause(second.id);
+  assert.deepEqual((await controller.listForReconciliation(2)).map((item) => item.id), [third.id, first.id]);
+});
