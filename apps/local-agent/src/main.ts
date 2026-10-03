@@ -44,6 +44,7 @@ import { AgentKernel } from '../../../src/core/agent-kernel.ts';
 import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
 import { IntentRegistry } from '../../../src/core/intent-registry.ts';
 import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
+import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -116,6 +117,7 @@ const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
 const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
+const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const semanticMigration = new SemanticCheckpointManager(stateDir, {
@@ -382,6 +384,7 @@ const taskOrchestrator = new TaskOrchestrator({
   permissions,
   intentRegistry,
   actionJournal,
+  intelligence: taskIntelligence,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {

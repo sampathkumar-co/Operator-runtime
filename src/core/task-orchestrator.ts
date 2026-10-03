@@ -75,6 +75,37 @@ export interface TaskPlannerContext {
     activeDeadlineMsRemaining: number;
   };
   recentEvents: TaskPlannerEvent[];
+  intelligence: TaskIntelligenceContext;
+}
+
+export interface TaskIntelligenceContext {
+  retrievedAt: string;
+  scopeKey: string;
+  sceneKey?: string;
+  world: Array<{
+    entityKey: string; type: string; updatedAt: string;
+    facts: Array<{ key: string; claimCount: number; freshestAt?: string; maxConfidence: number; evidenceDigests: string[] }>;
+  }>;
+  procedures: Array<{
+    id: string; confidence: number; capabilities: string[]; verifiedRuns: number; failedRuns: number; verificationDigest: string;
+  }>;
+  perception: Array<{
+    nodeId: string; semanticId?: string; confidence: number; channels: string[]; role?: string; name?: string; bounds?: PerceptionBoundsLike;
+  }>;
+  strategies: Array<{ id: string; score: number; staticScore: number; learnedAdjustment: number; samples: number }>;
+}
+
+type PerceptionBoundsLike = { x: number; y: number; width: number; height: number };
+
+export interface TaskIntelligenceRequest {
+  task: TaskCapsule;
+  goal: SemanticTaskGoal;
+  budget: TaskPlannerContext['budget'];
+  recentEvents: TaskPlannerEvent[];
+}
+
+export interface TaskIntelligenceProvider {
+  retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
 }
 
 /** Stable semantic observation boundary. A future visual provider can populate the
@@ -141,6 +172,7 @@ export class TaskOrchestrator {
   #actionJournal?: ActionTransitionJournal;
   #wallNow: () => number;
   #monotonicNow: () => number;
+  #intelligence?: TaskIntelligenceProvider;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -153,6 +185,7 @@ export class TaskOrchestrator {
     actionJournal?: ActionTransitionJournal;
     wallNow?: () => number;
     monotonicNow?: () => number;
+    intelligence?: TaskIntelligenceProvider;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -165,6 +198,7 @@ export class TaskOrchestrator {
     this.#actionJournal = options.actionJournal;
     this.#wallNow = options.wallNow ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.#intelligence = options.intelligence;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -340,11 +374,7 @@ export class TaskOrchestrator {
         }
       }
       current.plannerIterations = (current.plannerIterations ?? 0) + 1;
-      const context: TaskPlannerContext = {
-        task,
-        goal,
-        recentEvents: structuredClone((current.plannerEvents ?? []).slice(-10)),
-        budget: {
+      const budget: TaskPlannerContext['budget'] = {
           maxSteps: current.maxSteps,
           usedSteps: current.stepCount,
           remainingSteps: Math.max(0, current.maxSteps - current.stepCount),
@@ -353,7 +383,31 @@ export class TaskOrchestrator {
           dispatchedActions: current.dispatchedActions ?? current.stepCount,
           maxAttemptsPerStep: current.maxAttemptsPerStep,
           activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
+      };
+      const recentEvents = structuredClone((current.plannerEvents ?? []).slice(-10));
+      let intelligence: TaskIntelligenceContext = emptyTaskIntelligence(goal, task.authorizedScope);
+      if (this.#intelligence) {
+        try {
+          intelligence = await this.#intelligence.retrieve({ task: structuredClone(task), goal: structuredClone(goal), budget: structuredClone(budget), recentEvents });
+          task.evidence.push(evidence('task_intelligence_context', 'info', 'Retrieved bounded relevant intelligence for this planner iteration.', {
+            scopeKey: intelligence.scopeKey,
+            sceneKey: intelligence.sceneKey,
+            worldEntities: intelligence.world.length,
+            procedures: intelligence.procedures.length,
+            perceptionTargets: intelligence.perception.length,
+            strategies: intelligence.strategies.length,
+            retrievedAt: intelligence.retrievedAt
+          }));
+        } catch (error) {
+          return await this.#fail(task, 'TASK_INTELLIGENCE_RETRIEVAL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
         }
+      }
+      const context: TaskPlannerContext = {
+        task,
+        goal,
+        recentEvents,
+        intelligence,
+        budget
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
@@ -578,6 +632,7 @@ export class TaskOrchestrator {
         task,
         goal,
         recentEvents: structuredClone((latestExecution.plannerEvents ?? []).slice(-10)),
+        intelligence,
         budget: {
           maxSteps: latestExecution.maxSteps,
           usedSteps: latestExecution.stepCount,
@@ -1393,7 +1448,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
 
   supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
 
-  next({ task, goal, budget, recentEvents }: TaskPlannerContext): PlannerDecision {
+  next({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext): PlannerDecision {
     if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
     const state = task.execution!.plannerState;
     let index = workflowIndex(state, goal.steps.length);
@@ -1401,7 +1456,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
       const child = goal.steps[index]!;
       const childState = workflowChildState(state);
       const proxy = taskWithPlannerState(task, childState);
-      const decision = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents });
+      const decision = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence });
       state.workflowChildState = proxy.execution!.plannerState;
       if (decision.type === 'complete') {
         task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
@@ -1419,20 +1474,20 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
   }
 
-  accept({ task, goal, budget, recentEvents }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
-    const current = this.#current(task, goal, step, budget, recentEvents);
-    this.#atomic.accept({ task: current.proxy, goal: current.child, budget, recentEvents }, current.atomicStep, observation);
+  accept({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence);
+    this.#atomic.accept({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence }, current.atomicStep, observation);
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
   }
 
-  fallback({ task, goal, budget, recentEvents }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
-    const current = this.#current(task, goal, step, budget, recentEvents);
-    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget, recentEvents }, current.atomicStep, observation) ?? false;
+  fallback({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence }, current.atomicStep, observation) ?? false;
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
     return handled;
   }
 
-  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget'], recentEvents: TaskPlannerEvent[]): {
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget'], recentEvents: TaskPlannerEvent[], intelligence: TaskIntelligenceContext): {
     child: AtomicSemanticTaskGoal;
     proxy: TaskCapsule;
     atomicStep: Extract<PlannerDecision, { type: 'step' }>;
@@ -1443,7 +1498,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     const child = goal.steps[index];
     if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
     const proxy = taskWithPlannerState(task, workflowChildState(state));
-    const expected = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents });
+    const expected = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence });
     if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
       throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
     }
@@ -1458,6 +1513,14 @@ function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): str
   const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
   if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
   return goal.steps[index]?.kind ?? 'semantic-workflow';
+}
+
+function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {
+  return {
+    retrievedAt: new Date().toISOString(),
+    scopeKey: authorizedScope[0] ?? `task:${goal.kind}`,
+    world: [], procedures: [], perception: [], strategies: []
+  };
 }
 
 function workflowIndex(state: Record<string, unknown>, length: number): number {
