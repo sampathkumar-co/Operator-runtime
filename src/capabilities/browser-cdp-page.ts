@@ -160,9 +160,55 @@ export async function waitForDestinationReady(
 }
 
 export async function settleAfterInteraction(session: CdpConnection, signal?: AbortSignal, initialDelayMs = 50): Promise<void> {
-  await delay(Math.max(0, Math.min(500, initialDelayMs)), signal);
-  try { await waitForReadyState(session, 2_000, signal); } catch (error) {
-    if (!(error instanceof OperatorError) || error.code !== 'BROWSER_READY_TIMEOUT') throw error;
+  const initialDelay = Math.max(0, Math.min(500, initialDelayMs));
+  const quietWindowMs = initialDelay >= 300 ? 180 : 80;
+  const maxSettleMs = initialDelay >= 300 ? 1_800 : 1_000;
+  await delay(initialDelay, signal);
+
+  const readSettleState = async () => {
+    const result = await session.send('Runtime.evaluate', {
+      expression: `(() => {
+        const registry = globalThis[Symbol.for('mecord.browser.observed-targets.v2')];
+        const busy = document.querySelectorAll('[aria-busy="true"]').length;
+        const dialogs = document.querySelectorAll('dialog[open],[role="dialog"][aria-modal="true"]').length;
+        return {
+          url: location.href,
+          readyState: document.readyState,
+          mutationVersion: Number.isSafeInteger(registry?.mutationVersion) ? registry.mutationVersion : 0,
+          busy,
+          dialogs
+        };
+      })()`,
+      returnByValue: true
+    });
+    const value = unwrapRuntimeValue(result) as JsonMap | undefined;
+    return {
+      url: typeof value?.url === 'string' ? value.url : '',
+      readyState: typeof value?.readyState === 'string' ? value.readyState : '',
+      mutationVersion: Number.isSafeInteger(value?.mutationVersion) ? Number(value?.mutationVersion) : 0,
+      busy: Number.isFinite(Number(value?.busy)) ? Number(value?.busy) : 0,
+      dialogs: Number.isFinite(Number(value?.dialogs)) ? Number(value?.dialogs) : 0
+    };
+  };
+
+  const deadline = Date.now() + maxSettleMs;
+  let previous = await readSettleState();
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    throwIfAborted(signal);
+    await delay(40, signal);
+    const current = await readSettleState();
+    if (current.url !== previous.url
+      || current.readyState !== previous.readyState
+      || current.mutationVersion !== previous.mutationVersion
+      || current.busy !== previous.busy
+      || current.dialogs !== previous.dialogs) {
+      quietSince = Date.now();
+      previous = current;
+      continue;
+    }
+    const ready = current.readyState === 'interactive' || current.readyState === 'complete';
+    if (ready && current.busy === 0 && Date.now() - quietSince >= quietWindowMs) return;
   }
 }
 
