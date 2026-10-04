@@ -10,6 +10,7 @@ export * from './task-store.ts';
 export * from './task-orchestrator.ts';
 export * from './task-plan.ts';
 export * from './task-decision-budget.ts';
+export * from './performance-evidence.ts';
 export * from './team-coordinator.ts';
 export * from './audit.ts';
 export * from './device-identity.ts';
