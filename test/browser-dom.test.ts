@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { interactionFunction, semanticSnapshotFunction } from '../src/capabilities/browser-cdp-page.ts';
+import { dateSelectFunction, interactionFunction, semanticSnapshotFunction } from '../src/capabilities/browser-cdp-page.ts';
 import { semanticLocatorFunction } from '../src/capabilities/browser-cdp-frames.ts';
 
 class FakeEvent {
@@ -144,7 +144,37 @@ class FakeElement {
   click(): void { this.clicked = true; this.onEvent?.(new FakeEvent('click')); }
   remove(): void { /* synthetic style probe */ }
   contains(element: FakeElement): boolean { return this === element || this.children.includes(element); }
-  querySelector(): FakeElement | null { return this.child ?? null; }
+  querySelector(selector?: string): FakeElement | null {
+    if (!selector) return this.child ?? null;
+    if (this.child?.matches(selector)) return this.child;
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    const found: FakeElement[] = [];
+    const parts = selector.trim().split(/\s+/);
+    const leafSelector = parts.at(-1) ?? selector;
+    const ancestorSelector = parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+    const hasAncestor = (node: FakeElement, wanted: string) => {
+      let current = node.parentElement;
+      while (current) {
+        if (current.matches(wanted)) return true;
+        current = current.parentElement;
+      }
+      return false;
+    };
+    const visit = (node: FakeElement) => {
+      for (const child of node.children) {
+        if (child.matches(leafSelector) && (!ancestorSelector || hasAncestor(child, ancestorSelector))) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+  get classList(): { contains(name: string): boolean } {
+    const classes = String(this.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
+    return { contains: (name: string) => classes.includes(name) };
+  }
   closest(): FakeElement | null {
     if (this.hasAttribute('id') || this.hasAttribute('aria-label') || this.hasAttribute('title')) return this;
     return this.parentElement ?? null;
@@ -167,6 +197,7 @@ class FakeElement {
     return selector.split(',').some((raw) => {
       const token = raw.trim().toLowerCase();
       if (token === '*') return true;
+      if (token.startsWith('.')) return this.classList.contains(token.slice(1));
       if (token === this.tagName.toLowerCase()) return true;
       if (token === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       if (token === '[role]') return this.hasAttribute('role');
@@ -919,6 +950,49 @@ test('native date input normalizes a locale-aware numeric value', (t) => {
   const typed = interactionFunction({ operation: 'type', target: { ref: observed.ref }, value: '02/04/2012' }) as any;
   assert.equal(typed.ok, true);
   assert.equal(input.value, '2012-02-04');
+});
+
+test('bounded select_date navigates a visible calendar widget and verifies the chosen date', (t) => {
+  const root = new FakeRoot();
+  const input = new FakeElement('input'); input.id = 'datepicker';
+  const picker = new FakeElement('div'); picker.setAttribute('class', 'ui-datepicker');
+  const header = new FakeElement('div'); header.setAttribute('class', 'ui-datepicker-header');
+  const prev = new FakeElement('a', 'Prev'); prev.setAttribute('class', 'ui-datepicker-prev');
+  const next = new FakeElement('a', 'Next'); next.setAttribute('class', 'ui-datepicker-next');
+  const title = new FakeElement('div'); title.setAttribute('class', 'ui-datepicker-title');
+  const month = new FakeElement('span', 'December'); month.setAttribute('class', 'ui-datepicker-month');
+  const year = new FakeElement('span', '2016'); year.setAttribute('class', 'ui-datepicker-year');
+  const table = new FakeElement('table'); table.setAttribute('class', 'ui-datepicker-calendar');
+  const row = new FakeElement('tr');
+  const cell = new FakeElement('td');
+  const day = new FakeElement('a', '17');
+
+  picker.children = [header, table]; header.parentElement = picker; table.parentElement = picker;
+  header.children = [prev, title, next]; prev.parentElement = header; title.parentElement = header; next.parentElement = header;
+  title.children = [month, year]; month.parentElement = title; year.parentElement = title;
+  table.children = [row]; row.parentElement = table; row.children = [cell]; cell.parentElement = row; cell.children = [day]; day.parentElement = cell;
+
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  let monthIndex = 11;
+  prev.onEvent = () => { monthIndex -= 1; month.textContent = months[monthIndex]!; };
+  next.onEvent = () => { monthIndex += 1; month.textContent = months[monthIndex]!; };
+  day.onEvent = () => { input.value = '03/17/2016'; };
+
+  attach(root, input, picker, header, prev, next, title, month, year, table, row, cell, day);
+  installDocument(t, root);
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const priorRegistry = (globalThis as any)[registryKey];
+  (globalThis as any)[registryKey] = { refs: new Map([['b-date-input', input]]) };
+  t.after(() => { if (priorRegistry === undefined) delete (globalThis as any)[registryKey]; else (globalThis as any)[registryKey] = priorRegistry; });
+
+  const contract = { stateOf: () => ({ rendered: true, visible: true, disabled: false }) } as any;
+  const result = dateSelectFunction({ target: { ref: 'b-date-input' }, value: '2016-03-17' }, contract) as any;
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.after.navigationSteps, 9);
+  assert.equal(result.after.displayedMonth, 3);
+  assert.equal(result.after.displayedYear, 2016);
+  assert.equal(input.value, '03/17/2016');
+  assert.equal(day.clicked, true);
 });
 
 test('Browser Observation V2 disconnects observers for detached iframe documents', (t) => {

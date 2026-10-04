@@ -1,6 +1,6 @@
 import { OperatorError } from '../core/errors.ts';
 import type { CdpConnection, JsonMap } from './browser-cdp-connection.ts';
-import { browserDomContractFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
+import { browserDomContractFunction, dateSelectFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
 
 const MAX_OOPIF_SESSIONS = 16;
 const MAX_OOPIF_DEPTH = 4;
@@ -542,6 +542,20 @@ export async function performSemanticInteraction(
     }
 
     const chosen = matches[0]!.context;
+    if (input.operation === 'select_date') {
+      const expression = `(${dateSelectFunction.toString()})(${JSON.stringify({ target: input.target, value: input.value })}, (${browserDomContractFunction.toString()})())`;
+      const raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      if (!raw || raw.ok !== true) {
+        const message = typeof raw?.error === 'string' ? raw.error : 'Calendar date selection did not complete.';
+        if (raw?.staleRef === true) throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: input.target } });
+        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'none', executionPhase: 'pre_dispatch' } });
+        throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: input.target, value: input.value } });
+      }
+      return {
+        value: raw,
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
     const sendKey = (params: JsonMap) => chosen.frame
       ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
       : session.send('Input.dispatchKeyEvent', params, 8_000, signal);

@@ -1020,6 +1020,118 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
 }
 
+export function dateSelectFunction(
+  input: { target: { ref?: string }; value: unknown },
+  contract = browserDomContractFunction()
+) {
+  const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(input.value ?? ''));
+  if (!match) return { ok: false, recoverable: true, error: 'select_date requires an ISO YYYY-MM-DD value.' };
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    return { ok: false, recoverable: true, error: 'select_date received an invalid calendar date.' };
+  }
+  const ref = input.target?.ref;
+  if (!ref) return { ok: false, error: 'select_date requires an observed target ref.' };
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, staleRef: true, error: 'Observed date target is stale; re-observe before retrying.' };
+  const state = contract.stateOf(element);
+  if (!state.rendered || state.disabled) return { ok: false, error: 'Observed date target is not currently usable.' };
+  if (element.tagName !== 'INPUT') return { ok: false, recoverable: true, error: 'select_date requires an observed input control.' };
+  const control = element as HTMLInputElement;
+  const view = element.ownerDocument?.defaultView ?? window;
+  const emitValueEvents = () => {
+    control.dispatchEvent(new view.Event('input', { bubbles: true }));
+    control.dispatchEvent(new view.Event('change', { bubbles: true }));
+  };
+  const inputType = trim(element.getAttribute('type') || 'text').toLowerCase();
+  if (inputType === 'date') {
+    control.focus?.();
+    control.value = String(input.value);
+    emitValueEvents();
+    return control.value === input.value
+      ? { ok: true, matched: { ref, role: 'textbox', name: trim(element.getAttribute('aria-label') || element.getAttribute('name') || element.id) }, after: { value: control.value, date: String(input.value), widget: 'native-date' } }
+      : { ok: false, error: 'Native date input postcondition failed.', expected: input.value, actual: control.value };
+  }
+
+  control.focus?.();
+  control.click?.();
+  const visible = (candidate: Element) => contract.stateOf(candidate).visible;
+  const roots = Array.from(element.ownerDocument?.querySelectorAll?.('.ui-datepicker,[role="dialog"],[role="grid"]') ?? [])
+    .filter((candidate) => visible(candidate));
+  const root = roots.find((candidate) => candidate.matches?.('.ui-datepicker'))
+    ?? roots.find((candidate) => candidate.querySelector?.('.ui-datepicker-calendar'))
+    ?? null;
+  if (!root) return { ok: false, recoverable: true, error: 'No supported visible calendar widget was associated with the observed input.' };
+
+  const months: Record<string, number> = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+  };
+  const readMonth = () => {
+    const monthNode = root.querySelector?.('.ui-datepicker-month');
+    const yearNode = root.querySelector?.('.ui-datepicker-year');
+    const monthNumber = months[trim(monthNode?.textContent).toLowerCase()];
+    const yearNumber = Number(trim(yearNode?.textContent));
+    return Number.isSafeInteger(monthNumber) && Number.isSafeInteger(yearNumber)
+      ? { month: monthNumber, year: yearNumber }
+      : undefined;
+  };
+  let displayed = readMonth();
+  if (!displayed) return { ok: false, recoverable: true, error: 'Visible calendar widget did not expose a readable month/year heading.' };
+  const requestedIndex = year * 12 + (month - 1);
+  let displayedIndex = displayed.year * 12 + (displayed.month - 1);
+  const initialDelta = requestedIndex - displayedIndex;
+  if (Math.abs(initialDelta) > 120) return { ok: false, recoverable: true, error: 'Calendar month navigation exceeds the bounded 120-month select_date window.' };
+
+  let navigationSteps = 0;
+  while (displayedIndex !== requestedIndex) {
+    const forward = requestedIndex > displayedIndex;
+    const selector = forward ? '.ui-datepicker-next' : '.ui-datepicker-prev';
+    const navigation = root.querySelector?.(selector);
+    if (!navigation || !visible(navigation)) return { ok: false, recoverable: true, error: 'Calendar widget did not expose the required month navigation control.' };
+    const beforeIndex = displayedIndex;
+    (navigation as HTMLElement).click?.();
+    const next = readMonth();
+    if (!next) return { ok: false, recoverable: true, error: 'Calendar month heading disappeared during bounded navigation.' };
+    displayedIndex = next.year * 12 + (next.month - 1);
+    const expectedIndex = beforeIndex + (forward ? 1 : -1);
+    if (displayedIndex !== expectedIndex) return { ok: false, recoverable: true, error: 'Calendar month navigation did not advance by exactly one month.' };
+    displayed = next;
+    navigationSteps += 1;
+    if (navigationSteps > 120) return { ok: false, recoverable: true, error: 'Calendar month navigation exceeded its bounded step limit.' };
+  }
+
+  const dayCandidates = Array.from(root.querySelectorAll?.('.ui-datepicker-calendar a') ?? [])
+    .filter((candidate) => visible(candidate)
+      && trim(candidate.textContent) === String(day)
+      && !candidate.parentElement?.classList?.contains('ui-datepicker-other-month'));
+  if (dayCandidates.length !== 1) {
+    return { ok: false, recoverable: true, error: 'Calendar day did not resolve to one unique actionable control.', matches: dayCandidates.length };
+  }
+  (dayCandidates[0] as HTMLElement).click?.();
+
+  const parseActual = (raw: string) => {
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (iso) return { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) };
+    const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw);
+    if (slash) return { year: Number(slash[3]), month: Number(slash[1]), day: Number(slash[2]) };
+    return undefined;
+  };
+  const actual = parseActual(String(control.value ?? ''));
+  if (!actual || actual.year !== year || actual.month !== month || actual.day !== day) {
+    return { ok: false, error: 'Calendar date postcondition failed.', expected: { year, month, day }, actual: control.value };
+  }
+  return {
+    ok: true,
+    matched: { ref, role: 'textbox', name: trim(element.getAttribute('aria-label') || element.getAttribute('name') || element.id) },
+    after: { value: control.value, date: String(input.value), widget: 'calendar', navigationSteps, displayedMonth: displayed.month, displayedYear: displayed.year }
+  };
+}
+
 export function interactionFunction(input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; key?: string; keys?: string[]; start?: number; end?: number }, contract = browserDomContractFunction()) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
