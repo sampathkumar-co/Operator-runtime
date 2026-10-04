@@ -190,6 +190,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -204,7 +205,18 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     }
     return '';
   };
-  const eligible = (element: Element) => { const state = contract.stateOf(element); return state.rendered && !state.pointerBlocked && !state.disabled && (!state.inViewport || !state.occluded); };
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
+  const eligible = (element: Element) => {
+    const state = contract.stateOf(element);
+    const activeKeyboardSink = !prepareForPointer && editableElement(element) && element.ownerDocument?.activeElement === element;
+    return (state.rendered || activeKeyboardSink) && !state.pointerBlocked && !state.disabled && (activeKeyboardSink || !state.inViewport || !state.occluded);
+  };
   const identityOf = (element: Element) => {
     const parts: string[] = [];
     let current: Element | null = element;
@@ -508,9 +520,6 @@ export async function performSemanticInteraction(
     const sendKey = (params: JsonMap) => chosen.frame
       ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
       : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
-    const sendText = (text: string) => chosen.frame
-      ? session.sendInSession(chosen.frame.sessionId, 'Input.insertText', { text }, 8_000, signal)
-      : session.send('Input.insertText', { text }, 8_000, signal);
     if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text') {
       const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
       const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
@@ -520,7 +529,21 @@ export async function performSemanticInteraction(
       if (input.operation === 'keyboard_text') {
         const text = String(input.value ?? '');
         if (!text.length || text.length > 4096) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters.', { retryable: false });
-        await sendText(text);
+        for (const char of Array.from(text)) {
+          if (/\r|\n/.test(char)) {
+            await sendKey({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            await sendKey({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            continue;
+          }
+          const codePoint = char.codePointAt(0) ?? 0;
+          if (codePoint < 0x20 || codePoint === 0x7f) {
+            throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text accepts printable text plus newline only.', { retryable: false });
+          }
+          const upper = /^[A-Za-z]$/.test(char) ? char.toUpperCase() : '';
+          const code = upper ? `Key${upper}` : /^\d$/.test(char) ? `Digit${char}` : '';
+          await sendKey({ type: 'keyDown', key: char, ...(code ? { code } : {}), text: char, unmodifiedText: char });
+          await sendKey({ type: 'keyUp', key: char, ...(code ? { code } : {}) });
+        }
         return {
           value: { ok: true, matched: firstLocatedSample(matches[0]!.samples), after: { nativeKeyboardTextDispatched: true, textLength: text.length } },
           ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})

@@ -313,6 +313,55 @@ test('pointer-style custom controls are discoverable through shadow roots and sa
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
 });
 
+test('semantic snapshot exposes contenteditable controls as editable textboxes', (t) => {
+  const root = new FakeRoot();
+  const editor = new FakeElement('div', 'Draft text');
+  editor.isContentEditable = true;
+  editor.setAttribute('contenteditable', 'true');
+  editor.setAttribute('aria-label', 'Editor');
+  attach(root, editor); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'Editor');
+  assert.ok(control);
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+});
+
+test('active visually hidden editable control is exposed only as a bounded keyboard sink', (t) => {
+  const root = new FakeRoot();
+  const sink = new FakeElement('input');
+  sink.id = 'terminal-target';
+  sink.setAttribute('type', 'text');
+  sink.style.opacity = '0';
+  attach(root, sink); root.activeElement = sink; installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'terminal-target');
+  assert.ok(control);
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+  assert.equal(control.visuallyHidden, true);
+  assert.equal(control.keyboardSink, true);
+  assert.equal((semanticLocatorFunction({ ref: control.ref }) as any).count, 1);
+  assert.equal((interactionFunction({ operation: 'focus', target: { ref: control.ref }, value: null }) as any).ok, true);
+  assert.match((interactionFunction({ operation: 'click', target: { ref: control.ref }, value: null }) as any).error, /No matching|stale/i);
+});
+
+test('hover-only CSS pointer affordance exposes an icon-like control without requiring visible text', (t) => {
+  const root = new FakeRoot();
+  (root as any).styleSheets = [{ cssRules: [{ selectorText: 'span:hover', style: { cursor: 'pointer' } }] }];
+  const icon = new FakeElement('span');
+  attach(root, icon); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.tag === 'span');
+  assert.ok(control);
+  assert.equal(control.role, 'pointer');
+  assert.equal(control.name, '');
+  assert.equal(control.selector, 'span');
+});
+
 test('semantic snapshot emits distinct structural selectors for duplicate visible siblings', (t) => {
   const root = new FakeRoot();
   const parent = new FakeElement('section');

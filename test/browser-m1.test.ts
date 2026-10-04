@@ -403,7 +403,6 @@ test('OOPIF discovery cancellation returns promptly and disables auto-attach', a
 
 test('native browser keyboard actions focus the unique semantic target and dispatch bounded CDP keys', async () => {
   const keyEvents: any[] = [];
-  const textEvents: any[] = [];
   const sample = { tag: 'input', role: 'textbox', name: 'Command', identity: '#command', value: 'echo hi', active: false, geometry: { coordinateSpace: 'viewport', x: 10, y: 20, width: 120, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } };
   const session = {
     on() { return () => undefined; },
@@ -414,7 +413,6 @@ test('native browser keyboard actions focus the unique semantic target and dispa
         if (expression.includes('interactionFunction')) return { result: { value: { ok: true, matched: sample, after: { ...sample, active: true } } } };
       }
       if (method === 'Input.dispatchKeyEvent') keyEvents.push(params);
-      if (method === 'Input.insertText') textEvents.push(params);
       return {};
     },
     async sendInSession() { return {}; }
@@ -432,9 +430,13 @@ test('native browser keyboard actions focus the unique semantic target and dispa
   ]);
   assert.equal(keyEvents[1].modifiers & 2, 2);
 
+  keyEvents.length = 0;
   const inserted = await performSemanticInteraction(session as any, { operation: 'keyboard_text', target: { ref: 'b-command' }, value: 'echo ready' });
   assert.equal(inserted.value.ok, true);
-  assert.deepEqual(textEvents, [{ text: 'echo ready' }]);
+  assert.equal(keyEvents.length, 'echo ready'.length * 2);
+  assert.deepEqual(keyEvents.slice(0, 4).map((event) => [event.type, event.key, event.text]), [
+    ['keyDown', 'e', 'e'], ['keyUp', 'e', undefined], ['keyDown', 'c', 'c'], ['keyUp', 'c', undefined]
+  ]);
   assert.equal((inserted.value.after as any).nativeKeyboardTextDispatched, true);
 });
 

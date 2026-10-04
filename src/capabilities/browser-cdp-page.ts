@@ -759,6 +759,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -773,22 +774,57 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     }
     return '';
   };
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
+  const hoverPointerSelectors = (() => {
+    const selectors: string[] = [];
+    const visitRules = (rules: CSSRuleList | ArrayLike<CSSRule> | undefined, depth = 0) => {
+      if (!rules || depth > 4 || selectors.length >= 256) return;
+      for (const rule of Array.from(rules).slice(0, 512)) {
+        if (selectors.length >= 256) break;
+        const styleRule = rule as CSSStyleRule;
+        const nested = rule as CSSGroupingRule;
+        try {
+          if (typeof styleRule.selectorText === 'string' && styleRule.style?.cursor === 'pointer') {
+            for (const raw of styleRule.selectorText.split(',')) {
+              const selector = raw.replace(/:(?:hover|focus|active)(?:\([^)]*\))?/gi, '').trim();
+              if (selector && selector.length <= 512 && !selectors.includes(selector)) selectors.push(selector);
+            }
+          }
+          if (nested.cssRules) visitRules(nested.cssRules, depth + 1);
+        } catch { /* cross-origin or unsupported stylesheet rule */ }
+      }
+    };
+    for (const sheet of Array.from(document.styleSheets ?? []).slice(0, 128)) {
+      try { visitRules(sheet.cssRules); } catch { /* cross-origin stylesheet stays opaque */ }
+    }
+    return selectors;
+  })();
+  const pointerStyled = (element: Element) => {
+    const style = viewOf(element)?.getComputedStyle?.(element);
+    if (style?.cursor === 'pointer') return true;
+    return hoverPointerSelectors.some((selector) => {
+      try { return element.matches(selector); } catch { return false; }
+    });
+  };
   const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 320);
   const seenControls = new Set(semanticControls.map(({ element }) => element));
   const pointerControls = deepQuery('*', 600)
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
-      const style = viewOf(element)?.getComputedStyle?.(element);
-      return contract.stateOf(element).actionable
-        && style?.cursor === 'pointer'
-        && Boolean(accessibleName(element));
+      return contract.stateOf(element).actionable && pointerStyled(element);
     });
   const controlCandidates = [...semanticControls, ...pointerControls]
-    .filter(({ element }) => visible(element))
+    .filter(({ element }) => visible(element) || (editableElement(element) && element.ownerDocument?.activeElement === element))
     .map(({ element, context }) => {
       const state = contract.stateOf(element);
       const semanticRole = roleOf(element);
-      const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      const role = semanticRole || (pointerStyled(element) ? 'pointer' : '');
       const semanticName = accessibleName(element);
       const ref = observedRefOf(element);
       const priorFingerprint = observedRegistry!.history.get(ref)!;
@@ -816,6 +852,9 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         name: semanticName,
         type: inputType,
         semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
+        ...(editableElement(element) ? { editable: true } : {}),
+        ...(!state.visible ? { visuallyHidden: true } : {}),
+        ...(!state.visible && editableElement(element) && element.ownerDocument?.activeElement === element ? { keyboardSink: true } : {}),
         ...(inputType === 'date' ? { nativeValueFormat: 'YYYY-MM-DD' } : {}),
         ...(readableValue ? { value: readableValue } : {}),
         ...(autocomplete ? { autocomplete: true, ...(ariaAutocomplete ? { autocompleteMode: ariaAutocomplete } : {}), ...(popupId ? { popupId } : {}) } : {}),
@@ -847,7 +886,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         context
       };
     })
-    .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
+    .filter((item) => (item.role && (item.name || item.role === 'slider' || item.role === 'pointer' || item.keyboardSink === true)) || item.href)
     .sort((left, right) => {
       const score = (item: typeof left) => item._focusScore
         + (item.actionable ? 50 : 0)
@@ -1054,6 +1093,7 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -1068,7 +1108,16 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     }
     return '';
   };
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
   const visible = (element: Element) => { const state = contract.stateOf(element); return state.visible && !state.pointerBlocked && !state.occluded; };
+  const eligibleForOperation = (element: Element) => visible(element)
+    || (input.operation === 'focus' && editableElement(element) && element.ownerDocument?.activeElement === element);
   const normalizeColor = (raw: string) => {
     const probe = document.createElement?.('span');
     if (!probe) return trim(raw).toLowerCase();
@@ -1108,7 +1157,7 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     : deepQuery(selector, 1000);
   const desiredColor = input.target.renderedColor ? normalizeColor(input.target.renderedColor) : '';
   let matching = candidates.filter(({ element }) => {
-    if (!visible(element)) return false;
+    if (!eligibleForOperation(element)) return false;
     if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
     if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
     if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
