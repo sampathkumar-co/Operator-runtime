@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
-import { PERSISTENT_DATA_CATALOG, validatePersistentDataCatalog } from './persistent-data-catalog.ts';
+import { PERSISTENT_DATA_CATALOG, isMonotonicRestoreStore, validatePersistentDataCatalog } from './persistent-data-catalog.ts';
 
 const MAX_FILES = 50_000;
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
@@ -16,12 +16,20 @@ export interface SnapshotStore {
   files: SnapshotFile[];
 }
 export interface SnapshotManifest {
-  version: 1;
+  version: 2;
   epoch: string;
   createdAt: string;
   catalogDigest: string;
+  authorityDigest: string;
   stores: SnapshotStore[];
+  signerKeyId: string;
   manifestDigest: string;
+  signature: string;
+}
+export interface SnapshotAuthenticator {
+  keyId: string;
+  sign(payload: Uint8Array): Promise<string>;
+  verify(payload: Uint8Array, signature: string): Promise<boolean>;
 }
 export interface SnapshotCatalogMigrationPlan {
   id: string;
@@ -35,12 +43,14 @@ export class StateSnapshotManager {
   #stateDir: string;
   #snapshotRoot: string;
   #catalogMigrations: SnapshotCatalogMigrationPlan[];
+  #authenticator: SnapshotAuthenticator;
 
-  constructor(stateDir: string, snapshotRoot: string, options: { catalogMigrations?: SnapshotCatalogMigrationPlan[] } = {}) {
+  constructor(stateDir: string, snapshotRoot: string, options: { authenticator: SnapshotAuthenticator; catalogMigrations?: SnapshotCatalogMigrationPlan[] }) {
     validatePersistentDataCatalog();
     this.#stateDir = path.resolve(stateDir);
     this.#snapshotRoot = path.resolve(snapshotRoot);
     this.#catalogMigrations = structuredClone(options.catalogMigrations ?? []);
+    this.#authenticator = normalizeAuthenticator(options.authenticator);
     if (inside(this.#stateDir, this.#snapshotRoot) || inside(this.#snapshotRoot, this.#stateDir) || this.#stateDir === this.#snapshotRoot) {
       throw new OperatorError('SNAPSHOT_PATH_INVALID', 'Snapshot storage and runtime state must be separate directory trees.');
     }
@@ -85,14 +95,18 @@ export class StateSnapshotManager {
             files: manifestFiles
           });
         }
-        const base = {
-          version: 1 as const,
+        const unsigned = {
+          version: 2 as const,
           epoch,
           createdAt: new Date().toISOString(),
           catalogDigest: catalogDigest(),
-          stores
+          authorityDigest: authorityDigestFromStores(stores),
+          stores,
+          signerKeyId: this.#authenticator.keyId
         };
-        const manifest: SnapshotManifest = { ...base, manifestDigest: digestJson(base) };
+        const manifestDigest = digestJson(unsigned);
+        const signature = await this.#authenticator.sign(signaturePayload(manifestDigest, unsigned.signerKeyId));
+        const manifest: SnapshotManifest = { ...unsigned, manifestDigest, signature: validSignature(signature) };
         await fs.writeFile(path.join(partialDir, 'manifest.json'), JSON.stringify(manifest, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         await fs.rename(partialDir, finalDir);
         return manifest;
@@ -107,8 +121,16 @@ export class StateSnapshotManager {
     const snapshotDir = path.join(this.#snapshotRoot, validEpoch(epochInput));
     const manifest = await readManifest(snapshotDir);
     validateManifestShape(manifest);
-    const base = { version: manifest.version, epoch: manifest.epoch, createdAt: manifest.createdAt, catalogDigest: manifest.catalogDigest, stores: manifest.stores };
-    if (manifest.manifestDigest !== digestJson(base)) throw new OperatorError('SNAPSHOT_MANIFEST_TAMPERED', 'Snapshot manifest digest does not match its contents.');
+    const unsigned = {
+      version: manifest.version, epoch: manifest.epoch, createdAt: manifest.createdAt,
+      catalogDigest: manifest.catalogDigest, authorityDigest: manifest.authorityDigest,
+      stores: manifest.stores, signerKeyId: manifest.signerKeyId
+    };
+    if (manifest.manifestDigest !== digestJson(unsigned)) throw new OperatorError('SNAPSHOT_MANIFEST_TAMPERED', 'Snapshot manifest digest does not match its contents.');
+    if (manifest.authorityDigest !== authorityDigestFromStores(manifest.stores)) throw new OperatorError('SNAPSHOT_AUTHORITY_TAMPERED', 'Snapshot authority digest does not match its authority-bearing stores.');
+    if (manifest.signerKeyId !== this.#authenticator.keyId || !await this.#authenticator.verify(signaturePayload(manifest.manifestDigest, manifest.signerKeyId), manifest.signature)) {
+      throw new OperatorError('SNAPSHOT_SIGNATURE_INVALID', 'Snapshot manifest is not authenticated by the current device authority.');
+    }
     this.#resolveRestoreStores(manifest);
     for (const store of manifest.stores) {
       if (store.revision !== storeRevision(store.id, store.files)) throw new OperatorError('SNAPSHOT_STORE_TAMPERED', `Snapshot store ${store.id} revision is invalid.`);
@@ -123,12 +145,19 @@ export class StateSnapshotManager {
 
   async restore(input: { epoch: string; withQuiescence: SnapshotQuiescence; signal?: AbortSignal; onStoreRestored?: (count: number) => void | Promise<void> }): Promise<SnapshotManifest> {
     const manifest = await this.verify(input.epoch);
-    const restoreStores = this.#resolveRestoreStores(manifest);
+    const restoreStores = this.#resolveRestoreStores(manifest).filter((store) => !isMonotonicRestoreStore(store.targetId));
     return await input.withQuiescence(async () => {
       throwIfAborted(input.signal);
+      const liveAuthorityDigest = await authorityDigestForState(this.#stateDir);
+      if (liveAuthorityDigest !== manifest.authorityDigest) {
+        throw new OperatorError('SNAPSHOT_AUTHORITY_STALE', 'Restore refused because live authority changed after this snapshot; historical authority cannot replace or bypass the newer state.', {
+          retryable: false,
+          details: { snapshotAuthorityDigest: manifest.authorityDigest, liveAuthorityDigest }
+        });
+      }
       const snapshotDir = path.join(this.#snapshotRoot, manifest.epoch);
       const transaction = path.join(path.dirname(this.#stateDir), `.mecord-restore-${crypto.randomUUID()}`);
-        const staged = path.join(transaction, 'staged');
+      const staged = path.join(transaction, 'staged');
       const rollback = path.join(transaction, 'rollback');
       await fs.mkdir(staged, { recursive: true, mode: 0o700 });
       const moved: Array<{ target: string; rollbackTarget?: string }> = [];
@@ -167,12 +196,25 @@ export class StateSnapshotManager {
         await fs.rm(transaction, { recursive: true, force: true });
         return manifest;
       } catch (error) {
+        const rollbackFailures: string[] = [];
         for (const item of moved.reverse()) {
-          await fs.rm(item.target, { recursive: true, force: true }).catch(() => undefined);
-          if (item.rollbackTarget && await exists(item.rollbackTarget)) {
-            await fs.mkdir(path.dirname(item.target), { recursive: true, mode: 0o700 });
-            await fs.rename(item.rollbackTarget, item.target).catch(() => undefined);
+          try { await fs.rm(item.target, { recursive: true, force: true }); }
+          catch (rollbackError) { rollbackFailures.push(`remove:${item.target}:${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`); }
+          if (item.rollbackTarget) {
+            try {
+              if (!await exists(item.rollbackTarget)) throw new Error('rollback source is missing');
+              await fs.mkdir(path.dirname(item.target), { recursive: true, mode: 0o700 });
+              await fs.rename(item.rollbackTarget, item.target);
+            } catch (rollbackError) {
+              rollbackFailures.push(`restore:${item.target}:${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
           }
+        }
+        if (rollbackFailures.length > 0) {
+          throw new OperatorError('SNAPSHOT_ROLLBACK_INCOMPLETE', 'Snapshot restore failed and rollback could not fully recover the prior state. Recovery evidence was preserved.', {
+            retryable: false,
+            details: { transaction, rollbackFailures, originalError: error instanceof Error ? error.message : String(error) }
+          });
         }
         await fs.rm(transaction, { recursive: true, force: true });
         throw error;
@@ -243,10 +285,42 @@ export class StateSnapshotManager {
 function snapshotCatalog() {
   return PERSISTENT_DATA_CATALOG.filter((item) => item.backup === 'include' && item.restore !== 'never');
 }
-function catalogDigest(): string { return digestJson(snapshotCatalog().map(({ id, location, restore }) => ({ id, location, restore }))); }
+function catalogDigest(): string {
+  return digestJson(snapshotCatalog().map(({ id, location, restore }) => ({ id, location, restore, monotonicRestore: isMonotonicRestoreStore(id) })));
+}
 export function currentSnapshotCatalogDigest(): string { return catalogDigest(); }
 function storeRevision(id: string, files: SnapshotFile[]): string { return digestJson({ id, files: files.slice().sort((a, b) => a.path.localeCompare(b.path)) }); }
+function authorityDigestFromStores(stores: SnapshotStore[]): string {
+  return digestJson(stores.filter((store) => isMonotonicRestoreStore(store.id)).map((store) => ({
+    id: store.id, present: store.present, revision: store.revision
+  })).sort((a, b) => a.id.localeCompare(b.id)));
+}
+async function authorityDigestForState(stateDir: string): Promise<string> {
+  const stores: SnapshotStore[] = [];
+  for (const catalog of snapshotCatalog().filter((item) => isMonotonicRestoreStore(item.id))) {
+    const source = safeJoin(stateDir, catalog.location);
+    const files = await enumerate(source, catalog.location);
+    const manifestFiles: SnapshotFile[] = [];
+    for (const file of files) manifestFiles.push({ path: file.relative, bytes: file.bytes, sha256: await sha256File(file.absolute) });
+    stores.push({ id: catalog.id, location: catalog.location, present: await exists(source), revision: storeRevision(catalog.id, manifestFiles), files: manifestFiles });
+  }
+  return authorityDigestFromStores(stores);
+}
 function digestJson(value: unknown): string { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+function signaturePayload(manifestDigest: string, signerKeyId: string): Uint8Array {
+  return Buffer.from(JSON.stringify({ purpose: 'mecord-state-snapshot-v2', manifestDigest, signerKeyId }), 'utf8');
+}
+function normalizeAuthenticator(input: SnapshotAuthenticator): SnapshotAuthenticator {
+  if (!input || typeof input !== 'object' || !/^[A-Za-z0-9._:-]{8,256}$/.test(String(input.keyId ?? '')) || typeof input.sign !== 'function' || typeof input.verify !== 'function') {
+    throw new OperatorError('SNAPSHOT_AUTHENTICATOR_INVALID', 'Snapshot authenticator is missing or invalid.');
+  }
+  return input;
+}
+function validSignature(input: string): string {
+  const value = String(input ?? '');
+  if (!/^[A-Za-z0-9_-]{40,512}$/.test(value)) throw new OperatorError('SNAPSHOT_SIGNATURE_INVALID', 'Snapshot signature is invalid.');
+  return value;
+}
 
 async function enumerate(target: string, relative: string): Promise<Array<{ absolute: string; relative: string; bytes: number }>> {
   if (!await exists(target)) return [];
@@ -288,8 +362,9 @@ async function readManifest(snapshotDir: string): Promise<SnapshotManifest> {
 }
 
 function validateManifestShape(manifest: SnapshotManifest): void {
-  if (!manifest || manifest.version !== 1 || validEpoch(manifest.epoch) !== manifest.epoch || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.stores)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest shape is invalid.');
-  if (!/^[0-9a-f]{64}$/.test(manifest.catalogDigest) || !/^[0-9a-f]{64}$/.test(manifest.manifestDigest)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest digests are invalid.');
+  if (!manifest || manifest.version !== 2 || validEpoch(manifest.epoch) !== manifest.epoch || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.stores)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest shape is invalid.');
+  if (!/^[0-9a-f]{64}$/.test(manifest.catalogDigest) || !/^[0-9a-f]{64}$/.test(manifest.authorityDigest) || !/^[0-9a-f]{64}$/.test(manifest.manifestDigest)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest digests are invalid.');
+  if (!/^[A-Za-z0-9._:-]{8,256}$/.test(manifest.signerKeyId) || !/^[A-Za-z0-9_-]{40,512}$/.test(manifest.signature)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot authentication metadata is invalid.');
   for (const store of manifest.stores) {
     if (!store || typeof store.id !== 'string' || typeof store.location !== 'string' || typeof store.present !== 'boolean' || !/^[0-9a-f]{64}$/.test(store.revision) || !Array.isArray(store.files)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot store entry is invalid.');
     if (!store.present && store.files.length > 0) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Absent snapshot stores cannot contain files.');

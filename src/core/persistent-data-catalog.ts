@@ -20,6 +20,22 @@ export interface PersistentDataEntry {
 
 const entry = (value: PersistentDataEntry): PersistentDataEntry => Object.freeze(value);
 
+/**
+ * Stores whose historical contents must never replace newer live authority.
+ * Snapshots may authenticate/verify these stores, but normal restore preserves
+ * the live copy and refuses to cross a changed authority digest.
+ */
+export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
+  'audit-active', 'audit-head', 'audit-segments',
+  'tasks', 'team-missions', 'action-journal', 'action-results', 'sagas', 'compensation', 'intent-registry',
+  'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'semantic-migrations',
+  'relay-client', 'relay-session-credential', 'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
+  'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
+  'enterprise-policy', 'bootstrap', 'local-device-reset'
+] as const);
+const MONOTONIC_RESTORE_STORE_ID_SET = new Set<string>(MONOTONIC_RESTORE_STORE_IDS);
+export function isMonotonicRestoreStore(id: string): boolean { return MONOTONIC_RESTORE_STORE_ID_SET.has(id); }
+
 /** Authoritative local-runtime persistent-data registry. New durable stores must be added here. */
 export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.freeze([
   entry({ id: 'audit-active', owner: 'audit', location: 'audit.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-active-segment', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
@@ -66,5 +82,9 @@ export function validatePersistentDataCatalog(): void {
     }
     ids.add(item.id);
     locations.add(item.location);
+  }
+  for (const id of MONOTONIC_RESTORE_STORE_IDS) {
+    const item = PERSISTENT_DATA_CATALOG.find((candidate) => candidate.id === id);
+    if (!item || item.backup !== 'include' || item.restore === 'never') throw new Error('Monotonic restore catalog references a non-snapshot durable store.');
   }
 }
