@@ -17,6 +17,9 @@ test('decision budget separately accounts durable observations, retries, reconci
     plannerEvents: [{ kind: 'RECONCILIATION_REQUIRED', decision: 'RECONCILE', code: 'UNCERTAIN', at: '2026-10-04T00:00:00.200Z', provider: 'test', capability: 'file.info' }]
   };
   const budget = taskDecisionBudget(execution, Date.parse('2026-10-04T00:00:00.500Z'));
+  assert.deepEqual(budget.modelCalls, { used: 0, limit: 20, remaining: 20 });
+  assert.deepEqual(budget.tokens, { used: 0, limit: 1_000_000, remaining: 1_000_000 });
+  assert.deepEqual(budget.estimatedCostMicros, { used: 0, limit: 10_000_000, remaining: 10_000_000 });
   assert.equal(budget.readObservations.used, 1);
   assert.equal(budget.visualCaptures.used, 1);
   assert.equal(budget.retries.used, 1);

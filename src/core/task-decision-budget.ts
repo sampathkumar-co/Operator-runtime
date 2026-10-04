@@ -2,6 +2,9 @@ import type { TaskExecution } from './task.ts';
 
 export interface TaskDecisionBudgetDimension { used: number; limit: number; remaining: number }
 export interface TaskDecisionBudget {
+  modelCalls: TaskDecisionBudgetDimension;
+  tokens: TaskDecisionBudgetDimension;
+  estimatedCostMicros: TaskDecisionBudgetDimension;
   plannerIterations: TaskDecisionBudgetDimension;
   environmentActions: TaskDecisionBudgetDimension;
   readObservations: TaskDecisionBudgetDimension;
@@ -20,6 +23,11 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
   const events = execution.plannerEvents ?? [];
   const startedAt = execution.startedAt ? Date.parse(execution.startedAt) : nowMs;
   return {
+    // Built-in Task planners are deterministic. Model-backed adapters must
+    // charge these dimensions before returning a PlannerDecision.
+    modelCalls: dimension(0, Math.max(1, execution.maxSteps * 2)),
+    tokens: dimension(0, Math.max(1, execution.maxSteps * 100_000)),
+    estimatedCostMicros: dimension(0, Math.max(1, execution.maxSteps * 1_000_000)),
     plannerIterations: dimension(execution.plannerIterations ?? 0, plannerLimit),
     environmentActions: dimension(execution.dispatchedActions ?? execution.stepCount, execution.maxSteps),
     readObservations: dimension(records.filter((record) => record.risk === 'read' && record.observation !== undefined).length, observationLimit),
@@ -32,7 +40,7 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
 }
 
 export function decisionBudgetExhaustion(budget: TaskDecisionBudget): string | undefined {
-  for (const [name, value] of Object.entries(budget)) if (value.remaining === 0 && value.used >= value.limit) return name;
+  for (const [name, value] of Object.entries(budget)) if (value.limit > 0 && value.remaining === 0 && value.used >= value.limit) return name;
   return undefined;
 }
 
