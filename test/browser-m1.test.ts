@@ -10,6 +10,8 @@ class FakeWebSocket {
   static readonly OPEN = 1;
   static downloadScenario: 'complete' | 'unrelated-first' | 'simultaneous' | 'canceled' | 'target-closed' = 'complete';
   static autoAttachDisabled = 0;
+  static mutationNoise = false;
+  static mutationVersion = 0;
   static #instances = new Set<FakeWebSocket>();
   readonly url: string;
   readyState = 0;
@@ -80,7 +82,7 @@ class FakeWebSocket {
           result: {
             value: {
               count,
-              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', identity: '#email', geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } }] : []
+              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', identity: '#email', ...(FakeWebSocket.mutationNoise ? { documentMutationVersion: (FakeWebSocket.mutationVersion += 1) } : {}), geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } }] : []
             }
           }
         };
@@ -451,6 +453,29 @@ test('browser provider prevents a second equivalent no-progress action and prese
     assert.equal(second.error?.retryable, false);
     assert.equal(second.error?.sideEffectState, 'known');
     assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
+  });
+});
+
+test('browser progress ignores unrelated document mutation-version noise', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.mutationNoise = true;
+  FakeWebSocket.mutationVersion = 0;
+  t.after(() => {
+    FakeWebSocket.mutationNoise = false;
+    FakeWebSocket.mutationVersion = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const first = await provider.execute({
+      id: 'mutation-noise-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(first.ok, true, first.error?.message);
+    assert.equal((first.output as any).stateDelta.progress, false);
+    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
   });
 });
 
