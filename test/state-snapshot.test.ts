@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { StateSnapshotManager } from '../src/core/state-snapshot.ts';
+import { StateSnapshotManager, currentSnapshotCatalogDigest } from '../src/core/state-snapshot.ts';
+import { runOfflineStateSnapshot } from '../apps/local-agent/src/state-maintenance.ts';
+import { acquireLocalAgentStateInstanceLock } from '../apps/local-agent/src/state-instance-lock.ts';
 
 async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -72,4 +75,62 @@ test('restore verifies payload before mutation and rolls back an interrupted app
   await fs.writeFile(path.join(snapshots, manifest.epoch, 'data', auditFile), 'tampered');
   await assert.rejects(manager.restore({ epoch: manifest.epoch, withQuiescence: quiescent }), (error: any) => error?.code === 'SNAPSHOT_FILE_TAMPERED');
   assert.equal(await fs.readFile(path.join(state, 'audit.ndjson'), 'utf8'), 'live-value\n');
+});
+
+test('production snapshot maintenance cannot overlap a live multi-store mutation owner', async (t) => {
+  const state = await temp(t, 'operator-snapshot-owned-state-');
+  const snapshots = await temp(t, 'operator-snapshot-owned-output-');
+  const owner = await acquireLocalAgentStateInstanceLock(state);
+  await fs.mkdir(path.join(state, 'tasks'));
+  await fs.writeFile(path.join(state, 'tasks', 'one.json'), '{"epoch":"after"}');
+
+  await assert.rejects(
+    runOfflineStateSnapshot({ operation: 'create', stateDir: state, snapshotRoot: snapshots, epoch: 'overlap' }),
+    (error: unknown) => (error as { code?: string }).code === 'LOCAL_AGENT_ALREADY_RUNNING'
+  );
+  await fs.writeFile(path.join(state, 'world-model.json'), '{"epoch":"after"}');
+  await owner.release();
+
+  await runOfflineStateSnapshot({ operation: 'create', stateDir: state, snapshotRoot: snapshots, epoch: 'coherent-after' });
+  await fs.writeFile(path.join(state, 'tasks', 'one.json'), '{"epoch":"later"}');
+  await fs.writeFile(path.join(state, 'world-model.json'), '{"epoch":"later"}');
+  await runOfflineStateSnapshot({ operation: 'restore', stateDir: state, snapshotRoot: snapshots, epoch: 'coherent-after' });
+  assert.equal(await fs.readFile(path.join(state, 'tasks', 'one.json'), 'utf8'), '{"epoch":"after"}');
+  assert.equal(await fs.readFile(path.join(state, 'world-model.json'), 'utf8'), '{"epoch":"after"}');
+});
+
+test('cross-release restore requires and applies an exact catalog migration contract', async (t) => {
+  const state = await temp(t, 'operator-snapshot-migration-state-');
+  const snapshots = await temp(t, 'operator-snapshot-migration-output-');
+  await fs.mkdir(path.join(state, 'tasks'));
+  await fs.writeFile(path.join(state, 'tasks', 'one.json'), '{"release":"N"}');
+  const creator = new StateSnapshotManager(state, snapshots);
+  const original = await creator.create({ epoch: 'release-n', withQuiescence: quiescent });
+
+  const manifestFile = path.join(snapshots, original.epoch, 'manifest.json');
+  const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'));
+  const oldCatalogDigest = 'f'.repeat(64);
+  manifest.catalogDigest = oldCatalogDigest;
+  const base = {
+    version: manifest.version,
+    epoch: manifest.epoch,
+    createdAt: manifest.createdAt,
+    catalogDigest: manifest.catalogDigest,
+    stores: manifest.stores
+  };
+  manifest.manifestDigest = crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex');
+  await fs.writeFile(manifestFile, JSON.stringify(manifest, null, 2));
+
+  await assert.rejects(creator.verify('release-n'), (error: unknown) =>
+    (error as { code?: string }).code === 'SNAPSHOT_CATALOG_MISMATCH');
+  const upgrader = new StateSnapshotManager(state, snapshots, { catalogMigrations: [{
+    id: 'release-n-to-n-plus-1',
+    fromCatalogDigest: oldCatalogDigest,
+    toCatalogDigest: currentSnapshotCatalogDigest(),
+    stores: manifest.stores.map((store: { id: string }) => ({ targetId: store.id, sourceId: store.id }))
+  }] });
+  await upgrader.verify('release-n');
+  await fs.writeFile(path.join(state, 'tasks', 'one.json'), '{"release":"N+1"}');
+  await upgrader.restore({ epoch: 'release-n', withQuiescence: quiescent });
+  assert.equal(await fs.readFile(path.join(state, 'tasks', 'one.json'), 'utf8'), '{"release":"N"}');
 });

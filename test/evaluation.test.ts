@@ -143,7 +143,8 @@ test('runtime-native evaluation derives action, planner, retry, reconciliation, 
     id: crypto.randomUUID(), scenarioId: 'browser.general', scenarioVersion: 1,
     runtimeVersion: '4.0.0', sourceCommit: 'd'.repeat(40), candidateDirty: false,
     runnerHash: digest('runner'), task, seed: 7, model: 'model-x', provider: 'provider-y',
-    modelConfigDigest: digest('config'), inputTokens: 100, cachedInputTokens: 40, outputTokens: 20,
+    modelConfigDigest: digest('config'), environmentDigest: digest('runtime-image-and-host'),
+    inputTokens: 100, cachedInputTokens: 40, outputTokens: 20,
     plannerCalls: 3, modelLatencyMs: 500, runtimeLatencyMs: 1200
   });
   assert.equal(run.actionCount, 2);
@@ -158,4 +159,5 @@ test('runtime-native evaluation derives action, planner, retry, reconciliation, 
   assert.equal(run.taskFailures, 1);
   assert.equal(run.tokenCount, 120);
   assert.equal(run.cachedInputTokens, 40);
+  assert.equal(run.environmentDigest, digest('runtime-image-and-host'));
 });

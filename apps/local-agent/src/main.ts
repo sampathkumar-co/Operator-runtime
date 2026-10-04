@@ -112,7 +112,6 @@ const tasks = new TaskStore(stateDir);
 const resourceLeases = new ResourceLeaseStore(stateDir);
 const actionJournal = new ActionTransitionJournal(stateDir);
 const intentRegistry = new IntentRegistry(stateDir);
-const teams = new TeamCoordinator(stateDir, { requireKernelVerification: true, intentRegistry, actionJournal });
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
 const perception = new PerceptionGraphStore(stateDir);
@@ -126,17 +125,7 @@ const semanticMigration = new SemanticCheckpointManager(stateDir, {
 });
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
-const organizations = new OrganizationCoordinator(stateDir, teams);
-const organizationRecovery = await organizations.recoverPendingCompensations();
-if (organizationRecovery.pending > 0) {
-  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
-}
 const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const teachMode = new TeachModeStore(stateDir, {
-  journal: actionJournal,
-  requireKernelVerification: true,
-  intentRegistry
-});
 const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
@@ -200,6 +189,25 @@ const agentKernel = new AgentKernel({
       throw error;
     }
   }
+});
+const teams = new TeamCoordinator(stateDir, {
+  requireKernelVerification: true,
+  intentRegistry,
+  actionJournal,
+  agentKernel,
+  permissions
+});
+const organizations = new OrganizationCoordinator(stateDir, teams);
+const organizationRecovery = await organizations.recoverPendingCompensations();
+if (organizationRecovery.pending > 0) {
+  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+}
+const teachMode = new TeachModeStore(stateDir, {
+  journal: actionJournal,
+  requireKernelVerification: true,
+  intentRegistry,
+  agentKernel,
+  permissions
 });
 const sagas = new DurableSagaKernel(stateDir, { kernel: agentKernel, permissions });
 const studioExecutor = new StudioWorkflowExecutor(stateDir, {

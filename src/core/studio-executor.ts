@@ -13,6 +13,7 @@ import { VerificationKernel, type VerificationCheck, type VerificationReceipt } 
 import type { AgentKernel } from './agent-kernel.ts';
 import { kernelVerificationDigest } from './action-verification.ts';
 import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
+import { executeCanonicalVerification } from './canonical-verification.ts';
 
 export type StudioRunState =
   | 'PENDING'
@@ -337,13 +338,28 @@ export class StudioWorkflowExecutor {
     return runVerificationContract(run);
   }
 
-  async verify(runIdInput: string, checks: VerificationCheck[]): Promise<StudioWorkflowRun> {
+  async verify(runIdInput: string, verification: unknown): Promise<StudioWorkflowRun> {
     const runId = uuid(runIdInput, 'runId');
     const gated = await this.#gateRunIntent(runId);
-    if (gated.state === 'CANCELLED') return gated;
+    if (gated.state === 'CANCELLED' || gated.state === 'VERIFIED') return gated;
+    const checks = this.#agentKernel
+      ? (await executeCanonicalVerification({
+          request: verification,
+          kernel: this.#agentKernel,
+          permissions: this.#permissions,
+          subjectKind: 'studio-workflow-run',
+          subjectId: gated.id,
+          ownerKind: 'studio-verification',
+          ownerId: gated.id,
+          ...(gated.intent ? { intent: gated.intent } : {})
+        })).checks
+      : legacyVerificationChecks(verification, 'Studio');
     return await this.#update(runId, (run) => {
       if (run.state === 'VERIFIED') return;
       if (run.state !== 'AWAITING_VERIFICATION') throw new OperatorError('STUDIO_RUN_NOT_READY_FOR_VERIFICATION', 'Studio workflow run must complete all execution steps before verification.');
+      if (digest(runVerificationContract(run)) !== digest(runVerificationContract(gated))) {
+        throw new OperatorError('STUDIO_VERIFICATION_STALE', 'Studio run changed while canonical verification was executing.');
+      }
       const canonicalActionProofs = !this.#agentKernel || run.steps.every((step) => Boolean(step.verificationDigest));
       const receipt = new VerificationKernel().verify({
         subjectKind: 'studio-workflow-run',
@@ -373,6 +389,55 @@ export class StudioWorkflowExecutor {
   }): Promise<StudioWorkflowRun> {
     const runId = uuid(runIdInput, 'runId');
     const stepKey = bounded(stepKeyInput, 128, 'stepKey');
+    if (this.#agentKernel) {
+      const run = await this.#gateRunIntent(runId);
+      if (run.state !== 'BLOCKED') throw new OperatorError('STUDIO_RUN_NOT_BLOCKED', 'Studio run is not awaiting reconciliation.');
+      const step = requireStep(run, stepKey);
+      if (step.state !== 'NEEDS_RECONCILIATION') throw new OperatorError('STUDIO_STEP_NOT_UNCERTAIN', 'Studio step is not awaiting reconciliation.');
+      if (!step.provider) throw new OperatorError('STUDIO_RECONCILIATION_UNAVAILABLE', 'Uncertain Studio step has no durable provider identity.');
+      const action: ActionRequest = {
+        id: step.actionId,
+        capability: step.capability,
+        risk: step.risk,
+        input: structuredClone(step.input),
+        provenance: { kind: 'trusted_policy', source: `studio-workflow:${run.workflowId}` },
+        ...(step.target ? { target: step.target } : {}),
+        taskId: run.id,
+        ...(run.intent ? { intent: run.intent } : {})
+      };
+      const outcome = await this.#agentKernel.reconcile(action, step.provider);
+      if (outcome.status === 'uncertain') {
+        throw new OperatorError('STUDIO_RECONCILIATION_UNVERIFIED', 'Provider state remains uncertain; the Studio step stays blocked.');
+      }
+      return await this.#update(runId, (current) => {
+        if (current.state !== 'BLOCKED') throw new OperatorError('STUDIO_RECONCILIATION_STALE', 'Studio run changed while provider reconciliation was executing.');
+        const mutable = requireStep(current, stepKey);
+        if (mutable.state !== 'NEEDS_RECONCILIATION' || mutable.inputDigest !== step.inputDigest || mutable.provider !== step.provider) {
+          throw new OperatorError('STUDIO_RECONCILIATION_STALE', 'Studio step changed while provider reconciliation was executing.');
+        }
+        if (outcome.status === 'completed' && outcome.result?.ok) {
+          const verificationDigest = kernelVerificationDigest(outcome.result);
+          if (!verificationDigest) throw new OperatorError('STUDIO_KERNEL_VERIFICATION_REQUIRED', 'Reconciled Studio completion lacks an Agent Kernel verification proof.');
+          mutable.state = 'SUCCEEDED';
+          mutable.sideEffectState = 'known';
+          mutable.provider = outcome.result.provider;
+          mutable.evidenceDigest = digest(outcome.result.evidence);
+          mutable.verificationDigest = verificationDigest;
+          delete mutable.errorCode;
+        } else if (outcome.status === 'not_applied') {
+          mutable.state = 'PENDING';
+          mutable.sideEffectState = 'none';
+          delete mutable.errorCode;
+          delete mutable.evidenceDigest;
+          delete mutable.verificationDigest;
+          delete mutable.startedAt;
+          delete mutable.finishedAt;
+        } else {
+          throw new OperatorError('STUDIO_RECONCILIATION_UNVERIFIED', 'Provider reconciliation did not establish a safe Studio transition.');
+        }
+        current.state = 'PENDING';
+      });
+    }
     return await this.#update(runId, (run) => {
       if (run.state !== 'BLOCKED') throw new OperatorError('STUDIO_RUN_NOT_BLOCKED', 'Studio run is not awaiting reconciliation.');
       const step = requireStep(run, stepKey);
@@ -620,6 +685,10 @@ function validateState(input: unknown): StudioRunStateFile {
 }
 
 function digest(value: unknown): string { return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex'); }
+function legacyVerificationChecks(input: unknown, owner: string): VerificationCheck[] {
+  if (!Array.isArray(input)) throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `${owner} verification requires typed runtime probes in production.`);
+  return input as VerificationCheck[];
+}
 function sha(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${label} must be SHA-256.`);

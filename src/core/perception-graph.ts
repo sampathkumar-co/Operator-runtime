@@ -89,60 +89,35 @@ const STORE_OPTIONS = {
 export class PerceptionGraphStore {
   #file: string;
   #clock: () => Date;
+  #onDurableWrite?: () => void;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: { clock?: () => Date; onDurableWrite?: () => void } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'perception-graph.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#onDurableWrite = options.onDurableWrite;
   }
 
   async observe(input: PerceptionObservation): Promise<PerceptionNode> {
-    const normalized = normalizeObservation(input);
+    return (await this.observeBatch([input]))[0]!;
+  }
+
+  async observeBatch(inputs: readonly PerceptionObservation[]): Promise<PerceptionNode[]> {
+    if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 5_000) {
+      throw new OperatorError('PERCEPTION_INPUT_INVALID', 'Perception observation batch must contain between 1 and 5000 items.');
+    }
+    // Normalize the entire batch before entering the durable mutation so a bad
+    // member cannot partially publish the preceding observations.
+    const normalized = inputs.map((input) => normalizeObservation(input));
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const now = this.#clock();
       prune(state, now.getTime());
-      let node = resolveNode(state, normalized);
-      if (!node) {
-        if (state.nodes.length >= MAX_NODES) throw new OperatorError('PERCEPTION_LIMIT', 'Perception node limit reached.');
-        node = {
-          id: crypto.randomUUID(),
-          sceneKey: normalized.sceneKey,
-          ...(normalized.semanticId ? { semanticId: normalized.semanticId } : {}),
-          claims: [],
-          createdAt: now.toISOString(),
-          updatedAt: now.toISOString()
-        };
-        state.nodes.push(node);
-      } else if (normalized.semanticId && !node.semanticId) {
-        node.semanticId = normalized.semanticId;
-      }
-
-      const claim: PerceptionClaim = {
-        id: crypto.randomUUID(),
-        channel: normalized.channel,
-        source: normalized.source,
-        ...(normalized.role ? { role: normalized.role } : {}),
-        ...(normalized.name ? { name: normalized.name } : {}),
-        ...(normalized.text ? { text: normalized.text } : {}),
-        ...(normalized.bounds ? { bounds: normalized.bounds } : {}),
-        state: normalized.state,
-        confidence: normalized.confidence,
-        evidenceDigest: normalized.evidenceDigest,
-        correlationKey: normalized.correlationKey,
-        ...(normalized.coordinates ? { coordinates: normalized.coordinates } : {}),
-        observedAt: now.toISOString(),
-        expiresAt: new Date(now.getTime() + normalized.ttlMs).toISOString()
-      };
-      const correlated = node.claims.findIndex((existing) => existing.correlationKey === claim.correlationKey);
-      if (correlated >= 0) node.claims.splice(correlated, 1);
-      node.claims.push(claim);
-      node.claims.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
-      if (node.claims.length > MAX_CLAIMS) node.claims.length = MAX_CLAIMS;
-      node.updatedAt = now.toISOString();
+      const published = normalized.map((observation) => applyObservation(state, observation, now));
       state.nodes.sort((a, b) => a.sceneKey.localeCompare(b.sceneKey) || a.id.localeCompare(b.id));
       await this.#write(state);
-      return structuredClone(node);
+      this.#onDurableWrite?.();
+      return structuredClone(published);
     });
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
@@ -211,6 +186,52 @@ export class PerceptionGraphStore {
     validateState(state);
     await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
   }
+}
+
+function applyObservation(
+  state: PerceptionState,
+  normalized: ReturnType<typeof normalizeObservation>,
+  now: Date
+): PerceptionNode {
+  let node = resolveNode(state, normalized);
+  if (!node) {
+    if (state.nodes.length >= MAX_NODES) throw new OperatorError('PERCEPTION_LIMIT', 'Perception node limit reached.');
+    node = {
+      id: crypto.randomUUID(),
+      sceneKey: normalized.sceneKey,
+      ...(normalized.semanticId ? { semanticId: normalized.semanticId } : {}),
+      claims: [],
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString()
+    };
+    state.nodes.push(node);
+  } else if (normalized.semanticId && !node.semanticId) {
+    node.semanticId = normalized.semanticId;
+  }
+
+  const claim: PerceptionClaim = {
+    id: crypto.randomUUID(),
+    channel: normalized.channel,
+    source: normalized.source,
+    ...(normalized.role ? { role: normalized.role } : {}),
+    ...(normalized.name ? { name: normalized.name } : {}),
+    ...(normalized.text ? { text: normalized.text } : {}),
+    ...(normalized.bounds ? { bounds: normalized.bounds } : {}),
+    state: normalized.state,
+    confidence: normalized.confidence,
+    evidenceDigest: normalized.evidenceDigest,
+    correlationKey: normalized.correlationKey,
+    ...(normalized.coordinates ? { coordinates: normalized.coordinates } : {}),
+    observedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + normalized.ttlMs).toISOString()
+  };
+  const correlated = node.claims.findIndex((existing) => existing.correlationKey === claim.correlationKey);
+  if (correlated >= 0) node.claims.splice(correlated, 1);
+  node.claims.push(claim);
+  node.claims.sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+  if (node.claims.length > MAX_CLAIMS) node.claims.length = MAX_CLAIMS;
+  node.updatedAt = now.toISOString();
+  return node;
 }
 
 function normalizeObservation(input: PerceptionObservation) {

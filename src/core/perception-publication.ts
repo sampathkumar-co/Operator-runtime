@@ -19,7 +19,7 @@ export async function publishPerceptionFromActionResult(
 async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionResult): Promise<number> {
   const output = asRecord(result.output);
   const elements = Array.isArray(output.elements) ? output.elements.slice(0, MAX_ELEMENTS) : [];
-  let published = 0;
+  const observations: PerceptionObservation[] = [];
   for (const raw of elements) {
     const element = asRecord(raw);
     const processId = safeInteger(element.process_id, 0, 0xffff_ffff);
@@ -82,10 +82,11 @@ async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionR
         provenance: `${result.provider}:app.inspect`
       }
     };
-    await graph.observe(observation);
-    published += 1;
+    observations.push(observation);
   }
-  return published;
+  if (observations.length === 0) return 0;
+  await graph.observeBatch(observations);
+  return observations.length;
 }
 
 async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionResult): Promise<number> {

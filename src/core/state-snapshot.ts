@@ -23,16 +23,24 @@ export interface SnapshotManifest {
   stores: SnapshotStore[];
   manifestDigest: string;
 }
+export interface SnapshotCatalogMigrationPlan {
+  id: string;
+  fromCatalogDigest: string;
+  toCatalogDigest: string;
+  stores: Array<{ targetId: string; sourceId?: string }>;
+}
 export type SnapshotQuiescence = <T>(operation: () => Promise<T>) => Promise<T>;
 
 export class StateSnapshotManager {
   #stateDir: string;
   #snapshotRoot: string;
+  #catalogMigrations: SnapshotCatalogMigrationPlan[];
 
-  constructor(stateDir: string, snapshotRoot: string) {
+  constructor(stateDir: string, snapshotRoot: string, options: { catalogMigrations?: SnapshotCatalogMigrationPlan[] } = {}) {
     validatePersistentDataCatalog();
     this.#stateDir = path.resolve(stateDir);
     this.#snapshotRoot = path.resolve(snapshotRoot);
+    this.#catalogMigrations = structuredClone(options.catalogMigrations ?? []);
     if (inside(this.#stateDir, this.#snapshotRoot) || inside(this.#snapshotRoot, this.#stateDir) || this.#stateDir === this.#snapshotRoot) {
       throw new OperatorError('SNAPSHOT_PATH_INVALID', 'Snapshot storage and runtime state must be separate directory trees.');
     }
@@ -99,11 +107,9 @@ export class StateSnapshotManager {
     const snapshotDir = path.join(this.#snapshotRoot, validEpoch(epochInput));
     const manifest = await readManifest(snapshotDir);
     validateManifestShape(manifest);
-    if (manifest.catalogDigest !== catalogDigest()) throw new OperatorError('SNAPSHOT_CATALOG_MISMATCH', 'Snapshot was created for a different persistent-data catalog.');
     const base = { version: manifest.version, epoch: manifest.epoch, createdAt: manifest.createdAt, catalogDigest: manifest.catalogDigest, stores: manifest.stores };
     if (manifest.manifestDigest !== digestJson(base)) throw new OperatorError('SNAPSHOT_MANIFEST_TAMPERED', 'Snapshot manifest digest does not match its contents.');
-    const expectedIds = snapshotCatalog().map((item) => item.id).sort();
-    if (manifest.stores.map((item) => item.id).sort().join('\0') !== expectedIds.join('\0')) throw new OperatorError('SNAPSHOT_INCOMPLETE', 'Snapshot manifest does not cover every participating store.');
+    this.#resolveRestoreStores(manifest);
     for (const store of manifest.stores) {
       if (store.revision !== storeRevision(store.id, store.files)) throw new OperatorError('SNAPSHOT_STORE_TAMPERED', `Snapshot store ${store.id} revision is invalid.`);
       for (const file of store.files) {
@@ -117,6 +123,7 @@ export class StateSnapshotManager {
 
   async restore(input: { epoch: string; withQuiescence: SnapshotQuiescence; signal?: AbortSignal; onStoreRestored?: (count: number) => void | Promise<void> }): Promise<SnapshotManifest> {
     const manifest = await this.verify(input.epoch);
+    const restoreStores = this.#resolveRestoreStores(manifest);
     return await input.withQuiescence(async () => {
       throwIfAborted(input.signal);
       const snapshotDir = path.join(this.#snapshotRoot, manifest.epoch);
@@ -127,29 +134,29 @@ export class StateSnapshotManager {
       const moved: Array<{ target: string; rollbackTarget?: string }> = [];
       let restored = 0;
       try {
-        for (const store of manifest.stores) {
-          const isDirectory = store.present && !store.files.some((file) => file.path === store.location);
-          if (isDirectory) await fs.mkdir(safeJoin(staged, store.location), { recursive: true, mode: 0o700 });
+        for (const store of restoreStores) {
+          const isDirectory = store.present && !store.files.some((file) => file.targetPath === store.targetLocation);
+          if (isDirectory) await fs.mkdir(safeJoin(staged, store.targetLocation), { recursive: true, mode: 0o700 });
           for (const file of store.files) {
-            const source = safeJoin(path.join(snapshotDir, 'data'), file.path);
-            const destination = safeJoin(staged, file.path);
+            const source = safeJoin(path.join(snapshotDir, 'data'), file.sourcePath);
+            const destination = safeJoin(staged, file.targetPath);
             await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
             await fs.copyFile(source, destination);
           }
         }
         throwIfAborted(input.signal);
-        for (const store of manifest.stores) {
-          const target = safeJoin(this.#stateDir, store.location);
+        for (const store of restoreStores) {
+          const target = safeJoin(this.#stateDir, store.targetLocation);
           await assertNoSymlink(target);
           let rollbackTarget: string | undefined;
           if (await exists(target)) {
-            rollbackTarget = safeJoin(rollback, store.location);
+            rollbackTarget = safeJoin(rollback, store.targetLocation);
             await fs.mkdir(path.dirname(rollbackTarget), { recursive: true, mode: 0o700 });
             await fs.rename(target, rollbackTarget);
           }
           moved.push({ target, ...(rollbackTarget ? { rollbackTarget } : {}) });
           if (store.present) {
-            const source = safeJoin(staged, store.location);
+            const source = safeJoin(staged, store.targetLocation);
             await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
             await fs.rename(source, target);
           }
@@ -172,12 +179,72 @@ export class StateSnapshotManager {
       }
     });
   }
+
+  #resolveRestoreStores(manifest: SnapshotManifest): Array<{
+    targetId: string;
+    targetLocation: string;
+    present: boolean;
+    files: Array<{ sourcePath: string; targetPath: string }>;
+  }> {
+    const current = snapshotCatalog();
+    const currentDigest = catalogDigest();
+    let mappings: Array<{ targetId: string; sourceId?: string }>;
+    if (manifest.catalogDigest === currentDigest) {
+      const expectedIds = current.map((item) => item.id).sort();
+      if (manifest.stores.map((item) => item.id).sort().join('\0') !== expectedIds.join('\0')) {
+        throw new OperatorError('SNAPSHOT_INCOMPLETE', 'Snapshot manifest does not cover every participating store.');
+      }
+      mappings = current.map((item) => ({ targetId: item.id, sourceId: item.id }));
+    } else {
+      const migration = this.#catalogMigrations.find((candidate) =>
+        candidate.fromCatalogDigest === manifest.catalogDigest && candidate.toCatalogDigest === currentDigest);
+      if (!migration) {
+        throw new OperatorError('SNAPSHOT_CATALOG_MISMATCH', 'Snapshot was created for a different persistent-data catalog and no exact migration plan is registered.');
+      }
+      boundedMigrationId(migration.id);
+      if (!/^[0-9a-f]{64}$/.test(migration.fromCatalogDigest) || !/^[0-9a-f]{64}$/.test(migration.toCatalogDigest)
+        || !Array.isArray(migration.stores)) {
+        throw new OperatorError('SNAPSHOT_MIGRATION_INVALID', 'Snapshot catalog migration shape is invalid.');
+      }
+      if (migration.stores.some((mapping) => !mapping || typeof mapping !== 'object'
+        || typeof mapping.targetId !== 'string'
+        || (mapping.sourceId !== undefined && typeof mapping.sourceId !== 'string'))) {
+        throw new OperatorError('SNAPSHOT_MIGRATION_INVALID', 'Snapshot catalog migration store mapping is invalid.');
+      }
+      mappings = migration.stores;
+      const targets = mappings.map((item) => item.targetId).sort();
+      const expected = current.map((item) => item.id).sort();
+      if (targets.join('\0') !== expected.join('\0') || new Set(targets).size !== targets.length) {
+        throw new OperatorError('SNAPSHOT_MIGRATION_INVALID', 'Snapshot catalog migration must map every current store exactly once.');
+      }
+      const sources = mappings.flatMap((item) => item.sourceId ? [item.sourceId] : []);
+      if (new Set(sources).size !== sources.length || sources.some((id) => !manifest.stores.some((store) => store.id === id))) {
+        throw new OperatorError('SNAPSHOT_MIGRATION_INVALID', 'Snapshot catalog migration contains a missing or duplicate source store.');
+      }
+    }
+    return mappings.map((mapping) => {
+      const target = current.find((item) => item.id === mapping.targetId)!;
+      const source = mapping.sourceId ? manifest.stores.find((item) => item.id === mapping.sourceId) : undefined;
+      return {
+        targetId: target.id,
+        targetLocation: target.location,
+        present: source?.present ?? false,
+        files: (source?.files ?? []).map((file) => ({
+          sourcePath: file.path,
+          targetPath: file.path === source!.location
+            ? target.location
+            : `${target.location}/${file.path.slice(source!.location.length + 1)}`
+        }))
+      };
+    });
+  }
 }
 
 function snapshotCatalog() {
   return PERSISTENT_DATA_CATALOG.filter((item) => item.backup === 'include' && item.restore !== 'never');
 }
 function catalogDigest(): string { return digestJson(snapshotCatalog().map(({ id, location, restore }) => ({ id, location, restore }))); }
+export function currentSnapshotCatalogDigest(): string { return catalogDigest(); }
 function storeRevision(id: string, files: SnapshotFile[]): string { return digestJson({ id, files: files.slice().sort((a, b) => a.path.localeCompare(b.path)) }); }
 function digestJson(value: unknown): string { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
 
@@ -234,6 +301,10 @@ function validateManifestShape(manifest: SnapshotManifest): void {
 
 function validEpoch(value: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(value)) throw new OperatorError('SNAPSHOT_EPOCH_INVALID', 'Snapshot epoch is invalid.');
+  return value;
+}
+function boundedMigrationId(value: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) throw new OperatorError('SNAPSHOT_MIGRATION_INVALID', 'Snapshot migration id is invalid.');
   return value;
 }
 function safeJoin(root: string, relative: string): string {

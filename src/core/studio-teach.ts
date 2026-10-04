@@ -5,10 +5,12 @@ import { canonicalJson } from './action-identity.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
-import type { ActionRequest, ActionResult, ActionRisk, IntentBinding } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, IntentBinding, PermissionProfile } from './types.ts';
 import type { ActionTransitionJournal } from './action-transition-journal.ts';
 import { kernelVerificationDigest } from './action-verification.ts';
 import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
+import type { AgentKernel } from './agent-kernel.ts';
+import { executeCanonicalVerification } from './canonical-verification.ts';
 
 export type TeachSessionState = 'RECORDING' | 'STOPPED' | 'COMPILED' | 'CANCELLED';
 
@@ -107,6 +109,8 @@ export class TeachModeStore {
   #journal?: ActionTransitionJournal;
   #requireKernelVerification: boolean;
   #intentRegistry?: IntentRegistry;
+  #agentKernel?: AgentKernel;
+  #permissions?: PermissionProfile;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, options: {
@@ -115,6 +119,8 @@ export class TeachModeStore {
     journal?: ActionTransitionJournal;
     requireKernelVerification?: boolean;
     intentRegistry?: IntentRegistry;
+    agentKernel?: AgentKernel;
+    permissions?: PermissionProfile;
   } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'studio-teach.json');
@@ -124,6 +130,8 @@ export class TeachModeStore {
     this.#journal = options.journal;
     this.#requireKernelVerification = options.requireKernelVerification === true;
     this.#intentRegistry = options.intentRegistry;
+    this.#agentKernel = options.agentKernel;
+    this.#permissions = options.permissions ? structuredClone(options.permissions) : undefined;
   }
 
   async start(input: { sessionId?: string; title: string; objective: string; scopeKey: string; intent?: IntentBinding }): Promise<TeachSession> {
@@ -236,11 +244,23 @@ export class TeachModeStore {
     });
   }
 
-  async verify(sessionIdInput: string, checks: VerificationCheck[]): Promise<VerificationReceipt> {
+  async verify(sessionIdInput: string, verification: unknown): Promise<VerificationReceipt> {
     await this.#serial;
     const session = requireSession(await this.#read(), sessionIdInput);
     await this.#assertSessionIntent(session);
     if (session.state !== 'STOPPED') throw new OperatorError('TEACH_SESSION_NOT_STOPPED', 'Teaching session must be stopped before verification.');
+    const checks = this.#requireKernelVerification
+      ? (await executeCanonicalVerification({
+          request: verification,
+          kernel: requireCanonicalDependency(this.#agentKernel, 'Agent Kernel'),
+          permissions: requireCanonicalDependency(this.#permissions, 'permission profile'),
+          subjectKind: 'teach-session',
+          subjectId: session.id,
+          ownerKind: 'teach-verification',
+          ownerId: session.id,
+          ...(session.intent ? { intent: session.intent } : {})
+        })).checks
+      : legacyVerificationChecks(verification, 'Teach');
     const canonicalProofs = !this.#requireKernelVerification || session.steps.every((step) => Boolean(step.verificationDigest));
     return new VerificationKernel().verify({
       subjectKind: 'teach-session',
@@ -624,6 +644,14 @@ function stableStepId(sessionId: string, seq: number): string {
 }
 
 function digest(value: unknown): string { return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex'); }
+function legacyVerificationChecks(input: unknown, owner: string): VerificationCheck[] {
+  if (!Array.isArray(input)) throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `${owner} verification requires typed runtime probes in production.`);
+  return input as VerificationCheck[];
+}
+function requireCanonicalDependency<T>(value: T | undefined, label: string): T {
+  if (!value) throw new OperatorError('CANONICAL_VERIFICATION_UNAVAILABLE', `${label} is required for runtime-owned verification.`);
+  return value;
+}
 function sha(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('TEACH_INPUT_INVALID', `${label} must be SHA-256.`);

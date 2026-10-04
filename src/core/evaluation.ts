@@ -47,6 +47,7 @@ export interface EvaluationRun {
   model?: string;
   provider?: string;
   modelConfigDigest?: string;
+  environmentDigest?: string;
   inputTokens?: number;
   cachedInputTokens?: number;
   outputTokens?: number;
@@ -252,6 +253,7 @@ export function evaluationRunFromTask(input: {
   model: string;
   provider: string;
   modelConfigDigest: string;
+  environmentDigest: string;
   inputTokens?: number;
   cachedInputTokens?: number;
   outputTokens?: number;
@@ -298,6 +300,7 @@ export function evaluationRunFromTask(input: {
     evidenceDigest,
     candidateDirty: input.candidateDirty, runnerHash: input.runnerHash, taskId: input.task.id, seed: input.seed,
     model: input.model, provider: input.provider, modelConfigDigest: input.modelConfigDigest,
+    environmentDigest: input.environmentDigest,
     inputTokens, cachedInputTokens, outputTokens, plannerCalls: input.plannerCalls ?? 0,
     plannerIterations: execution.plannerIterations ?? 0,
     reobserves: execution.preDispatchReobserves ?? 0,
@@ -417,6 +420,7 @@ function normalizeRun(input: EvaluationRun): EvaluationRun {
     ...(input.model === undefined ? {} : { model: bounded(input.model, 256, 'run.model') }),
     ...(input.provider === undefined ? {} : { provider: bounded(input.provider, 256, 'run.provider') }),
     ...(input.modelConfigDigest === undefined ? {} : { modelConfigDigest: digest(input.modelConfigDigest, 'run.modelConfigDigest') }),
+    ...(input.environmentDigest === undefined ? {} : { environmentDigest: digest(input.environmentDigest, 'run.environmentDigest') }),
     ...optionalCounters(input)
   };
 }

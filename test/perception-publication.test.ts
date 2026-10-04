@@ -127,3 +127,22 @@ test('UIA runtime identity survives geometry changes and shares its window scene
     provenance: 'windows.uia:visual.capture:capture-window'
   });
 });
+
+test('UIA publication commits a multi-element inspection with one durable rewrite', async (t) => {
+  let writes = 0;
+  const graph = new PerceptionGraphStore(await temp(t), { onDurableWrite: () => { writes += 1; } });
+  const published = await publishPerceptionFromActionResult(graph, {
+    id: 'batch-inspect', capability: 'app.inspect', risk: 'read', provenance: { kind: 'runtime' }, input: {}
+  }, {
+    ok: true, capability: 'app.inspect', provider: 'windows.uia', evidence: [], durationMs: 1,
+    output: { elements: [
+      { name: 'First', automation_id: 'first', control_type: 'Button', process_id: 7, depth: 1 },
+      { name: 'Second', automation_id: 'second', control_type: 'Button', process_id: 7, depth: 1 },
+      { name: 'Third', automation_id: 'third', control_type: 'Button', process_id: 7, depth: 1 }
+    ] }
+  });
+
+  assert.equal(published, 3);
+  assert.equal(writes, 1);
+  assert.equal((await graph.scene('uia:process:7')).length, 3);
+});

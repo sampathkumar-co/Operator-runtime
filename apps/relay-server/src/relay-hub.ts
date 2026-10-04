@@ -25,6 +25,7 @@ const MAX_NEGOTIATED_CONCURRENT_READS = 16;
 const DEFAULT_MAX_QUEUED_MESSAGES = 64;
 const DEFAULT_MAX_QUEUED_BYTES = 1024 * 1024;
 const DEFAULT_MAX_QUEUED_AGE_MS = 15_000;
+const DEFAULT_MAX_ACCOUNT_RUNTIME_CACHES = 2_048;
 
 type JsonObject = Record<string, unknown>;
 
@@ -65,6 +66,7 @@ export interface RelayHubOptions {
   maxQueuedMessagesPerConnection?: number;
   maxQueuedBytesPerConnection?: number;
   maxQueuedAgeMs?: number;
+  maxAccountRuntimeCaches?: number;
 }
 
 export interface RelayDispatchRequest {
@@ -95,8 +97,14 @@ export class RelayHub {
   #server: http.Server | null = null;
   #wss: WebSocketServer | null = null;
   #connections = new Map<string, Connection>();
-  #routing = new Map<string, DeviceRoutingStore>();
-  #pools = new Map<string, DevicePoolScheduler>();
+  #accountRuntimes = new Map<string, {
+    routing: DeviceRoutingStore;
+    pool?: DevicePoolScheduler;
+    active: number;
+    lastUsed: number;
+  }>();
+  #accountRuntimeTick = 0;
+  #maxAccountRuntimeCaches: number;
   #upgradeLimiter: FixedWindowRateLimiter;
   #deviceHelloLimiter: FixedWindowRateLimiter;
   #maxLiveConnections: number;
@@ -124,6 +132,7 @@ export class RelayHub {
     this.#maxQueuedMessagesPerConnection = boundedPositiveInt(options.maxQueuedMessagesPerConnection, DEFAULT_MAX_QUEUED_MESSAGES, 10_000, 'maxQueuedMessagesPerConnection');
     this.#maxQueuedBytesPerConnection = boundedPositiveInt(options.maxQueuedBytesPerConnection, DEFAULT_MAX_QUEUED_BYTES, 64 * 1024 * 1024, 'maxQueuedBytesPerConnection');
     this.#maxQueuedAgeMs = boundedPositiveInt(options.maxQueuedAgeMs, DEFAULT_MAX_QUEUED_AGE_MS, 5 * 60_000, 'maxQueuedAgeMs');
+    this.#maxAccountRuntimeCaches = boundedPositiveInt(options.maxAccountRuntimeCaches, DEFAULT_MAX_ACCOUNT_RUNTIME_CACHES, 100_000, 'maxAccountRuntimeCaches');
     this.#upgradeLimiter = new FixedWindowRateLimiter({ limit: upgradeLimit, windowMs: 60_000 });
     this.#deviceHelloLimiter = new FixedWindowRateLimiter({ limit: helloLimit, windowMs: 5 * 60_000 });
   }
@@ -229,26 +238,30 @@ export class RelayHub {
 
   async reserveDevice(accountId: string, request: DevicePoolRequest): Promise<DeviceReservation> {
     const advertisements = await this.resourceAdvertisements(accountId);
-    return await this.#poolFor(accountId).reserve(request, advertisements);
+    return await this.#withAccountRuntime(accountId, async (runtime) =>
+      await this.#poolFor(accountId, runtime).reserve(request, advertisements));
   }
 
   async heartbeatDeviceReservation(accountId: string, reservationId: string, sessionId: string, leaseMs?: number): Promise<DeviceReservation> {
-    return await this.#poolFor(accountId).heartbeat(reservationId, sessionId, leaseMs);
+    return await this.#withAccountRuntime(accountId, async (runtime) =>
+      await this.#poolFor(accountId, runtime).heartbeat(reservationId, sessionId, leaseMs));
   }
 
   async releaseDeviceReservation(accountId: string, reservationId: string): Promise<DeviceReservation> {
-    return await this.#poolFor(accountId).release(reservationId);
+    return await this.#withAccountRuntime(accountId, async (runtime) =>
+      await this.#poolFor(accountId, runtime).release(reservationId));
   }
 
   async listDeviceReservations(accountId: string, input: { activeOnly?: boolean; deviceId?: string; limit?: number } = {}): Promise<DeviceReservation[]> {
-    return await this.#poolFor(accountId).list(input);
+    return await this.#withAccountRuntime(accountId, async (runtime) =>
+      await this.#poolFor(accountId, runtime).list(input));
   }
 
   async bindProject(accountId: string, projectKey: string, deviceId: string): Promise<void> {
     if (!(await this.#accounts.ownsDevice(accountId, deviceId))) {
       throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Project can only be bound to an active device owned by the account.');
     }
-    await this.#routingFor(accountId).bindProject(projectKey, deviceId);
+    await this.#withAccountRuntime(accountId, async ({ routing }) => { await routing.bindProject(projectKey, deviceId); });
   }
 
   async setDefaultDevice(accountId: string, deviceId: string): Promise<void> {
@@ -261,12 +274,13 @@ export class RelayHub {
       deviceId,
       generation: membership.authorityGeneration
     }, async () => {
-      await this.#routingFor(accountId).setDefaultDevice(deviceId);
+      await this.#withAccountRuntime(accountId, async ({ routing }) => { await routing.setDefaultDevice(deviceId); });
     });
   }
 
   async boundProjectDevice(accountId: string, projectKey: string): Promise<string> {
-    const binding = (await this.#routingFor(accountId).listBindings()).find((candidate) => candidate.projectKey === projectKey);
+    const binding = await this.#withAccountRuntime(accountId, async ({ routing }) =>
+      (await routing.listBindings()).find((candidate) => candidate.projectKey === projectKey));
     if (!binding) throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Required task-to-device binding is missing.');
     if (!(await this.#accounts.ownsDevice(accountId, binding.deviceId))) {
       throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Bound task device is no longer actively owned by the account.');
@@ -279,11 +293,11 @@ export class RelayHub {
     const memberships = await this.#accounts.listDevices(request.accountId);
     const owned = new Set(memberships.map((membership) => membership.deviceId));
     const online = (await this.onlineDevices(request.accountId)).filter((device) => owned.has(device.deviceId));
-    const route = await this.#routingFor(request.accountId).resolve({
-      explicitDeviceId: request.explicitDeviceId,
-      projectKey: request.projectKey,
-      requiredCapabilities
-    }, online);
+    const route = await this.#withAccountRuntime(request.accountId, async ({ routing }) => await routing.resolve({
+        explicitDeviceId: request.explicitDeviceId,
+        projectKey: request.projectKey,
+        requiredCapabilities
+      }, online));
     const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
     if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
     const authority: RelayDeliveryAuthority = {
@@ -350,22 +364,52 @@ export class RelayHub {
     return closed;
   }
 
-  #routingFor(accountId: string): DeviceRoutingStore {
-    let store = this.#routing.get(accountId);
-    if (!store) {
-      store = new DeviceRoutingStore(path.join(this.#stateDir, 'accounts', accountId), this.#devices, { clock: this.#clock });
-      this.#routing.set(accountId, store);
-    }
-    return store;
+  accountRuntimeCacheStats(): { accounts: number; limit: number; active: number } {
+    return {
+      accounts: this.#accountRuntimes.size,
+      limit: this.#maxAccountRuntimeCaches,
+      active: [...this.#accountRuntimes.values()].filter((runtime) => runtime.active > 0).length
+    };
   }
 
-  #poolFor(accountId: string): DevicePoolScheduler {
-    let pool = this.#pools.get(accountId);
-    if (!pool) {
-      pool = new DevicePoolScheduler(path.join(this.#stateDir, 'accounts', accountId), this.#devices, this.#routingFor(accountId), { clock: this.#clock });
-      this.#pools.set(accountId, pool);
+  async #withAccountRuntime<T>(
+    accountId: string,
+    fn: (runtime: { routing: DeviceRoutingStore; pool?: DevicePoolScheduler }) => Promise<T>
+  ): Promise<T> {
+    let runtime = this.#accountRuntimes.get(accountId);
+    if (!runtime) {
+      if (this.#accountRuntimes.size >= this.#maxAccountRuntimeCaches) {
+        const idle = [...this.#accountRuntimes.entries()]
+          .filter(([, candidate]) => candidate.active === 0)
+          .sort((a, b) => a[1].lastUsed - b[1].lastUsed || a[0].localeCompare(b[0]))[0];
+        if (!idle) throw new OperatorError('RELAY_ACCOUNT_CACHE_BUSY', 'All bounded relay account runtime slots are currently active.', { retryable: true });
+        this.#accountRuntimes.delete(idle[0]);
+      }
+      runtime = {
+        routing: new DeviceRoutingStore(path.join(this.#stateDir, 'accounts', accountId), this.#devices, { clock: this.#clock }),
+        active: 0,
+        lastUsed: ++this.#accountRuntimeTick
+      };
+      this.#accountRuntimes.set(accountId, runtime);
     }
-    return pool;
+    runtime.active += 1;
+    runtime.lastUsed = ++this.#accountRuntimeTick;
+    try {
+      return await fn(runtime);
+    } finally {
+      runtime.active -= 1;
+      runtime.lastUsed = ++this.#accountRuntimeTick;
+    }
+  }
+
+  #poolFor(
+    accountId: string,
+    runtime: { routing: DeviceRoutingStore; pool?: DevicePoolScheduler }
+  ): DevicePoolScheduler {
+    runtime.pool ??= new DevicePoolScheduler(
+      path.join(this.#stateDir, 'accounts', accountId), this.#devices, runtime.routing, { clock: this.#clock }
+    );
+    return runtime.pool;
   }
 
   #accept(socket: WebSocket): void {

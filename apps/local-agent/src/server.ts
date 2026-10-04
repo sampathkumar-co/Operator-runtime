@@ -1047,7 +1047,7 @@ export function createLocalAgentServer(options: {
           const body = await readJson(req) as Record<string, unknown>;
           const receipt = await options.teachMode.verify(
             sessionId,
-            Array.isArray(body.checks) ? body.checks as any : []
+            body.verification ?? (Array.isArray(body.checks) ? body.checks : undefined)
           );
           send(res, 200, { ok: true, receipt });
           return;
@@ -1152,7 +1152,7 @@ export function createLocalAgentServer(options: {
           const body = await readJson(req) as Record<string, unknown>;
           const run = await options.studioExecutor.verify(
             runId,
-            Array.isArray(body.checks) ? body.checks as any : []
+            body.verification ?? (Array.isArray(body.checks) ? body.checks : undefined)
           );
           send(res, 200, { ok: true, run });
           return;
@@ -1675,7 +1675,7 @@ export function createLocalAgentServer(options: {
             if (!options.world) throw Object.assign(new Error('World model is not configured.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
             const before = await options.teams.inspect(id);
             const item = before.workItems.find((candidate) => candidate.id === workItemId);
-            if (!item || item.role !== 'verifier' || body.verificationPassed !== true) {
+            if (!item || item.role !== 'verifier') {
               throw Object.assign(new Error('Only a passing verifier may commit world observations.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
             }
             preparedWorld = prepareVerifierWorldObservations(body.worldObservations, id, workItemId);
@@ -1684,6 +1684,7 @@ export function createLocalAgentServer(options: {
             workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
             summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
             verificationPassed: body.verificationPassed === true,
+            ...(body.verification !== undefined ? { verification: body.verification } : {}),
             ...(preparedWorld ? { worldObservationDigest: preparedWorld.digest } : {})
           });
           let worldObservationsPublished = 0;

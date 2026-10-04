@@ -330,20 +330,66 @@ function validateState(input: unknown): JournalState {
     entry.generation = entry.generation === undefined ? 1 : integer(entry.generation, 1, Number.MAX_SAFE_INTEGER, 'generation');
     if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED'].includes(entry.state)) throw corrupt('Entry state is invalid.');
     if (!Array.isArray(entry.transitions) || entry.transitions.length < 1 || entry.transitions.length > MAX_TRANSITIONS) throw corrupt('Transition history is invalid.');
+    if (entry.transitions[0]?.state !== 'PREPARED') throw corrupt('Transition history must begin in PREPARED.');
+    let previousAt = -Infinity;
     for (let index = 0; index < entry.transitions.length; index += 1) {
       const transition = entry.transitions[index]!;
       if (transition.seq !== index + 1) throw corrupt('Transition sequence is invalid.');
       if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED'].includes(transition.state)) throw corrupt('Transition state is invalid.');
-      iso(transition.at);
+      const transitionAt = Date.parse(iso(transition.at));
+      if (transitionAt < previousAt) throw corrupt('Transition timestamps must be nondecreasing.');
+      previousAt = transitionAt;
       if (transition.provider !== undefined) bounded(transition.provider, 256, 'provider');
       if (transition.resultDigest !== undefined) sha(transition.resultDigest, 'resultDigest');
       if (transition.verificationDigest !== undefined) sha(transition.verificationDigest, 'verificationDigest');
       if (transition.reconciliationStatus !== undefined && !['completed','not_applied','uncertain'].includes(transition.reconciliationStatus)) throw corrupt('Reconciliation status is invalid.');
+      if (index > 0 && !allowedTransition(entry.transitions[index - 1]!.state, transition.state)) {
+        throw corrupt(`Transition ${entry.transitions[index - 1]!.state} -> ${transition.state} is illegal.`);
+      }
+      validateTransitionMetadata(transition, index === 0);
     }
     if (entry.transitions.at(-1)?.state !== entry.state) throw corrupt('Entry state does not match its latest transition.');
-    iso(entry.createdAt); iso(entry.updatedAt);
+    const createdAt = Date.parse(iso(entry.createdAt));
+    const updatedAt = Date.parse(iso(entry.updatedAt));
+    if (createdAt > Date.parse(entry.transitions[0]!.at)) throw corrupt('Entry creation timestamp is after its current generation.');
+    if (updatedAt !== Date.parse(entry.transitions.at(-1)!.at)) throw corrupt('Entry update timestamp does not match its latest transition.');
   }
   return state;
+}
+
+function validateTransitionMetadata(transition: ActionJournalTransition, initial: boolean): void {
+  if (initial && (transition.provider !== undefined || transition.resultDigest !== undefined
+    || transition.verificationDigest !== undefined || transition.reconciliationStatus !== undefined)) {
+    throw corrupt('Initial PREPARED transition cannot contain execution metadata.');
+  }
+  if (transition.verificationDigest !== undefined && transition.state !== 'COMPLETED') {
+    throw corrupt('Verification metadata is only valid on COMPLETED transitions.');
+  }
+  if (transition.reconciliationStatus !== undefined && transition.state !== 'RECONCILED' && transition.state !== 'UNCERTAIN') {
+    throw corrupt('Reconciliation metadata is attached to an invalid transition state.');
+  }
+  if (transition.state === 'DEFERRED' || transition.state === 'OBSERVED') {
+    if (!transition.provider || !transition.resultDigest) throw corrupt(`${transition.state} transition is missing provider result metadata.`);
+  }
+  if (transition.state === 'PREPARED' && !initial && (!transition.provider || !transition.resultDigest)) {
+    throw corrupt('A retried PREPARED transition is missing its observed provider result.');
+  }
+  if (transition.state === 'UNCERTAIN') {
+    const observed = transition.provider !== undefined && transition.resultDigest !== undefined
+      && transition.reconciliationStatus === undefined;
+    const reconciled = transition.provider === undefined && transition.reconciliationStatus === 'uncertain';
+    if (!observed && !reconciled) throw corrupt('UNCERTAIN transition metadata is inconsistent with observation or reconciliation.');
+  }
+  if (transition.state === 'RECONCILED'
+    && transition.reconciliationStatus !== 'completed'
+    && transition.reconciliationStatus !== 'not_applied') {
+    throw corrupt('RECONCILED transition must record a definitive reconciliation status.');
+  }
+  if (transition.state === 'COMPLETED') {
+    const verified = transition.verificationDigest !== undefined;
+    const terminalObservation = transition.provider !== undefined && transition.resultDigest !== undefined;
+    if (!verified && !terminalObservation) throw corrupt('COMPLETED transition lacks verification or terminal observation metadata.');
+  }
 }
 
 function validateReplayResult(input: unknown, expectedCapability?: string): ActionResult {
