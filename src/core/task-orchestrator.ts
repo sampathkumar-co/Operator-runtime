@@ -603,6 +603,7 @@ export class TaskOrchestrator {
             await resolvePhysicalResourceKeysForAction(action),
             risk === 'read' ? 'shared' : 'exclusive'
           );
+          await resourceLease.assertOwned();
         }
         executionDispatched = true;
         result = await this.#executeAction(action, permissions, { signal, learningContext });

@@ -366,16 +366,20 @@ export class ProcessProvider implements CapabilityProvider {
     if (process.platform !== 'win32') return failure(action, this.name, started, 'WINDOWS_ONLY', 'System process inspection is currently certified only on Windows.');
     try {
       const limit = boundedInteger(action.input.limit, 200, 1, MAX_PROCESS_INSPECT_RESULTS);
+      const offset = boundedInteger(action.input.offset, 0, 0, 1_000_000);
       const nameFilter = typeof action.input.name === 'string' ? action.input.name.trim().toLowerCase() : '';
       const pidFilter = action.input.pid === undefined ? undefined : boundedInteger(action.input.pid, 0, 1, 0x7fff_ffff);
       const rows = await runTasklist(signal, pidFilter);
-      const processes = rows
+      const matching = rows
         .filter((row) => (pidFilter === undefined || row.pid === pidFilter) && (!nameFilter || row.imageName.toLowerCase().includes(nameFilter)))
-        .slice(0, limit);
+        .sort((left, right) => left.pid - right.pid || left.imageName.localeCompare(right.imageName));
+      const processes = matching.slice(offset, offset + limit);
+      const nextOffset = offset + processes.length;
+      const truncated = nextOffset < matching.length;
       return {
         ok: true, capability: action.capability, provider: this.name,
-        output: { processes, truncated: rows.length > processes.length && processes.length >= limit },
-        evidence: [evidence('process_inspect', 'pass', 'Windows process table inspected through tasklist without command lines or environment data.', { count: processes.length })],
+        output: { processes, offset, limit, total: matching.length, truncated, ...(truncated ? { nextOffset } : {}) },
+        evidence: [evidence('process_inspect', 'pass', 'Windows process table page inspected deterministically through tasklist without command lines or environment data.', { count: processes.length, offset, total: matching.length })],
         durationMs: Math.round(performance.now() - started)
       };
     } catch (error) {

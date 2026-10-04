@@ -39,6 +39,14 @@ test('exclusive lease blocks both readers and writers owned by other executions'
   await exclusive.release();
 });
 
+test('lease ownership loss is detected before dispatch instead of becoming an uncoordinated mutation', async (t) => {
+  const state = await temp(t);
+  const store = new ResourceLeaseStore(state);
+  const lease = await store.acquire('owner', ['repo:/tmp/lease-loss'], 'exclusive');
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({ version: 1, resources: [] }));
+  await assert.rejects(() => lease.assertOwned(), (error: any) => error?.code === 'RESOURCE_LEASE_LOST');
+});
+
 test('resource leases reap a stale holder when its PID identifies a newer process instance', async (t) => {
   const state = await temp(t);
   const key = 'repo:/tmp/reused-pid';

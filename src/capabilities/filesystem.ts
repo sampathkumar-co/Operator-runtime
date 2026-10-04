@@ -272,17 +272,22 @@ export class FilesystemProvider implements CapabilityProvider {
       await this.#pathLeaseHook?.(action.capability, dirPath);
       const stat = await fs.stat(dirPath);
       if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Requested path is not a directory.');
-      const entries = await fs.readdir(dirPath, { withFileTypes: true });
-      const bounded = entries.slice(0, 500).map((entry) => ({
+      const offset = boundedInteger(action.input.offset, 0, 0, 1_000_000);
+      const limit = boundedInteger(action.input.limit, 500, 1, 500);
+      const entries = (await fs.readdir(dirPath, { withFileTypes: true }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const bounded = entries.slice(offset, offset + limit).map((entry) => ({
         name: entry.name,
         type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other'
       }));
+      const nextOffset = offset + bounded.length;
+      const truncated = nextOffset < entries.length;
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { path: dirPath, entries: bounded, truncated: entries.length > bounded.length },
-        evidence: [evidence('directory_list', 'pass', 'Directory listed from authorized scope.', { path: dirPath, count: bounded.length })],
+        output: { path: dirPath, entries: bounded, offset, limit, total: entries.length, truncated, ...(truncated ? { nextOffset } : {}) },
+        evidence: [evidence('directory_list', 'pass', 'Directory page listed deterministically from authorized scope.', { path: dirPath, count: bounded.length, offset, total: entries.length })],
         durationMs: Math.round(performance.now() - started)
       };
     });

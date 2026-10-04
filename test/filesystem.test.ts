@@ -226,6 +226,19 @@ test('file.replace never overwrites a concurrent recreation after claiming the e
 });
 
 
+test('file.list exposes deterministic continuation for large directories', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-list-page-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await Promise.all(['c.txt', 'a.txt', 'b.txt'].map((name) => fs.writeFile(path.join(root, name), name)));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const first = await provider.execute(action('file.list', { path: root, offset: 0, limit: 2 }));
+  assert.deepEqual((first.output as any).entries.map((entry: any) => entry.name), ['a.txt', 'b.txt']);
+  assert.deepEqual({ truncated: (first.output as any).truncated, nextOffset: (first.output as any).nextOffset, total: (first.output as any).total }, { truncated: true, nextOffset: 2, total: 3 });
+  const second = await provider.execute(action('file.list', { path: root, offset: 2, limit: 2 }));
+  assert.deepEqual((second.output as any).entries.map((entry: any) => entry.name), ['c.txt']);
+  assert.equal((second.output as any).truncated, false);
+});
+
 test('file.search recursively finds bounded matches without following symlinks', async (ctx) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-search-'));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-search-outside-'));

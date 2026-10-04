@@ -14,6 +14,9 @@ test('persistent data catalog is unique and covers execution, learning, identity
   ]) assert.ok(ids.has(required), required);
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.concurrency.length > 0));
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.retention.length > 0));
+  assert.ok(PERSISTENT_DATA_CATALOG.every((item) => Object.values(item.lifecycle).every((description) => description.length >= 12)));
+  assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.lifecycle.corruptionBehavior.includes('fail closed')));
+  assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.lifecycle.restartBehavior.length > 20));
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.restore.length > 0));
 });
 

@@ -72,6 +72,20 @@ export interface EvaluationRun {
   retryCount?: number;
   successfulSubgoals?: number;
   attemptedSubgoals?: number;
+  primaryFailure?: EvaluationFailureCause;
+  secondaryFailures?: EvaluationFailureCause[];
+  recoveryAttempts?: number;
+  replans?: number;
+  environmentActions?: number;
+  verificationState?: 'verified' | 'failed' | 'pending';
+}
+
+export interface EvaluationFailureCause {
+  source: 'planner' | 'provider' | 'verification' | 'policy' | 'infrastructure' | 'unknown';
+  code: string;
+  at: string;
+  executionPhase?: string;
+  sideEffectState?: string;
 }
 
 interface EvaluationState {
@@ -279,6 +293,7 @@ export function evaluationRunFromTask(input: {
   const cachedInputTokens = input.cachedInputTokens ?? 0;
   const outputTokens = input.outputTokens ?? 0;
   const reconciliationCount = (execution.plannerEvents ?? []).filter((event) => event.decision === 'RECONCILE').length;
+  const replans = (execution.plannerEvents ?? []).filter((event) => event.decision === 'REPLAN').length;
   const providerRetries = records.reduce((count, record) => count + Math.max(0, record.attempt - 1), 0);
   const verificationCount = input.task.evidence.filter((item) => item.kind.includes('verification') && item.status === 'pass').length;
   const runtimeFailures = records.filter((record) => record.state === 'FAILED' && record.errorCode !== 'TASK_PLANNER_FAILED').length;
@@ -295,6 +310,7 @@ export function evaluationRunFromTask(input: {
       sideEffectState: record.sideEffectState, executionPhase: record.executionPhase
     })), verification: input.task.evidence.filter((item) => item.kind.includes('verification')).map((item) => item.data)
   })).digest('hex');
+  const failureTaxonomy = deriveFailureTaxonomy(input.task);
   return normalizeRun({
     id: input.id, scenarioId: input.scenarioId, scenarioVersion: input.scenarioVersion,
     runtimeVersion: input.runtimeVersion, sourceCommit: input.sourceCommit,
@@ -328,8 +344,65 @@ export function evaluationRunFromTask(input: {
     duplicateActions: actionIdentities.length - new Set(actionIdentities).size,
     retryCount: providerRetries,
     successfulSubgoals: planSubgoals.filter((subgoal) => subgoal.status === 'VERIFIED').length,
-    attemptedSubgoals: planSubgoals.filter((subgoal) => Number(subgoal.attempts ?? 0) > 0).length
+    attemptedSubgoals: planSubgoals.filter((subgoal) => Number(subgoal.attempts ?? 0) > 0).length,
+    ...failureTaxonomy,
+    recoveryAttempts: reconciliationCount + (execution.preDispatchReobserves ?? 0) + replans + providerRetries,
+    replans,
+    environmentActions: execution.dispatchedActions ?? execution.stepCount,
+    verificationState: input.task.state === 'VERIFIED' ? 'verified'
+      : input.task.evidence.some((item) => item.kind.includes('verification') && item.status === 'fail') ? 'failed' : 'pending'
   });
+}
+
+export function deriveFailureTaxonomy(task: TaskCapsule): Pick<EvaluationRun, 'primaryFailure' | 'secondaryFailures'> {
+  const execution = task.execution;
+  const causes: Array<EvaluationFailureCause & { secondary: boolean; order: number }> = [];
+  let order = 0;
+  for (const record of execution?.records ?? []) {
+    if (record.state !== 'FAILED' && record.state !== 'INTERRUPTED') continue;
+    const code = record.errorCode ?? 'PROVIDER_EXECUTION_FAILED';
+    causes.push({
+      source: failureSource(code, 'provider'), code, at: record.finishedAt ?? record.startedAt,
+      ...(record.executionPhase ? { executionPhase: record.executionPhase } : {}),
+      ...(record.sideEffectState ? { sideEffectState: record.sideEffectState } : {}),
+      secondary: isSecondaryFailure(code), order: order++
+    });
+  }
+  for (const failure of task.failures) {
+    causes.push({
+      source: failureSource(failure.code, 'unknown'), code: failure.code, at: failure.at,
+      secondary: isSecondaryFailure(failure.code), order: order++
+    });
+  }
+  for (const item of task.evidence) {
+    if (item.status !== 'fail') continue;
+    const code = typeof item.data?.code === 'string' ? item.data.code : item.kind.toUpperCase();
+    causes.push({
+      source: failureSource(code, item.kind.includes('verification') ? 'verification' : 'infrastructure'),
+      code, at: item.timestamp, secondary: isSecondaryFailure(code) || /audit|teardown|cleanup/i.test(item.kind), order: order++
+    });
+  }
+  causes.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.order - b.order);
+  const primary = causes.find((cause) => !cause.secondary);
+  const secondary = causes.filter((cause) => cause !== primary);
+  const clean = ({ secondary: _secondary, order: _order, ...cause }: typeof causes[number]): EvaluationFailureCause => cause;
+  return {
+    ...(primary ? { primaryFailure: clean(primary) } : {}),
+    ...(secondary.length > 0 ? { secondaryFailures: secondary.slice(0, 32).map(clean) } : {})
+  };
+}
+
+function isSecondaryFailure(code: string): boolean {
+  return /AUDIT|TEARDOWN|CLOSE|CLEANUP|SHUTDOWN/.test(code.toUpperCase());
+}
+
+function failureSource(code: string, fallback: EvaluationFailureCause['source']): EvaluationFailureCause['source'] {
+  const upper = code.toUpperCase();
+  if (upper.includes('PLANNER')) return 'planner';
+  if (/VERIFY|VERIFICATION|POSTCONDITION/.test(upper)) return 'verification';
+  if (/POLICY|AUTHORITY|APPROVAL|UNAUTHORIZED|DENIED/.test(upper)) return 'policy';
+  if (/AUDIT|TEARDOWN|CLOSE|CLEANUP|RELAY|TRANSPORT|NETWORK/.test(upper)) return 'infrastructure';
+  return fallback;
 }
 
 function summarize(runs: EvaluationRun[]): EvaluationSummary {
@@ -440,6 +513,9 @@ function normalizeRun(input: EvaluationRun): EvaluationRun {
     ...(input.provider === undefined ? {} : { provider: bounded(input.provider, 256, 'run.provider') }),
     ...(input.modelConfigDigest === undefined ? {} : { modelConfigDigest: digest(input.modelConfigDigest, 'run.modelConfigDigest') }),
     ...(input.environmentDigest === undefined ? {} : { environmentDigest: digest(input.environmentDigest, 'run.environmentDigest') }),
+    ...(input.primaryFailure === undefined ? {} : { primaryFailure: normalizeFailureCause(input.primaryFailure, 'run.primaryFailure') }),
+    ...(input.secondaryFailures === undefined ? {} : { secondaryFailures: normalizeSecondaryFailures(input.secondaryFailures) }),
+    ...(input.verificationState === undefined ? {} : { verificationState: verificationState(input.verificationState) }),
     ...optionalCounters(input)
   };
 }
@@ -451,11 +527,29 @@ function optionalCounters(input: EvaluationRun): Partial<EvaluationRun> {
     'dispatchedActions', 'reconciliationCount', 'providerRetries', 'verificationCount', 'modelLatencyMs',
     'runtimeLatencyMs', 'infrastructureFailures', 'runtimeFailures', 'modelFailures', 'plannerFailures', 'taskFailures',
     'observationCount', 'visualCaptureCount', 'zeroProgressActions', 'duplicateActions', 'retryCount',
-    'successfulSubgoals', 'attemptedSubgoals'
+    'successfulSubgoals', 'attemptedSubgoals', 'recoveryAttempts', 'replans', 'environmentActions'
   ] as const) {
     if (input[key] !== undefined) output[key] = boundedInt(input[key], 0, Number.MAX_SAFE_INTEGER, `run.${key}`);
   }
   return output;
+}
+function normalizeSecondaryFailures(input: unknown): EvaluationFailureCause[] {
+  if (!Array.isArray(input) || input.length > 32) throw new OperatorError('EVALUATION_INPUT_INVALID', 'run.secondaryFailures is invalid.');
+  return input.map((item, index) => normalizeFailureCause(item as EvaluationFailureCause, `run.secondaryFailures[${index}]`));
+}
+function normalizeFailureCause(input: EvaluationFailureCause, label: string): EvaluationFailureCause {
+  if (!input || typeof input !== 'object') throw new OperatorError('EVALUATION_INPUT_INVALID', `${label} is invalid.`);
+  const source = String(input.source);
+  if (!['planner','provider','verification','policy','infrastructure','unknown'].includes(source)) throw new OperatorError('EVALUATION_INPUT_INVALID', `${label}.source is invalid.`);
+  return {
+    source: source as EvaluationFailureCause['source'], code: bounded(input.code, 256, `${label}.code`), at: iso(input.at, `${label}.at`),
+    ...(input.executionPhase === undefined ? {} : { executionPhase: bounded(input.executionPhase, 64, `${label}.executionPhase`) }),
+    ...(input.sideEffectState === undefined ? {} : { sideEffectState: bounded(input.sideEffectState, 64, `${label}.sideEffectState`) })
+  };
+}
+function verificationState(input: unknown): NonNullable<EvaluationRun['verificationState']> {
+  if (!['verified', 'failed', 'pending'].includes(String(input))) throw new OperatorError('EVALUATION_INPUT_INVALID', 'run.verificationState is invalid.');
+  return input as NonNullable<EvaluationRun['verificationState']>;
 }
 function category(input: unknown): EvaluationCategory {
   if (!['browser','desktop','developer','office','enterprise','multi-agent','multi-device','recovery','security','long-running'].includes(String(input))) {

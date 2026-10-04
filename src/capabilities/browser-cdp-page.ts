@@ -640,7 +640,8 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     if (focus.text) {
       const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const desired = normalized(focus.text);
-      const actual = normalized(text);
+      const structural = structuralContextOf(element);
+      const actual = normalized([text, structural.groupName, structural.semanticPath].filter(Boolean).join(' '));
       if (actual.includes(desired)) score += 350;
       const desiredTokens = new Set(desired.split(' ').filter(Boolean));
       const actualTokens = new Set(actual.split(' ').filter(Boolean));
@@ -650,7 +651,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const wordOrdinal = Object.entries(ordinalWords).find(([word]) => desiredTokens.has(word))?.[1];
       const numericOrdinal = Number(desired.match(/(?:^|\s)(\d+)(?:st|nd|rd|th)?(?:\s|$)/)?.[1]);
       const wantedOrdinal = wordOrdinal ?? (Number.isSafeInteger(numericOrdinal) && numericOrdinal > 0 ? numericOrdinal : undefined);
-      if (wantedOrdinal && structuralContextOf(element).repeatedOrdinal === wantedOrdinal) score += 260;
+      if (wantedOrdinal && structural.repeatedOrdinal === wantedOrdinal) score += 260;
     }
     const region = focus.region;
     if (region) {
@@ -737,12 +738,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const seenScopes = new Set<unknown>();
     let scanned = 0;
     const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
-      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 20_000) return;
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 50_000) return;
       seenScopes.add(scope);
       let elements: Element[] = [];
-      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 12_000); } catch { return; }
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 50_000); } catch { return; }
       for (const element of elements) {
-        if (found.length >= max || scanned++ >= 20_000) break;
+        if (found.length >= max || scanned++ >= 50_000) break;
         try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector */ }
         const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
         if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
@@ -887,9 +888,9 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       try { return element.matches(selector); } catch { return false; }
     });
   };
-  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 12_000);
+  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 50_000);
   const seenControls = new Set(semanticControls.map(({ element }) => element));
-  const pointerControls = deepQuery('*', 12_000)
+  const pointerControls = deepQuery('*', 50_000)
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
       return contract.stateOf(element).actionable && pointerStyled(element);
@@ -981,7 +982,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         || left.selector.localeCompare(right.selector);
     });
   const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls).map(({ _focusScore, ...item }) => item);
-  const visibleTextCandidates = deepQuery('*', 12_000)
+  const visibleTextCandidates = deepQuery('*', 50_000)
     .filter(({ element }) => visible(element)
       && Array.from(element.children ?? []).length === 0
       && Boolean(readableText(element)))
@@ -1018,7 +1019,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       context
     };
   });
-  const visualCandidates = deepQuery('*', 12_000).flatMap(({ element, context }) => {
+  const visualCandidates = deepQuery('*', 50_000).flatMap(({ element, context }) => {
     const state = contract.stateOf(element);
     if (!state.visible) return [];
     const style = viewOf(element)?.getComputedStyle?.(element);

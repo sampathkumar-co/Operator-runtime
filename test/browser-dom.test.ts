@@ -1161,6 +1161,60 @@ test('dense-DOM observation paginates the ten-thousandth control truthfully', (t
   assert.deepEqual(page.pagination.controls, { offset: 9999, limit: 1, returned: 1, total: 10000, truncated: false });
 });
 
+test('realistic dense grouped DOM remains bounded, rankable, and deeply pageable', (t) => {
+  const root = new FakeRoot();
+  const rows: FakeElement[] = [];
+  const controls: FakeElement[] = [];
+  for (let index = 0; index < 3_000; index += 1) {
+    const row = new FakeElement('div', `Invoice row ${index + 1}`);
+    row.setAttribute('role', 'row');
+    row.setAttribute('aria-label', `Invoice ${index + 1}`);
+    const buttons = ['Open', 'Approve', 'Archive'].map((label, ordinal) => {
+      const button = new FakeElement('button', label);
+      button.parentElement = row;
+      button.y = index * 24;
+      button.x = ordinal * 30;
+      return button;
+    });
+    row.children = buttons;
+    rows.push(row);
+    controls.push(...buttons);
+  }
+  const visuals = Array.from({ length: 500 }, (_, index) => {
+    const image = new FakeElement('div');
+    image.setAttribute('alt', `Invoice chart ${index + 1}`);
+    image.backgroundColor = 'rgb(240, 240, 240)';
+    image.cursor = 'pointer';
+    image.y = index * 30;
+    return image;
+  });
+  attach(root, ...rows, ...controls, ...visuals);
+  installDocument(t, root);
+
+  const heapBefore = process.memoryUsage().heapUsed;
+  const started = performance.now();
+  const focused = semanticSnapshotFunction({
+    maxControls: 3, maxText: 10, maxVisuals: 5,
+    focusRole: 'button', focusText: 'Invoice 2999 Approve'
+  }) as any;
+  const elapsed = performance.now() - started;
+  const encodedBytes = Buffer.byteLength(JSON.stringify(focused));
+  const heapGrowth = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+
+  assert.equal(focused.controls[0].name, 'Approve');
+  assert.equal(focused.controls[0].groupRole, 'row');
+  assert.equal(focused.controls[0].groupName, 'Invoice 2999');
+  assert.equal(focused.pagination.controls.total, 12_500);
+  assert.equal(focused.pagination.visualObjects.total, 500);
+  assert.ok(encodedBytes < 256 * 1024, `bounded observation grew to ${encodedBytes} bytes`);
+  assert.ok(elapsed < 10_000, `dense observation took ${elapsed.toFixed(1)} ms`);
+  assert.ok(heapGrowth < 192 * 1024 * 1024, `dense observation heap grew by ${heapGrowth} bytes`);
+
+  const deepPage = semanticSnapshotFunction({ controlOffset: 8_997, maxControls: 3, maxText: 1, maxVisuals: 1 }) as any;
+  assert.deepEqual(deepPage.controls.map((control: any) => control.name), ['Open', 'Approve', 'Archive']);
+  assert.deepEqual(deepPage.pagination.controls, { offset: 8997, limit: 3, returned: 3, total: 12500, truncated: true, nextOffset: 9000 });
+});
+
 test('click-collapsible-nodelay regression exposes and verifies immediate expanded state changes', (t) => {
   const root = new FakeRoot();
   const disclosure = new FakeElement('button', 'Details'); disclosure.setAttribute('aria-expanded', 'false');

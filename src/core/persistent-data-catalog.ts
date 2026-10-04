@@ -16,9 +16,43 @@ export interface PersistentDataEntry {
   secretMaterial: 'none' | 'derived' | 'encrypted' | 'plaintext-token';
   participatesInDeletion: boolean;
   concurrency: StoreConcurrency;
+  lifecycle: PersistentStoreLifecycle;
 }
 
-const entry = (value: PersistentDataEntry): PersistentDataEntry => Object.freeze(value);
+export interface PersistentStoreLifecycle {
+  maximumActiveEntries: string;
+  terminalRetention: string;
+  reclamation: string;
+  restartBehavior: string;
+  corruptionBehavior: string;
+  referenceSafety: string;
+}
+
+type PersistentDataEntryInput = Omit<PersistentDataEntry, 'lifecycle'>;
+
+const entry = (value: PersistentDataEntryInput): PersistentDataEntry => Object.freeze({
+  ...value,
+  lifecycle: Object.freeze({
+    maximumActiveEntries: value.backup === 'ephemeral'
+      ? 'one active owner record per protected resource'
+      : 'bounded by the owning store shape validator and durable byte ceiling',
+    terminalRetention: value.retention,
+    reclamation: value.backup === 'ephemeral'
+      ? 'removed by the verified owner on clean shutdown; stale ownership is reclaimed only after liveness checks'
+      : /lifetime|while-/.test(value.retention)
+        ? 'removed only by the cataloged privacy, reset, or ownership lifecycle'
+        : 'oldest eligible terminal/history entries are reclaimed without removing live authority or replay fences',
+    restartBehavior: value.restore === 'never'
+      ? 'recreated or reacquired; never restored as authority'
+      : value.restore === 'required'
+        ? 'loaded and validated before accepting new work; snapshots may not overwrite newer authority'
+        : 'loaded and validated when present; absence starts an empty bounded store',
+    corruptionBehavior: 'fail closed on bounded parse, schema, integrity, or reference validation; never silently reset',
+    referenceSafety: value.category === 'tasks' || value.restore === 'required'
+      ? 'live/replay-referenced records are retained; only terminal unreferenced history is reclaimable'
+      : 'reclamation follows owner and privacy boundaries without widening authority'
+  })
+});
 
 /**
  * Stores whose historical contents must never replace newer live authority.
@@ -97,6 +131,9 @@ export function validatePersistentDataCatalog(): void {
     }
     ids.add(item.id);
     locations.add(item.location);
+    for (const [field, description] of Object.entries(item.lifecycle)) {
+      if (typeof description !== 'string' || description.length < 12) throw new Error(`Persistent data lifecycle ${item.id}.${field} is missing.`);
+    }
   }
   for (const id of MONOTONIC_RESTORE_STORE_IDS) {
     const item = PERSISTENT_DATA_CATALOG.find((candidate) => candidate.id === id);

@@ -165,4 +165,41 @@ test('runtime-native evaluation derives action, planner, retry, reconciliation, 
   assert.equal(run.tokenCount, 120);
   assert.equal(run.cachedInputTokens, 40);
   assert.equal(run.environmentDigest, digest('runtime-image-and-host'));
+  assert.equal(run.primaryFailure?.code, 'BROWSER_NO_PROGRESS');
+  assert.equal(run.primaryFailure?.source, 'provider');
+  assert.equal(run.primaryFailure?.executionPhase, 'reconciled');
+  assert.equal(run.primaryFailure?.sideEffectState, 'uncertain');
+  assert.equal(run.secondaryFailures?.[0]?.code, 'TASK_PLANNER_FAILED');
+  assert.equal(run.recoveryAttempts, 3);
+  assert.equal(run.replans, 0);
+  assert.equal(run.environmentActions, 2);
+  assert.equal(run.verificationState, 'pending');
+});
+
+test('runtime taxonomy keeps teardown and audit failures secondary to the real root cause', () => {
+  const task = createTask({
+    userObjective: 'classify', interpretedObjective: 'classify', authorizedScope: [], prohibitedScope: [], successConditions: ['done']
+  });
+  task.state = 'FAILED';
+  task.execution = {
+    schemaVersion: 1, plannerId: 'planner', goalKind: 'test', plannerState: {}, maxSteps: 2,
+    maxAttemptsPerStep: 1, timeoutMs: 1000, stepCount: 1, startedAt: '2026-10-04T00:00:00.000Z',
+    records: [{
+      stepKey: 'step', actionId: 'action', capability: 'browser.interact', risk: 'external', inputHash: digest('x'),
+      attempt: 1, state: 'FAILED', startedAt: '2026-10-04T00:00:01.000Z', finishedAt: '2026-10-04T00:00:02.000Z',
+      errorCode: 'BROWSER_STALE_TARGET', executionPhase: 'pre_dispatch', sideEffectState: 'none', evidence: []
+    }]
+  };
+  task.failures.push({ at: '2026-10-04T00:00:03.000Z', code: 'BROWSER_TEARDOWN_CDP_FAILED', message: 'close failed' });
+  task.evidence.push({
+    kind: 'audit_persistence', status: 'fail', message: 'audit failed', data: { code: 'AUDIT_APPEND_FAILED' }, timestamp: '2026-10-04T00:00:04.000Z'
+  });
+  task.updatedAt = '2026-10-04T00:00:04.000Z';
+  const run = evaluationRunFromTask({
+    id: crypto.randomUUID(), scenarioId: 'taxonomy.root-cause', scenarioVersion: 1, runtimeVersion: '4.0.0',
+    sourceCommit: 'e'.repeat(40), candidateDirty: false, runnerHash: digest('runner'), task, seed: 1,
+    model: 'model', provider: 'provider', modelConfigDigest: digest('config'), environmentDigest: digest('environment')
+  });
+  assert.equal(run.primaryFailure?.code, 'BROWSER_STALE_TARGET');
+  assert.deepEqual(run.secondaryFailures?.map((cause) => cause.code), ['BROWSER_TEARDOWN_CDP_FAILED', 'AUDIT_APPEND_FAILED']);
 });

@@ -6,14 +6,21 @@ const root = process.cwd();
 const benchmarkTests = new Set(['test/benchmark-runner.test.ts']);
 const requiredEvidence: Record<string, string[]> = {
   authority: ['test/authority-kernel.test.ts', 'test/executable-authority-boundary-audit.test.ts', 'test/intent-kernel.test.ts'],
-  resources: ['test/resource-leases.test.ts', 'test/capability-sdk.test.ts'],
+  resources: ['test/resource-leases.test.ts', 'test/capability-sdk.test.ts', 'test/reconciliation-coverage.test.ts'],
   exactlyOnce: ['test/action-execution-store.test.ts', 'test/action-transition-journal-integrity.test.ts', 'test/agent-kernel-p0.test.ts'],
   semanticVerification: ['test/verification-kernel.test.ts', 'test/task-orchestrator.test.ts'],
   privacy: ['test/account-erasure.test.ts', 'test/privacy-data.test.ts'],
-  lifecycle: ['test/local-agent-instance-lock.test.ts', 'test/state-snapshot.test.ts', 'test/desired-state-reconciler.test.ts'],
-  faultInjection: ['security/resilience-executable-evidence.test.ts', 'security/resilience-1000.test.ts'],
+  lifecycle: ['test/local-agent-instance-lock.test.ts', 'test/state-snapshot.test.ts', 'test/desired-state-reconciler.test.ts', 'test/persistent-data-catalog.test.ts'],
+  faultInjection: [
+    'security/resilience-executable-evidence.test.ts', 'security/resilience-1000.test.ts',
+    'test/local-action-execution-receipt.test.ts', 'test/team-api.test.ts', 'test/state-snapshot.test.ts',
+    'test/relay-client.test.ts', 'test/privacy-data.test.ts', 'test/resource-leases.test.ts',
+    'test/windows-uia.test.ts', 'test/desired-state.test.ts', 'test/digital-operations.test.ts'
+  ],
   performanceControls: ['performance/performance.test.ts', 'security/performance-control-evidence.test.ts'],
   browserDeterminism: ['test/browser-dom.test.ts', 'test/browser-m1.test.ts', 'test/browser-managed.test.ts', 'test/browser-navigation-postcondition-audit.test.ts'],
+  largeEnvironment: ['test/browser-dom.test.ts', 'test/filesystem.test.ts', 'test/git-public-diff.test.ts', 'test/git-status-safe-structure.test.ts', 'test/postgres.test.ts', 'test/process.test.ts'],
+  telemetry: ['test/evaluation.test.ts', 'test/task-decision-budget.test.ts'],
   packaging: ['test/npm-remote-runtime.test.ts', 'test/plugin-publication-package.test.ts', 'test/release-source-gate.test.ts', 'test/production-release-inputs.test.ts']
 };
 
