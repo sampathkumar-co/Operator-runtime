@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "2.0.3",
+  "version": "2.0.5",
   "npmTag": "latest",
   "publicationMode": "stage",
-  "requestedAt": "2026-09-29",
-  "purpose": "Stage Mecord Connect runtime 2.0.3 superseding 2.0.2 with durable relay-result replay and bounded out-of-order read-window result persistence, preserving write barriers, ordered ACKs, benchmark scheduling fixes, signed benchmark runner, Windows path authority, and duplicate-runtime state protection; final npm activation requires explicit owner approval on npmjs.com."
+  "requestedAt": "2026-10-04",
+  "purpose": "Stage Mecord Connect runtime 2.0.5 with completed non-benchmark runtime hardening: semantic and visual browser recovery, first-class epistemic uncertainty, universal capability and reconciliation contracts, durable lifecycle limits, accurate failure taxonomy, and large-environment proof. Final npm activation remains an explicit owner-authenticated action."
 }
