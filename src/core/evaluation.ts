@@ -65,6 +65,13 @@ export interface EvaluationRun {
   modelFailures?: number;
   plannerFailures?: number;
   taskFailures?: number;
+  observationCount?: number;
+  visualCaptureCount?: number;
+  zeroProgressActions?: number;
+  duplicateActions?: number;
+  retryCount?: number;
+  successfulSubgoals?: number;
+  attemptedSubgoals?: number;
 }
 
 interface EvaluationState {
@@ -276,6 +283,11 @@ export function evaluationRunFromTask(input: {
   const verificationCount = input.task.evidence.filter((item) => item.kind.includes('verification') && item.status === 'pass').length;
   const runtimeFailures = records.filter((record) => record.state === 'FAILED' && record.errorCode !== 'TASK_PLANNER_FAILED').length;
   const plannerFailures = input.task.failures.filter((failure) => failure.code.includes('PLANNER')).length;
+  const planValue = execution.plannerState.durablePlan;
+  const planSubgoals = planValue && typeof planValue === 'object' && !Array.isArray(planValue)
+    && Array.isArray((planValue as Record<string, unknown>).subgoals)
+    ? (planValue as { subgoals: Array<Record<string, unknown>> }).subgoals : [];
+  const actionIdentities = records.map((record) => `${record.stepKey}\0${record.inputHash}`);
   const evidenceDigest = crypto.createHash('sha256').update(canonicalJson({
     taskId: input.task.id, state: input.task.state, records: records.map((record) => ({
       actionId: record.actionId, state: record.state,
@@ -309,7 +321,14 @@ export function evaluationRunFromTask(input: {
     modelLatencyMs: input.modelLatencyMs ?? 0, runtimeLatencyMs: input.runtimeLatencyMs ?? 0,
     infrastructureFailures: input.infrastructureFailures ?? 0,
     runtimeFailures, modelFailures: input.modelFailures ?? 0, plannerFailures,
-    taskFailures: input.task.state === 'FAILED' ? 1 : 0
+    taskFailures: input.task.state === 'FAILED' ? 1 : 0,
+    observationCount: records.filter((record) => record.observation !== undefined).length,
+    visualCaptureCount: records.filter((record) => record.observation?.channel === 'visual').length,
+    zeroProgressActions: (execution.plannerEvents ?? []).filter((event) => event.kind === 'ACTION_SUCCEEDED_BUT_NO_PROGRESS').length,
+    duplicateActions: actionIdentities.length - new Set(actionIdentities).size,
+    retryCount: providerRetries,
+    successfulSubgoals: planSubgoals.filter((subgoal) => subgoal.status === 'VERIFIED').length,
+    attemptedSubgoals: planSubgoals.filter((subgoal) => Number(subgoal.attempts ?? 0) > 0).length
   });
 }
 
@@ -430,7 +449,9 @@ function optionalCounters(input: EvaluationRun): Partial<EvaluationRun> {
   for (const key of [
     'inputTokens', 'cachedInputTokens', 'outputTokens', 'plannerCalls', 'plannerIterations', 'reobserves',
     'dispatchedActions', 'reconciliationCount', 'providerRetries', 'verificationCount', 'modelLatencyMs',
-    'runtimeLatencyMs', 'infrastructureFailures', 'runtimeFailures', 'modelFailures', 'plannerFailures', 'taskFailures'
+    'runtimeLatencyMs', 'infrastructureFailures', 'runtimeFailures', 'modelFailures', 'plannerFailures', 'taskFailures',
+    'observationCount', 'visualCaptureCount', 'zeroProgressActions', 'duplicateActions', 'retryCount',
+    'successfulSubgoals', 'attemptedSubgoals'
   ] as const) {
     if (input[key] !== undefined) output[key] = boundedInt(input[key], 0, Number.MAX_SAFE_INTEGER, `run.${key}`);
   }

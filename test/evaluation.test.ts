@@ -157,6 +157,11 @@ test('runtime-native evaluation derives action, planner, retry, reconciliation, 
   assert.equal(run.plannerFailures, 1);
   assert.equal(run.runtimeFailures, 1);
   assert.equal(run.taskFailures, 1);
+  assert.equal(run.observationCount, 0);
+  assert.equal(run.visualCaptureCount, 0);
+  assert.equal(run.retryCount, 1);
+  assert.equal(run.duplicateActions, 0);
+  assert.equal(run.successfulSubgoals, 0);
   assert.equal(run.tokenCount, 120);
   assert.equal(run.cachedInputTokens, 40);
   assert.equal(run.environmentDigest, digest('runtime-image-and-host'));

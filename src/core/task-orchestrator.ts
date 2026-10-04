@@ -25,6 +25,7 @@ import {
   activateSubgoal, createDurableTaskPlan, nextReadySubgoal, normalizeDurableTaskPlan,
   taskPlanComplete, verifySubgoal, type DurableTaskPlan
 } from './task-plan.ts';
+import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -93,6 +94,7 @@ export interface TaskPlannerContext {
   };
   recentEvents: TaskPlannerEvent[];
   intelligence: TaskIntelligenceContext;
+  decisionBudget: TaskDecisionBudget;
 }
 
 export interface TaskIntelligenceContext {
@@ -401,6 +403,11 @@ export class TaskOrchestrator {
         }
       }
       current.plannerIterations = (current.plannerIterations ?? 0) + 1;
+      const decisionBudget = taskDecisionBudget(current, this.#wallNow());
+      const exhaustedDecisionDimension = decisionBudgetExhaustion(decisionBudget);
+      if (exhaustedDecisionDimension === 'plannerIterations') {
+        return await this.#fail(task, 'TASK_DECISION_BUDGET_EXHAUSTED', 'Task exhausted its bounded planner-iteration budget.', assertLease);
+      }
       const budget: TaskPlannerContext['budget'] = {
           maxSteps: current.maxSteps,
           usedSteps: current.stepCount,
@@ -434,7 +441,8 @@ export class TaskOrchestrator {
         goal,
         recentEvents,
         intelligence,
-        budget
+        budget,
+        decisionBudget
       };
       let decision: PlannerDecision;
       let rawDecision: unknown;
@@ -660,6 +668,7 @@ export class TaskOrchestrator {
         goal,
         recentEvents: structuredClone((latestExecution.plannerEvents ?? []).slice(-10)),
         intelligence,
+        decisionBudget: taskDecisionBudget(latestExecution, this.#wallNow()),
         budget: {
           maxSteps: latestExecution.maxSteps,
           usedSteps: latestExecution.stepCount,
@@ -1555,7 +1564,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
 
   supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
 
-  next({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext): PlannerDecision {
+  next({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext): PlannerDecision {
     if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
     const state = task.execution!.plannerState;
     let index = workflowIndex(state, goal.steps.length);
@@ -1563,7 +1572,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
       const child = goal.steps[index]!;
       const childState = workflowChildState(state);
       const proxy = taskWithPlannerState(task, childState);
-      const decision = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence });
+      const decision = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence, decisionBudget });
       state.workflowChildState = proxy.execution!.plannerState;
       if (decision.type === 'complete') {
         task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
@@ -1581,20 +1590,20 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
   }
 
-  accept({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
-    const current = this.#current(task, goal, step, budget, recentEvents, intelligence);
-    this.#atomic.accept({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence }, current.atomicStep, observation);
+  accept({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence, decisionBudget);
+    this.#atomic.accept({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence, decisionBudget }, current.atomicStep, observation);
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
   }
 
-  fallback({ task, goal, budget, recentEvents, intelligence }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
-    const current = this.#current(task, goal, step, budget, recentEvents, intelligence);
-    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence }, current.atomicStep, observation) ?? false;
+  fallback({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence, decisionBudget);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence, decisionBudget }, current.atomicStep, observation) ?? false;
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
     return handled;
   }
 
-  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget'], recentEvents: TaskPlannerEvent[], intelligence: TaskIntelligenceContext): {
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget'], recentEvents: TaskPlannerEvent[], intelligence: TaskIntelligenceContext, decisionBudget: TaskDecisionBudget): {
     child: AtomicSemanticTaskGoal;
     proxy: TaskCapsule;
     atomicStep: Extract<PlannerDecision, { type: 'step' }>;
@@ -1605,7 +1614,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     const child = goal.steps[index];
     if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
     const proxy = taskWithPlannerState(task, workflowChildState(state));
-    const expected = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence });
+    const expected = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence, decisionBudget });
     if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
       throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
     }
