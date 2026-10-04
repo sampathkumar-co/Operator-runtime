@@ -440,10 +440,18 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError(operation === 'scroll' ? 'INVALID_BROWSER_SCROLL' : 'INVALID_BROWSER_DRAG', 'Drag/resize/scroll requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
     if (operation === 'scroll' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'scroll requires an observed target ref.');
-    const xRatio = operation === 'click_relative' ? Number(action.input.xRatio) : undefined;
-    const yRatio = operation === 'click_relative' ? Number(action.input.yRatio) : undefined;
-    if (operation === 'click_relative' && (!targetSpec.ref || !Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1)) {
-      throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and finite xRatio/yRatio values between 0 and 1.');
+    const hasRatioPoint = operation === 'click_relative' && (action.input.xRatio !== undefined || action.input.yRatio !== undefined);
+    const hasPixelPoint = operation === 'click_relative' && (action.input.xPx !== undefined || action.input.yPx !== undefined);
+    const xRatio = hasRatioPoint ? Number(action.input.xRatio) : undefined;
+    const yRatio = hasRatioPoint ? Number(action.input.yRatio) : undefined;
+    const xPx = hasPixelPoint ? Number(action.input.xPx) : undefined;
+    const yPx = hasPixelPoint ? Number(action.input.yPx) : undefined;
+    if (operation === 'click_relative' && (
+      !targetSpec.ref || hasRatioPoint === hasPixelPoint
+      || (hasRatioPoint && (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1))
+      || (hasPixelPoint && (!Number.isFinite(xPx) || !Number.isFinite(yPx) || xPx! < 0 || yPx! < 0 || xPx! > 2000 || yPx! > 2000))
+    )) {
+      throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and exactly one bounded coordinate pair: xRatio/yRatio in [0,1] or non-negative xPx/yPx within 2000 CSS pixels.');
     }
 
     const tabs = await this.#listTargets(signal);
@@ -473,7 +481,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
         ...(toTargetSpec ? { toTarget: toTargetSpec } : {}),
         value: action.input.value ?? null,
         ...(deltaOperation ? { deltaX, deltaY } : {}),
-        ...(operation === 'click_relative' ? { xRatio, yRatio } : {}),
+        ...(operation === 'click_relative' && hasRatioPoint ? { xRatio, yRatio } : {}),
+        ...(operation === 'click_relative' && hasPixelPoint ? { xPx, yPx } : {}),
         ...(operation === 'key_press' ? { key: String(action.input.key ?? '') } : {}),
         ...(operation === 'hotkey' ? { keys: Array.isArray(action.input.keys) ? action.input.keys.map(String) : [] } : {}),
         ...(operation === 'select_text_range' ? { start: Number(action.input.start), end: Number(action.input.end) } : {})
@@ -518,7 +527,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
-      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
+      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, xPx, yPx, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
       const noProgressFamily = (() => {
         if (operation === 'drag' || operation === 'drag_by') return { family: 'drag-displacement' };
         if (operation === 'resize') return { family: 'resize-displacement' };

@@ -402,22 +402,40 @@ export async function inspectOopifFrames(session: CdpConnection, signal: AbortSi
 
 
 
-export function observedRelativePointFunction(ref: string, xRatio: number, yRatio: number) {
+export function observedRelativePointFunction(ref: string, point: { xRatio?: number; yRatio?: number; xPx?: number; yPx?: number }) {
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
   const element = registry?.refs?.get(ref);
   if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed browser target is stale.' };
-  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
-    return { ok: false, error: 'Relative pointer ratios must be finite values between 0 and 1.' };
-  }
+  const ratioMode = point.xRatio !== undefined || point.yRatio !== undefined;
+  const pixelMode = point.xPx !== undefined || point.yPx !== undefined;
+  if (ratioMode === pixelMode) return { ok: false, error: 'Provide exactly one observed-local pointer coordinate mode.' };
   const rect = element.getBoundingClientRect();
-  const localX = rect.x + rect.width * xRatio;
-  const localY = rect.y + rect.height * yRatio;
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Observed browser target geometry is invalid.' };
+  }
+  let xOffset: number;
+  let yOffset: number;
+  if (ratioMode) {
+    const xRatio = Number(point.xRatio); const yRatio = Number(point.yRatio);
+    if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
+      return { ok: false, error: 'Relative pointer ratios must be finite values between 0 and 1.' };
+    }
+    xOffset = rect.width * xRatio; yOffset = rect.height * yRatio;
+  } else {
+    const xPx = Number(point.xPx); const yPx = Number(point.yPx);
+    if (!Number.isFinite(xPx) || !Number.isFinite(yPx) || xPx < 0 || xPx > rect.width || yPx < 0 || yPx > rect.height) {
+      return { ok: false, error: 'Observed-local pointer pixels must lie within the observed element bounds.', width: rect.width, height: rect.height };
+    }
+    xOffset = xPx; yOffset = yPx;
+  }
+  const localX = rect.x + xOffset;
+  const localY = rect.y + yOffset;
   let hit: Element | null = null;
   try { hit = element.ownerDocument?.elementFromPoint?.(localX, localY) ?? null; } catch { hit = null; }
   if (!hit) return { ok: false, error: 'Relative pointer point is not hit-testable in the observed document.' };
   if (hit !== element && !element.contains(hit)) return { ok: false, occluded: true, error: 'Relative pointer point is occluded by another element.' };
-  return { ok: true, local: { x: localX, y: localY }, tag: element.tagName.toLowerCase() };
+  return { ok: true, local: { x: localX, y: localY }, offset: { xPx: xOffset, yPx: yOffset }, tag: element.tagName.toLowerCase() };
 }
 
 export async function observeSemanticTargetState(
@@ -452,7 +470,7 @@ export async function observeSemanticTargetState(
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; key?: string; keys?: string[]; start?: number; end?: number },
+  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number },
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
@@ -553,17 +571,18 @@ export async function performSemanticInteraction(
       let y = Number(geometry.y) + Number(geometry.height) / 2;
       if (input.operation === 'click_relative') {
         if (!input.target.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'click_relative requires an observed target ref.', { retryable: false });
-        const xRatio = Number(input.xRatio); const yRatio = Number(input.yRatio);
-        const pointExpression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(xRatio)}, ${JSON.stringify(yRatio)})`;
+        const pointSpec = { xRatio: input.xRatio, yRatio: input.yRatio, xPx: input.xPx, yPx: input.yPx };
+        const pointExpression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(pointSpec)})`;
         const point = unwrapRuntimeValue(await evaluate(session, chosen, pointExpression, false, signal)) as JsonMap | undefined;
         if (!point || point.ok !== true) {
           throw new OperatorError(point?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE', typeof point?.error === 'string' ? point.error : 'Relative pointer point is not actionable.', {
             retryable: point?.stale === true,
-            details: { target: input.target, xRatio, yRatio, point }
+            details: { target: input.target, pointSpec, point }
           });
         }
-        x = Number(geometry.x) + Number(geometry.width) * xRatio;
-        y = Number(geometry.y) + Number(geometry.height) * yRatio;
+        const pointLocal = point.local as JsonMap | undefined;
+        x = Number(pointLocal?.x);
+        y = Number(pointLocal?.y);
       }
       if (![x, y, geometry.width, geometry.height].every((value) => Number.isFinite(Number(value))) || Number(geometry.width) <= 0 || Number(geometry.height) <= 0) {
         throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target geometry is not actionable.', { retryable: true });

@@ -536,7 +536,7 @@ test('click_relative stays inside an observed object and dispatches the verified
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
-        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 20, y: 30 } } } };
+        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 120, y: 230 } } } };
         if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
       }
       if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
@@ -559,6 +559,31 @@ test('click_relative stays inside an observed object and dispatches the verified
   ]);
 });
 
+
+test('click_relative accepts bounded observed-local pixel coordinates', async () => {
+  const nativeEvents: any[] = [];
+  const sample = { tag: 'div', role: 'pointer', name: 'Canvas cell', identity: '#cell', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 100, y: 200, width: 80, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 110, y: 215 }, offset: { xPx: 10, yPx: 15 } } } };
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'click_relative', target: { ref: 'b-test-px' }, value: null, xPx: 10, yPx: 15
+  });
+  assert.equal(result.value.ok, true);
+  assert.deepEqual(nativeEvents.map((event) => [event.type, event.x, event.y]), [
+    ['mouseMoved', 110, 215], ['mousePressed', 110, 215], ['mouseReleased', 110, 215]
+  ]);
+});
 
 test('browser provider rejects a non-scrollable target before dispatch', async (t) => {
   const original = globalThis.WebSocket;
