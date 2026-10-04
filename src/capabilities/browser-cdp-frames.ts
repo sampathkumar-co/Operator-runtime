@@ -544,11 +544,16 @@ export async function performSemanticInteraction(
     const chosen = matches[0]!.context;
     if (input.operation === 'select_date') {
       const expression = `(${dateSelectFunction.toString()})(${JSON.stringify({ target: input.target, value: input.value })}, (${browserDomContractFunction.toString()})())`;
-      const raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      let raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      const widgetPending = raw?.recoverable === true && typeof raw.error === 'string' && /No supported visible calendar widget/i.test(raw.error);
+      if (widgetPending) {
+        await delay(60, signal);
+        raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      }
       if (!raw || raw.ok !== true) {
         const message = typeof raw?.error === 'string' ? raw.error : 'Calendar date selection did not complete.';
         if (raw?.staleRef === true) throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: input.target } });
-        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'none', executionPhase: 'pre_dispatch' } });
+        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'possible', executionPhase: 'post_dispatch' } });
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: input.target, value: input.value } });
       }
       return {

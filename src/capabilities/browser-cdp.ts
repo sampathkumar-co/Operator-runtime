@@ -528,7 +528,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status }
       };
       const semanticAfter = value.after && typeof value.after === 'object' ? value.after as JsonMap : undefined;
-      const directSemanticProgress = ['type', 'select', 'set_value', 'select_text_range'].includes(operation)
+      const directSemanticProgress = ['type', 'select', 'set_value', 'select_date', 'select_text_range'].includes(operation)
         && semanticAfter !== undefined
         && JSON.stringify({
           value: beforeTarget.value, checked: beforeTarget.checked, selected: beforeTarget.selected,

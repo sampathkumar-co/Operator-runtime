@@ -14,6 +14,8 @@ class FakeWebSocket {
   static mutationVersion = 0;
   static localTreeProgress = false;
   static localTreeVersion = 0;
+  static dateWidgetDelay = false;
+  static dateSelectEvaluations = 0;
   static #instances = new Set<FakeWebSocket>();
   readonly url: string;
   readyState = 0;
@@ -77,7 +79,12 @@ class FakeWebSocket {
       if (message.params?.type === 'mouseReleased') FakeWebSocket.#emitDownload();
     } else if (message.method === 'Runtime.evaluate') {
       const expression = String(message.params?.expression ?? '');
-      if (expression.includes('semanticLocatorFunction')) {
+      if (FakeWebSocket.dateWidgetDelay && expression.includes('Calendar date postcondition failed')) {
+        FakeWebSocket.dateSelectEvaluations += 1;
+        result = FakeWebSocket.dateSelectEvaluations === 1
+          ? { result: { value: { ok: false, recoverable: true, error: 'No supported visible calendar widget was associated with the observed input.' } } }
+          : { result: { value: { ok: true, matched: { tag: 'input', role: 'textbox', name: 'Date', identity: '#date', value: '' }, after: { value: '03/17/2016', date: '2016-03-17', widget: 'calendar', navigationSteps: 9 } } } };
+      } else if (expression.includes('semanticLocatorFunction')) {
         const inFrame = message.sessionId === 'frame-session-1';
         const count = this.#oopif ? (inFrame ? 1 : 0) : 1;
         result = {
@@ -445,6 +452,31 @@ test('native browser keyboard actions focus the unique semantic target and dispa
     ['keyDown', 'e', 'e'], ['keyUp', 'e', undefined], ['keyDown', 'c', 'c'], ['keyUp', 'c', undefined]
   ]);
   assert.equal((inserted.value.after as any).nativeKeyboardTextDispatched, true);
+});
+
+test('select_date tolerates one asynchronous calendar-open turn and still completes as one browser action', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.dateWidgetDelay = true;
+  FakeWebSocket.dateSelectEvaluations = 0;
+  t.after(() => {
+    FakeWebSocket.dateWidgetDelay = false;
+    FakeWebSocket.dateSelectEvaluations = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'date-select-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'select_date', target: { ref: 'b-date' }, value: '2016-03-17' },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.equal(FakeWebSocket.dateSelectEvaluations, 2);
+    assert.equal((result.output as any).stateDelta.progress, true);
+    const postcondition = result.evidence?.find((item: any) => item.kind === 'postcondition');
+    assert.equal(postcondition?.data?.after?.date, '2016-03-17');
+  });
 });
 
 test('browser provider prevents a second equivalent no-progress action and preserves side-effect truth', async (t) => {
