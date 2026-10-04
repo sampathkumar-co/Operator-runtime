@@ -32,7 +32,7 @@ export function assertTaskMachineState(state: Record<string, unknown>, assertion
     let passed = false;
     if (assertion.operator === 'exists') passed = resolved.found;
     else if (assertion.operator === 'equals') passed = resolved.found && canonicalJson(resolved.value) === canonicalJson(assertion.value);
-    else if (assertion.operator === 'not_equals') passed = !resolved.found || canonicalJson(resolved.value) !== canonicalJson(assertion.value);
+    else if (assertion.operator === 'not_equals') passed = resolved.found && canonicalJson(resolved.value) !== canonicalJson(assertion.value);
     else if (assertion.operator === 'includes') passed = resolved.found && Array.isArray(resolved.value)
       && resolved.value.some((item) => canonicalJson(item) === canonicalJson(assertion.value));
     if (!passed) throw new OperatorError('TASK_AUTONOMOUS_VERIFICATION_FAILED', `Machine-state assertion failed: ${assertion.path} ${assertion.operator}.`);
