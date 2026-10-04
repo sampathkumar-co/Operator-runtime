@@ -121,7 +121,10 @@ async function ensureRuntimeReady(config: Awaited<ReturnType<BootstrapConfigStor
     windowsHide: true
   });
   child.unref();
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // A clean packaged start performs durable-state recovery before both health
+  // surfaces become ready. Keep setup bounded, but allow slower hosted Windows
+  // runners enough time to complete that certified startup path.
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     if (await runtimeHealthy(config)) return;
   }
