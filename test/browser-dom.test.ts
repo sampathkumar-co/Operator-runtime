@@ -745,6 +745,30 @@ test('Browser Observation V2 gives repeated controls bounded rendered container 
   assert.deepEqual(control.ancestorContextLabels, ['Spicy Thai Peanut Chicken - +']);
 });
 
+test('repeated-item context stops at the owning card instead of absorbing neighboring entities', (t) => {
+  const root = new FakeRoot();
+  const area = new FakeElement('div', '@myron card @aenean card');
+  const myron = new FakeElement('div', '@myron Share via DM'); myron.setAttribute('class', 'media');
+  const aenean = new FakeElement('div', '@aenean Share via DM'); aenean.setAttribute('class', 'media');
+  const controls = new FakeElement('div', 'Share via DM'); controls.setAttribute('class', 'controls');
+  const wrapper = new FakeElement('span', 'Share via DM');
+  const menu = new FakeElement('ul', 'Share via DM');
+  const action = new FakeElement('li', 'Share via DM'); action.cursor = 'pointer';
+
+  myron.parentElement = area; aenean.parentElement = area; area.children = [myron, aenean];
+  controls.parentElement = myron; myron.children = [controls];
+  wrapper.parentElement = controls; controls.children = [wrapper];
+  menu.parentElement = wrapper; wrapper.children = [menu];
+  action.parentElement = menu; menu.children = [action];
+
+  attach(root, area, myron, aenean, controls, wrapper, menu, action); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'Share via DM' && item.tag === 'li');
+  assert.ok(control);
+  assert.equal(control.ancestorContextLabels.some((label: string) => label.includes('@myron')), true);
+  assert.equal(control.ancestorContextLabels.some((label: string) => label.includes('@aenean')), false);
+});
+
 test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
   const root = new FakeRoot();
   const scroller = new FakeElement('div', 'Scrollable list');

@@ -523,6 +523,13 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         if (!contextLabel) contextLabel = candidate;
         if (!ancestorContextLabels.includes(candidate) && ancestorContextLabels.length < 4) ancestorContextLabels.push(candidate);
       }
+      const classes = trim(current.getAttribute('class'), 160).split(/\s+/).filter(Boolean).slice(0, 4);
+      const repeatedItem = classes.length > 0 && Boolean(current.parentElement && Array.from(current.parentElement.children).some((sibling) => {
+        if (sibling === current || sibling.tagName !== current.tagName) return false;
+        const siblingClasses = trim(sibling.getAttribute('class'), 160).split(/\s+/).filter(Boolean);
+        return classes.every((name) => siblingClasses.includes(name));
+      }));
+      if (repeatedItem) break;
     }
     let group: Element | null = parent;
     for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
