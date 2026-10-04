@@ -19,6 +19,14 @@ class FakeText {
   constructor(data: string) { this.data = data; }
 }
 
+class FakeMutationObserver {
+  static created = 0;
+  static disconnected = 0;
+  constructor(_callback: () => void) { FakeMutationObserver.created += 1; }
+  observe(): void { /* synthetic observer */ }
+  disconnect(): void { FakeMutationObserver.disconnected += 1; }
+}
+
 class FakeRoot {
   elements: FakeElement[] = [];
   hit?: FakeElement;
@@ -83,6 +91,7 @@ class FakeElement {
   max = '';
   step = '';
   disabled = false;
+  isConnected = true;
   checked = false;
   isContentEditable = false;
   clicked = false;
@@ -816,6 +825,41 @@ test('Browser Observation V2 marks autocomplete text controls and preserves the 
   assert.equal(typed.ok, true);
   assert.equal(typed.matched.autocomplete, true);
   assert.equal(typed.after.value, 'SHG');
+});
+
+test('Browser Observation V2 disconnects observers for detached iframe documents', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const priorRegistry = (globalThis as any)[registryKey];
+  delete (globalThis as any)[registryKey];
+  t.after(() => {
+    if (priorRegistry === undefined) delete (globalThis as any)[registryKey];
+    else (globalThis as any)[registryKey] = priorRegistry;
+  });
+  FakeMutationObserver.created = 0;
+  FakeMutationObserver.disconnected = 0;
+
+  const root = new FakeRoot();
+  const frameDocument = new FakeRoot();
+  root.defaultView.MutationObserver = FakeMutationObserver;
+  frameDocument.defaultView.MutationObserver = FakeMutationObserver;
+  const iframe = new FakeElement('iframe');
+  const frameText = new FakeElement('p', 'frame text');
+  iframe.contentDocument = frameDocument;
+  frameDocument.defaultView.frameElement = iframe;
+  attach(root, iframe);
+  attach(frameDocument, frameText);
+  installDocument(t, root);
+
+  semanticSnapshotFunction();
+  const registry = (globalThis as any)[registryKey];
+  assert.equal(registry.observers.length, 2);
+  assert.equal(FakeMutationObserver.created, 2);
+
+  iframe.isConnected = false;
+  iframe.contentDocument = undefined;
+  semanticSnapshotFunction();
+  assert.equal(registry.observers.length, 1);
+  assert.equal(FakeMutationObserver.disconnected, 1);
 });
 
 test('focused Browser Observation V2 ranks a prior observed ref before truncation and refreshes its generation', (t) => {

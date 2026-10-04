@@ -433,7 +433,8 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
   type ObservedFingerprint = { tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string };
-  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: MutationObserver[] };
+  type ObservedMutationObserver = { doc: Document; observer: MutationObserver };
+  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: ObservedMutationObserver[] };
   let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
   const priorFocusElement = focus.ref && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.ref) : undefined;
   const priorGroupElement = focus.groupRef && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.groupRef) : undefined;
@@ -447,6 +448,33 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   if (!Number.isSafeInteger(observedRegistry.mutationVersion)) observedRegistry.mutationVersion = 0;
   if (!(observedRegistry.observedDocs instanceof WeakSet)) observedRegistry.observedDocs = new WeakSet();
   if (!Array.isArray(observedRegistry.observers)) observedRegistry.observers = [];
+  const rawObservers = observedRegistry.observers as unknown[];
+  if (rawObservers.some((entry) => !entry || typeof entry !== 'object' || !('doc' in entry) || !('observer' in entry))) {
+    for (const entry of rawObservers) {
+      try { (entry as { disconnect?: () => void })?.disconnect?.(); } catch { /* already detached */ }
+    }
+    observedRegistry.observers = [];
+    observedRegistry.observedDocs = new WeakSet();
+  }
+  const documentIsActive = (doc: Document) => {
+    if (doc === document) return true;
+    try {
+      const frame = doc.defaultView?.frameElement as HTMLIFrameElement | null | undefined;
+      if (!frame || frame.isConnected === false) return false;
+      return frame.contentDocument === doc;
+    } catch { return false; }
+  };
+  const liveObservers: ObservedMutationObserver[] = [];
+  for (const entry of observedRegistry.observers) {
+    if (documentIsActive(entry.doc)) liveObservers.push(entry);
+    else {
+      try { entry.observer.disconnect(); } catch { /* observer already inert */ }
+    }
+  }
+  if (liveObservers.length !== observedRegistry.observers.length) {
+    observedRegistry.observers = liveObservers;
+    observedRegistry.observedDocs = new WeakSet(liveObservers.map((entry) => entry.doc));
+  }
   const ensureMutationObserver = (doc: Document | null | undefined) => {
     if (!doc || observedRegistry!.observedDocs.has(doc)) return;
     const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
@@ -456,7 +484,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const observer = new Observer(() => { observedRegistry!.mutationVersion += 1; });
       observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
       observedRegistry!.observedDocs.add(doc);
-      observedRegistry!.observers.push(observer);
+      observedRegistry!.observers.push({ doc, observer });
     } catch { /* same-origin document may disappear while observation is being built */ }
   };
   ensureMutationObserver(document);
