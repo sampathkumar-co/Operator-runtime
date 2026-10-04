@@ -423,7 +423,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
+    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'keyboard_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
@@ -440,6 +440,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError(operation === 'scroll' ? 'INVALID_BROWSER_SCROLL' : 'INVALID_BROWSER_DRAG', 'Drag/resize/scroll requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
     if (operation === 'scroll' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'scroll requires an observed target ref.');
+    if (operation === 'keyboard_text') {
+      const text = String(action.input.value ?? '');
+      if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'keyboard_text requires an observed target ref.');
+      if (!text.length || text.length > 4096 || Buffer.byteLength(text, 'utf8') > 16 * 1024) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters and at most 16 KiB UTF-8.');
+    }
     const hasRatioPoint = operation === 'click_relative' && (action.input.xRatio !== undefined || action.input.yRatio !== undefined);
     const hasPixelPoint = operation === 'click_relative' && (action.input.xPx !== undefined || action.input.yPx !== undefined);
     const xRatio = hasRatioPoint ? Number(action.input.xRatio) : undefined;
@@ -542,7 +547,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         if (operation === 'click_relative') return { family: 'click-relative' };
         if (operation === 'key_press') return { family: 'key-press', key: action.input.key };
         if (operation === 'hotkey') return { family: 'hotkey', keys: action.input.keys };
-        if (operation === 'type' || operation === 'select' || operation === 'set_value') return { family: operation, value: action.input.value ?? null };
+        if (operation === 'type' || operation === 'select' || operation === 'set_value' || operation === 'keyboard_text') return { family: operation, value: action.input.value ?? null };
         if (operation === 'select_text_range') return { family: operation, start: action.input.start, end: action.input.end };
         return { family: operation };
       })();

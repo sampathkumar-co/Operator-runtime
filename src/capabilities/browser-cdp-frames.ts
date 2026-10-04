@@ -508,11 +508,23 @@ export async function performSemanticInteraction(
     const sendKey = (params: JsonMap) => chosen.frame
       ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
       : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
-    if (input.operation === 'key_press' || input.operation === 'hotkey') {
+    const sendText = (text: string) => chosen.frame
+      ? session.sendInSession(chosen.frame.sessionId, 'Input.insertText', { text }, 8_000, signal)
+      : session.send('Input.insertText', { text }, 8_000, signal);
+    if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text') {
       const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
       const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
       if (!focused || focused.ok !== true) {
         throw new OperatorError('BROWSER_INTERACTION_FAILED', typeof focused?.error === 'string' ? focused.error : 'Browser target could not be focused before keyboard input.', { retryable: true, details: { target: input.target } });
+      }
+      if (input.operation === 'keyboard_text') {
+        const text = String(input.value ?? '');
+        if (!text.length || text.length > 4096) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters.', { retryable: false });
+        await sendText(text);
+        return {
+          value: { ok: true, matched: firstLocatedSample(matches[0]!.samples), after: { nativeKeyboardTextDispatched: true, textLength: text.length } },
+          ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+        };
       }
       const requested = input.operation === 'key_press' ? [String(input.key ?? '')] : Array.isArray(input.keys) ? input.keys.map(String) : [];
       const allowedKeys = new Set(['Enter','Escape','Tab','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Backspace','Delete','Home','End','PageUp','PageDown','Shift','Control','Alt','Meta','a','c','v','b','i','A','C','V','B','I']);
