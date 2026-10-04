@@ -359,6 +359,21 @@ test('semantic snapshot exposes contenteditable controls as editable textboxes',
   assert.equal(control.editable, true);
 });
 
+test('semantic snapshot keeps visible editable inputs even without an accessible name', (t) => {
+  const root = new FakeRoot();
+  const input = new FakeElement('input');
+  input.setAttribute('type', 'text');
+  attach(root, input); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.tag === 'input');
+  assert.ok(control);
+  assert.equal(control.name, '');
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+  assert.equal(control.actionable, true);
+});
+
 test('active visually hidden editable control is exposed only as a bounded keyboard sink', (t) => {
   const root = new FakeRoot();
   const sink = new FakeElement('input');

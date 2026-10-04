@@ -113,7 +113,7 @@ async function evaluate(
     : session.send('Runtime.evaluate', params, 8_000, signal);
 }
 
-export function semanticLocatorFunction(target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer = false) {
+export function semanticLocatorFunction(target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer: boolean | 'drop' = false) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -215,7 +215,11 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   const eligible = (element: Element) => {
     const state = contract.stateOf(element);
     const activeKeyboardSink = !prepareForPointer && editableElement(element) && element.ownerDocument?.activeElement === element;
-    return (state.rendered || activeKeyboardSink) && !state.pointerBlocked && !state.disabled && (activeKeyboardSink || !state.inViewport || !state.occluded);
+    const allowOccludedDropTarget = prepareForPointer === 'drop';
+    return (state.rendered || activeKeyboardSink)
+      && !state.pointerBlocked
+      && !state.disabled
+      && (activeKeyboardSink || !state.inViewport || allowOccludedDropTarget || !state.occluded);
   };
   const identityOf = (element: Element) => {
     const parts: string[] = [];
@@ -350,7 +354,9 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const element = matches[0]!.element;
     (element as HTMLElement).scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
     const state = contract.stateOf(element);
-    if (!state.actionable) matches = [];
+    if (prepareForPointer === 'drop') {
+      if (!state.rendered || state.disabled || state.pointerBlocked) matches = [];
+    } else if (!state.actionable) matches = [];
   }
   return {
     count: matches.length,
@@ -473,6 +479,31 @@ export function observedRelativePointFunction(ref: string, point: { xRatio?: num
   if (!hit) return { ok: false, error: 'Relative pointer point is not hit-testable in the observed document.' };
   if (hit !== element && !element.contains(hit)) return { ok: false, occluded: true, error: 'Relative pointer point is occluded by another element.' };
   return { ok: true, local: { x: localX, y: localY }, offset: { xPx: xOffset, yPx: yOffset }, tag: element.tagName.toLowerCase() };
+}
+
+export function observedDropPointFunction(ref: string) {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed drop target is stale.' };
+  const rect = element.getBoundingClientRect();
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Observed drop target geometry is invalid.' };
+  }
+  const candidates = [
+    [0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+    [0.5, 0.25], [0.5, 0.75], [0.25, 0.5], [0.75, 0.5],
+    [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]
+  ];
+  for (const [xRatio, yRatio] of candidates) {
+    const x = rect.x + rect.width * xRatio;
+    const y = rect.y + rect.height * yRatio;
+    let hit: Element | null = null;
+    try { hit = element.ownerDocument?.elementFromPoint?.(x, y) ?? null; } catch { hit = null; }
+    if (!hit) continue;
+    if (hit === element || element.contains(hit)) return { ok: true, xRatio, yRatio };
+  }
+  return { ok: false, occluded: true, error: 'Observed drop target has no currently hit-testable point.' };
 }
 
 export function observedResizeHandleFunction(ref: string, delta: { deltaX?: number; deltaY?: number }) {
@@ -824,7 +855,7 @@ export async function performSemanticInteraction(
         if (!input.target.ref || !input.toTarget?.ref) {
           throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs.', { retryable: false });
         }
-        const destinationExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), true)`;
+        const destinationExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), 'drop')`;
         const destinationPrepared = unwrapRuntimeValue(await evaluate(session, chosen, destinationExpression, false, signal)) as JsonMap | undefined;
         const destinationFirst = firstLocatedSample(destinationPrepared?.matches);
         if (destinationPrepared?.count !== 1 || !destinationFirst) {
@@ -841,7 +872,7 @@ export async function performSemanticInteraction(
             details: { source: input.target, destination: input.toTarget, before: second, after: sourceAfterDestinationScroll }
           });
         }
-        const destinationConfirmedExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})())`;
+        const destinationConfirmedExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), 'drop')`;
         const destinationConfirmed = unwrapRuntimeValue(await evaluate(session, chosen, destinationConfirmedExpression, false, signal)) as JsonMap | undefined;
         const destinationSecond = firstLocatedSample(destinationConfirmed?.matches);
         if (destinationConfirmed?.count !== 1 || !destinationSecond || !sameLocatedTarget(destinationFirst, destinationSecond)) {
@@ -853,10 +884,18 @@ export async function performSemanticInteraction(
         const sourceGeometry = sourceAfterDestinationScroll.geometry as JsonMap | undefined;
         const destinationGeometry = destinationSecond.geometry as JsonMap | undefined;
         if (!sourceGeometry || !destinationGeometry) throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is unavailable.', { retryable: true });
+        const dropPointExpression = `(${observedDropPointFunction.toString()})(${JSON.stringify(input.toTarget.ref)})`;
+        const dropPoint = unwrapRuntimeValue(await evaluate(session, chosen, dropPointExpression, false, signal)) as JsonMap | undefined;
+        if (!dropPoint || dropPoint.ok !== true) {
+          throw new OperatorError('BROWSER_TARGET_STALE', typeof dropPoint?.error === 'string' ? dropPoint.error : 'Observed drag destination has no usable drop point.', {
+            retryable: true,
+            details: { source: input.target, destination: input.toTarget, dropPoint }
+          });
+        }
         x = Number(sourceGeometry.x) + Number(sourceGeometry.width) / 2;
         y = Number(sourceGeometry.y) + Number(sourceGeometry.height) / 2;
-        const destinationX = Number(destinationGeometry.x) + Number(destinationGeometry.width) / 2;
-        const destinationY = Number(destinationGeometry.y) + Number(destinationGeometry.height) / 2;
+        const destinationX = Number(destinationGeometry.x) + Number(destinationGeometry.width) * Number(dropPoint.xRatio);
+        const destinationY = Number(destinationGeometry.y) + Number(destinationGeometry.height) * Number(dropPoint.yRatio);
         if (![x, y, destinationX, destinationY].every(Number.isFinite)) {
           throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is invalid.', { retryable: true });
         }

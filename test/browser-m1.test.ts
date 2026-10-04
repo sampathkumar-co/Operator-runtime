@@ -780,7 +780,7 @@ test('browser scroll uses native CDP wheel input scoped to an observed target', 
   ]);
 });
 
-test('drag_between revalidates two observed refs and uses native center-to-center input', async () => {
+test('drag_between revalidates two observed refs and uses a verified free point inside the destination', async () => {
   const nativeEvents: any[] = [];
   const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };
   const destination = { tag: 'div', role: 'pointer', name: 'Drop zone', identity: '#destination', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 210, y: 120, width: 60, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
@@ -789,6 +789,7 @@ test('drag_between revalidates two observed refs and uses native center-to-cente
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
+        if (expression.includes('observedDropPointFunction')) return { result: { value: { ok: true, xRatio: 0.25, yRatio: 0.75 } } };
         const sample = expression.includes('b-destination') ? destination : source;
         return { result: { value: { count: 1, matches: [sample] } } };
       }
@@ -807,6 +808,6 @@ test('drag_between revalidates two observed refs and uses native center-to-cente
   assert.equal((result.value as any).destination.identity, '#destination');
   assert.deepEqual(nativeEvents[0], { type: 'mouseMoved', x: 30, y: 30, button: 'none', buttons: 0 });
   assert.deepEqual(nativeEvents[1], { type: 'mousePressed', x: 30, y: 30, button: 'left', buttons: 1, clickCount: 1 });
-  assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 240, y: 140, button: 'left', buttons: 0, clickCount: 1 });
+  assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 225, y: 150, button: 'left', buttons: 0, clickCount: 1 });
   assert.ok(nativeEvents.length > 6);
 });

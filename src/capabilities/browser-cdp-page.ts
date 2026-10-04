@@ -898,7 +898,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         context
       };
     })
-    .filter((item) => (item.role && (item.name || item.role === 'slider' || item.role === 'pointer' || item.keyboardSink === true)) || item.href)
+    .filter((item) => (item.role && (item.name || item.editable === true || item.role === 'slider' || item.role === 'pointer' || item.keyboardSink === true)) || item.href)
     .sort((left, right) => {
       const score = (item: typeof left) => item._focusScore
         + (item.actionable ? 50 : 0)
