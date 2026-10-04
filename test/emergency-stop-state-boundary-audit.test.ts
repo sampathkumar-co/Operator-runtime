@@ -146,5 +146,5 @@ test('corrupt emergency-stop authority fails closed at the execution boundary', 
   });
 
   assert.equal(response.status, 400);
-  assert.equal((await response.json() as any).error.code, 'BAD_REQUEST');
+  assert.equal((await response.json() as any).error.code, 'EMERGENCY_STOP_STATE_INVALID');
 });
