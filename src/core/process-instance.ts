@@ -36,7 +36,11 @@ export function currentProcessInstance(): Promise<ProcessInstanceIdentity> {
 }
 
 export function sameProcessInstance(left: ProcessInstanceIdentity, right: ProcessInstanceIdentity | null): boolean {
-  return right !== null && left.pid === right.pid && left.started === right.started;
+  if (right === null || left.pid !== right.pid) return false;
+  if (left.started === right.started) return true;
+  const leftWindowsMs = windowsStartedMillisecond(left.started);
+  const rightWindowsMs = windowsStartedMillisecond(right.started);
+  return leftWindowsMs !== null && rightWindowsMs !== null && leftWindowsMs === rightWindowsMs;
 }
 
 export function validProcessInstance(input: unknown): ProcessInstanceIdentity | null {
@@ -51,7 +55,9 @@ export function validProcessInstance(input: unknown): ProcessInstanceIdentity | 
 async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const script = `$p=Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}';if($null-ne$p){$p.CreationDate.ToUniversalTime().ToString('O')}`;
+  // Get-Process uses the Win32 process handle path and remains available to
+  // packaged full-trust applications where the WMI/CIM provider may not be.
+  const script = `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($null-ne$p){$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()}`;
   try {
     const { stdout } = await execFileAsync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
       windowsHide: true,
@@ -60,10 +66,20 @@ async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdenti
       encoding: 'utf8'
     });
     const started = stdout.trim();
-    return started ? { pid, started } : null;
+    return /^\d{15,20}$/.test(started) ? { pid, started: `windows-filetime:${started}` } : null;
   } catch {
     return null;
   }
+}
+
+const WINDOWS_EPOCH_FILETIME_MS = 11_644_473_600_000n;
+
+function windowsStartedMillisecond(value: string): bigint | null {
+  const filetime = /^windows-filetime:(\d{15,20})$/.exec(value);
+  if (filetime) return BigInt(filetime[1]!) / 10_000n;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || !/^\d{4}-\d{2}-\d{2}T/.test(value)) return null;
+  return BigInt(Math.trunc(parsed)) + WINDOWS_EPOCH_FILETIME_MS;
 }
 
 async function inspectLinuxProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
