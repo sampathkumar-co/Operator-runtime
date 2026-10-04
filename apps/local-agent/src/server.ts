@@ -37,6 +37,7 @@ import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
+import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import {
   assertMigrationCapabilities,
   buildMigrationArtifacts,
@@ -732,6 +733,22 @@ export function createLocalAgentServer(options: {
 
     if (pathname === '/v1/activity/summary' && req.method === 'GET') {
       send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/runtime' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 200) : 100;
+      const [tasks, journal, approvals] = await Promise.all([
+        options.tasks ? options.tasks.list(limit) : [],
+        options.agentKernel ? options.agentKernel.journal.list(Math.min(1000, limit * 5)) : [],
+        options.approvals ? options.approvals.list() : []
+      ]);
+      send(res, 200, {
+        ok: true,
+        projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
+        configured: Boolean(options.tasks)
+      });
       return;
     }
 
