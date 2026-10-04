@@ -87,6 +87,7 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
     return { class: 'policy', strategy: 'fail', retryable: false, code };
   }
   if (epistemic === 'UNKNOWN') {
+    if (error?.retryable === false) return { class: 'permanent', strategy: 'fail', retryable: false, code };
     return { class: 'unknown', strategy: error?.sideEffectState === 'uncertain' ? 'reconcile' : 'reobserve', retryable: true, code };
   }
   if (error) return { class: 'permanent', strategy: 'fail', retryable: false, code };

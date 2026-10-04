@@ -855,8 +855,12 @@ export class TaskOrchestrator {
         return task;
       }
       const retrySafe = retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain');
+      const ambiguityAlreadyReobserved = /AMBIGUOUS|NOT_UNIQUE|MULTIPLE_MATCH/i.test(failureDecision.code)
+        && task.evidence.some((item) => item.kind === 'strategy_reobserve'
+          && item.data?.code === failureDecision.code && item.data?.stepKey === decision.key);
       if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'reobserve'
-        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')) {
+        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')
+        && !ambiguityAlreadyReobserved) {
         setNodeState(task, latestNode.id, 'SKIPPED');
         latestExecution.records = latestExecution.records.filter((candidate) => candidate !== latestRecord);
         latestExecution.preDispatchReobserves = (latestExecution.preDispatchReobserves ?? 0) + 1;
@@ -864,6 +868,7 @@ export class TaskOrchestrator {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
+          stepKey: decision.key,
           actionId: latestRecord.actionId,
           sideEffectState: latestRecord.sideEffectState ?? 'none',
           executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
