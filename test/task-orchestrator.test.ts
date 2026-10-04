@@ -1403,7 +1403,10 @@ class RepairingBudgetPlanner implements TaskPlanner {
     assert.equal(context.budget.maxSteps, 4);
     assert.ok(context.budget.remainingSteps >= 0 && context.budget.remainingSteps <= 4);
     if (context.task.execution!.plannerState.phase === 'complete') return { type: 'complete', message: 'repaired step verified' };
-    return { reasoning: 'I know what to do but omitted the typed action.' } as unknown as PlannerDecision;
+    return {
+      reasoning: 'I know what to do but omitted the typed action.',
+      secretPlannerText: 'never-persist-this-planner-secret'
+    } as unknown as PlannerDecision;
   }
   repair(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision {
     assert.match(issue, /decision type|structured/i);
@@ -1437,4 +1440,14 @@ test('task planner boundary exposes remaining budget and permits one typed repai
   assert.equal(completed.state, 'VERIFIED');
   assert.equal(completed.execution?.stepCount, 1);
   assert.ok(completed.evidence.some((item) => item.kind === 'planner_repair'));
+  const restarted = await new TaskStore(state).get(task.id);
+  const rejected = restarted.execution?.rejectedDecisions?.[0];
+  assert.equal(rejected?.decisionType, 'invalid');
+  assert.equal(rejected?.code, 'TASK_PLANNER_FAILED');
+  assert.equal(rejected?.taskId, task.id);
+  assert.equal(rejected?.authorityState, 'TASK_SCOPE_BOUND');
+  assert.equal(rejected?.retryAllowed, true);
+  assert.equal(rejected?.replanAllowed, true);
+  assert.match(rejected?.decisionDigest ?? '', /^[0-9a-f]{64}$/);
+  assert.doesNotMatch(JSON.stringify(restarted.execution?.rejectedDecisions), /never-persist-this-planner-secret/);
 });

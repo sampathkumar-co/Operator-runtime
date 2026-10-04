@@ -64,6 +64,26 @@ export interface TaskObservationSummaryV2 {
 
 export type TaskObservationSummary = TaskObservationSummaryV1 | TaskObservationSummaryV2;
 
+export interface TaskRejectedDecision {
+  taskId: string;
+  /** Deterministic correlation for the rejected candidate, not a dispatched action ID. */
+  actionCorrelation?: string;
+  decisionDigest: string;
+  decisionType: 'invalid' | 'complete' | 'step';
+  code: string;
+  reason: string;
+  authorityState: 'INTENT_BOUND' | 'TASK_SCOPE_BOUND';
+  resourceContext: {
+    capability?: string;
+    targetDigest?: string;
+  };
+  observationDigest: string;
+  at: string;
+  retryAllowed: boolean;
+  reobserveAllowed: boolean;
+  replanAllowed: boolean;
+}
+
 export interface TaskExecution {
   schemaVersion: 1;
   plannerId: string;
@@ -81,6 +101,8 @@ export interface TaskExecution {
   deadlineAt?: string;
   records: TaskActionRecord[];
   plannerEvents?: TaskPlannerEvent[];
+  /** Bounded, secret-minimized evidence for candidates refused before dispatch. */
+  rejectedDecisions?: TaskRejectedDecision[];
 }
 
 export interface TaskCapsule {

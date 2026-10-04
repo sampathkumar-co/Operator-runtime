@@ -252,6 +252,45 @@ test('TaskStore rejects oversized persisted collections and strings', async (t) 
   await expectCorrupt(() => new TaskStore(state).get(stringTask.id), /userObjective is invalid/);
 });
 
+test('TaskStore bounds and validates durable rejected-decision evidence', async (t) => {
+  const state = await tempDir(t, 'operator-task-rejected-decisions-');
+  const value = task();
+  const rejectedDecision = {
+    taskId: value.id,
+    actionCorrelation: 'a'.repeat(64),
+    decisionDigest: 'b'.repeat(64),
+    decisionType: 'step',
+    code: 'TASK_LOOP_DETECTED',
+    reason: 'Repeated candidate made no progress.',
+    authorityState: 'TASK_SCOPE_BOUND',
+    resourceContext: { capability: 'file.read', targetDigest: 'c'.repeat(64) },
+    observationDigest: 'd'.repeat(64),
+    at: value.createdAt,
+    retryAllowed: false,
+    reobserveAllowed: true,
+    replanAllowed: true
+  };
+  value.execution = {
+    schemaVersion: 1, plannerId: 'test.planner', goalKind: 'test-goal', plannerState: {},
+    maxSteps: 10, maxAttemptsPerStep: 2, timeoutMs: 1000, stepCount: 0, records: [],
+    rejectedDecisions: [rejectedDecision]
+  };
+  await new TaskStore(state).put(value);
+  assert.deepEqual((await new TaskStore(state).get(value.id)).execution?.rejectedDecisions, [rejectedDecision]);
+
+  await writePersisted(state, value.id, {
+    ...value,
+    execution: { ...value.execution, rejectedDecisions: Array.from({ length: 101 }, () => rejectedDecision) }
+  });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /at most 100 entries/);
+
+  await writePersisted(state, value.id, {
+    ...value,
+    execution: { ...value.execution, rejectedDecisions: [{ ...rejectedDecision, observationDigest: 'not-a-digest' }] }
+  });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /observationDigest is invalid/);
+});
+
 test('TaskStore rejects symlinked task files instead of reading their targets', async (t) => {
   const state = await tempDir(t, 'operator-task-file-link-');
   const value = task();

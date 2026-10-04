@@ -3,7 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
-import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain, TaskRejectedDecision } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
@@ -451,6 +451,9 @@ export class TaskOrchestrator {
         decision = validatePlannerDecision(rawDecision);
       } catch (error) {
         const issue = error instanceof Error ? error.message : String(error);
+        await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
+          retryAllowed: Boolean(planner.repair), reobserveAllowed: false, replanAllowed: Boolean(planner.repair)
+        }, assertLease);
         if (!planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
         try {
           decision = validatePlannerDecision(planner.repair(context, rawDecision, issue));
@@ -460,13 +463,20 @@ export class TaskOrchestrator {
             remainingSteps: context.budget.remainingSteps
           }));
         } catch (repairError) {
-          return await this.#fail(task, 'TASK_PLANNER_FAILED', repairError instanceof Error ? repairError.message : String(repairError), assertLease);
+          const issue = repairError instanceof Error ? repairError.message : String(repairError);
+          await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
+            retryAllowed: false, reobserveAllowed: false, replanAllowed: false
+          }, assertLease);
+          return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
         }
       }
       if (decision.type === 'complete') {
         const verification = verifyTaskCompletion(task);
         task.evidence.push(verification.evidence);
         if (!verification.ok) {
+          await this.#recordRejectedDecision(task, decision, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', {
+            retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+          }, assertLease);
           return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
         }
         task.evidence.push(evidence('task_completion', 'pass', decision.message, { verificationDigest: verification.bundle.digest }));
@@ -474,21 +484,40 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
+      if (current.stepCount >= current.maxSteps) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', {
+          retryAllowed: false, reobserveAllowed: false, replanAllowed: false
+        }, assertLease);
+        return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
+      }
 
       const inputHash = sha256(canonicalJson(decision.input));
       const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
       const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
       if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, {
+          retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+        }, assertLease);
         return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, assertLease);
       }
       const priorAttempts = current.records.filter((record) =>
         record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED' && record.state !== 'STARTED'
       ).length;
-      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, {
+          retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+        }, assertLease);
+        return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      }
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
-      catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
+      catch (error) {
+        const issue = error instanceof Error ? error.message : String(error);
+        await this.#recordRejectedDecision(task, decision, 'TASK_RISK_RESOLUTION_FAILED', issue, {
+          retryAllowed: false, reobserveAllowed: false, replanAllowed: true
+        }, assertLease);
+        return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', issue, assertLease);
+      }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const replayRecord = blockedReplay ?? recoveryReplay;
       const attempt = replayRecord?.attempt ?? priorAttempts + 1;
@@ -1054,6 +1083,55 @@ export class TaskOrchestrator {
     if (assertLease) await this.#persistRunState(task, assertLease);
     else await this.#store.put(task);
     return task;
+  }
+
+  async #recordRejectedDecision(
+    task: TaskCapsule,
+    candidate: unknown,
+    code: string,
+    reason: string,
+    recovery: Pick<TaskRejectedDecision, 'retryAllowed' | 'reobserveAllowed' | 'replanAllowed'>,
+    assertLease: () => Promise<void>
+  ): Promise<void> {
+    const execution = task.execution!;
+    const structured = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      ? candidate as Record<string, unknown>
+      : {};
+    const rawType = structured.type;
+    const decisionType: TaskRejectedDecision['decisionType'] = rawType === 'complete' || rawType === 'step' ? rawType : 'invalid';
+    const capability = decisionType === 'step' && typeof structured.capability === 'string'
+      ? structured.capability.slice(0, 256)
+      : undefined;
+    const target = decisionType === 'step' && typeof structured.target === 'string' ? structured.target : undefined;
+    const safeDecision = {
+      type: decisionType,
+      key: decisionType === 'step' && typeof structured.key === 'string' ? structured.key.slice(0, 256) : undefined,
+      capability,
+      targetDigest: target ? sha256(target) : undefined
+    };
+    const decisionDigest = sha256(canonicalJson(safeDecision));
+    const latestObservation = [...execution.records].reverse().find((record) => record.observation)?.observation;
+    const observationDigest = latestObservation?.schemaVersion === 2
+      ? latestObservation.stateVersion
+      : sha256(canonicalJson(latestObservation ?? { state: 'unobserved' }));
+    const record: TaskRejectedDecision = {
+      taskId: task.id,
+      ...(decisionType === 'step' ? { actionCorrelation: sha256(`${task.id}:${decisionDigest}`) } : {}),
+      decisionDigest,
+      decisionType,
+      code: code.slice(0, 256),
+      reason: reason.slice(0, 1024),
+      authorityState: task.intent ? 'INTENT_BOUND' : 'TASK_SCOPE_BOUND',
+      resourceContext: { ...(capability ? { capability } : {}), ...(target ? { targetDigest: sha256(target) } : {}) },
+      observationDigest,
+      at: new Date().toISOString(),
+      ...recovery
+    };
+    execution.rejectedDecisions ??= [];
+    execution.rejectedDecisions.push(record);
+    if (execution.rejectedDecisions.length > 100) execution.rejectedDecisions.splice(0, execution.rejectedDecisions.length - 100);
+    task.updatedAt = record.at;
+    await this.#persistRunState(task, assertLease);
   }
 }
 

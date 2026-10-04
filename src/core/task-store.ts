@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary, TaskRejectedDecision } from './task.ts';
 import { validIntentBinding } from './intent-registry.ts';
 import type { Evidence, TaskState } from './types.ts';
 import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from './task-planner-event.ts';
@@ -31,6 +31,7 @@ const TASK_OPTIONS = {
 } as const;
 const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
 const MAX_ACTION_RECORDS = 5000;
+const MAX_REJECTED_DECISIONS = 100;
 const LEASE_OPTIONS = {
   maxBytes: 16 * 1024,
   errorCode: 'TASK_LEASE_CORRUPT',
@@ -348,12 +349,60 @@ function validateExecution(input: unknown): TaskExecution {
   if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
   const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
   const plannerEvents = raw.plannerEvents === undefined ? [] : validatePlannerEvents(raw.plannerEvents);
+  const rejectedDecisions = raw.rejectedDecisions === undefined ? [] : validateRejectedDecisions(raw.rejectedDecisions);
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
     plannerIterations, preDispatchReobserves, dispatchedActions,
     ...(startedAt ? { startedAt, deadlineAt } : {}), records,
-    ...(plannerEvents.length > 0 ? { plannerEvents } : {})
+    ...(plannerEvents.length > 0 ? { plannerEvents } : {}),
+    ...(rejectedDecisions.length > 0 ? { rejectedDecisions } : {})
   };
+}
+
+function validateRejectedDecisions(input: unknown): TaskRejectedDecision[] {
+  if (!Array.isArray(input) || input.length > MAX_REJECTED_DECISIONS) {
+    throw corrupt(`execution rejectedDecisions must contain at most ${MAX_REJECTED_DECISIONS} entries.`);
+  }
+  const decisionTypes = new Set<TaskRejectedDecision['decisionType']>(['invalid', 'complete', 'step']);
+  const authorityStates = new Set<TaskRejectedDecision['authorityState']>(['INTENT_BOUND', 'TASK_SCOPE_BOUND']);
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw corrupt(`rejected decision ${index} must be an object.`);
+    const raw = entry as Record<string, unknown>;
+    const decisionType = String(raw.decisionType) as TaskRejectedDecision['decisionType'];
+    const authorityState = String(raw.authorityState) as TaskRejectedDecision['authorityState'];
+    if (!decisionTypes.has(decisionType)) throw corrupt(`rejected decision ${index} type is invalid.`);
+    if (!authorityStates.has(authorityState)) throw corrupt(`rejected decision ${index} authorityState is invalid.`);
+    const resource = raw.resourceContext;
+    if (!resource || typeof resource !== 'object' || Array.isArray(resource)) throw corrupt(`rejected decision ${index} resourceContext is invalid.`);
+    const resourceRaw = resource as Record<string, unknown>;
+    const capability = resourceRaw.capability === undefined ? undefined : boundedText(resourceRaw.capability, 256, `rejected decision ${index} capability`);
+    const targetDigest = resourceRaw.targetDigest === undefined ? undefined : digest(resourceRaw.targetDigest, `rejected decision ${index} targetDigest`);
+    const actionCorrelation = raw.actionCorrelation === undefined ? undefined : digest(raw.actionCorrelation, `rejected decision ${index} actionCorrelation`);
+    for (const field of ['retryAllowed', 'reobserveAllowed', 'replanAllowed'] as const) {
+      if (typeof raw[field] !== 'boolean') throw corrupt(`rejected decision ${index} ${field} is invalid.`);
+    }
+    return {
+      taskId: boundedText(raw.taskId, 128, `rejected decision ${index} taskId`),
+      ...(actionCorrelation ? { actionCorrelation } : {}),
+      decisionDigest: digest(raw.decisionDigest, `rejected decision ${index} decisionDigest`),
+      decisionType,
+      code: boundedText(raw.code, 256, `rejected decision ${index} code`),
+      reason: boundedText(raw.reason, 1024, `rejected decision ${index} reason`),
+      authorityState,
+      resourceContext: { ...(capability ? { capability } : {}), ...(targetDigest ? { targetDigest } : {}) },
+      observationDigest: digest(raw.observationDigest, `rejected decision ${index} observationDigest`),
+      at: validIso(raw.at, `rejected decision ${index} at`),
+      retryAllowed: raw.retryAllowed as boolean,
+      reobserveAllowed: raw.reobserveAllowed as boolean,
+      replanAllowed: raw.replanAllowed as boolean
+    };
+  });
+}
+
+function digest(input: unknown, name: string): string {
+  const value = boundedText(input, 64, name);
+  if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${name} is invalid.`);
+  return value;
 }
 
 function validatePlannerEvents(input: unknown): TaskPlannerEvent[] {
