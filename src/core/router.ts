@@ -85,6 +85,10 @@ export class CapabilityRouter {
     return this.#providers.find((provider) => provider.name === name);
   }
 
+  providers(): readonly CapabilityProvider[] {
+    return [...this.#providers];
+  }
+
   async select(action: ActionRequest, learningContext = 'global'): Promise<CapabilityProvider> {
     const ranked = await this.rank(action, learningContext);
     if (!ranked[0]) {

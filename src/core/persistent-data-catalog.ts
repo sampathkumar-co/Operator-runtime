@@ -29,7 +29,8 @@ export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
   'audit-active', 'audit-head', 'audit-segments',
   'tasks', 'team-missions', 'action-journal', 'action-results', 'sagas', 'compensation', 'intent-registry',
   'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'semantic-migrations',
-  'relay-client', 'relay-session-credential', 'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
+  'relay-client', 'relay-session-credential', 'relay-deliveries', 'relay-results', 'relay-reservation-reconciliation', 'relay-outbox',
+  'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
   'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
   'enterprise-policy', 'bootstrap', 'local-device-reset'
 ] as const);
@@ -60,6 +61,12 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
     ['approvals', 'approvals.json', 'derived'], ['action-executions', 'action-executions.json', 'derived'],
     ['resource-leases', 'resource-leases.json', 'none'], ['emergency-stop', 'emergency-stop.json', 'none']
   ].map(([id, location, secretMaterial]) => entry({ id, owner: id, location, category: 'session-state', sensitivity: secretMaterial === 'plaintext-token' || secretMaterial === 'encrypted' ? 'secret' : 'sensitive', retention: 'active-session-or-policy', deletion: 'privacy-category', backup: secretMaterial === 'plaintext-token' ? 'exclude-secret' : 'include', restore: secretMaterial === 'plaintext-token' ? 'never' : 'optional', scope: 'device', secretMaterial: secretMaterial as PersistentDataEntry['secretMaterial'], participatesInDeletion: true, concurrency: id === 'resource-leases' ? 'PROCESS_LOCKED' : 'SINGLE_PROCESS_ONLY' })),
+  ...[
+    ['relay-deliveries', 'relay-deliveries.json'], ['relay-results', 'relay-results.json'],
+    ['relay-reservation-reconciliation', 'relay-reservation-reconciliation.json'], ['relay-outbox', 'relay-outbox']
+  ].map(([id, location]) => entry({ id, owner: id, location, category: 'session-state', sensitivity: 'sensitive', retention: 'bounded-replay-fence', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' })),
+  entry({ id: 'resource-leases-lock', owner: 'resource-leases', location: 'resource-leases.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-writer-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'none', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'local-agent-lock', owner: 'local-agent', location: 'local-agent.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-agent-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'device-identity', owner: 'device-identity', location: 'device-identity.json', category: 'device-identity', sensitivity: 'secret', retention: 'device-lifetime', deletion: 'device-reset-only', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'encrypted', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   ...[
     ['device-registry', 'device-registry.json'], ['device-routing', 'device-routing.json'], ['device-pool', 'device-pool.json'],
@@ -70,6 +77,14 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
 
 export function persistentDataForCategory(category: PersistentDataCategory): PersistentDataEntry[] {
   return PERSISTENT_DATA_CATALOG.filter((item) => item.category === category).map((item) => ({ ...item }));
+}
+
+export function assertPersistentDataLocationsCataloged(locations: Iterable<string>): void {
+  const cataloged = new Set(PERSISTENT_DATA_CATALOG.map((item) => item.location));
+  const missing = [...new Set([...locations].map((location) => location.replace(/\\/g, '/').replace(/^\.\//, '')))]
+    .filter((location) => !cataloged.has(location))
+    .sort();
+  if (missing.length > 0) throw new Error(`Persistent data locations are not cataloged: ${missing.join(', ')}`);
 }
 
 export function validatePersistentDataCatalog(): void {

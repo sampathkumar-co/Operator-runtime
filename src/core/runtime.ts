@@ -5,6 +5,7 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
+import { MUTATION_RECONCILIATION_POLICIES, assertRegisteredMutationReconciliation, reconcileFromDurableResult } from './reconciliation-coverage.ts';
 
 export class OperatorRuntime {
   readonly router: CapabilityRouter;
@@ -20,6 +21,10 @@ export class OperatorRuntime {
   register(provider: CapabilityProvider): this {
     this.router.register(provider);
     return this;
+  }
+
+  async assertMutationReconciliationCoverage(): Promise<void> {
+    await assertRegisteredMutationReconciliation(this.router.providers());
   }
 
   async supportedCapabilities(capabilities: readonly string[]): Promise<string[]> {
@@ -174,10 +179,9 @@ export class OperatorRuntime {
       throw new OperatorError('PROVIDER_RECONCILIATION_UNAVAILABLE', `Provider ${providerName} is not available for reconciliation.`);
     }
     if (!provider.reconcile) {
-      return {
-        status: 'uncertain',
-        evidence: [evidence('reconciliation', 'info', 'Selected provider does not implement an action reconciliation contract.', { provider: providerName })]
-      };
+      const policy = MUTATION_RECONCILIATION_POLICIES[action.capability];
+      if (policy?.mode === 'side_effect_free') return reconcileFromDurableResult(providerName, action.capability, priorResult);
+      throw new OperatorError('PROVIDER_RECONCILIATION_CONTRACT_MISSING', `Provider ${providerName} has no reconciliation contract for mutable capability ${action.capability}.`);
     }
     return await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
   }

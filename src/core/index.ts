@@ -6,6 +6,7 @@ export * from './provenance.ts';
 export * from './policy.ts';
 export * from './router.ts';
 export * from './runtime.ts';
+export * from './reconciliation-coverage.ts';
 export * from './task.ts';
 export * from './task-store.ts';
 export * from './task-orchestrator.ts';

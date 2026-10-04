@@ -2,9 +2,10 @@ import crypto from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
 import { createRenderedDeltaEvidence, createRenderedEvidence, type RenderedEvidence, type RenderedEvidenceTier } from '../core/rendered-evidence.ts';
 
@@ -249,6 +250,10 @@ export class WindowsUiaProvider implements CapabilityProvider {
   }
 
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
