@@ -54,6 +54,12 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
   assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
+  assert.deepEqual(classifyTaskFailure({ code: 'UIA_AMBIGUOUS_SELECTOR', message: 'ambiguous', retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' }), {
+    class: 'target-drift', strategy: 'reobserve', retryable: true, code: 'UIA_AMBIGUOUS_SELECTOR'
+  });
+  assert.deepEqual(classifyTaskFailure({ code: 'EVIDENCE_UNKNOWN', message: 'not enough evidence', sideEffectState: 'none', executionPhase: 'pre_dispatch' }), {
+    class: 'unknown', strategy: 'reobserve', retryable: true, code: 'EVIDENCE_UNKNOWN'
+  });
   for (const code of ['BROWSER_POSTCONDITION_FAILED', 'DOCKER_POSTCONDITION_FAILED', 'PROCESS_TERMINATE_POSTCONDITION_FAILED']) {
     assert.deepEqual(classifyTaskFailure({ code, message: 'verification failed', retryable: true, sideEffectState: 'uncertain' }), {
       class: 'postcondition', strategy: 'fail', retryable: false, code
@@ -167,6 +173,8 @@ test('independent typed outcome verification rejects planner completion when mac
         observedAt: new Date().toISOString(),
         stateVersion: 'f'.repeat(64),
         importantState: { ok: true, sha256: crypto.createHash('sha256').update('wrong content\n').digest('hex') },
+        epistemicStatus: 'KNOWN',
+        epistemicReason: 'ACTION_RESULT_KNOWN',
         ambiguous: false,
         confidence: 1,
         evidenceRefs: []
@@ -179,6 +187,10 @@ test('independent typed outcome verification rejects planner completion when mac
   assert.equal(verdict.ok, false);
   assert.ok(verdict.bundle.checks.some((check) => check.name === 'typed-goal-outcome-truth' && !check.ok));
   assert.ok(verdict.bundle.checks.some((check) => check.name === 'declared-condition-1' && !check.ok));
+  task.execution.records[0]!.observation = { ...task.execution.records[0]!.observation!, epistemicStatus: 'UNKNOWN', epistemicReason: 'EVIDENCE_UNKNOWN' };
+  const unresolved = verifyTaskCompletion(task);
+  assert.equal(unresolved.ok, false);
+  assert.ok(unresolved.bundle.checks.some((check) => check.name === 'epistemic-state-resolved' && !check.ok));
 });
 
 test('stage3 repairs wrong existing file content with SHA precondition, explicit approval, and fresh verification', async (t) => {

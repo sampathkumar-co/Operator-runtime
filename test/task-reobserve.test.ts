@@ -193,6 +193,41 @@ test('pre-dispatch approval wait does not consume environment-action budget', as
   assert.equal(completed.execution?.records.length, 1);
 });
 
+test('epistemic ambiguity gathers bounded fresh evidence instead of becoming an immediate failure', async (t) => {
+  const root = await tempDir(t, 'operator-task-ambiguity-root-');
+  const state = await tempDir(t, 'operator-task-ambiguity-state-');
+  let executions = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new StaleThenSuccessBrowserProvider()),
+    store: new TaskStore(state),
+    permissions: { allowedCapabilities: ['browser.interact'], allowedRoots: [root], allowExternalWrites: true },
+    planners: [new OneBrowserStepPlanner()],
+    executeAction: async (action) => {
+      executions += 1;
+      if (executions === 1) return {
+        ok: false, capability: action.capability, provider: 'ambiguity-probe', evidence: [], durationMs: 0,
+        error: {
+          code: 'BROWSER_AMBIGUOUS_ELEMENT', message: 'two candidates remain', retryable: false,
+          sideEffectState: 'none', executionPhase: 'pre_dispatch'
+        }
+      };
+      return { ok: true, capability: action.capability, provider: 'ambiguity-probe', output: { dispatched: true }, evidence: [], durationMs: 0 };
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Resolve an ambiguous target with fresh evidence.', authorizedScope: [root],
+    successConditions: ['one uniquely rebound interaction succeeds'],
+    goal: { kind: 'controlled-file-change', root, path: 'unused.txt', content: 'unused' },
+    maxSteps: 1, maxAttemptsPerStep: 1
+  });
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(executions, 2);
+  assert.equal(completed.execution?.preDispatchReobserves, 1);
+  assert.equal(completed.execution?.plannerEvents?.[0]?.epistemicStatus, 'AMBIGUOUS');
+  assert.equal(completed.execution?.records.length, 1);
+});
+
 test('no-progress becomes a durable planner event and triggers bounded replanning without blind mutation retry', async (t) => {
   const root = await tempDir(t, 'operator-task-planner-event-root-');
   const state = await tempDir(t, 'operator-task-planner-event-state-');

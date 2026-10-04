@@ -44,6 +44,8 @@ test('runtime projection derives bounded operator state from authoritative task,
           observedAt: '2026-10-04T00:00:01.000Z',
           stateVersion: 'revision-9',
           importantState: { id: 1 },
+          epistemicStatus: 'EXECUTION_UNCERTAIN',
+          epistemicReason: 'ACTION_RECONCILIATION_REQUIRED',
           ambiguous: false,
           confidence: 0.99,
           evidenceRefs: ['evidence-1']

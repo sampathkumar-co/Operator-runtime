@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ActionRisk, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
+import type { ActionRisk, EpistemicStatus, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 import type { TaskPlannerEvent } from './task-planner-event.ts';
 
@@ -57,6 +57,8 @@ export interface TaskObservationSummaryV2 {
   observedAt: string;
   stateVersion: string;
   importantState: Record<string, unknown>;
+  epistemicStatus: EpistemicStatus;
+  epistemicReason: string;
   ambiguous: boolean;
   confidence: number;
   evidenceRefs: string[];

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeMachineObservation, observationDomain } from '../src/core/machine-state.ts';
+import { epistemicStatusFromResult } from '../src/core/epistemic-state.ts';
 import type { ActionRequest, ActionResult } from '../src/core/types.ts';
 
 const provenance = { kind: 'trusted_policy' as const };
@@ -47,6 +48,8 @@ test('normalized observation persists bounded state without raw sensitive inputs
   assert.equal(observation.importantState.operation, 'set_value');
   assert.deepEqual(observation.importantState.postcondition, { verified: true });
   assert.equal(observation.confidence, 1);
+  assert.equal(observation.epistemicStatus, 'KNOWN');
+  assert.equal(observation.epistemicReason, 'ACTION_RESULT_KNOWN');
   assert.equal(observation.ambiguous, false);
   assert.match(observation.entityId, /^uia:[0-9a-f]{32}$/);
   assert.match(observation.stateVersion, /^[0-9a-f]{64}$/);
@@ -73,8 +76,23 @@ test('ambiguous provider result is represented explicitly without claiming confi
   };
   const observation = normalizeMachineObservation(request, failed);
   assert.equal(observation.ambiguous, true);
+  assert.equal(observation.epistemicStatus, 'AMBIGUOUS');
   assert.equal(observation.confidence, 0);
   assert.equal(observation.importantState.errorCode, 'UIA_AMBIGUOUS_SELECTOR');
+});
+
+test('epistemic outcome taxonomy distinguishes every non-authoritative state', () => {
+  const status = (code: string, options: Record<string, unknown> = {}) => epistemicStatusFromResult({
+    ok: false,
+    error: { code, message: code, ...options }
+  } as ActionResult);
+  assert.equal(status('EVIDENCE_UNKNOWN'), 'UNKNOWN');
+  assert.equal(status('TARGET_NOT_UNIQUE'), 'AMBIGUOUS');
+  assert.equal(status('STATE_CHANGED'), 'CONTRADICTED');
+  assert.equal(status('PROVIDER_UNAVAILABLE'), 'UNAVAILABLE');
+  assert.equal(status('PATH_OUTSIDE_SCOPE'), 'UNAUTHORIZED');
+  assert.equal(status('NETWORK_TIMEOUT', { sideEffectState: 'uncertain' }), 'EXECUTION_UNCERTAIN');
+  assert.equal(status('POSTCONDITION_FAILED'), 'VERIFIED_FALSE');
 });
 
 test('docker normalized state retains safe fingerprint and service lifecycle summary', () => {

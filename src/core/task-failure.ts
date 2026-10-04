@@ -1,4 +1,5 @@
 import type { ActionResult } from './types.ts';
+import { epistemicStatusFromResult } from './epistemic-state.ts';
 
 type ActionError = NonNullable<ActionResult['error']>;
 
@@ -37,6 +38,7 @@ export interface TaskFailureDecision {
  */
 export function classifyTaskFailure(error: ActionError | undefined): TaskFailureDecision {
   const code = error?.code ?? 'EXECUTION_FAILED';
+  const epistemic = epistemicStatusFromResult({ ok: false, error });
   if (code === 'APPROVAL_REQUIRED' || code === 'APPROVAL_EXPIRED') {
     return { class: 'approval', strategy: 'block', retryable: false, code };
   }
@@ -46,11 +48,10 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   if (/NO_PROGRESS/i.test(code)) {
     return { class: 'postcondition', strategy: 'replan', retryable: false, code };
   }
-  if (/TARGET_NOT_UNIQUE|AMBIGUOUS/i.test(code)) {
-    if (error?.retryable !== true) return { class: 'target-drift', strategy: 'fail', retryable: false, code };
+  if (epistemic === 'AMBIGUOUS') {
     return {
       class: 'target-drift',
-      strategy: error.executionPhase === 'pre_dispatch' ? 'reobserve' : error.sideEffectState === 'none' ? 'repair' : 'reconcile',
+      strategy: error?.executionPhase === 'pre_dispatch' || error?.sideEffectState === 'none' || error?.executionPhase === undefined ? 'reobserve' : 'reconcile',
       retryable: true,
       code
     };
@@ -84,6 +85,9 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   }
   if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY/i.test(code)) {
     return { class: 'policy', strategy: 'fail', retryable: false, code };
+  }
+  if (epistemic === 'UNKNOWN') {
+    return { class: 'unknown', strategy: error?.sideEffectState === 'uncertain' ? 'reconcile' : 'reobserve', retryable: true, code };
   }
   if (error) return { class: 'permanent', strategy: 'fail', retryable: false, code };
   return { class: 'unknown', strategy: 'fail', retryable: false, code };

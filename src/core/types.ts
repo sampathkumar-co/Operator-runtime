@@ -3,6 +3,15 @@ export type SideEffectState = 'none' | 'known' | 'uncertain';
 export type ExecutionPhase = 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
+export type EpistemicStatus =
+  | 'KNOWN'
+  | 'UNKNOWN'
+  | 'AMBIGUOUS'
+  | 'CONTRADICTED'
+  | 'UNAVAILABLE'
+  | 'UNAUTHORIZED'
+  | 'EXECUTION_UNCERTAIN'
+  | 'VERIFIED_FALSE';
 export type ProvenanceKind =
   | 'user'
   | 'chatgpt'
@@ -55,6 +64,7 @@ export interface ActionResult {
     retryable?: boolean;
     sideEffectState?: SideEffectState;
     executionPhase?: ExecutionPhase;
+    epistemicStatus?: Exclude<EpistemicStatus, 'KNOWN'>;
     details?: Record<string, unknown>;
   };
   durationMs: number;

@@ -1,5 +1,7 @@
 import type { ActionResult } from './types.ts';
 import type { TaskFailureDecision } from './task-failure.ts';
+import type { EpistemicStatus } from './types.ts';
+import { epistemicStatusFromResult } from './epistemic-state.ts';
 
 export type PlannerEventKind =
   | 'STALE_TARGET'
@@ -28,6 +30,7 @@ export interface TaskPlannerEvent {
   busy?: number;
   dialogs?: number;
   deltaSummary?: { progress: boolean; repeatedNoProgress: number };
+  epistemicStatus?: EpistemicStatus;
 }
 
 export function plannerEventFromResult(result: ActionResult, failure?: TaskFailureDecision): TaskPlannerEvent | undefined {
@@ -39,6 +42,7 @@ export function plannerEventFromResult(result: ActionResult, failure?: TaskFailu
     return {
       kind: 'ACTION_SUCCEEDED_BUT_NO_PROGRESS', decision: 'REPLAN', code: 'ACTION_SUCCEEDED_BUT_NO_PROGRESS',
       at, provider: result.provider, capability: result.capability,
+      epistemicStatus: 'VERIFIED_FALSE',
       deltaSummary: { progress: false, repeatedNoProgress: safeInteger(delta.repeatedNoProgress) }
     };
   }
@@ -46,11 +50,13 @@ export function plannerEventFromResult(result: ActionResult, failure?: TaskFailu
     return {
       kind: 'SETTLE_TIMEOUT', decision: 'REOBSERVE', code: 'BROWSER_SETTLE_TIMEOUT',
       at, provider: result.provider, capability: result.capability, settled: false,
+      epistemicStatus: 'UNAVAILABLE',
       elapsedMs: safeInteger(settle.elapsedMs), reason: safeText(settle.reason),
       lastMutationVersion: safeInteger(settle.lastMutationVersion), busy: safeInteger(settle.busy), dialogs: safeInteger(settle.dialogs)
     };
   }
   if (result.ok || !result.error) return undefined;
+  const epistemicStatus = epistemicStatusFromResult(result);
   const code = result.error.code;
   const upper = code.toUpperCase();
   const kind: PlannerEventKind = /AMBIGUOUS|NOT_UNIQUE/.test(upper) ? 'AMBIGUOUS_TARGET'
@@ -63,7 +69,7 @@ export function plannerEventFromResult(result: ActionResult, failure?: TaskFailu
                 : /TEMPORARY|UNAVAILABLE|OFFLINE|CONNECTION|RATE_LIMIT/.test(upper) ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
                   : 'UI_CHANGED';
   const decision = failure ? strategyDecision(failure.strategy) : 'FAIL';
-  return { kind, decision, code, at, provider: result.provider, capability: result.capability, reason: result.error.message.slice(0, 1024) };
+  return { kind, decision, code, at, provider: result.provider, capability: result.capability, epistemicStatus, reason: result.error.message.slice(0, 1024) };
 }
 
 function strategyDecision(strategy: TaskFailureDecision['strategy']): PlannerEventDecision {

@@ -1,6 +1,7 @@
 export * from './types.ts';
 export * from './errors.ts';
 export * from './evidence.ts';
+export * from './epistemic-state.ts';
 export * from './provenance.ts';
 export * from './policy.ts';
 export * from './router.ts';

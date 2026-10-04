@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary, TaskRejectedDecision } from './task.ts';
 import { validIntentBinding } from './intent-registry.ts';
-import type { Evidence, TaskState } from './types.ts';
+import type { EpistemicStatus, Evidence, TaskState } from './types.ts';
 import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from './task-planner-event.ts';
 import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
@@ -432,6 +432,12 @@ function validatePlannerEvents(input: unknown): TaskPlannerEvent[] {
       provider: boundedText(raw.provider, 512, `planner event ${index} provider`),
       capability: boundedText(raw.capability, 256, `planner event ${index} capability`)
     };
+    if (raw.epistemicStatus !== undefined) {
+      const statuses = new Set<EpistemicStatus>(['KNOWN', 'UNKNOWN', 'AMBIGUOUS', 'CONTRADICTED', 'UNAVAILABLE', 'UNAUTHORIZED', 'EXECUTION_UNCERTAIN', 'VERIFIED_FALSE']);
+      const status = String(raw.epistemicStatus) as EpistemicStatus;
+      if (!statuses.has(status)) throw corrupt(`planner event ${index} epistemicStatus is invalid.`);
+      event.epistemicStatus = status;
+    }
     if (raw.settled !== undefined) {
       if (typeof raw.settled !== 'boolean') throw corrupt(`planner event ${index} settled is invalid.`);
       event.settled = raw.settled;
@@ -510,13 +516,22 @@ function validateObservation(input: unknown, index: number): TaskObservationSumm
   const confidence = Number(raw.confidence);
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw corrupt(`Action record ${index} observation confidence is invalid.`);
   if (typeof raw.ambiguous !== 'boolean') throw corrupt(`Action record ${index} observation ambiguous must be boolean.`);
+  const epistemicStatuses = new Set<EpistemicStatus>(['KNOWN', 'UNKNOWN', 'AMBIGUOUS', 'CONTRADICTED', 'UNAVAILABLE', 'UNAUTHORIZED', 'EXECUTION_UNCERTAIN', 'VERIFIED_FALSE']);
+  const epistemicStatus = raw.epistemicStatus === undefined
+    ? (raw.ambiguous ? 'AMBIGUOUS' : 'KNOWN')
+    : String(raw.epistemicStatus) as EpistemicStatus;
+  if (!epistemicStatuses.has(epistemicStatus)) throw corrupt(`Action record ${index} observation epistemicStatus is invalid.`);
+  const epistemicReason = raw.epistemicReason === undefined
+    ? (epistemicStatus === 'AMBIGUOUS' ? 'LEGACY_AMBIGUOUS_OBSERVATION' : 'LEGACY_KNOWN_OBSERVATION')
+    : boundedText(raw.epistemicReason, 128, `action record ${index} observation epistemicReason`);
+  if ((epistemicStatus === 'AMBIGUOUS') !== raw.ambiguous) throw corrupt(`Action record ${index} observation ambiguity fields disagree.`);
   const evidenceRefs = boundedHashArray(raw.evidenceRefs, 100, `action record ${index} observation evidenceRefs`);
   const stateVersion = boundedHash(raw.stateVersion, `action record ${index} observation stateVersion`);
   return {
     schemaVersion: 2, channel, domain: domain as TaskObservationSummary['domain'], provider,
     capability: boundedText(raw.capability, 256, `action record ${index} observation capability`),
     entityId: boundedText(raw.entityId, 256, `action record ${index} observation entityId`),
-    observedAt, stateVersion, importantState, ambiguous: raw.ambiguous, confidence, evidenceRefs
+    observedAt, stateVersion, importantState, epistemicStatus, epistemicReason, ambiguous: raw.ambiguous, confidence, evidenceRefs
   };
 }
 
