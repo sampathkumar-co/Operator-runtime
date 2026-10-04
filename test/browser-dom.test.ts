@@ -85,6 +85,7 @@ class FakeElement {
   readonly tagName: string;
   childNodes: Array<FakeElement | FakeText> = [];
   textContent = '';
+  innerText?: string;
   id = '';
   value = '';
   min = '';
@@ -564,6 +565,23 @@ test('rendered visual colors are bounded, normalized, and uniquely actionable', 
   assert.equal(clicked.ok, true); assert.equal(olive.clicked, true); assert.equal(blue.clicked, false);
   blue.backgroundColor = 'rgb(128, 128, 0)';
   assert.match((interactionFunction({ operation: 'click', target: { renderedColor: 'olive' }, value: null }) as any).error, /multiple/);
+});
+
+test('visual observations derive names from rendered text without embedded source text', (t) => {
+  const root = new FakeRoot();
+  const page = new FakeElement('html', 'Visible task text function hiddenImplementation() { return 42; }');
+  page.innerText = 'Visible task text';
+  page.backgroundColor = 'rgb(255, 255, 255)';
+  const script = new FakeElement('script', 'function hiddenImplementation() { return 42; }');
+  script.backgroundColor = 'rgb(255, 255, 255)';
+  attach(root, page, script); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const pageVisual = snapshot.visualObjects.find((item: any) => item.tag === 'html');
+  const scriptVisual = snapshot.visualObjects.find((item: any) => item.tag === 'script');
+  assert.equal(pageVisual.name, 'Visible task text');
+  assert.equal(scriptVisual.name, '');
+  assert.equal(snapshot.visibleText.some((item: any) => /hiddenImplementation/.test(item.text)), false);
 });
 
 test('semantic select preserves bounded native multi-select values', (t) => {

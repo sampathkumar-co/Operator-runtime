@@ -701,11 +701,13 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   const styleOf = (element: Element) => viewOf(element)?.getComputedStyle?.(element);
   const visible = (element: Element) => contract.stateOf(element).visible;
   const readableText = (element: Element, max = 180) => {
+    if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName)) return '';
     const style = styleOf(element);
     const fontSize = Number.parseFloat(String(style?.fontSize ?? ''));
     if (Number.isFinite(fontSize) && fontSize <= 0) return '';
     if (style && Number(style.opacity) === 0) return '';
-    return trim(element.textContent, max);
+    const renderedText = (element as HTMLElement).innerText;
+    return trim(typeof renderedText === 'string' ? renderedText : element.textContent, max);
   };
   const cssEscape = (value: string) => {
     const css = (viewOf(document.documentElement) as Window & { CSS?: { escape?: (input: string) => string } } | undefined)?.CSS;
