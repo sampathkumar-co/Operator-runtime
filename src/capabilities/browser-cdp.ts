@@ -515,7 +515,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const compactTarget = (sample: JsonMap | undefined) => sample ? {
         identity: sample.identity, role: sample.role, name: sample.name, value: sample.value,
         checked: sample.checked, selected: sample.selected, expanded: sample.expanded, current: sample.current,
-        active: sample.active, scroll: sample.scroll, geometry: sample.geometry
+        active: sample.active, scroll: sample.scroll, geometry: sample.geometry, localTreeState: sample.subtreeSignature
       } : null;
       const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget) };
       const afterRelevant = {

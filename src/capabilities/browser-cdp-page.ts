@@ -516,9 +516,13 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const parent = element.parentElement;
     const ownText = trim((element as HTMLElement).innerText ?? element.textContent, 240);
     let contextLabel = '';
-    for (let current = parent, depth = 0; current && depth < 4; current = current.parentElement, depth += 1) {
+    const ancestorContextLabels: string[] = [];
+    for (let current = parent, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
       const candidate = trim((current as HTMLElement).innerText ?? current.textContent, 240);
-      if (candidate && candidate !== ownText && candidate.length <= 240) { contextLabel = candidate; break; }
+      if (candidate && candidate !== ownText && candidate.length <= 240) {
+        if (!contextLabel) contextLabel = candidate;
+        if (!ancestorContextLabels.includes(candidate) && ancestorContextLabels.length < 4) ancestorContextLabels.push(candidate);
+      }
     }
     let group: Element | null = parent;
     for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
@@ -530,6 +534,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       ...(parent ? { parentRef: observedRefOf(parent) } : {}),
       ...(group ? { groupRef: observedRefOf(group) } : {}),
       ...(contextLabel ? { contextLabel } : {}),
+      ...(ancestorContextLabels.length ? { ancestorContextLabels } : {}),
       ...(children.length ? { children } : {}),
       ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
       depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()

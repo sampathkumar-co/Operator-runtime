@@ -12,6 +12,8 @@ class FakeWebSocket {
   static autoAttachDisabled = 0;
   static mutationNoise = false;
   static mutationVersion = 0;
+  static localTreeProgress = false;
+  static localTreeVersion = 0;
   static #instances = new Set<FakeWebSocket>();
   readonly url: string;
   readyState = 0;
@@ -82,7 +84,12 @@ class FakeWebSocket {
           result: {
             value: {
               count,
-              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', identity: '#email', ...(FakeWebSocket.mutationNoise ? { documentMutationVersion: (FakeWebSocket.mutationVersion += 1) } : {}), geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } }] : []
+              matches: count ? [{
+                tag: 'input', role: 'textbox', name: 'Email', identity: '#email',
+                ...(FakeWebSocket.mutationNoise ? { documentMutationVersion: (FakeWebSocket.mutationVersion += 1) } : {}),
+                ...(FakeWebSocket.localTreeProgress ? { subtreeSignature: { descendantCount: 1, digest: `tree-${FakeWebSocket.localTreeVersion += 1}` } } : {}),
+                geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 }
+              }] : []
             }
           }
         };
@@ -485,6 +492,28 @@ test('browser progress ignores unrelated document mutation-version noise', async
     assert.equal(first.ok, true, first.error?.message);
     assert.equal((first.output as any).stateDelta.progress, false);
     assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
+  });
+});
+
+test('target-local subtree change counts as browser progress', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.localTreeProgress = true;
+  FakeWebSocket.localTreeVersion = 0;
+  t.after(() => {
+    FakeWebSocket.localTreeProgress = false;
+    FakeWebSocket.localTreeVersion = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'local-tree-progress-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.equal((result.output as any).stateDelta.progress, true);
   });
 });
 

@@ -270,6 +270,30 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     if (![top, left, scrollHeight, scrollWidth, clientHeight, clientWidth].every(Number.isFinite)) return undefined;
     return { top, left, scrollHeight, scrollWidth, clientHeight, clientWidth, canScrollY: scrollHeight > clientHeight + 1, canScrollX: scrollWidth > clientWidth + 1 };
   };
+  const subtreeSignatureOf = (element: Element) => {
+    let hash = 2166136261 >>> 0;
+    let count = 0;
+    const mix = (value: string) => {
+      for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+    };
+    const queue = Array.from(element.children ?? []).slice(0, 96);
+    while (queue.length && count < 96) {
+      const child = queue.shift()!;
+      count += 1;
+      mix(child.tagName.toLowerCase());
+      mix('|'); mix(child.id || '');
+      mix('|'); mix(child.getAttribute('class') || '');
+      mix('|'); mix(child.getAttribute('role') || '');
+      mix('|'); mix(child.getAttribute('aria-expanded') || '');
+      mix('|'); mix(child.getAttribute('aria-selected') || '');
+      mix('|'); mix(child.getAttribute('aria-checked') || '');
+      if (queue.length < 96) queue.push(...Array.from(child.children ?? []).slice(0, 96 - queue.length));
+    }
+    return { descendantCount: count, digest: hash.toString(16).padStart(8, '0') };
+  };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string };
@@ -357,6 +381,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current')) } : {}),
       active: element.ownerDocument?.activeElement === element,
       actionable: contract.stateOf(element).actionable,
+      subtreeSignature: subtreeSignatureOf(element),
       documentMutationVersion: Number.isSafeInteger(registry?.mutationVersion) ? registry?.mutationVersion : 0,
       ...(scrollStateOf(element) ? { scroll: scrollStateOf(element), scrollable: Boolean(scrollStateOf(element)?.canScrollY || scrollStateOf(element)?.canScrollX) } : {}),
       geometry: geometryOf(element, context),

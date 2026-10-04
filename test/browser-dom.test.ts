@@ -742,6 +742,7 @@ test('Browser Observation V2 gives repeated controls bounded rendered container 
   assert.ok(control);
   assert.equal(control.name, '+');
   assert.equal(control.contextLabel, 'Spicy Thai Peanut Chicken - +');
+  assert.deepEqual(control.ancestorContextLabels, ['Spicy Thai Peanut Chicken - +']);
 });
 
 test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
@@ -775,6 +776,12 @@ test('semantic locator carries document mutation version and scroll state into a
   assert.equal(located.matches[0].documentMutationVersion, 7);
   assert.equal(located.matches[0].scroll.top, 10);
   assert.equal(located.matches[0].scroll.canScrollY, true);
+  assert.deepEqual(located.matches[0].subtreeSignature, { descendantCount: 0, digest: '811c9dc5' });
+
+  const marker = new FakeElement('span'); marker.id = 'blue-point'; marker.parentElement = scroller; scroller.children.push(marker); attach(root, marker);
+  const changed = semanticLocatorFunction({ name: 'List' }) as any;
+  assert.equal(changed.matches[0].subtreeSignature.descendantCount, 1);
+  assert.notEqual(changed.matches[0].subtreeSignature.digest, located.matches[0].subtreeSignature.digest);
 });
 
 test('same-origin iframe geometry is converted into the owning CDP target viewport', (t) => {
