@@ -12,6 +12,13 @@ class FakeEvent {
   constructor(type: string, init?: any) { this.type = type; this.key = init?.key; this.clientX = init?.clientX; this.clientY = init?.clientY; this.buttons = init?.buttons; }
 }
 
+class FakeText {
+  readonly nodeType = 3;
+  readonly childNodes: never[] = [];
+  data: string;
+  constructor(data: string) { this.data = data; }
+}
+
 class FakeRoot {
   elements: FakeElement[] = [];
   hit?: FakeElement;
@@ -27,8 +34,31 @@ class FakeRoot {
   };
   body = { innerText: '', appendChild: () => undefined };
   activeElement?: FakeElement;
+  selectionRange?: { startNode?: FakeText; startOffset?: number; endNode?: FakeText; endOffset?: number };
 
   createElement(tagName: string): FakeElement { const element = new FakeElement(tagName); element.ownerDocument = this; return element; }
+  createRange(): any {
+    const draft: { startNode?: FakeText; startOffset?: number; endNode?: FakeText; endOffset?: number } = {};
+    return {
+      draft,
+      setStart(node: FakeText, offset: number) { draft.startNode = node; draft.startOffset = offset; },
+      setEnd(node: FakeText, offset: number) { draft.endNode = node; draft.endOffset = offset; }
+    };
+  }
+  getSelection(): any {
+    const root = this;
+    return {
+      get rangeCount() { return root.selectionRange ? 1 : 0; },
+      removeAllRanges() { root.selectionRange = undefined; },
+      addRange(range: any) { root.selectionRange = { ...range.draft }; },
+      toString() {
+        const selected = root.selectionRange;
+        if (!selected?.startNode || !selected.endNode) return '';
+        if (selected.startNode === selected.endNode) return selected.startNode.data.slice(selected.startOffset ?? 0, selected.endOffset ?? 0);
+        return '';
+      }
+    };
+  }
 
   querySelectorAll(selector: string): FakeElement[] {
     if (selector === '*') return [...this.elements];
@@ -43,7 +73,9 @@ class FakeRoot {
 }
 
 class FakeElement {
+  readonly nodeType = 1;
   readonly tagName: string;
+  childNodes: Array<FakeElement | FakeText> = [];
   textContent = '';
   id = '';
   value = '';
@@ -729,6 +761,21 @@ test('bounded text selection uses visible control offsets and verifies its postc
   assert.match(invalid.error, /exceeds/i);
 });
 
+
+test('bounded text selection supports ordinary observed static text', (t) => {
+  const root = new FakeRoot();
+  const paragraph = new FakeElement('p', 'select this phrase');
+  paragraph.childNodes = [new FakeText('select this phrase')];
+  attach(root, paragraph); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.visibleText.find((item: any) => item.text === 'select this phrase');
+  assert.ok(observed?.ref);
+
+  const selected = interactionFunction({ operation: 'select_text_range', target: { ref: observed.ref }, value: null, start: 0, end: 6 }) as any;
+  assert.equal(selected.ok, true);
+  assert.deepEqual(selected.after.selection, { start: 0, end: 6 });
+  assert.equal(root.getSelection().toString(), 'select');
+});
 
 test('Browser Observation V2 exposes a bounded page scroll target when the document can scroll', (t) => {
   const root = new FakeRoot();

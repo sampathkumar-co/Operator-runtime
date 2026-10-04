@@ -1161,36 +1161,34 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
       if (selectedStart !== start || selectedEnd !== end) return { ok: false, error: 'Text selection postcondition failed.', expected: { start, end }, actual: { start: selectedStart, end: selectedEnd } };
       return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
     }
-    if (control.isContentEditable === true) {
-      const textNodes: Text[] = [];
-      const visit = (node: Node) => {
-        if (textNodes.length >= 2000) return;
-        if (node.nodeType === 3) { textNodes.push(node as Text); return; }
-        for (const child of Array.from(node.childNodes ?? [])) visit(child);
-      };
-      visit(element);
-      const totalLength = textNodes.reduce((sum, node) => sum + (node.data?.length ?? 0), 0);
-      if (end > totalLength) return { ok: false, error: 'Text selection range exceeds editable text.', length: totalLength };
-      const locate = (offset: number) => {
-        let remaining = offset;
-        for (const node of textNodes) {
-          const length = node.data?.length ?? 0;
-          if (remaining <= length) return { node, offset: remaining };
-          remaining -= length;
-        }
-        const last = textNodes[textNodes.length - 1];
-        return last ? { node: last, offset: last.data?.length ?? 0 } : undefined;
-      };
-      const from = locate(start); const to = locate(end);
-      if (!from || !to) return { ok: false, error: 'Editable text does not contain a selectable text node.' };
-      const range = element.ownerDocument.createRange();
-      range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
-      const selection = element.ownerDocument.getSelection?.();
-      selection?.removeAllRanges(); selection?.addRange(range);
-      if (!selection || selection.rangeCount !== 1 || selection.toString().length !== end - start) return { ok: false, error: 'Editable text selection postcondition failed.' };
-      return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
-    }
-    return { ok: false, error: 'Matched element does not support bounded text selection.' };
+    const textNodes: Text[] = [];
+    const visit = (node: Node) => {
+      if (textNodes.length >= 2000) return;
+      if (node.nodeType === 3) { textNodes.push(node as Text); return; }
+      for (const child of Array.from(node.childNodes ?? [])) visit(child);
+    };
+    visit(element);
+    const totalLength = textNodes.reduce((sum, node) => sum + (node.data?.length ?? 0), 0);
+    if (end > totalLength) return { ok: false, error: 'Text selection range exceeds observed text.', length: totalLength };
+    const locate = (offset: number) => {
+      let remaining = offset;
+      for (const node of textNodes) {
+        const length = node.data?.length ?? 0;
+        if (remaining <= length) return { node, offset: remaining };
+        remaining -= length;
+      }
+      const last = textNodes[textNodes.length - 1];
+      return last ? { node: last, offset: last.data?.length ?? 0 } : undefined;
+    };
+    const from = locate(start); const to = locate(end);
+    if (!from || !to) return { ok: false, error: 'Matched text container does not expose selectable text nodes.' };
+    if (control.isContentEditable === true) control.focus?.();
+    const range = element.ownerDocument.createRange();
+    range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
+    const selection = element.ownerDocument.getSelection?.();
+    selection?.removeAllRanges(); selection?.addRange(range);
+    if (!selection || selection.rangeCount !== 1 || selection.toString().length !== end - start) return { ok: false, error: 'DOM text selection postcondition failed.' };
+    return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
   }
 
   if (input.operation === 'verify_value') {
