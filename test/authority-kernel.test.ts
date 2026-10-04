@@ -178,3 +178,113 @@ test('capability tokens inherit parent maxRisk and cannot widen it', () => {
     (error: any) => error?.code === 'AUTHORITY_RISK_ESCALATION'
   );
 });
+
+test('capability token root attenuation covers every path operand in a multi-path action', () => {
+  const root = path.resolve('/tmp/operator-authority-multi');
+  const safe = path.join(root, 'safe');
+  const outsideToken = path.join(root, 'other');
+  const authority = new AuthorityKernel({ secret: Buffer.alloc(32, 23) });
+  const profile = permissions(root);
+  const token = authority.issueToken(profile, {
+    capability: 'file.manage',
+    roots: [safe],
+    maxRisk: 'write'
+  });
+  const action: ActionRequest = {
+    id: 'multi-path-token',
+    capability: 'file.manage',
+    risk: 'write',
+    input: {
+      operation: 'move',
+      path: path.join(safe, 'decoy.txt'),
+      source: path.join(safe, 'source.txt'),
+      destination: path.join(outsideToken, 'destination.txt')
+    },
+    provenance: { kind: 'chatgpt' }
+  };
+  assert.throws(
+    () => authority.verifyToken(token, action, profile),
+    (error: any) => error?.code === 'AUTHORITY_TOKEN_SCOPE_MISMATCH'
+  );
+});
+
+test('runtime revalidates token expiry immediately before provider dispatch', async () => {
+  const root = path.resolve('/tmp/operator-authority-dispatch-expiry');
+  let now = new Date('2026-10-04T00:00:00.000Z');
+  const authority = new AuthorityKernel({ secret: Buffer.alloc(32, 29), clock: () => now });
+  let calls = 0;
+  const provider: CapabilityProvider = {
+    name: 'expiry-probe',
+    supports: () => true,
+    score: () => {
+      now = new Date('2026-10-04T00:00:02.000Z');
+      return SCORE;
+    },
+    execute: async (action) => {
+      calls += 1;
+      return { ok: true, capability: action.capability, provider: 'expiry-probe', evidence: [], durationMs: 0 };
+    }
+  };
+  const runtime = new OperatorRuntime({ authority }).register(provider);
+  const profile = permissions(root);
+  const token = authority.issueToken(profile, {
+    capability: 'file.read',
+    roots: [root],
+    maxRisk: 'read',
+    ttlMs: 1_000
+  });
+  let dispatched = false;
+  const result = await runtime.execute({
+    id: 'expires-during-ranking',
+    capability: 'file.read',
+    risk: 'read',
+    input: { path: path.join(root, 'a.txt') },
+    provenance: { kind: 'chatgpt' }
+  }, profile, {
+    authorityToken: token,
+    onProviderDispatch: () => { dispatched = true; }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'AUTHORITY_TOKEN_EXPIRED');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(dispatched, false);
+  assert.equal(calls, 0);
+});
+
+test('runtime revalidates selected-provider dynamic risk immediately before dispatch', async () => {
+  const root = path.resolve('/tmp/operator-authority-risk-drift');
+  const authority = new AuthorityKernel({ secret: Buffer.alloc(32, 31) });
+  let risk: 'write' | 'destructive' = 'write';
+  let calls = 0;
+  const provider: CapabilityProvider = {
+    name: 'risk-drift-probe',
+    supports: () => true,
+    resolveRisk: () => risk,
+    score: () => {
+      risk = 'destructive';
+      return SCORE;
+    },
+    execute: async (action) => {
+      calls += 1;
+      return { ok: true, capability: action.capability, provider: 'risk-drift-probe', evidence: [], durationMs: 0 };
+    }
+  };
+  const runtime = new OperatorRuntime({ authority }).register(provider);
+  let dispatched = false;
+  const result = await runtime.execute({
+    id: 'risk-drift',
+    capability: 'file.manage',
+    risk: 'write',
+    input: { operation: 'copy', source: path.join(root, 'a.txt'), destination: path.join(root, 'b.txt') },
+    provenance: { kind: 'chatgpt' }
+  }, permissions(root), {
+    onProviderDispatch: () => { dispatched = true; }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'ACTION_RISK_MISMATCH');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(dispatched, false);
+  assert.equal(calls, 0);
+});

@@ -43,6 +43,22 @@ function requiredSegment(value: unknown, fallback: string): string {
   return escapeSegment(raw || fallback);
 }
 
+/** Every host path operand that participates in capability authorization. */
+export function resourcePathOperandsForAction(action: ActionRequest): string[] {
+  const input = action.input;
+  const values: unknown[] = [];
+  if (action.capability === 'file.manage') values.push(input.path, input.source, input.destination);
+  else if (action.capability.startsWith('file.')) values.push(input.path);
+  else if (action.capability.startsWith('git.')) values.push(input.cwd);
+  else if (action.capability.startsWith('project.')) values.push(input.path ?? input.cwd);
+  else if (action.capability.startsWith('docker.')) values.push(input.path);
+  else if (action.capability.startsWith('postgres.')) values.push(input.path);
+  else if (action.capability === 'vscode.open') values.push(input.path, input.leftPath, input.rightPath);
+  else if (action.capability === 'terminal.execute') values.push(input.cwd);
+  else if (action.capability === 'terminal.session' && input.operation === 'start') values.push(input.cwd);
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0 && !value.includes('\0')))];
+}
+
 /** Stable resource identities shared by Task, Team and future workflow schedulers. */
 export function resourceKeysForAction(action: ActionRequest): string[] {
   if (!RESOURCE_EXTRACTOR_SET.has(action.capability)) {
@@ -103,26 +119,7 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
 export async function resolvePhysicalResourceKeysForAction(action: ActionRequest): Promise<string[]> {
   const keys = new Set<string>(resourceKeysForAction(action));
   const input = action.input;
-  const paths = new Set<string>();
-  const addPath = (value: unknown) => {
-    if (typeof value === 'string' && value && !value.includes('\0')) paths.add(value);
-  };
-
-  if (action.capability.startsWith('file.')) {
-    addPath(input.path); addPath(input.source); addPath(input.destination);
-  } else if (action.capability.startsWith('git.')) {
-    addPath(input.cwd);
-  } else if (action.capability.startsWith('project.')) {
-    addPath(input.path ?? input.cwd);
-  } else if (action.capability.startsWith('docker.')) {
-    addPath(input.path);
-  } else if (action.capability.startsWith('postgres.')) {
-    addPath(input.path);
-  } else if (action.capability.startsWith('vscode.')) {
-    addPath(input.path); addPath(input.leftPath); addPath(input.rightPath);
-  } else if (action.capability === 'terminal.execute' || (action.capability === 'terminal.session' && input.operation === 'start')) {
-    addPath(input.cwd);
-  }
+  const paths = resourcePathOperandsForAction(action);
 
   for (const candidate of paths) {
     const physical = await physicalPathIdentity(candidate);

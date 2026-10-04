@@ -4,6 +4,7 @@ import { PolicyError } from './errors.ts';
 import { assertInstructionAuthority } from './provenance.ts';
 import { assertCanonicalRisk, capabilityRiskRule } from './capability-policy.ts';
 import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
+import { resourcePathOperandsForAction } from './resource-identity.ts';
 
 const RISK_ORDER: Record<ActionRisk, number> = { read: 0, write: 1, external: 2, system: 3, destructive: 4 };
 
@@ -31,16 +32,12 @@ export class PolicyEngine {
       throw new PolicyError('CAPABILITY_DENIED', `Capability ${action.capability} is not permitted.`);
     }
 
-    const targetPath = typeof action.input.path === 'string'
-      ? action.input.path
-      : typeof action.input.cwd === 'string'
-        ? action.input.cwd
-        : undefined;
-
-    if (targetPath && permissions.allowedRoots.length > 0) {
-      const candidate = policyPath(targetPath, permissions.allowedRoots);
-      if (!candidate || !permissions.allowedRoots.some((root) => pathWithin(candidate, root))) {
-        throw new PolicyError('PATH_OUTSIDE_SCOPE', 'Requested path is outside the authorized roots.', { targetPath });
+    if (permissions.allowedRoots.length > 0) {
+      for (const targetPath of resourcePathOperandsForAction(action)) {
+        const candidate = policyPath(targetPath, permissions.allowedRoots);
+        if (!candidate || !permissions.allowedRoots.some((root) => pathWithin(candidate, root))) {
+          throw new PolicyError('PATH_OUTSIDE_SCOPE', 'Requested path operand is outside the authorized roots.', { targetPath });
+        }
       }
     }
 

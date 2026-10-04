@@ -92,6 +92,24 @@ export class OperatorRuntime {
     for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
+        if (!await provider.supports(canonicalAction)) {
+          failures.push({ code: 'PROVIDER_SUPPORT_CHANGED', message: `${provider.name} no longer supports the canonical action.`, retryable: true, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const });
+          continue;
+        }
+        try {
+          const dispatchDecision = await this.authority.authorize(
+            canonicalAction,
+            permissions,
+            async (candidate) => {
+              if (!provider.resolveRisk) throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', `Selected provider ${provider.name} has no dynamic-risk contract.`);
+              return await provider.resolveRisk(candidate);
+            },
+            context.authorityToken
+          );
+          canonicalAction = dispatchDecision.canonicalAction;
+        } catch (error) {
+          return policyDeniedBeforeDispatch(canonicalAction, error, start);
+        }
         await context.onProviderDispatch?.(provider.name);
         const result = await provider.execute(canonicalAction, context);
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
@@ -167,6 +185,18 @@ export class OperatorRuntime {
   async close(): Promise<void> {
     await this.router.closeAll();
   }
+}
+
+function policyDeniedBeforeDispatch(action: ActionRequest, error: unknown, start: number): ActionResult {
+  const op = error instanceof OperatorError ? error : new OperatorError('POLICY_ERROR', String(error));
+  return {
+    ok: false,
+    capability: action.capability,
+    provider: 'policy',
+    evidence: [evidence('policy_dispatch', 'fail', 'Authority changed or could not be revalidated immediately before provider dispatch.', { code: op.code })],
+    error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+    durationMs: Math.round(performance.now() - start)
+  };
 }
 
 function isAbortError(error: unknown): boolean {

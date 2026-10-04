@@ -67,3 +67,21 @@ test('relative project paths are authorized against the single root while traver
     provenance: { kind: 'chatgpt' }
   }, { ...permissions, allowedRoots: [root, path.resolve('/tmp/operator-other')] }), /outside the authorized roots/);
 });
+
+test('multi-path capability scope checks every filesystem operand before execution', () => {
+  const policy = new PolicyEngine();
+  const root = path.resolve('/tmp/operator-safe');
+  const outside = path.resolve('/tmp/operator-outside');
+  assert.throws(() => policy.authorizeBase({
+    id: 'multi-path-escape',
+    capability: 'file.manage',
+    risk: 'write',
+    input: {
+      operation: 'move',
+      path: path.join(root, 'decoy.txt'),
+      source: path.join(root, 'source.txt'),
+      destination: path.join(outside, 'escaped.txt')
+    },
+    provenance: { kind: 'chatgpt' }
+  }, { ...permissions, allowedRoots: [root] }), (error: any) => error?.code === 'PATH_OUTSIDE_SCOPE');
+});
