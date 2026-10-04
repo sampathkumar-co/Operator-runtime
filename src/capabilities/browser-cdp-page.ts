@@ -432,7 +432,10 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
-  type ObservedFingerprint = { tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string };
+  type ObservedFingerprint = {
+    tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string;
+    groupRole?: string; groupName?: string; repeatedOrdinal?: number; repeatedCount?: number; ancestorPath?: string;
+  };
   type ObservedMutationObserver = { doc: Document; observer: MutationObserver };
   type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: ObservedMutationObserver[] };
   let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
@@ -494,6 +497,36 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   while (observedRegistry.history.size > 512) observedRegistry.history.delete(observedRegistry.history.keys().next().value as string);
   const observationGeneration = `${observedRegistry.nonce}-${observedRegistry.generation.toString(36)}`;
   const refByElement = new WeakMap<Element, string>();
+  const structuralContextOf = (element: Element) => {
+    let group: Element | null = element.parentElement;
+    for (let depth = 0; group && depth < 8; depth += 1, group = group.parentElement) {
+      const candidateRole = trim(group.getAttribute('role')).toLowerCase();
+      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(candidateRole)
+        || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    }
+    let repeatedElement = element;
+    let peers: Element[] = [element];
+    for (let current: Element | null = element, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      const candidates = current.parentElement ? Array.from(current.parentElement.children).filter((peer) =>
+        peer.tagName === current!.tagName && trim(peer.getAttribute('role')).toLowerCase() === role
+      ) : [current];
+      if (candidates.length > 1) { repeatedElement = current; peers = candidates; break; }
+    }
+    const path: string[] = [];
+    for (let current: Element | null = element.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      const label = trim(current.getAttribute('aria-label') || current.getAttribute('data-testid') || current.id || '', 80);
+      path.unshift(`${current.tagName.toLowerCase()}${label ? `:${label}` : ''}`);
+    }
+    return {
+      group,
+      groupRole: group ? trim(group.getAttribute('role')).toLowerCase() || group.tagName.toLowerCase() : '',
+      groupName: group ? trim(group.getAttribute('aria-label') || group.getAttribute('title') || group.id || '', 160) : '',
+      repeatedOrdinal: Math.max(1, peers.indexOf(repeatedElement) + 1),
+      repeatedCount: peers.length,
+      ancestorPath: path.join('>')
+    };
+  };
   const observedRefOf = (element: Element) => {
     ensureMutationObserver(element.ownerDocument);
     const existing = refByElement.get(element);
@@ -501,6 +534,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const ref = `b-${observationGeneration}-${(++observedRegistry!.next).toString(36)}`;
     refByElement.set(element, ref);
     observedRegistry!.refs.set(ref, element);
+    const structural = structuralContextOf(element);
     observedRegistry!.history.set(ref, {
       tag: element.tagName.toLowerCase(),
       id: trim(element.id, 160),
@@ -508,7 +542,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       semanticName: '',
       ariaLabel: trim(element.getAttribute('aria-label'), 240),
       name: trim(element.getAttribute('name'), 240),
-      text: trim(element.textContent, 240)
+      text: trim(element.textContent, 240),
+      groupRole: structural.groupRole,
+      groupName: structural.groupName,
+      repeatedOrdinal: structural.repeatedOrdinal,
+      repeatedCount: structural.repeatedCount,
+      ancestorPath: structural.ancestorPath
     });
     return ref;
   };
@@ -531,17 +570,24 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       }));
       if (repeatedItem) break;
     }
-    let group: Element | null = parent;
-    for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
-      const groupRole = trim(group.getAttribute('role')).toLowerCase();
-      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(groupRole) || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
-    }
+    const structural = structuralContextOf(element);
+    const group = structural.group;
+    const siblingLabels = parent ? Array.from(parent.children).slice(0, 12)
+      .map((sibling) => trim(sibling.getAttribute('aria-label') || (sibling as HTMLElement).innerText || sibling.textContent, 80))
+      .filter(Boolean) : [];
     const children = Array.from(element.children ?? []).slice(0, 12).map((child) => observedRefOf(child));
     return {
       ...(parent ? { parentRef: observedRefOf(parent) } : {}),
       ...(group ? { groupRef: observedRefOf(group) } : {}),
       ...(contextLabel ? { contextLabel } : {}),
       ...(ancestorContextLabels.length ? { ancestorContextLabels } : {}),
+      ...(structural.groupRole ? { groupRole: structural.groupRole } : {}),
+      ...(structural.groupName ? { groupName: structural.groupName } : {}),
+      ...(siblingLabels.length ? { siblingLabels } : {}),
+      repeatedOrdinal: structural.repeatedOrdinal,
+      repeatedCount: structural.repeatedCount,
+      ordinalWithinRole: structural.repeatedOrdinal,
+      semanticPath: structural.ancestorPath,
       ...(children.length ? { children } : {}),
       ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
       depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()
@@ -591,7 +637,21 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       if (priorGroupElement && (priorGroupElement === element || priorGroupElement.contains(element) || element.contains(priorGroupElement))) score += 650;
     } catch { /* detached/cross-realm relationship changed */ }
     if (focus.role && role.toLowerCase() === focus.role) score += 300;
-    if (focus.text && text.toLowerCase().includes(focus.text)) score += 350;
+    if (focus.text) {
+      const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const desired = normalized(focus.text);
+      const actual = normalized(text);
+      if (actual.includes(desired)) score += 350;
+      const desiredTokens = new Set(desired.split(' ').filter(Boolean));
+      const actualTokens = new Set(actual.split(' ').filter(Boolean));
+      const overlap = [...desiredTokens].filter((token) => actualTokens.has(token)).length;
+      if (desiredTokens.size > 0) score += Math.round(180 * overlap / desiredTokens.size);
+      const ordinalWords: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+      const wordOrdinal = Object.entries(ordinalWords).find(([word]) => desiredTokens.has(word))?.[1];
+      const numericOrdinal = Number(desired.match(/(?:^|\s)(\d+)(?:st|nd|rd|th)?(?:\s|$)/)?.[1]);
+      const wantedOrdinal = wordOrdinal ?? (Number.isSafeInteger(numericOrdinal) && numericOrdinal > 0 ? numericOrdinal : undefined);
+      if (wantedOrdinal && structuralContextOf(element).repeatedOrdinal === wantedOrdinal) score += 260;
+    }
     const region = focus.region;
     if (region) {
       const right = geometry.x + geometry.width; const bottom = geometry.y + geometry.height;
@@ -677,12 +737,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const seenScopes = new Set<unknown>();
     let scanned = 0;
     const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
-      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 20_000) return;
       seenScopes.add(scope);
       let elements: Element[] = [];
-      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 12_000); } catch { return; }
       for (const element of elements) {
-        if (found.length >= max || scanned++ >= 5000) break;
+        if (found.length >= max || scanned++ >= 20_000) break;
         try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector */ }
         const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
         if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
@@ -827,9 +887,9 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       try { return element.matches(selector); } catch { return false; }
     });
   };
-  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 320);
+  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 12_000);
   const seenControls = new Set(semanticControls.map(({ element }) => element));
-  const pointerControls = deepQuery('*', 600)
+  const pointerControls = deepQuery('*', 12_000)
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
       return contract.stateOf(element).actionable && pointerStyled(element);
@@ -842,8 +902,14 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const role = semanticRole || (pointerStyled(element) ? 'pointer' : '');
       const semanticName = accessibleName(element);
       const ref = observedRefOf(element);
+      const relationship = relationshipOf(element);
       const priorFingerprint = observedRegistry!.history.get(ref)!;
-      observedRegistry!.history.set(ref, { ...priorFingerprint, role, semanticName });
+      observedRegistry!.history.set(ref, {
+        ...priorFingerprint, role, semanticName,
+        groupRole: String(relationship.groupRole ?? ''), groupName: String(relationship.groupName ?? ''),
+        repeatedOrdinal: Number(relationship.repeatedOrdinal), repeatedCount: Number(relationship.repeatedCount),
+        ancestorPath: String(relationship.semanticPath ?? '')
+      });
       const rect = element.getBoundingClientRect();
       const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLOptionElement;
@@ -887,7 +953,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         actionable: state.actionable,
         ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
         ...(state.occluded ? { occluded: true } : {}),
-        ...relationshipOf(element),
+        ...relationship,
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         geometry: geometryOf(element, context),
         ...(semanticRole === 'slider' ? {
@@ -915,7 +981,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         || left.selector.localeCompare(right.selector);
     });
   const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls).map(({ _focusScore, ...item }) => item);
-  const visibleTextCandidates = deepQuery('*', 600)
+  const visibleTextCandidates = deepQuery('*', 12_000)
     .filter(({ element }) => visible(element)
       && Array.from(element.children ?? []).length === 0
       && Boolean(readableText(element)))
@@ -952,14 +1018,17 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       context
     };
   });
-  const visualCandidates = deepQuery('*', 600).flatMap(({ element, context }) => {
+  const visualCandidates = deepQuery('*', 12_000).flatMap(({ element, context }) => {
     const state = contract.stateOf(element);
     if (!state.visible) return [];
     const style = viewOf(element)?.getComputedStyle?.(element);
     const colors = {
+      color: trim(style?.color, 64).toLowerCase(),
       background: trim(style?.backgroundColor, 64).toLowerCase(),
       fill: trim(style?.fill, 64).toLowerCase(),
-      stroke: trim(style?.stroke, 64).toLowerCase()
+      stroke: trim(style?.stroke, 64).toLowerCase(),
+      border: trim(style?.borderColor, 64).toLowerCase(),
+      outline: trim(style?.outlineColor, 64).toLowerCase()
     };
     const scroll = scrollStateOf(element);
     const scrollable = Boolean(scroll?.canScrollY || scroll?.canScrollX);
@@ -972,7 +1041,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
     const effectiveRole = role || (pointer ? 'pointer' : '');
     const geometry = geometryOf(element, context);
-    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
+    const area = Math.round(rect.width * rect.height);
+    const viewportWidth = Number(viewOf(element)?.innerWidth ?? 0); const viewportHeight = Number(viewOf(element)?.innerHeight ?? 0);
+    const zone = `${rect.y + rect.height / 2 < viewportHeight / 3 ? 'top' : rect.y + rect.height / 2 > viewportHeight * 2 / 3 ? 'bottom' : 'middle'}-${rect.x + rect.width / 2 < viewportWidth / 3 ? 'left' : rect.x + rect.width / 2 > viewportWidth * 2 / 3 ? 'right' : 'center'}`;
+    const numericText = trim((element as HTMLInputElement).value || element.getAttribute('aria-valuenow') || readableText(element), 80);
+    const numericValue = /^-?(?:\d+\.?\d*|\.\d+)$/.test(numericText) ? Number(numericText) : undefined;
+    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), fontSize: trim(style?.fontSize, 32), area, aspectRatio: rect.height > 0 ? Math.round((rect.width / rect.height) * 1000) / 1000 : undefined, viewportZone: zone, ...(numericValue !== undefined ? { numericValue } : {}), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
     const score = (item: typeof left) => item._focusScore
       + (item.actionable ? 50 : 0)

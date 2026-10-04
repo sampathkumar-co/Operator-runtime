@@ -27,3 +27,18 @@ test('decision budget separately accounts durable observations, retries, reconci
   assert.equal(budget.elapsedMs.used, 500);
   assert.equal(decisionBudgetExhaustion(budget), undefined);
 });
+
+test('verified progress extends only planner iterations under a hard maxSteps ceiling', () => {
+  const execution: TaskExecution = {
+    schemaVersion: 1, plannerId: 'test', goalKind: 'test', plannerState: {}, maxSteps: 3,
+    maxAttemptsPerStep: 1, timeoutMs: 1000, stepCount: 1, dispatchedActions: 1,
+    plannerIterations: 11, progressExtensions: 2, progressProofDigests: ['a'.repeat(64), 'b'.repeat(64)],
+    records: []
+  };
+  const budget = taskDecisionBudget(execution, 0);
+  assert.deepEqual(budget.plannerIterations, { used: 11, limit: 14, remaining: 3 });
+  assert.deepEqual(budget.environmentActions, { used: 1, limit: 3, remaining: 2 });
+
+  execution.progressExtensions = 99;
+  assert.equal(taskDecisionBudget(execution, 0).plannerIterations.limit, 15);
+});

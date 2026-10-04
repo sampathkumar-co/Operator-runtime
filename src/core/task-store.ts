@@ -32,6 +32,7 @@ const TASK_OPTIONS = {
 const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
 const MAX_ACTION_RECORDS = 5000;
 const MAX_REJECTED_DECISIONS = 100;
+const MAX_PROGRESS_PROOFS = 1000;
 const LEASE_OPTIONS = {
   maxBytes: 16 * 1024,
   errorCode: 'TASK_LEASE_CORRUPT',
@@ -335,6 +336,15 @@ function validateExecution(input: unknown): TaskExecution {
   const plannerIterations = raw.plannerIterations === undefined
     ? stepCount
     : boundedInteger(raw.plannerIterations, 0, 1_000_000, 'execution plannerIterations');
+  const progressExtensions = raw.progressExtensions === undefined
+    ? 0
+    : boundedInteger(raw.progressExtensions, 0, maxSteps, 'execution progressExtensions');
+  const progressProofDigests = raw.progressProofDigests === undefined
+    ? []
+    : boundedTextArray(raw.progressProofDigests, Math.min(MAX_PROGRESS_PROOFS, maxSteps), 64, 'execution progressProofDigests');
+  if (progressProofDigests.some((digest) => !/^[a-f0-9]{64}$/.test(digest))) throw corrupt('execution progressProofDigests must contain SHA-256 digests.');
+  if (new Set(progressProofDigests).size !== progressProofDigests.length) throw corrupt('execution progressProofDigests must be unique.');
+  if (progressExtensions !== progressProofDigests.length) throw corrupt('execution progressExtensions must equal its durable proof count.');
   const preDispatchReobserves = raw.preDispatchReobserves === undefined
     ? 0
     : boundedInteger(raw.preDispatchReobserves, 0, 1_000_000, 'execution preDispatchReobserves');
@@ -352,7 +362,7 @@ function validateExecution(input: unknown): TaskExecution {
   const rejectedDecisions = raw.rejectedDecisions === undefined ? [] : validateRejectedDecisions(raw.rejectedDecisions);
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
-    plannerIterations, preDispatchReobserves, dispatchedActions,
+    plannerIterations, progressExtensions, progressProofDigests, preDispatchReobserves, dispatchedActions,
     ...(startedAt ? { startedAt, deadlineAt } : {}), records,
     ...(plannerEvents.length > 0 ? { plannerEvents } : {}),
     ...(rejectedDecisions.length > 0 ? { rejectedDecisions } : {})

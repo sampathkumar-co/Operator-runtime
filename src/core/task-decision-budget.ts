@@ -16,7 +16,9 @@ export interface TaskDecisionBudget {
 }
 
 export function taskDecisionBudget(execution: TaskExecution, nowMs: number): TaskDecisionBudget {
-  const plannerLimit = Math.max(4, execution.maxSteps * 4);
+  const basePlannerLimit = Math.max(4, execution.maxSteps * 4);
+  const verifiedExtensions = Math.min(execution.maxSteps, Math.max(0, execution.progressExtensions ?? 0));
+  const plannerLimit = basePlannerLimit + verifiedExtensions;
   const observationLimit = Math.max(execution.maxSteps, Math.ceil(execution.maxSteps * 1.5));
   const retryLimit = execution.maxSteps * Math.max(0, execution.maxAttemptsPerStep - 1);
   const records = execution.records;

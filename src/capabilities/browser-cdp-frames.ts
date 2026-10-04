@@ -132,12 +132,12 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const seenScopes = new Set<unknown>();
     let scanned = 0;
     const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
-      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 20_000) return;
       seenScopes.add(scope);
       let elements: Element[] = [];
-      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 12_000); } catch { return; }
       for (const element of elements) {
-        if (found.length >= max || scanned++ >= 5000) break;
+        if (found.length >= max || scanned++ >= 20_000) break;
         try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector becomes no match */ }
         const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
         if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
@@ -300,10 +300,37 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
-  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string };
+  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string; groupRole?: string; groupName?: string; repeatedOrdinal?: number; repeatedCount?: number; ancestorPath?: string };
   const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; history?: Map<string, HistoricalFingerprint>; mutationVersion?: number } | undefined })[registryKey];
   const observed = target.ref ? registry?.refs?.get(target.ref) : undefined;
   const historical = target.ref && !observed ? registry?.history?.get(target.ref) : undefined;
+  const structuralContextOf = (element: Element) => {
+    let group: Element | null = element.parentElement;
+    for (let depth = 0; group && depth < 8; depth += 1, group = group.parentElement) {
+      const candidateRole = trim(group.getAttribute('role')).toLowerCase();
+      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(candidateRole)
+        || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    }
+    let repeatedElement = element;
+    let peers: Element[] = [element];
+    for (let current: Element | null = element, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      const candidates = current.parentElement ? Array.from(current.parentElement.children).filter((peer) =>
+        peer.tagName === current!.tagName && trim(peer.getAttribute('role')).toLowerCase() === role
+      ) : [current];
+      if (candidates.length > 1) { repeatedElement = current; peers = candidates; break; }
+    }
+    const path: string[] = [];
+    for (let current: Element | null = element.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      const label = trim(current.getAttribute('aria-label') || current.getAttribute('data-testid') || current.id || '');
+      path.unshift(`${current.tagName.toLowerCase()}${label ? `:${label}` : ''}`);
+    }
+    return {
+      groupRole: group ? trim(group.getAttribute('role')).toLowerCase() || group.tagName.toLowerCase() : '',
+      groupName: group ? trim(group.getAttribute('aria-label') || group.getAttribute('title') || group.id || '') : '',
+      repeatedOrdinal: Math.max(1, peers.indexOf(repeatedElement) + 1), repeatedCount: peers.length, ancestorPath: path.join('>')
+    };
+  };
   const matchesHistorical = (element: Element, fingerprint: HistoricalFingerprint) => {
     if (fingerprint.tag && element.tagName.toLowerCase() !== fingerprint.tag) return false;
     if (fingerprint.id && element.id !== fingerprint.id) return false;
@@ -311,6 +338,12 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     if (fingerprint.name && trim(element.getAttribute('name')) !== fingerprint.name) return false;
     if (fingerprint.role && roleOf(element) !== fingerprint.role) return false;
     if (fingerprint.semanticName && nameOf(element) !== fingerprint.semanticName) return false;
+    const structural = structuralContextOf(element);
+    if (fingerprint.groupRole && structural.groupRole !== fingerprint.groupRole) return false;
+    if (fingerprint.groupName && structural.groupName !== fingerprint.groupName) return false;
+    if (fingerprint.repeatedCount !== undefined && structural.repeatedCount !== fingerprint.repeatedCount) return false;
+    if (fingerprint.repeatedOrdinal !== undefined && structural.repeatedOrdinal !== fingerprint.repeatedOrdinal) return false;
+    if (fingerprint.ancestorPath && structural.ancestorPath !== fingerprint.ancestorPath) return false;
     const strongSignals = [fingerprint.id, fingerprint.ariaLabel, fingerprint.name, fingerprint.semanticName].filter(Boolean).length;
     if (strongSignals > 0) return true;
     return Boolean(fingerprint.role && fingerprint.text && trim(element.textContent) === fingerprint.text);
@@ -319,7 +352,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   let matches = (target.ref
     ? (observed && observed.isConnected !== false
       ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }]
-      : historical ? deepQuery('*', 1000).filter(({ element }) => matchesHistorical(element, historical)) : [])
+      : historical ? deepQuery('*', 12_000).filter(({ element }) => matchesHistorical(element, historical)) : [])
     : deepQuery(selector, 1000)).filter(({ element }) => {
     if (!eligible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
@@ -605,13 +638,13 @@ export async function performSemanticInteraction(
   try {
     const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
     const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})())`;
-    const matches: Array<{ context: FrameContext; count: number; samples: unknown }> = [];
+    const matches: Array<{ context: FrameContext; count: number; samples: unknown; refHealed: boolean }> = [];
 
     for (const context of contexts) {
       try {
         const located = unwrapRuntimeValue(await evaluate(session, context, locateExpression, false, signal)) as JsonMap | undefined;
         const count = typeof located?.count === 'number' ? located.count : 0;
-        if (count > 0) matches.push({ context, count, samples: located?.matches });
+        if (count > 0) matches.push({ context, count, samples: located?.matches, refHealed: located?.refHealed === true });
       } catch {
         if (signal?.aborted) throw abortError();
         // Cross-origin frame may disappear or deny execution while the page is changing; continue bounded search.
@@ -629,6 +662,13 @@ export async function performSemanticInteraction(
       throw new OperatorError('BROWSER_AMBIGUOUS_ELEMENT', 'Semantic browser target matched multiple elements across page/frame contexts; narrow the selector.', {
         retryable: false,
         details: { target: input.target, totalMatches, contexts: matches.map((match) => ({ count: match.count, frameTargetId: match.context.frame?.targetId, samples: match.samples })) }
+      });
+    }
+
+    if (input.target.ref && matches[0]?.refHealed) {
+      throw new OperatorError('BROWSER_TARGET_STALE', 'The observed target was replaced after observation. Re-observe before dispatch so the new element receives a fresh authority-bound reference.', {
+        retryable: true,
+        details: { target: input.target, sideEffectState: 'none', executionPhase: 'pre_dispatch', recoveredCandidateCount: 1 }
       });
     }
 

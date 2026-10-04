@@ -543,7 +543,7 @@ test('click uses a coherent pointer sequence so delegated menu state activates t
   assert.equal(result.ok, true); assert.equal(selected, true);
 });
 
-test('drag emits bounded intermediate pointer motion and verifies changed geometry', (t) => {
+test('drag-items regression: drag emits bounded intermediate pointer motion and verifies changed geometry', (t) => {
   const root = new FakeRoot();
   const shape = new FakeElement('svg', 'Shape'); shape.setAttribute('role', 'graphics-symbol');
   shape.onEvent = (event) => { if (event.type === 'mousemove' && event.buttons === 1) { shape.x = Number(event.clientX) - 10; shape.y = Number(event.clientY) - 10; } };
@@ -784,7 +784,7 @@ test('Browser Observation V2 stale-ref healing fails closed when semantic replac
   assert.equal(secondReplacement.clicked, false);
 });
 
-test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts with explicit coordinate spaces', (t) => {
+test('bisect-angle, find-midpoint, and draw-circle regressions expose deterministic geometry facts', (t) => {
   const root = new FakeRoot();
   const polygon = new FakeElement('polygon');
   polygon.setAttribute('points', '0,0 10,0 10,10');
@@ -795,7 +795,10 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
   const line = new FakeElement('line');
   line.setAttribute('x1', '2'); line.setAttribute('y1', '3'); line.setAttribute('x2', '12'); line.setAttribute('y2', '13');
   line.stroke = 'rgb(0, 0, 0)'; line.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
-  attach(root, polygon, line); installDocument(t, root);
+  const circle = new FakeElement('circle');
+  circle.setAttribute('cx', '15'); circle.setAttribute('cy', '25'); circle.setAttribute('r', '7');
+  circle.fill = 'rgb(4, 5, 6)'; circle.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
+  attach(root, polygon, line, circle); installDocument(t, root);
 
   const snapshot = semanticSnapshotFunction() as any;
   const visual = snapshot.visualObjects.find((item: any) => item.tag === 'polygon');
@@ -814,6 +817,9 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
   assert.equal(lineVisual.line.coordinateSpace, 'svg-local');
   assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43, vector: { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 } });
   assert.deepEqual(lineVisual.line.vector, { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 });
+  const circleVisual = snapshot.visualObjects.find((item: any) => item.tag === 'circle');
+  assert.deepEqual(circleVisual.circle, { coordinateSpace: 'svg-local', cx: 15, cy: 25, r: 7 });
+  assert.deepEqual(circleVisual.viewportCenter, { coordinateSpace: 'viewport', x: 35, y: 55 });
 });
 
 
@@ -951,7 +957,7 @@ test('bounded text selection supports ordinary observed static text', (t) => {
   assert.equal(root.getSelection().toString(), 'select');
 });
 
-test('Browser Observation V2 exposes a bounded page scroll target when the document can scroll', (t) => {
+test('click-scroll-list regression: observation exposes a bounded page scroll target', (t) => {
   const root = new FakeRoot();
   const scroller = new FakeElement('html');
   scroller.scrollTop = 25;
@@ -992,7 +998,7 @@ test('Browser Observation V2 marks autocomplete text controls and preserves the 
   assert.equal(typed.after.value, 'SHG');
 });
 
-test('native date input normalizes a locale-aware numeric value', (t) => {
+test('enter-date regression: native date input normalizes a locale-aware numeric value', (t) => {
   const root = new FakeRoot();
   root.defaultView.navigator = { language: 'en-US' };
   const input = new FakeElement('input');
@@ -1007,7 +1013,7 @@ test('native date input normalizes a locale-aware numeric value', (t) => {
   assert.equal(input.value, '2012-02-04');
 });
 
-test('bounded select_date navigates a visible calendar widget and verifies the chosen date', (t) => {
+test('choose-date-easy regression: bounded select_date navigates and verifies the chosen date', (t) => {
   const root = new FakeRoot();
   const input = new FakeElement('input'); input.id = 'datepicker';
   const picker = new FakeElement('div'); picker.setAttribute('class', 'ui-datepicker');
@@ -1122,4 +1128,48 @@ test('focused observation can prioritize role, text, and viewport region without
   assert.equal(focused.controls.length, 1);
   assert.equal(focused.controls[0].name, 'Schedule meeting');
   assert.equal(focused.pagination.controls.limit, 1);
+});
+
+test('semantic grouping and ordinal focus select the requested repeated item without name hacks', (t) => {
+  const root = new FakeRoot();
+  const list = new FakeElement('ul', 'Repeated actions'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', 'Queue');
+  const rows = [1, 2, 3].map((ordinal) => {
+    const row = new FakeElement('li', `Job ${ordinal} Open`); row.setAttribute('role', 'listitem'); row.parentElement = list;
+    const button = new FakeElement('button', 'Open'); button.parentElement = row; button.y = ordinal * 20; row.children = [button];
+    return { row, button };
+  });
+  list.children = rows.map(({ row }) => row);
+  attach(root, list, ...rows.flatMap(({ row, button }) => [row, button])); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction({ maxControls: 1, focusRole: 'button', focusText: 'third Open' }) as any;
+  assert.equal(snapshot.controls[0].name, 'Open');
+  assert.equal(snapshot.controls[0].groupRole, 'listitem');
+  assert.equal(snapshot.controls[0].repeatedOrdinal, 3);
+  assert.match(snapshot.controls[0].semanticPath, /ul:Queue>li/);
+  assert.equal(snapshot.controls[0].rect.y, 60);
+});
+
+test('dense-DOM observation paginates the ten-thousandth control truthfully', (t) => {
+  const root = new FakeRoot();
+  const controls = Array.from({ length: 10_000 }, (_, index) => {
+    const button = new FakeElement('button', `Control ${index + 1}`); button.y = index;
+    return button;
+  });
+  attach(root, ...controls); installDocument(t, root);
+  const page = semanticSnapshotFunction({ controlOffset: 9_999, maxControls: 1, maxText: 1, maxVisuals: 1 }) as any;
+  assert.equal(page.controls[0].name, 'Control 10000');
+  assert.deepEqual(page.pagination.controls, { offset: 9999, limit: 1, returned: 1, total: 10000, truncated: false });
+});
+
+test('click-collapsible-nodelay regression exposes and verifies immediate expanded state changes', (t) => {
+  const root = new FakeRoot();
+  const disclosure = new FakeElement('button', 'Details'); disclosure.setAttribute('aria-expanded', 'false');
+  disclosure.onEvent = (event) => { if (event.type === 'click') disclosure.setAttribute('aria-expanded', 'true'); };
+  attach(root, disclosure); installDocument(t, root);
+  const before = semanticSnapshotFunction() as any;
+  const target = before.controls.find((item: any) => item.name === 'Details');
+  assert.equal(target.expanded, false);
+  const clicked = interactionFunction({ operation: 'click', target: { ref: target.ref }, value: null }) as any;
+  assert.equal(clicked.ok, true);
+  assert.equal((semanticLocatorFunction({ ref: target.ref }) as any).matches[0].expanded, true);
 });

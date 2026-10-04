@@ -282,6 +282,8 @@ export class TaskOrchestrator {
       timeoutMs: normalized.timeoutMs,
       stepCount: 0,
       plannerIterations: 0,
+      progressExtensions: 0,
+      progressProofDigests: [],
       preDispatchReobserves: 0,
       dispatchedActions: 0,
       records: []
@@ -763,6 +765,30 @@ export class TaskOrchestrator {
           latestRecord.errorCode = 'TASK_POSTCONDITION_FAILED';
           setNodeState(task, latestNode.id, 'FAILED');
           return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', postconditionMessage, assertLease);
+        }
+        const resultOutput = result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+          ? result.output as Record<string, unknown>
+          : {};
+        const stateDelta = resultOutput.stateDelta && typeof resultOutput.stateDelta === 'object' && !Array.isArray(resultOutput.stateDelta)
+          ? resultOutput.stateDelta as Record<string, unknown>
+          : undefined;
+        if (stateDelta?.progress === true && (latestExecution.progressExtensions ?? 0) < latestExecution.maxSteps) {
+          const progressProofDigest = crypto.createHash('sha256').update(canonicalJson({
+            actionId, stepKey: decision.key, inputHash, stateDelta
+          })).digest('hex');
+          latestExecution.progressProofDigests ??= [];
+          if (!latestExecution.progressProofDigests.includes(progressProofDigest)) {
+            latestExecution.progressProofDigests.push(progressProofDigest);
+            latestExecution.progressExtensions = latestExecution.progressProofDigests.length;
+            task.evidence.push(evidence('decision_budget_extension', 'pass', 'A unique, explicitly reported state delta passed the planner postcondition and earned one bounded planner-iteration extension.', {
+              actionId,
+              stepKey: decision.key,
+              progressProofDigest,
+              progressExtensions: latestExecution.progressExtensions,
+              maximumExtensions: latestExecution.maxSteps,
+              environmentActionLimit: latestExecution.maxSteps
+            }));
+          }
         }
         await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
