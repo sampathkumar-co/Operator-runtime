@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   inspectProcessInstance,
   sameProcessInstance,
@@ -7,6 +9,11 @@ import {
 } from '../src/core/process-instance.ts';
 
 test('current process identity is inspectable without PID-only authority', async () => {
+  if (process.platform === 'win32') {
+    const helper = path.resolve('native/windows-path-lease/target/release/operator-windows-path-lease.exe');
+    assert.ok(fs.existsSync(helper), 'Windows process identity test requires the built native helper.');
+    process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH = helper;
+  }
   const identity = await inspectProcessInstance(process.pid);
   assert.ok(identity);
   assert.equal(identity.pid, process.pid);

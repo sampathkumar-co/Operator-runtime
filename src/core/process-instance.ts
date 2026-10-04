@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { safeChildEnvironment } from './child-environment.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +54,22 @@ export function validProcessInstance(input: unknown): ProcessInstanceIdentity | 
 }
 
 async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
+  const nativeHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  if (nativeHelper && path.isAbsolute(nativeHelper)) {
+    try {
+      const { stdout } = await execFileAsync(nativeHelper, ['process-instance', String(pid)], {
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 16 * 1024,
+        encoding: 'utf8',
+        env: safeChildEnvironment('windows-native')
+      });
+      const started = stdout.trim();
+      return /^\d{15,20}$/.test(started) ? { pid, started: `windows-filetime:${started}` } : null;
+    } catch {
+      return null;
+    }
+  }
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   // Get-Process uses the Win32 process handle path and remains available to
