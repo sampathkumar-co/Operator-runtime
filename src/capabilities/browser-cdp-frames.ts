@@ -475,6 +475,54 @@ export function observedRelativePointFunction(ref: string, point: { xRatio?: num
   return { ok: true, local: { x: localX, y: localY }, offset: { xPx: xOffset, yPx: yOffset }, tag: element.tagName.toLowerCase() };
 }
 
+export function observedResizeHandleFunction(ref: string, delta: { deltaX?: number; deltaY?: number }) {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed resize target is stale.' };
+  const dx = Number(delta.deltaX ?? 0); const dy = Number(delta.deltaY ?? 0);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return { ok: false, error: 'Resize requires a non-zero finite delta.' };
+  const documentView = element.ownerDocument?.defaultView;
+  const visible = (candidate: Element) => {
+    const rect = candidate.getBoundingClientRect();
+    const style = documentView?.getComputedStyle?.(candidate);
+    return rect.width > 0 && rect.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden';
+  };
+  const wrapper = element.parentElement?.classList?.contains('ui-wrapper') ? element.parentElement : element;
+  const handles = Array.from(wrapper.querySelectorAll?.('.ui-resizable-handle') ?? []).filter(visible);
+  const desiredClasses = dx !== 0 && dy !== 0
+    ? ['ui-resizable-se', 'ui-resizable-e', 'ui-resizable-s']
+    : dx !== 0 ? ['ui-resizable-e', 'ui-resizable-se', 'ui-resizable-w']
+    : ['ui-resizable-s', 'ui-resizable-se', 'ui-resizable-n'];
+  let handle: Element | undefined;
+  let handleClass = '';
+  for (const className of desiredClasses) {
+    handle = handles.find((candidate) => candidate.classList?.contains(className));
+    if (handle) { handleClass = className; break; }
+  }
+  if (handle) {
+    const rect = handle.getBoundingClientRect();
+    const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2;
+    if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+      return { ok: false, stale: true, error: 'Resize handle geometry is invalid.' };
+    }
+    return { ok: true, local: { x, y }, handleClass, source: 'generated-handle', targetRect: element.getBoundingClientRect() };
+  }
+  const style = documentView?.getComputedStyle?.(element);
+  const resizeMode = String(style?.resize ?? '').toLowerCase();
+  const allowsHorizontal = resizeMode === 'both' || resizeMode === 'horizontal';
+  const allowsVertical = resizeMode === 'both' || resizeMode === 'vertical';
+  if ((dx !== 0 && !allowsHorizontal) || (dy !== 0 && !allowsVertical)) {
+    return { ok: false, error: 'Observed target does not expose a compatible resize affordance.' };
+  }
+  const rect = element.getBoundingClientRect();
+  const x = rect.x + Math.max(1, rect.width - 2); const y = rect.y + Math.max(1, rect.height - 2);
+  if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Resize target geometry is invalid.' };
+  }
+  return { ok: true, local: { x, y }, handleClass: 'native-resize-corner', source: 'native-resize', targetRect: rect };
+}
+
 export async function observeSemanticTargetState(
   session: CdpConnection,
   target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string },
@@ -507,7 +555,7 @@ export async function observeSemanticTargetState(
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number },
+  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; scope?: string; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number },
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
@@ -561,14 +609,73 @@ export async function performSemanticInteraction(
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }
+    if (input.operation === 'resize') {
+      if (!input.target.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'resize requires an observed semantic target ref.', { retryable: false });
+      const matched = firstLocatedSample(matches[0]!.samples);
+      const pointExpression = `(${observedResizeHandleFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify({ deltaX: input.deltaX, deltaY: input.deltaY })})`;
+      const point = unwrapRuntimeValue(await evaluate(session, chosen, pointExpression, false, signal)) as JsonMap | undefined;
+      if (!point || point.ok !== true) {
+        const message = typeof point?.error === 'string' ? point.error : 'Observed target does not expose a usable resize handle.';
+        throw new OperatorError(point?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_RESIZE_NOT_ACTIONABLE', message, {
+          retryable: point?.stale === true,
+          details: { target: input.target, deltaX: input.deltaX, deltaY: input.deltaY, point }
+        });
+      }
+      const local = point.local as JsonMap | undefined;
+      const startX = Number(local?.x); const startY = Number(local?.y);
+      const dx = Number(input.deltaX ?? 0); const dy = Number(input.deltaY ?? 0);
+      const endX = startX + dx; const endY = startY + dy;
+      if (![startX, startY, endX, endY].every(Number.isFinite)) {
+        throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
+      }
+      const dispatch = (params: JsonMap) => chosen.frame
+        ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
+        : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
+      await dispatch({ type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0 });
+      await dispatch({ type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1 });
+      const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(dx, dy) / 20)));
+      for (let step = 1; step <= steps; step += 1) {
+        await dispatch({ type: 'mouseMoved', x: startX + dx * step / steps, y: startY + dy * step / steps, button: 'left', buttons: 1 });
+      }
+      await dispatch({ type: 'mouseReleased', x: endX, y: endY, button: 'left', buttons: 0, clickCount: 1 });
+      return {
+        value: { ok: true, matched, after: { nativeResizeDispatched: true, handleClass: point.handleClass, source: point.source, deltaX: dx, deltaY: dy } },
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
     const sendKey = (params: JsonMap) => chosen.frame
       ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
       : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
-    if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text') {
+    if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text' || input.operation === 'format_text') {
       const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
       const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
       if (!focused || focused.ok !== true) {
         throw new OperatorError('BROWSER_INTERACTION_FAILED', typeof focused?.error === 'string' ? focused.error : 'Browser target could not be focused before keyboard input.', { retryable: true, details: { target: input.target } });
+      }
+      if (input.operation === 'format_text') {
+        const format = String(input.value ?? '').toLowerCase();
+        const styleKey: Record<string, string> = { bold: 'b', italic: 'i', italics: 'i', underline: 'u', underlined: 'u' };
+        const key = styleKey[format];
+        const formatScope = String(input.scope ?? 'all').toLowerCase();
+        if (!key || !['all', 'selection'].includes(formatScope)) {
+          throw new OperatorError('INVALID_BROWSER_FORMAT', 'format_text supports bold, italic, or underline with scope all or selection.', { retryable: false });
+        }
+        const chord = async (letter: string) => {
+          await sendKey({ type: 'keyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, modifiers: 2 });
+          await sendKey({ type: 'keyDown', key: letter, code: `Key${letter.toUpperCase()}`, windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0), modifiers: 2 });
+          await sendKey({ type: 'keyUp', key: letter, code: `Key${letter.toUpperCase()}`, windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0), modifiers: 2 });
+          await sendKey({ type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, modifiers: 0 });
+        };
+        if (formatScope === 'all') await chord('a');
+        await chord(key);
+        return {
+          value: {
+            ok: true,
+            matched: firstLocatedSample(matches[0]!.samples),
+            after: { nativeTextFormatDispatched: true, format: format === 'italics' ? 'italic' : format === 'underlined' ? 'underline' : format, scope: formatScope }
+          },
+          ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+        };
       }
       if (input.operation === 'keyboard_text') {
         const text = String(input.value ?? '');

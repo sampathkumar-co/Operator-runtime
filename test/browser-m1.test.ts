@@ -359,6 +359,42 @@ test('semantic pointer actions use native CDP input and reject a target that cha
   );
 });
 
+test('semantic resize dispatches from the observed control resize handle instead of the target center', async () => {
+  const nativeEvents: any[] = [];
+  const sample = {
+    tag: 'textarea', role: 'textbox', name: 'Notes', identity: '#notes',
+    geometry: { coordinateSpace: 'viewport', x: 20, y: 30, width: 100, height: 60 },
+    context: { frameDepth: 0, shadowDepth: 0 }
+  };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedResizeHandleFunction')) {
+          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle' } } };
+        }
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'resize', target: { ref: 'b-notes' }, value: null, deltaX: 0, deltaY: 40
+  });
+  assert.equal(result.value.ok, true);
+  assert.equal((result.value.after as any).handleClass, 'ui-resizable-s');
+  assert.deepEqual(nativeEvents.map((event) => event.type), [
+    'mouseMoved', 'mousePressed', 'mouseMoved', 'mouseMoved', 'mouseMoved', 'mouseMoved', 'mouseReleased'
+  ]);
+  assert.equal(nativeEvents[0].x, 118);
+  assert.equal(nativeEvents[0].y, 88);
+  assert.equal(nativeEvents.at(-1).x, 118);
+  assert.equal(nativeEvents.at(-1).y, 128);
+});
+
 test('download tracking binds events to the initiating target frame and fails closed on ambiguity', async (t) => {
   const original = globalThis.WebSocket;
   Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
@@ -452,6 +488,17 @@ test('native browser keyboard actions focus the unique semantic target and dispa
     ['keyDown', 'e', 'e'], ['keyUp', 'e', undefined], ['keyDown', 'c', 'c'], ['keyUp', 'c', undefined]
   ]);
   assert.equal((inserted.value.after as any).nativeKeyboardTextDispatched, true);
+
+  keyEvents.length = 0;
+  const formatted = await performSemanticInteraction(session as any, {
+    operation: 'format_text', target: { ref: 'b-command' }, value: 'bold', scope: 'all'
+  });
+  assert.equal(formatted.value.ok, true);
+  assert.equal((formatted.value.after as any).nativeTextFormatDispatched, true);
+  assert.deepEqual(keyEvents.map((event) => [event.type, event.key]), [
+    ['keyDown', 'Control'], ['keyDown', 'a'], ['keyUp', 'a'], ['keyUp', 'Control'],
+    ['keyDown', 'Control'], ['keyDown', 'b'], ['keyUp', 'b'], ['keyUp', 'Control']
+  ]);
 });
 
 test('select_date tolerates one asynchronous calendar-open turn and still completes as one browser action', async (t) => {
