@@ -23,7 +23,7 @@ import { plannerEventFromResult, type TaskPlannerEvent } from './task-planner-ev
 import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
 import {
   activateSubgoal, createDurableTaskPlan, nextReadySubgoal, normalizeDurableTaskPlan,
-  taskPlanComplete, verifySubgoal, type DurableTaskPlan
+  taskPlanComplete, verifySubgoal, type DurableTaskPlan, type TaskPlanSubgoal
 } from './task-plan.ts';
 import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
 
@@ -1498,15 +1498,19 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     const phase = String(state.autonomousPhase ?? 'observe');
     const selected = phase === 'observe' ? item.execution.observe : phase === 'action' ? item.execution.action : phase === 'verify' ? item.successContract : undefined;
     if (!selected) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow phase is invalid.');
+    const selectedInput = structuredClone(selected.input);
+    if (phase === 'observe' && selected.capability === 'browser.inspect') {
+      applyAutonomousBrowserObservationFocusAndPagination(state, item, selectedInput);
+    }
     return {
       type: 'step', key: `autonomous:${index}:${phase}`,
       title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.description}`,
-      capability: selected.capability, input: structuredClone(selected.input),
+      capability: selected.capability, input: selectedInput,
       ...(selected.target ? { target: selected.target } : {})
     };
   }
 
-  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>): void {
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
     if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
     const state = task.execution!.plannerState;
     const plan = autonomousPlan(task, goal);
@@ -1514,6 +1518,17 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no active subgoal.');
     const index = item.sourceIndex;
     if (step.key === `autonomous:${index}:observe`) {
+      if (item.execution.observe.capability === 'browser.inspect'
+        && advanceAutonomousBrowserObservationPage(state, item, observation)) {
+        state.durablePlan = plan;
+        task.evidence.push(evidence('browser_observation_pagination', 'info', 'The interaction target was absent from the current bounded browser observation page; advancing using provider-supplied pagination metadata.', {
+          subgoalId: item.id,
+          stepKey: item.key,
+          pagination: state.autonomousBrowserPagination ?? null
+        }));
+        return;
+      }
+      delete state.autonomousBrowserPagination;
       state.autonomousPhase = 'action';
       return;
     }
@@ -1555,6 +1570,185 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     }
     return observation.error?.sideEffectState === 'none' && observation.error?.retryable === true;
   }
+}
+
+
+const MAX_AUTONOMOUS_BROWSER_PAGE_ADVANCES = 5;
+
+function autonomousBrowserTarget(item: TaskPlanSubgoal): Record<string, unknown> | undefined {
+  if (item.execution.action.capability !== 'browser.interact') return undefined;
+  const raw = item.execution.action.input.target;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const target = raw as Record<string, unknown>;
+  const discoverable = ['ref', 'role', 'name', 'text', 'renderedColor']
+    .some((key) => typeof target[key] === 'string' && String(target[key]).trim().length > 0);
+  return discoverable ? target : undefined;
+}
+
+function applyAutonomousBrowserObservationFocusAndPagination(
+  state: Record<string, unknown>,
+  item: TaskPlanSubgoal,
+  input: Record<string, unknown>
+): void {
+  const actionTargetId = item.execution.action.input.targetId;
+  if (input.targetId === undefined && typeof actionTargetId === 'string' && actionTargetId) input.targetId = actionTargetId;
+
+  const target = autonomousBrowserTarget(item);
+  if (!target) return;
+  const observation = { ...asRecord(input.observation) };
+  const text = typeof target.name === 'string' && target.name.trim()
+    ? target.name.trim()
+    : typeof target.text === 'string' && target.text.trim()
+      ? target.text.trim()
+      : undefined;
+  if (observation.focusRef === undefined && typeof target.ref === 'string' && target.ref.trim()) observation.focusRef = target.ref.trim();
+  if (observation.focusRole === undefined && typeof target.role === 'string' && target.role.trim()) observation.focusRole = target.role.trim();
+  if (observation.focusText === undefined && text) observation.focusText = text;
+
+  const pagination = asRecord(state.autonomousBrowserPagination);
+  if (pagination.subgoalId === item.id) {
+    for (const key of ['controlOffset', 'textOffset', 'visualOffset'] as const) {
+      const value = Number(pagination[key]);
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 10_000) observation[key] = value;
+    }
+  }
+  input.observation = observation;
+}
+
+function advanceAutonomousBrowserObservationPage(
+  state: Record<string, unknown>,
+  item: TaskPlanSubgoal,
+  observation: TaskObservation
+): boolean {
+  const target = autonomousBrowserTarget(item);
+  if (!target || browserObservationContainsTarget(observation.output, target)) return false;
+
+  const prior = asRecord(state.autonomousBrowserPagination);
+  const priorPages = prior.subgoalId === item.id && Number.isSafeInteger(Number(prior.pages))
+    ? Number(prior.pages)
+    : 0;
+  if (priorPages >= MAX_AUTONOMOUS_BROWSER_PAGE_ADVANCES) return false;
+
+  const dimensions = browserTargetPaginationDimensions(target);
+  const next: Record<string, unknown> = { subgoalId: item.id, pages: priorPages + 1 };
+  let advanced = false;
+  for (const dimension of dimensions) {
+    const offsetKey = dimension === 'controls' ? 'controlOffset' : dimension === 'visibleText' ? 'textOffset' : 'visualOffset';
+    const priorOffset = prior.subgoalId === item.id && Number.isSafeInteger(Number(prior[offsetKey]))
+      ? Number(prior[offsetKey])
+      : -1;
+    const candidates = browserPaginationNextOffsets(observation.output, dimension)
+      .filter((value) => value > priorOffset && value <= 10_000);
+    if (candidates.length > 0) {
+      next[offsetKey] = Math.min(...candidates);
+      advanced = true;
+    } else if (priorOffset >= 0) {
+      next[offsetKey] = priorOffset;
+    }
+  }
+  if (!advanced) return false;
+  state.autonomousBrowserPagination = next;
+  return true;
+}
+
+function browserTargetPaginationDimensions(target: Record<string, unknown>): Array<'controls' | 'visibleText' | 'visualObjects'> {
+  const dimensions = new Set<'controls' | 'visibleText' | 'visualObjects'>();
+  if (typeof target.renderedColor === 'string' && target.renderedColor.trim()) dimensions.add('visualObjects');
+  if (typeof target.text === 'string' && target.text.trim()) {
+    dimensions.add('controls');
+    dimensions.add('visibleText');
+  }
+  if (['ref', 'role', 'name'].some((key) => typeof target[key] === 'string' && String(target[key]).trim())) {
+    dimensions.add('controls');
+    if (typeof target.ref === 'string' && target.ref.trim()) {
+      dimensions.add('visibleText');
+      dimensions.add('visualObjects');
+    }
+  }
+  return [...dimensions];
+}
+
+function browserSemanticScopes(output: unknown): Record<string, unknown>[] {
+  const page = asRecord(asRecord(output).page);
+  const scopes: Record<string, unknown>[] = [];
+  if (page.semantic && typeof page.semantic === 'object' && !Array.isArray(page.semantic)) scopes.push(page.semantic as Record<string, unknown>);
+  for (const frame of Array.isArray(page.frames) ? page.frames : []) {
+    const semantic = asRecord(frame).semantic;
+    if (semantic && typeof semantic === 'object' && !Array.isArray(semantic)) scopes.push(semantic as Record<string, unknown>);
+  }
+  return scopes;
+}
+
+function browserObservationContainsTarget(output: unknown, target: Record<string, unknown>): boolean {
+  const ref = cleanBrowserTargetText(target.ref);
+  const role = cleanBrowserTargetText(target.role)?.toLowerCase();
+  const name = cleanBrowserTargetText(target.name)?.toLowerCase();
+  const text = cleanBrowserTargetText(target.text)?.toLowerCase();
+  const renderedColor = cleanBrowserTargetText(target.renderedColor)?.toLowerCase();
+  if (!ref && !role && !name && !text && !renderedColor) return true;
+
+  const matches = (value: unknown): boolean => {
+    const item = asRecord(value);
+    if (ref && item.ref !== ref) return false;
+    if (role && String(item.role ?? '').toLowerCase() !== role) return false;
+    if (name && String(item.name ?? '').trim().toLowerCase() !== name) return false;
+    if (text) {
+      const corpus = [item.text, item.name].filter((part) => typeof part === 'string').join(' ').toLowerCase();
+      if (!corpus.includes(text)) return false;
+    }
+    if (renderedColor && !browserVisualColorMatches(item, renderedColor)) return false;
+    return true;
+  };
+
+  for (const semantic of browserSemanticScopes(output)) {
+    const candidates = [
+      ...(Array.isArray(semantic.controls) ? semantic.controls : []),
+      ...(Array.isArray(semantic.visibleText) ? semantic.visibleText : []),
+      ...(Array.isArray(semantic.visualObjects) ? semantic.visualObjects : [])
+    ];
+    if (candidates.some(matches)) return true;
+  }
+  return false;
+}
+
+function browserPaginationNextOffsets(
+  output: unknown,
+  dimension: 'controls' | 'visibleText' | 'visualObjects'
+): number[] {
+  const offsets: number[] = [];
+  for (const semantic of browserSemanticScopes(output)) {
+    const pagination = asRecord(semantic.pagination);
+    const meta = asRecord(pagination[dimension]);
+    if (meta.truncated !== true) continue;
+    const nextOffset = Number(meta.nextOffset);
+    if (Number.isSafeInteger(nextOffset) && nextOffset >= 0) offsets.push(nextOffset);
+  }
+  return offsets;
+}
+
+function cleanBrowserTargetText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function browserVisualColorMatches(item: Record<string, unknown>, requested: string): boolean {
+  const colors = asRecord(item.colors);
+  const observed = Object.values(colors).filter((value): value is string => typeof value === 'string').map((value) => value.trim().toLowerCase());
+  const aliases = new Set<string>([requested]);
+  const named: Record<string, string> = {
+    red: 'rgb(255, 0, 0)', green: 'rgb(0, 128, 0)', blue: 'rgb(0, 0, 255)',
+    black: 'rgb(0, 0, 0)', white: 'rgb(255, 255, 255)', yellow: 'rgb(255, 255, 0)',
+    gray: 'rgb(128, 128, 128)', grey: 'rgb(128, 128, 128)', orange: 'rgb(255, 165, 0)',
+    purple: 'rgb(128, 0, 128)'
+  };
+  if (named[requested]) aliases.add(named[requested]!);
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(requested);
+  if (hex) {
+    const raw = hex[1]!.length === 3 ? hex[1]!.split('').map((part) => part + part).join('') : hex[1]!;
+    const [r, g, b] = [0, 2, 4].map((offset) => Number.parseInt(raw.slice(offset, offset + 2), 16));
+    aliases.add(`rgb(${r}, ${g}, ${b})`);
+    aliases.add(`rgba(${r}, ${g}, ${b}, 1)`);
+  }
+  return observed.some((value) => aliases.has(value));
 }
 
 
