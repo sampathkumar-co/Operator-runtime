@@ -278,6 +278,7 @@ test('relay-only main treats terminal relay loss and emergency stop as fatal', a
   assert.match(source, /RELAY_REQUIRED_STOPPED/);
   assert.match(source, /RELAY_REQUIRED_EMERGENCY_STOP/);
   assert.match(source, /await failRequiredRelay\(error\)/);
+  assert.match(source, /shutdownRuntime\(1, 'required-relay-failure', \{ awaitRelay: false \}\)/);
   assert.match(source, /getSupportedCapabilities:\s*\(\) => runtime\.supportedCapabilities\(DEVELOPER_RELAY_CAPABILITIES\)/);
   assert.doesNotMatch(source, /const relaySupportedCapabilities = await runtime\.supportedCapabilities/);
 });

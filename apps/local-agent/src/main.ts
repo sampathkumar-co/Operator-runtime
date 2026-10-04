@@ -262,13 +262,16 @@ function stopRelay(): void {
   relaySessionCredentials?.stop();
 }
 
-async function shutdownRuntime(exitCode: number, reason: string): Promise<void> {
+async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
   if (shutdownPromise) return await shutdownPromise;
   shuttingDown = true;
   shutdownPromise = (async () => {
     console.error(`[operator] shutting down (${reason})`);
     stopRelay();
-    const pendingRelay = relayRun;
+    // Fatal relay shutdown is invoked from relayRun's own rejection chain. Do
+    // not make that path wait on itself; signal/launcher shutdown still drains
+    // the independent active relay promise before releasing durable state.
+    const pendingRelay = options.awaitRelay === false ? null : relayRun;
     await Promise.allSettled([
       pendingRelay,
       desiredStateReconciler.stop(),
@@ -286,7 +289,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
   if (!relayRequired || shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
-  await shutdownRuntime(1, 'required-relay-failure');
+  await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
   setImmediate(() => process.exit(1));
 }
 
