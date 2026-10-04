@@ -233,6 +233,15 @@ test('relay-only entrypoint derives executable roots independently of npm enviro
   assert.doesNotMatch(source, /process\.env\.OPERATOR_RELAY_URL\s*\?\?/);
 });
 
+test('packaged desktop startup reports bounded diagnostics instead of an opaque timeout', async () => {
+  const source = await fs.readFile(path.resolve('apps/local-agent/src/cli.ts'), 'utf8');
+  assert.match(source, /stdio: \['ignore', 'ignore', 'pipe'\]/);
+  assert.match(source, /slice\(-16 \* 1024\)/);
+  assert.match(source, /child\.stderr\?\.destroy\(\)/);
+  assert.match(source, /Startup diagnostic:/);
+  assert.doesNotMatch(source, /startupStderr[\s\S]{0,500}(?:agentToken|recoveryToken)/);
+});
+
 test('relay-only main reports loopback readiness only to the trusted Mecord launcher IPC channel', async () => {
   const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
   assert.match(source, /process\.env\.OPERATOR_REMOTE_PACKAGE === 'mecord-connect'/);
