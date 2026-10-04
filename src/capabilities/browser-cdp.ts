@@ -490,6 +490,12 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const value = interaction.value;
       if (value.ok !== true) {
         const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
+        if (value.recoverable === true) {
+          throw new OperatorError('BROWSER_INPUT_NORMALIZATION_REQUIRED', message, {
+            retryable: true,
+            details: { target: targetSpec, frame: interaction.frame, sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+          });
+        }
         if (value.staleRef === true || (targetSpec.ref && /stale/i.test(message))) {
           throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: targetSpec, frame: interaction.frame } });
         }

@@ -827,6 +827,21 @@ test('Browser Observation V2 marks autocomplete text controls and preserves the 
   assert.equal(typed.after.value, 'SHG');
 });
 
+test('native date input normalizes a locale-aware numeric value', (t) => {
+  const root = new FakeRoot();
+  root.defaultView.navigator = { language: 'en-US' };
+  const input = new FakeElement('input');
+  input.setAttribute('type', 'date');
+  input.setAttribute('aria-label', 'Date field');
+  attach(root, input); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Date field');
+  assert.equal(observed.nativeValueFormat, 'YYYY-MM-DD');
+  const typed = interactionFunction({ operation: 'type', target: { ref: observed.ref }, value: '02/04/2012' }) as any;
+  assert.equal(typed.ok, true);
+  assert.equal(input.value, '2012-02-04');
+});
+
 test('Browser Observation V2 disconnects observers for detached iframe documents', (t) => {
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const priorRegistry = (globalThis as any)[registryKey];

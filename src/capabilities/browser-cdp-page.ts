@@ -816,6 +816,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         name: semanticName,
         type: inputType,
         semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
+        ...(inputType === 'date' ? { nativeValueFormat: 'YYYY-MM-DD' } : {}),
         ...(readableValue ? { value: readableValue } : {}),
         ...(autocomplete ? { autocomplete: true, ...(ariaAutocomplete ? { autocompleteMode: ariaAutocomplete } : {}), ...(popupId ? { popupId } : {}) } : {}),
         ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
@@ -1269,9 +1270,36 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     const endY = start.y + deltaY;
     dispatchPointer(element.ownerDocument?.elementFromPoint?.(endX, endY) || element, 'mouseup', endX, endY, 0);
   } else if (input.operation === 'type') {
-    const value = String(input.value ?? '');
+    const requestedValue = String(input.value ?? '');
+    let value = requestedValue;
     const tag = element.tagName;
     if (!(tag === 'INPUT' || tag === 'TEXTAREA' || control.isContentEditable === true)) return { ok: false, error: 'Matched element is not text-editable.' };
+    if (tag === 'INPUT' && trim(element.getAttribute('type') || 'text').toLowerCase() === 'date') {
+      const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(requestedValue);
+      const human = /^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})$/.exec(requestedValue);
+      const validDate = (year: number, month: number, day: number) => {
+        if (!Number.isSafeInteger(year) || !Number.isSafeInteger(month) || !Number.isSafeInteger(day) || month < 1 || month > 12 || day < 1 || day > 31) return false;
+        const probe = new Date(Date.UTC(year, month - 1, day));
+        return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+      };
+      if (iso) {
+        const year = Number(iso[1]); const month = Number(iso[2]); const day = Number(iso[3]);
+        if (!validDate(year, month, day)) return { ok: false, recoverable: true, error: 'Native date input received an invalid calendar date.' };
+      } else if (human) {
+        const first = Number(human[1]); const second = Number(human[2]); const year = Number(human[3]);
+        const language = trim((element.ownerDocument?.documentElement as Element | undefined)?.getAttribute?.('lang') || element.ownerDocument?.defaultView?.navigator?.language || '').toLowerCase();
+        const dayFirstLocale = /^(en-gb|en-au|en-nz|en-in|fr|de|es|it|pt|nl|ru|ja|zh)/.test(language);
+        let month: number; let day: number;
+        if (first > 12 && second <= 12) { day = first; month = second; }
+        else if (second > 12 && first <= 12) { month = first; day = second; }
+        else if (first <= 12 && second <= 12 && language) { month = dayFirstLocale ? second : first; day = dayFirstLocale ? first : second; }
+        else return { ok: false, recoverable: true, error: 'Native date input requires ISO YYYY-MM-DD or an unambiguous locale-aware date.' };
+        if (!validDate(year, month, day)) return { ok: false, recoverable: true, error: 'Native date input received an invalid calendar date.' };
+        value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      } else {
+        return { ok: false, recoverable: true, error: 'Native date input requires ISO YYYY-MM-DD or a supported locale-aware numeric date.' };
+      }
+    }
     control.focus?.();
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       const ctor = tag === 'INPUT' ? view.HTMLInputElement : view.HTMLTextAreaElement;
