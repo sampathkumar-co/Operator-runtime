@@ -772,7 +772,6 @@ test('repeated-item context stops at the owning card instead of absorbing neighb
 test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
   const root = new FakeRoot();
   const scroller = new FakeElement('div', 'Scrollable list');
-  scroller.backgroundColor = 'rgb(255, 255, 255)';
   scroller.scrollTop = 40; scroller.scrollHeight = 400; scroller.clientHeight = 120;
   attach(root, scroller); installDocument(t, root);
 

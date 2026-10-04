@@ -958,8 +958,10 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       fill: trim(style?.fill, 64).toLowerCase(),
       stroke: trim(style?.stroke, 64).toLowerCase()
     };
+    const scroll = scrollStateOf(element);
+    const scrollable = Boolean(scroll?.canScrollY || scroll?.canScrollX);
     const meaningful = Object.values(colors).some((color) => color && color !== 'none' && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)');
-    if (!meaningful) return [];
+    if (!meaningful && !scrollable) return [];
     const rect = element.getBoundingClientRect();
     if (rect.width * rect.height < 16) return [];
     const role = roleOf(element);
@@ -967,12 +969,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
     const effectiveRole = role || (pointer ? 'pointer' : '');
     const geometry = geometryOf(element, context);
-    const scroll = scrollStateOf(element);
     return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
     const score = (item: typeof left) => item._focusScore
       + (item.actionable ? 50 : 0)
       + (['circle', 'rect', 'polygon', 'path', 'ellipse', 'svg'].includes(item.tag) ? 40 : 0)
+      + (item.scrollable ? 60 : 0)
       + (item.role ? 10 : 0)
       + (item.name ? 5 : 0);
     const leftArea = left.rect.width * left.rect.height;
