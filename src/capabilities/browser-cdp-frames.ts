@@ -492,21 +492,28 @@ export function observedResizeHandleFunction(ref: string, delta: { deltaX?: numb
   const handles = Array.from(wrapper.querySelectorAll?.('.ui-resizable-handle') ?? []).filter(visible);
   const desiredClasses = dx !== 0 && dy !== 0
     ? ['ui-resizable-se', 'ui-resizable-e', 'ui-resizable-s']
-    : dx !== 0 ? ['ui-resizable-e', 'ui-resizable-se', 'ui-resizable-w']
-    : ['ui-resizable-s', 'ui-resizable-se', 'ui-resizable-n'];
+    : dx !== 0 ? ['ui-resizable-se', 'ui-resizable-e', 'ui-resizable-w']
+    : ['ui-resizable-se', 'ui-resizable-s', 'ui-resizable-n'];
   let handle: Element | undefined;
   let handleClass = '';
+  let handlePoint: { x: number; y: number } | undefined;
   for (const className of desiredClasses) {
-    handle = handles.find((candidate) => candidate.classList?.contains(className));
-    if (handle) { handleClass = className; break; }
-  }
-  if (handle) {
-    const rect = handle.getBoundingClientRect();
+    const candidate = handles.find((entry) => entry.classList?.contains(className));
+    if (!candidate) continue;
+    const rect = candidate.getBoundingClientRect();
     const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2;
-    if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
-      return { ok: false, stale: true, error: 'Resize handle geometry is invalid.' };
-    }
-    return { ok: true, local: { x, y }, handleClass, source: 'generated-handle', targetRect: element.getBoundingClientRect() };
+    if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) continue;
+    let hit: Element | null = null;
+    try { hit = element.ownerDocument?.elementFromPoint?.(x, y) ?? null; } catch { hit = null; }
+    if (hit && hit !== candidate && !candidate.contains(hit)) continue;
+    handle = candidate; handleClass = className; handlePoint = { x, y }; break;
+  }
+  if (handle && handlePoint) {
+    const targetRect = element.getBoundingClientRect();
+    return {
+      ok: true, local: handlePoint, handleClass, source: 'generated-handle',
+      targetRect: { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: targetRect.height }
+    };
   }
   const style = documentView?.getComputedStyle?.(element);
   const resizeMode = String(style?.resize ?? '').toLowerCase();
@@ -520,7 +527,10 @@ export function observedResizeHandleFunction(ref: string, delta: { deltaX?: numb
   if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
     return { ok: false, stale: true, error: 'Resize target geometry is invalid.' };
   }
-  return { ok: true, local: { x, y }, handleClass: 'native-resize-corner', source: 'native-resize', targetRect: rect };
+  return {
+    ok: true, local: { x, y }, handleClass: 'native-resize-corner', source: 'native-resize',
+    targetRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  };
 }
 
 export async function observeSemanticTargetState(
@@ -638,8 +648,34 @@ export async function performSemanticInteraction(
         await dispatch({ type: 'mouseMoved', x: startX + dx * step / steps, y: startY + dy * step / steps, button: 'left', buttons: 1 });
       }
       await dispatch({ type: 'mouseReleased', x: endX, y: endY, button: 'left', buttons: 0, clickCount: 1 });
+      await delay(50, signal);
+      const afterLocated = unwrapRuntimeValue(await evaluate(session, chosen, locateExpression, false, signal)) as JsonMap | undefined;
+      const afterSample = firstLocatedSample(afterLocated?.matches);
+      const beforeRect = point.targetRect as JsonMap | undefined;
+      const afterRect = afterSample?.geometry as JsonMap | undefined;
+      const beforeWidth = Number(beforeRect?.width); const beforeHeight = Number(beforeRect?.height);
+      const afterWidth = Number(afterRect?.width); const afterHeight = Number(afterRect?.height);
+      const widthSatisfied = dx === 0 || (Number.isFinite(beforeWidth) && Number.isFinite(afterWidth) && (dx > 0 ? afterWidth > beforeWidth + 0.5 : afterWidth < beforeWidth - 0.5));
+      const heightSatisfied = dy === 0 || (Number.isFinite(beforeHeight) && Number.isFinite(afterHeight) && (dy > 0 ? afterHeight > beforeHeight + 0.5 : afterHeight < beforeHeight - 0.5));
+      if (!afterSample || !widthSatisfied || !heightSatisfied) {
+        throw new OperatorError('BROWSER_RESIZE_NO_EFFECT', 'Resize input was dispatched but the observed target geometry did not change in the requested direction.', {
+          retryable: true,
+          details: {
+            target: input.target, deltaX: dx, deltaY: dy,
+            before: beforeRect, after: afterRect,
+            handleClass: point.handleClass, source: point.source,
+            sideEffectState: 'known', executionPhase: 'dispatched'
+          }
+        });
+      }
       return {
-        value: { ok: true, matched, after: { nativeResizeDispatched: true, handleClass: point.handleClass, source: point.source, deltaX: dx, deltaY: dy } },
+        value: {
+          ok: true, matched,
+          after: {
+            nativeResizeDispatched: true, handleClass: point.handleClass, source: point.source, deltaX: dx, deltaY: dy,
+            beforeGeometry: beforeRect, afterGeometry: afterRect
+          }
+        },
         ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
       };
     }

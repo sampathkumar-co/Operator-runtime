@@ -359,22 +359,27 @@ test('semantic pointer actions use native CDP input and reject a target that cha
   );
 });
 
-test('semantic resize dispatches from the observed control resize handle instead of the target center', async () => {
+test('semantic resize dispatches from the observed control resize handle and verifies geometry change', async () => {
   const nativeEvents: any[] = [];
+  let locateCount = 0;
   const sample = {
     tag: 'textarea', role: 'textbox', name: 'Notes', identity: '#notes',
     geometry: { coordinateSpace: 'viewport', x: 20, y: 30, width: 100, height: 60 },
     context: { frameDepth: 0, shadowDepth: 0 }
   };
+  const resizedSample = { ...sample, geometry: { ...sample.geometry, height: 100 } };
   const session = {
     on() { return () => undefined; },
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
         if (expression.includes('observedResizeHandleFunction')) {
-          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle' } } };
+          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle', targetRect: { x: 20, y: 30, width: 100, height: 60 } } } };
         }
-        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+        if (expression.includes('semanticLocatorFunction')) {
+          locateCount += 1;
+          return { result: { value: { count: 1, matches: [locateCount >= 2 ? resizedSample : sample] } } };
+        }
       }
       if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
       return {};
@@ -393,6 +398,38 @@ test('semantic resize dispatches from the observed control resize handle instead
   assert.equal(nativeEvents[0].y, 88);
   assert.equal(nativeEvents.at(-1).x, 118);
   assert.equal(nativeEvents.at(-1).y, 128);
+  assert.equal((result.value.after as any).beforeGeometry.height, 60);
+  assert.equal((result.value.after as any).afterGeometry.height, 100);
+});
+
+test('semantic resize fails closed when native input produces no geometry change', async () => {
+  const sample = {
+    tag: 'textarea', role: 'textbox', name: 'Notes', identity: '#notes',
+    geometry: { coordinateSpace: 'viewport', x: 20, y: 30, width: 100, height: 60 },
+    context: { frameDepth: 0, shadowDepth: 0 }
+  };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedResizeHandleFunction')) {
+          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle', targetRect: { x: 20, y: 30, width: 100, height: 60 } } } };
+        }
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  await assert.rejects(
+    () => performSemanticInteraction(session as any, {
+      operation: 'resize', target: { ref: 'b-notes' }, value: null, deltaX: 0, deltaY: 40
+    }),
+    (error: any) => error?.code === 'BROWSER_RESIZE_NO_EFFECT'
+      && error?.details?.executionPhase === 'dispatched'
+      && error?.details?.sideEffectState === 'known'
+  );
 });
 
 test('download tracking binds events to the initiating target frame and fails closed on ambiguity', async (t) => {
