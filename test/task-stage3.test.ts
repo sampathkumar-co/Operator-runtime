@@ -48,6 +48,7 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
     class: 'approval', strategy: 'block', retryable: false, code: 'APPROVAL_REQUIRED'
   });
   assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'pre_dispatch' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'BROWSER_TARGET_NOT_SCROLLABLE', message: 'choose a valid scroller', retryable: true, sideEffectState: 'none', executionPhase: 'pre_dispatch' }).strategy, 'reobserve');
   assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'dispatched' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'NETWORK_TIMEOUT', message: 'uncertain', retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched' }).strategy, 'reconcile');
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');

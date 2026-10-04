@@ -104,7 +104,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const caught = context.signal?.aborted ? abortError() : error;
       const normalized = action.capability === 'browser.interact'
         && caught instanceof OperatorError
-        && ['BROWSER_TARGET_STALE', 'BROWSER_STALE_TARGET', 'BROWSER_TARGET_NOT_FOUND'].includes(caught.code)
+        && ['BROWSER_TARGET_STALE', 'BROWSER_STALE_TARGET', 'BROWSER_TARGET_NOT_FOUND', 'BROWSER_TARGET_NOT_SCROLLABLE'].includes(caught.code)
         && caught.details?.sideEffectState === undefined
         ? new OperatorError(caught.code, caught.message, {
             retryable: caught.retryable,

@@ -55,7 +55,7 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
       code
     };
   }
-  if (/PRECONDITION|STATE_CHANGED|FINGERPRINT|STALE|TARGET_NOT_FOUND|ELEMENT_NOT_FOUND|WAIT_TIMEOUT/i.test(code)) {
+  if (/PRECONDITION|STATE_CHANGED|FINGERPRINT|STALE|TARGET_NOT_FOUND|TARGET_NOT_SCROLLABLE|ELEMENT_NOT_FOUND|WAIT_TIMEOUT/i.test(code)) {
     return {
       class: 'stale-state',
       strategy: error?.executionPhase === 'pre_dispatch' ? 'reobserve' : error?.sideEffectState === 'none' ? 'repair' : 'reconcile',

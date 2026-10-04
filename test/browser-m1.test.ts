@@ -560,6 +560,25 @@ test('click_relative stays inside an observed object and dispatches the verified
 });
 
 
+test('browser provider rejects a non-scrollable target before dispatch', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'scroll-invalid-target', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'scroll', target: { ref: 'observed-scroll-1' }, deltaX: 0, deltaY: 180 },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'BROWSER_TARGET_NOT_SCROLLABLE');
+    assert.equal(result.error?.retryable, true);
+    assert.equal(result.error?.sideEffectState, 'none');
+    assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  });
+});
+
 test('browser scroll uses native CDP wheel input scoped to an observed target', async () => {
   const nativeEvents: any[] = [];
   const sample = { tag: 'div', role: 'pointer', name: 'Scrollable list', identity: '#list', actionable: true, documentMutationVersion: 3, scroll: { top: 20, left: 0, scrollHeight: 500, scrollWidth: 100, clientHeight: 120, clientWidth: 100, canScrollY: true, canScrollX: false }, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 20, y: 40, width: 120, height: 100 }, context: { frameDepth: 0, shadowDepth: 0 } };

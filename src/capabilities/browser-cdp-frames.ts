@@ -568,6 +568,16 @@ export async function performSemanticInteraction(
       if (![x, y, geometry.width, geometry.height].every((value) => Number.isFinite(Number(value))) || Number(geometry.width) <= 0 || Number(geometry.height) <= 0) {
         throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target geometry is not actionable.', { retryable: true });
       }
+      if (input.operation === 'scroll') {
+        const scroll = second.scroll && typeof second.scroll === 'object' && !Array.isArray(second.scroll) ? second.scroll as JsonMap : undefined;
+        const scrollable = second.scrollable === true || scroll?.canScrollY === true || scroll?.canScrollX === true;
+        if (!scrollable) {
+          throw new OperatorError('BROWSER_TARGET_NOT_SCROLLABLE', 'Scroll requires an observed scrollable target or page scroller; re-observe and choose a valid scroller.', {
+            retryable: true,
+            details: { target: input.target }
+          });
+        }
+      }
       let dragDestination: { x: number; y: number; sample: JsonMap } | undefined;
       if (input.operation === 'drag_between') {
         if (!input.target.ref || !input.toTarget?.ref) {
