@@ -51,10 +51,11 @@ process.stdout.write(`# non-benchmark certification: ${tests.length} determinist
 await run(process.execPath, ['--experimental-strip-types', 'scripts/check.ts']);
 await run(process.execPath, ['--experimental-strip-types', 'scripts/run-test-suite.ts', ...tests]);
 
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const npmCli = String(process.env.npm_execpath ?? '').trim();
+if (!npmCli) throw new Error('npm_execpath is required for deterministic packaging smoke tests.');
 for (const packageDirectory of ['packages/mecord-connect', 'packages/operator-runtime-cli']) {
   process.stdout.write(`# packaging smoke: ${packageDirectory}\n`);
-  await run(npm, ['pack', '--dry-run', '--ignore-scripts'], path.join(root, packageDirectory));
+  await run(process.execPath, [npmCli, 'pack', '--dry-run', '--ignore-scripts'], path.join(root, packageDirectory));
 }
 
 process.stdout.write('NONBENCHMARK_CERTIFICATION_PASS\n');
