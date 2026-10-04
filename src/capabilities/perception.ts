@@ -77,6 +77,7 @@ export class PerceptionProvider implements CapabilityProvider {
           ...(target.text ? { text: target.text } : {}),
           ...(target.bounds ? { bounds: target.bounds } : {}),
           ...(center ? { center } : {}),
+          ...(target.coordinates ? { coordinates: target.coordinates } : {}),
           state: target.state,
           channels: target.channels
         },

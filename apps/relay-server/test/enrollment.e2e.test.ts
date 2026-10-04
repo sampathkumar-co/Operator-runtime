@@ -13,6 +13,7 @@ import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayControlService } from '../src/control-service.ts';
 import { RelayResultService } from '../src/result-service.ts';
 import { LocalDeviceResetCoordinator } from '../../local-agent/src/device-reset.ts';
+import { RelayEnrollmentClient } from '../../local-agent/src/relay-enrollment.ts';
 
 const CONTROL_TOKEN = 'relay-control-token-enrollment-0123456789abcdef';
 
@@ -148,6 +149,36 @@ test('fresh device enrollment binds authenticated account and returns one recove
   assert.equal(membership?.accountId, account.accountId);
   assert.equal(Number.isSafeInteger(membership?.authorityGeneration), true);
 
+  const recoveryChallenge = await postJson(`${resultBase}/v1/device-session/recover/challenge`, { deviceId: device.deviceId });
+  assert.equal(recoveryChallenge.response.status, 200, JSON.stringify(recoveryChallenge.payload));
+  const recoveryPairing = await answerPairingChallenge(recoveryChallenge.payload.challenge, deviceIdentity);
+  const recovered = await postJson(`${resultBase}/v1/device-session/recover`, { pairingResponse: recoveryPairing });
+  assert.equal(recovered.response.status, 200, JSON.stringify(recovered.payload));
+  assert.equal(recovered.payload.recovery.status, 'recovered');
+  const recoveredSession = await sessions.verify(recovered.payload.session.token, {
+    audience: 'operator-relay',
+    requiredScopes: ['relay:connect', 'relay:result'],
+    expectedSubjectDeviceId: device.deviceId
+  });
+  assert.equal(recoveredSession.jti, recoveryPairing.challengeId);
+  const recoveredRetry = await postJson(`${resultBase}/v1/device-session/recover`, { pairingResponse: recoveryPairing });
+  assert.equal(recoveredRetry.response.status, 200, JSON.stringify(recoveredRetry.payload));
+  assert.equal(recoveredRetry.payload.session.token, recovered.payload.session.token, 'lost recovery responses must be safely replayable');
+
+  const recoveryClient = new RelayEnrollmentClient({
+    relayUrl: `ws://127.0.0.1:${resultListening.port}/device`,
+    resultUrl: `${resultBase}/v1/device-result`,
+    identity: deviceIdentity,
+    allowLoopbackInsecure: true
+  });
+  t.after(() => recoveryClient.stop());
+  const silentlyRecoveredToken = await recoveryClient.recover();
+  await sessions.verify(silentlyRecoveredToken, {
+    audience: 'operator-relay',
+    requiredScopes: ['relay:connect', 'relay:result'],
+    expectedSubjectDeviceId: device.deviceId
+  });
+
   await accounts.removeDevice(account.accountId, device.deviceId, 'user removed device');
   const afterRemoval = await postJson(`${resultBase}/v1/device-enrollment/poll`, {
     enrollmentId: pairing.challengeId,
@@ -155,6 +186,13 @@ test('fresh device enrollment binds authenticated account and returns one recove
   });
   assert.equal(afterRemoval.response.status, 400);
   assert.equal(afterRemoval.payload.error.code, 'DEVICE_ENROLLMENT_UNAUTHORIZED');
+
+  const deniedRecoveryChallenge = await postJson(`${resultBase}/v1/device-session/recover/challenge`, { deviceId: device.deviceId });
+  assert.equal(deniedRecoveryChallenge.response.status, 200, JSON.stringify(deniedRecoveryChallenge.payload));
+  const deniedRecoveryPairing = await answerPairingChallenge(deniedRecoveryChallenge.payload.challenge, deviceIdentity);
+  const deniedRecovery = await postJson(`${resultBase}/v1/device-session/recover`, { pairingResponse: deniedRecoveryPairing });
+  assert.equal(deniedRecovery.response.status, 400);
+  assert.equal(deniedRecovery.payload.error.code, 'DEVICE_SESSION_RECOVERY_AUTHORITY_REVOKED');
   await assert.rejects(
     sessions.verify(issued.payload.session.token, { audience: 'operator-relay' }),
     (error: any) => ['SESSION_NOT_FOUND', 'SESSION_REVOKED'].includes(error?.code)

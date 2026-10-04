@@ -2,7 +2,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { resourceKeysConflict } from './resource-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import {
+  currentProcessInstance,
+  inspectProcessInstance,
+  sameProcessInstance,
+  type ProcessInstanceIdentity,
+  type ProcessInstanceInspector,
+  validProcessInstance
+} from './process-instance.ts';
 
 export type ResourceLeaseMode = 'shared' | 'exclusive';
 
@@ -10,6 +19,7 @@ interface Holder {
   leaseId: string;
   ownerId: string;
   pid: number;
+  processInstance?: ProcessInstanceIdentity;
   mode: ResourceLeaseMode;
   acquiredAt: string;
 }
@@ -44,11 +54,15 @@ const STATE_OPTIONS = {
 export class ResourceLeaseStore {
   #file: string;
   #lockFile: string;
+  #inspectProcessInstance: ProcessInstanceInspector;
+  #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'resource-leases.json');
     this.#lockFile = path.join(root, 'resource-leases.lock');
+    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#processInstance = options.processInstance;
   }
 
   async acquire(ownerIdInput: string, keysInput: string[], mode: ResourceLeaseMode): Promise<ResourceLease> {
@@ -58,19 +72,25 @@ export class ResourceLeaseStore {
     if (mode !== 'shared' && mode !== 'exclusive') throw new OperatorError('RESOURCE_LEASE_INPUT_INVALID', 'Resource lease mode is invalid.');
 
     const leaseId = crypto.randomUUID();
-    await this.#mutate((state) => {
-      reapDeadHolders(state);
+    const processInstance = this.#processInstance ?? await currentProcessInstance();
+    await this.#mutate(async (state) => {
+      await reapDeadHolders(state, this.#inspectProcessInstance);
       for (const key of keys) {
-        const entry = state.resources.find((item) => item.key === key);
-        if (!entry) continue;
-        const conflicts = entry.holders.filter((holder) =>
-          holder.ownerId !== ownerId && (mode === 'exclusive' || holder.mode === 'exclusive')
-        );
-        if (conflicts.length > 0) {
-          throw new OperatorError('RESOURCE_BUSY', `Resource ${key} is owned by another active execution.`, {
-            retryable: true,
-            details: { key, holders: conflicts.map((holder) => ({ ownerId: holder.ownerId, mode: holder.mode })) }
-          });
+        const conflictingEntries = state.resources.filter((item) => resourceKeysConflict(item.key, key));
+        for (const entry of conflictingEntries) {
+          const conflicts = entry.holders.filter((holder) =>
+            holder.ownerId !== ownerId && (mode === 'exclusive' || holder.mode === 'exclusive')
+          );
+          if (conflicts.length > 0) {
+            throw new OperatorError('RESOURCE_BUSY', `Resource ${key} conflicts with another active execution.`, {
+              retryable: true,
+              details: {
+                key,
+                conflictingKey: entry.key,
+                holders: conflicts.map((holder) => ({ ownerId: holder.ownerId, mode: holder.mode }))
+              }
+            });
+          }
         }
       }
       const now = new Date().toISOString();
@@ -82,7 +102,7 @@ export class ResourceLeaseStore {
           state.resources.push(entry);
         }
         if (entry.holders.length >= MAX_HOLDERS) throw new OperatorError('RESOURCE_LEASE_LIMIT', `Resource ${key} has too many shared holders.`);
-        entry.holders.push({ leaseId, ownerId, pid: process.pid, mode, acquiredAt: now });
+        entry.holders.push({ leaseId, ownerId, pid: processInstance.pid, processInstance, mode, acquiredAt: now });
         entry.holders.sort((a, b) => a.leaseId.localeCompare(b.leaseId));
       }
       state.resources.sort((a, b) => a.key.localeCompare(b.key));
@@ -94,7 +114,8 @@ export class ResourceLeaseStore {
       const state = await this.#read();
       for (const key of keys) {
         const entry = state.resources.find((item) => item.key === key);
-        if (!entry?.holders.some((holder) => holder.leaseId === leaseId && holder.ownerId === ownerId && holder.pid === process.pid && holder.mode === mode)) {
+        if (!entry?.holders.some((holder) => holder.leaseId === leaseId && holder.ownerId === ownerId && holder.pid === processInstance.pid &&
+          holder.processInstance && sameProcessInstance(processInstance, holder.processInstance) && holder.mode === mode)) {
           throw new OperatorError('RESOURCE_LEASE_LOST', `Resource lease ownership for ${key} was lost.`);
         }
       }
@@ -120,7 +141,7 @@ export class ResourceLeaseStore {
 
   async inspect(): Promise<LeaseState> {
     const state = await this.#read();
-    reapDeadHolders(state);
+    await reapDeadHolders(state, this.#inspectProcessInstance);
     return structuredClone(state);
   }
 
@@ -134,11 +155,11 @@ export class ResourceLeaseStore {
     }
   }
 
-  async #mutate(mutator: (state: LeaseState) => void): Promise<void> {
+  async #mutate(mutator: (state: LeaseState) => void | Promise<void>): Promise<void> {
     const release = await this.#acquireCoordinatorLock();
     try {
       const state = await this.#read();
-      mutator(state);
+      await mutator(state);
       validateState(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STATE_OPTIONS);
     } finally {
@@ -148,7 +169,8 @@ export class ResourceLeaseStore {
 
   async #acquireCoordinatorLock(): Promise<() => Promise<void>> {
     await fs.mkdir(path.dirname(this.#lockFile), { recursive: true, mode: 0o700 });
-    const owner = { id: crypto.randomUUID(), pid: process.pid };
+    const processInstance = this.#processInstance ?? await currentProcessInstance();
+    const owner = { id: crypto.randomUUID(), pid: processInstance.pid, processInstance };
     for (let attempt = 0; attempt < 120; attempt += 1) {
       try {
         const handle = await fs.open(this.#lockFile, 'wx', 0o600);
@@ -169,9 +191,11 @@ export class ResourceLeaseStore {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       try {
-        const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { pid?: unknown };
+        const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
-        if (Number.isSafeInteger(pid) && pid > 0 && !processAlive(pid)) {
+        const storedIdentity = validProcessInstance(current.processInstance);
+        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
+        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
           await fs.rm(this.#lockFile, { force: true });
           continue;
         }
@@ -220,6 +244,10 @@ function validateState(input: unknown): LeaseState {
       ids.add(holder.leaseId);
       bounded(holder.ownerId, 256, 'resource ownerId');
       if (!Number.isSafeInteger(holder.pid) || holder.pid < 1) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource holder PID is invalid.');
+      if (holder.processInstance !== undefined) {
+        const identity = validProcessInstance(holder.processInstance);
+        if (!identity || identity.pid !== holder.pid) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource holder process identity is invalid.');
+      }
       if (holder.mode !== 'shared' && holder.mode !== 'exclusive') throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource holder mode is invalid.');
       if (!Number.isFinite(Date.parse(holder.acquiredAt))) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource holder timestamp is invalid.');
     }
@@ -227,18 +255,16 @@ function validateState(input: unknown): LeaseState {
   return state;
 }
 
-function reapDeadHolders(state: LeaseState): void {
-  for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => processAlive(holder.pid));
-  state.resources = state.resources.filter((entry) => entry.holders.length > 0);
-}
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+async function reapDeadHolders(state: LeaseState, inspector: ProcessInstanceInspector): Promise<void> {
+  const identities = new Map<number, ProcessInstanceIdentity | null>();
+  for (const holder of state.resources.flatMap((entry) => entry.holders)) {
+    if (!identities.has(holder.pid)) identities.set(holder.pid, await inspector(holder.pid));
   }
+  for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
+    const live = identities.get(holder.pid) ?? null;
+    return holder.processInstance ? sameProcessInstance(holder.processInstance, live) : live !== null;
+  });
+  state.resources = state.resources.filter((entry) => entry.holders.length > 0);
 }
 
 function bounded(input: unknown, max: number, label: string): string {

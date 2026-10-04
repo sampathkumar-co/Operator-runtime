@@ -18,6 +18,8 @@ export type TaskFailureStrategy =
   | 'cancel'
   | 'reobserve'
   | 'repair'
+  | 'replan'
+  | 'reconcile'
   | 'retry'
   | 'fail';
 
@@ -41,20 +43,47 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   if (code === 'EXECUTION_ABORTED' || code === 'TASK_CANCELLED') {
     return { class: 'cancelled', strategy: 'cancel', retryable: false, code };
   }
-  if (/PRECONDITION|STATE_CHANGED|FINGERPRINT|STALE|TARGET_NOT_FOUND|ELEMENT_NOT_FOUND|WAIT_TIMEOUT|TARGET_NOT_UNIQUE|AMBIGUOUS/i.test(code)) {
-    return { class: 'stale-state', strategy: 'reobserve', retryable: true, code };
+  if (/NO_PROGRESS/i.test(code)) {
+    return { class: 'postcondition', strategy: 'replan', retryable: false, code };
   }
-  if (/TARGET_EXISTS|CONTENT_MISMATCH|POSTCONDITION|ARTIFACT.*MISMATCH/i.test(code)) {
-    return { class: 'target-drift', strategy: 'repair', retryable: true, code };
+  if (/TARGET_NOT_UNIQUE|AMBIGUOUS/i.test(code)) {
+    if (error?.retryable !== true) return { class: 'target-drift', strategy: 'fail', retryable: false, code };
+    return {
+      class: 'target-drift',
+      strategy: error.executionPhase === 'pre_dispatch' ? 'reobserve' : error.sideEffectState === 'none' ? 'repair' : 'reconcile',
+      retryable: true,
+      code
+    };
   }
-  if (/TIMEOUT|TEMPORARY|UNAVAILABLE|OFFLINE|CONNECTION|RELAY_RESULT_PENDING|RATE_LIMIT|BUSY/i.test(code) || error?.retryable === true) {
-    return { class: 'transient', strategy: 'retry', retryable: true, code };
-  }
-  if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY/i.test(code)) {
-    return { class: 'policy', strategy: 'fail', retryable: false, code };
+  if (/PRECONDITION|STATE_CHANGED|FINGERPRINT|STALE|TARGET_NOT_FOUND|ELEMENT_NOT_FOUND|WAIT_TIMEOUT/i.test(code)) {
+    return {
+      class: 'stale-state',
+      strategy: error?.executionPhase === 'pre_dispatch' ? 'reobserve' : error?.sideEffectState === 'none' ? 'repair' : 'reconcile',
+      retryable: true,
+      code
+    };
   }
   if (/POSTCONDITION|VERIFY|VERIFICATION/i.test(code)) {
     return { class: 'postcondition', strategy: 'fail', retryable: false, code };
+  }
+  if (/ARTIFACT.*MISMATCH/i.test(code)) {
+    return error?.sideEffectState === 'none'
+      ? { class: 'target-drift', strategy: 'repair', retryable: true, code }
+      : { class: 'postcondition', strategy: 'fail', retryable: false, code };
+  }
+  if (/TARGET_EXISTS|CONTENT_MISMATCH/i.test(code)) {
+    return { class: 'target-drift', strategy: 'repair', retryable: true, code };
+  }
+  if (/TIMEOUT|TEMPORARY|UNAVAILABLE|OFFLINE|CONNECTION|RELAY_RESULT_PENDING|RATE_LIMIT|BUSY/i.test(code) || error?.retryable === true) {
+    return {
+      class: 'transient',
+      strategy: error?.sideEffectState === 'uncertain' ? 'reconcile' : 'retry',
+      retryable: true,
+      code
+    };
+  }
+  if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY/i.test(code)) {
+    return { class: 'policy', strategy: 'fail', retryable: false, code };
   }
   if (error) return { class: 'permanent', strategy: 'fail', retryable: false, code };
   return { class: 'unknown', strategy: 'fail', retryable: false, code };

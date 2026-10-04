@@ -127,6 +127,64 @@ test('task executor completes and durably verifies a real semantic multi-action 
   assert.deepEqual(await store.get(submitted.id), completed);
 });
 
+test('generic autonomous workflow observes, mutates through the kernel boundary, and independently verifies durable machine state', async (t) => {
+  const root = await tempDir(t, 'operator-task-autonomous-root-');
+  const state = await tempDir(t, 'operator-task-autonomous-state-');
+  const target = path.join(root, 'autonomous.txt');
+  const content = 'general bounded workflow\n';
+  const expectedSha256 = crypto.createHash('sha256').update(content).digest('hex');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.info'])
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Perform a capability-agnostic bounded workflow.',
+    authorizedScope: [root],
+    successConditions: ['fresh observation precedes mutation', 'independent read proves exact bytes'],
+    goal: {
+      kind: 'autonomous-workflow', roots: [root], steps: [{
+        key: 'create-output', title: 'Create and verify output',
+        observe: { capability: 'file.list', input: { path: root } },
+        action: { capability: 'file.create', input: { path: target, content } },
+        verify: { capability: 'file.info', input: { path: target }, assertions: [{ path: 'sha256', operator: 'equals', value: expectedSha256 }] }
+      }]
+    }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.stepKey), [
+    'autonomous:0:observe', 'autonomous:0:action', 'autonomous:0:verify'
+  ]);
+  assert.equal(completed.execution?.plannerState.workflowIndex, 1);
+  const durablePlan = completed.execution?.plannerState.durablePlan as any;
+  assert.equal(durablePlan.schemaVersion, 1);
+  assert.equal(durablePlan.subgoals[0].status, 'VERIFIED');
+  assert.equal(durablePlan.subgoals[0].attempts, 1);
+  assert.deepEqual(durablePlan.subgoals[0].requiredEvidence, ['fresh-machine-observation', 'canonical-verification']);
+  assert.equal(await fs.readFile(target, 'utf8'), content);
+  assert.ok(completed.evidence.some((item) => item.kind === 'autonomous_step_verified'));
+});
+
+test('autonomous workflow rejects mutating observation or verification contracts', async (t) => {
+  const root = await tempDir(t, 'operator-task-autonomous-invalid-root-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(await tempDir(t, 'operator-task-autonomous-invalid-state-')),
+    permissions: permissions(root, ['file.write'])
+  });
+  await assert.rejects(() => orchestrator.submit({
+    objective: 'Invalid verifier.', authorizedScope: [root], successConditions: ['must reject'],
+    goal: {
+      kind: 'autonomous-workflow', roots: [root], steps: [{
+        key: 'invalid', title: 'Invalid',
+        observe: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' } },
+        action: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' } },
+        verify: { capability: 'file.write', input: { path: path.join(root, 'x'), content: 'x' }, assertions: [{ path: 'ok', operator: 'equals', value: true }] }
+      }]
+    }
+  }), (error: any) => error?.code === 'TASK_GOAL_INVALID');
+});
+
 test('task executor discovers and runs only a trusted registered project command', async (t) => {
   const root = await tempDir(t, 'operator-task-command-project-');
   const authority = await tempDir(t, 'operator-task-command-authority-');
@@ -190,7 +248,9 @@ test('task executor recovers an interrupted create without duplicating the mutat
   task.execution!.plannerState.phase = 'create';
   task.execution!.startedAt = new Date().toISOString();
   task.execution!.deadlineAt = new Date(Date.now() + 60_000).toISOString();
-  task.execution!.stepCount = 1;
+  task.execution!.stepCount = 0;
+  task.execution!.dispatchedActions = 0;
+  task.execution!.plannerIterations = 1;
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ content, path: target })).digest('hex');
   task.execution!.records.push({
     stepKey: 'create-file', actionId: `task-${'a'.repeat(64)}`, capability: 'file.create', risk: 'write',
@@ -284,6 +344,36 @@ test('task executor detects a no-progress planner loop before exhausting the glo
   assert.equal(failed.execution?.stepCount, 2);
 });
 
+test('active task timeout uses a monotonic clock despite wall-clock jumps', async (t) => {
+  const root = await tempDir(t, 'operator-task-monotonic-root-');
+  const state = await tempDir(t, 'operator-task-monotonic-state-');
+  const target = path.join(root, 'input.txt');
+  await fs.writeFile(target, 'data');
+  const runtime = new OperatorRuntime().register(filesystem(root));
+  let wall = Date.parse('2026-01-01T00:00:00.000Z');
+  let monotonic = 0;
+  let calls = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime, store: new TaskStore(state), permissions: permissions(root, ['file.read']), planners: [new StuckPlanner()],
+    wallNow: () => wall,
+    monotonicNow: () => monotonic,
+    executeAction: async (action, profile, context) => {
+      calls += 1;
+      monotonic += 60;
+      wall += calls % 2 === 0 ? 86_400_000 : -172_800_000;
+      return await runtime.execute(action, profile, context);
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Use elapsed active time.', authorizedScope: [root], successConditions: ['stop on monotonic budget'],
+    goal: { kind: 'controlled-file-change', root, path: target, content: 'unused' }, timeoutMs: 100, maxSteps: 20
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.failures.at(-1)?.code, 'TASK_TIMEOUT');
+  assert.equal(calls, 2);
+});
+
 class StaleRunnerWriteStore extends TaskStore {
   #blockedOnce = false;
   blocked!: () => void;
@@ -368,7 +458,8 @@ class DelayedProvider implements CapabilityProvider {
 
 class SemanticBrowserProvider implements CapabilityProvider {
   readonly name = 'test.browser.semantic';
-  #url = 'https://example.test/start';
+  #url: string;
+  constructor(initialUrl = 'https://example.test/start') { this.#url = initialUrl; }
   supports(action: ActionRequest): boolean { return ['browser.inspect', 'browser.navigate'].includes(action.capability); }
   score(): CapabilityScore { return SCORE; }
   async execute(action: ActionRequest): Promise<ActionResult> {
@@ -414,6 +505,32 @@ test('task executor navigates and re-observes a semantic browser target before c
   ]);
   assert.ok(completed.execution?.records.every((record) => record.observation?.domain === 'browser'));
   assert.equal(completed.execution?.plannerState.targetId, 'tab-1');
+});
+
+test('typed outcome truth stops browser navigation when the destination is already satisfied', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-early-state-');
+  const destination = 'https://example.test/already?mode=verified#ignored';
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(new SemanticBrowserProvider(destination)),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.navigate'], allowedRoots: [],
+      allowDestructive: false, allowExternalWrites: false, allowSystemChanges: false
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Do not navigate when the requested browser destination is already true.',
+    authorizedScope: ['browser:https://example.test'],
+    successConditions: ['selected page already reaches the requested destination'],
+    goal: { kind: 'browser-navigation', url: destination }
+  });
+
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.deepEqual(completed.execution?.records.map((record) => record.capability), ['browser.inspect']);
+  assert.equal(completed.execution?.dispatchedActions, 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'early_outcome_completion'));
+  assert.ok(completed.evidence.some((item) => item.kind === 'independent_task_verification' && item.status === 'pass'));
 });
 
 test('semantic workflow composes multiple verified browser goals durably', async (t) => {
@@ -504,12 +621,17 @@ class SemanticDockerProvider implements CapabilityProvider {
   manageCalls = 0;
   failStateChangedOnce = false;
   #failed = false;
+  #revision = 0;
 
   supports(action: ActionRequest): boolean { return ['docker.inspect', 'docker.manage'].includes(action.capability); }
   score(): CapabilityScore { return SCORE; }
 
+  #fingerprint(): string {
+    return crypto.createHash('sha256').update(`${this.state}:${this.#revision}`).digest('hex');
+  }
+
   async execute(action: ActionRequest): Promise<ActionResult> {
-    const fingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    const fingerprint = this.#fingerprint();
     if (action.capability === 'docker.inspect') {
       return {
         ok: true, capability: action.capability, provider: this.name,
@@ -523,17 +645,24 @@ class SemanticDockerProvider implements CapabilityProvider {
     this.manageCalls += 1;
     if (this.failStateChangedOnce && !this.#failed) {
       this.#failed = true;
-      this.state = 'exited';
+      this.#revision += 1;
       return {
         ok: false, capability: action.capability, provider: this.name, evidence: [], durationMs: 0,
-        error: { code: 'DOCKER_STATE_CHANGED', message: 'state changed after inspection', retryable: true }
+        error: {
+          code: 'DOCKER_STATE_CHANGED',
+          message: 'state changed after inspection',
+          retryable: true,
+          sideEffectState: 'none',
+          executionPhase: 'pre_dispatch'
+        }
       };
     }
     assert.equal(action.input.expectedCurrentFingerprint, fingerprint);
     assert.deepEqual(action.input.services, ['web']);
     assert.equal(action.input.operation, 'stop');
     this.state = 'exited';
-    const afterFingerprint = crypto.createHash('sha256').update(this.state).digest('hex');
+    this.#revision += 1;
+    const afterFingerprint = this.#fingerprint();
     return {
       ok: true, capability: action.capability, provider: this.name,
       output: {
@@ -852,8 +981,12 @@ test('an in-flight pause survives action completion and can be resumed durably',
   });
   const running = orchestrator.run(task.id);
   await provider.startedPromise;
-  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  let pauseSettled = false;
+  const pausing = orchestrator.pause(task.id).finally(() => { pauseSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pauseSettled, false);
   provider.release();
+  assert.equal((await pausing).state, 'PAUSED');
   const paused = await running;
   assert.equal(paused.state, 'PAUSED');
   assert.equal(paused.execution?.records[0]?.state, 'SUCCEEDED');
@@ -913,8 +1046,9 @@ test('concurrent cancel cannot be overwritten by resume', async (t) => {
 
   const initialRun = orchestrator.run(task.id);
   await provider.startedPromise;
-  assert.equal((await orchestrator.pause(task.id)).state, 'PAUSED');
+  const pausing = orchestrator.pause(task.id);
   provider.release();
+  assert.equal((await pausing).state, 'PAUSED');
   assert.equal((await initialRun).state, 'PAUSED');
 
   const resumed = orchestrator.resume(task.id);
@@ -980,6 +1114,78 @@ test('cancelling an in-flight task aborts provider execution and persists an int
   assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
 });
 
+class IgnoringAbortMutationProvider implements CapabilityProvider {
+  readonly name = 'test.ignoring-abort-mutation';
+  started!: () => void;
+  release!: () => void;
+  readonly startedPromise = new Promise<void>((resolve) => { this.started = resolve; });
+  readonly releasePromise = new Promise<void>((resolve) => { this.release = resolve; });
+  supports(action: ActionRequest): boolean { return action.capability === 'file.write'; }
+  score(): CapabilityScore { return SCORE; }
+  async execute(action: ActionRequest): Promise<ActionResult> {
+    this.started();
+    await this.releasePromise;
+    return { ok: true, capability: action.capability, provider: this.name, output: {}, evidence: [], durationMs: 0 };
+  }
+}
+
+class OneWritePlanner extends OneStepPlanner {
+  override next({ task }: TaskPlannerContext): PlannerDecision {
+    return task.execution!.plannerState.phase === 'complete'
+      ? { type: 'complete', message: 'done' }
+      : { type: 'step', key: 'one-write', title: 'One delayed mutation', capability: 'file.write', input: { path: 'output.txt', content: 'changed' } };
+  }
+}
+
+test('cancel does not return terminal state before an abort-ignoring mutation settles', async (t) => {
+  const root = await tempDir(t, 'operator-task-cancel-quiesce-');
+  const state = await tempDir(t, 'operator-task-cancel-quiesce-state-');
+  const provider = new IgnoringAbortMutationProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Cancel only after mutation settles.', authorizedScope: [root], successConditions: ['truthful cancellation'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' }
+  });
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  let cancelSettled = false;
+  const cancelling = orchestrator.cancel(task.id).finally(() => { cancelSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancelSettled, false);
+  assert.equal((await new TaskStore(state).get(task.id)).state, 'RUNNING');
+  provider.release();
+  const cancelled = await cancelling;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal((await running).state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.sideEffectState, 'known');
+});
+
+test('post-mutation executor exception is recorded uncertain instead of side-effect free', async (t) => {
+  const root = await tempDir(t, 'operator-task-executor-uncertain-');
+  const state = await tempDir(t, 'operator-task-executor-uncertain-state-');
+  const target = path.join(root, 'output.txt');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime(), store: new TaskStore(state),
+    permissions: permissions(root, ['file.write']), planners: [new OneWritePlanner()],
+    executeAction: async () => {
+      await fs.writeFile(target, 'mutated', 'utf8');
+      throw new Error('post-execution bookkeeping failed');
+    }
+  });
+  const task = await orchestrator.submit({
+    objective: 'Preserve mutation truth.', authorizedScope: [root], successConditions: ['requires reconciliation'],
+    goal: { kind: 'controlled-file-change', root, path: 'output.txt', content: 'changed' }
+  });
+  const failed = await orchestrator.run(task.id);
+  assert.equal(await fs.readFile(target, 'utf8'), 'mutated');
+  assert.equal(failed.state, 'FAILED');
+  assert.equal(failed.execution?.records[0]?.sideEffectState, 'uncertain');
+  assert.equal(failed.execution?.records[0]?.errorCode, 'TASK_EXECUTOR_EXCEPTION');
+});
+
 test('a durable execution lease prevents a second orchestrator from duplicating an in-flight action', async (t) => {
   const root = await tempDir(t, 'operator-task-exclusive-');
   const state = await tempDir(t, 'operator-task-exclusive-state-');
@@ -1004,4 +1210,48 @@ test('a durable execution lease prevents a second orchestrator from duplicating 
   provider.release();
   assert.equal((await running).state, 'VERIFIED');
   assert.equal((await new TaskStore(state).get(task.id)).execution?.records.length, 1);
+});
+
+
+class RepairingBudgetPlanner implements TaskPlanner {
+  readonly id = 'test.repairing-budget';
+  supports(): boolean { return true; }
+  next(context: TaskPlannerContext): PlannerDecision {
+    assert.equal(context.budget.maxSteps, 4);
+    assert.ok(context.budget.remainingSteps >= 0 && context.budget.remainingSteps <= 4);
+    if (context.task.execution!.plannerState.phase === 'complete') return { type: 'complete', message: 'repaired step verified' };
+    return { reasoning: 'I know what to do but omitted the typed action.' } as unknown as PlannerDecision;
+  }
+  repair(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision {
+    assert.match(issue, /decision type|structured/i);
+    assert.equal(typeof invalidDecision, 'object');
+    assert.equal(context.budget.usedSteps, 0);
+    return { type: 'step', key: 'repaired-read', title: 'Repaired bounded read', capability: 'file.read', input: { path: context.goal.kind === 'controlled-file-change' ? context.goal.path : 'input.txt' } };
+  }
+  accept({ task }: TaskPlannerContext): void { task.execution!.plannerState.phase = 'complete'; }
+}
+
+test('task planner boundary exposes remaining budget and permits one typed repair of malformed output', async (t) => {
+  const root = await tempDir(t, 'operator-task-planner-repair-root-');
+  const state = await tempDir(t, 'operator-task-planner-repair-state-');
+  const target = path.join(root, 'input.txt');
+  await fs.writeFile(target, 'data');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']),
+    planners: [new RepairingBudgetPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Repair one malformed typed planner decision.',
+    authorizedScope: [root],
+    successConditions: ['one bounded read completes'],
+    goal: { kind: 'controlled-file-change', root, path: target, content: 'unused' },
+    maxSteps: 4,
+    maxAttemptsPerStep: 2
+  });
+  const completed = await orchestrator.run(task.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(completed.execution?.stepCount, 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'planner_repair'));
 });

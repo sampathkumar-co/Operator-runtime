@@ -13,6 +13,7 @@ import { ExecutionOptimizerStore } from '../src/core/execution-optimizer.ts';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
 import { DigitalOperationsLayer } from '../src/core/digital-operations.ts';
+import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-digital-ops-'));
@@ -138,6 +139,43 @@ test('stage10 refuses to create execution when declared world precondition is co
   );
 });
 
+test('stage10 creation cleanup persists compensation failure and restart recovery completes it', async (t) => {
+  const base = await setup(t);
+  const reservationId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
+  let failRelease = true;
+  let releases = 0;
+  const devices = {
+    async reserve() {
+      return {
+        id: reservationId, sessionId, deviceId: crypto.randomUUID(), state: 'ACTIVE',
+        acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString()
+      };
+    },
+    async release(id: string) {
+      assert.equal(id, reservationId);
+      releases += 1;
+      if (failRelease) throw Object.assign(new Error('release unavailable'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
+      return { id, state: 'RELEASED' };
+    }
+  };
+  const teams = { async submit() { throw new Error('mission creation failed'); } };
+  const compensations = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, teams: teams as any, compensations });
+  await assert.rejects(() => ops.submit({
+    objective: 'Fail after reservation', scopeKey: 'project:compensation', successConditions: ['not leaked'],
+    execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'job:cleanup' }, advertisements: [] }
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
+  assert.equal((await compensations.pending('digital-operation')).length, 1);
+  assert.equal(releases, 1);
+
+  failRelease = false;
+  const recovered = await ops.recoverPendingCompensations();
+  assert.deepEqual(recovered, { recovered: 1, pending: 0 });
+  assert.equal(releases, 2);
+});
+
 test('stage10 cancellation records failed strategy outcome exactly once', async (t) => {
   const { ops, optimizer } = await setup(t);
   const operation = await ops.submit({
@@ -197,6 +235,53 @@ test('stage10 requestId is idempotent for identical contract and rejects conflic
     ops.submit({ ...request, objective: 'Different contract' }),
     (error: any) => error?.code === 'OPERATIONS_REQUEST_CONFLICT'
   );
+});
+
+test('stage10 running operation renews its device reservation and blocks visibly on reservation loss', async (t) => {
+  const base = await setup(t);
+  const reservationId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
+  let heartbeats = 0;
+  let loseReservation = false;
+  let nowMs = Date.parse('2026-01-01T00:00:00.000Z');
+  let expiresAtMs = nowMs + 10_000;
+  let activeWorkload = '';
+  const devices = {
+    async reserve(request: { workloadKey: string }) {
+      if (activeWorkload && activeWorkload !== request.workloadKey && nowMs < expiresAtMs) throw Object.assign(new Error('capacity held'), { code: 'DEVICE_POOL_NO_ELIGIBLE_DEVICE' });
+      activeWorkload = request.workloadKey;
+      expiresAtMs = nowMs + 10_000;
+      const now = new Date(nowMs).toISOString();
+      return { id: reservationId, sessionId, deviceId: crypto.randomUUID(), acquiredAt: now, heartbeatAt: now, expiresAt: new Date(expiresAtMs).toISOString(), state: 'ACTIVE' };
+    },
+    async heartbeat(id: string, session: string) {
+      heartbeats += 1;
+      assert.equal(id, reservationId); assert.equal(session, sessionId);
+      if (loseReservation) throw Object.assign(new Error('lost'), { code: 'DEVICE_POOL_RESERVATION_LOST' });
+      expiresAtMs = nowMs + 10_000;
+      return { id, sessionId: session, state: 'ACTIVE', heartbeatAt: new Date(nowMs).toISOString(), expiresAt: new Date(expiresAtMs).toISOString() };
+    },
+    async release() { return {}; }
+  };
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, clock: () => new Date(nowMs) });
+  const operation = await ops.submit({
+    objective: 'Hold device capacity', scopeKey: 'project:device', successConditions: ['verified'],
+    execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'job:held', leaseMs: 10_000 }, advertisements: [] }, run: true
+  });
+  nowMs += 9_000;
+  const running = await ops.refresh(operation.id);
+  assert.equal(running.state, 'RUNNING');
+  assert.equal(heartbeats, 1);
+  nowMs += 9_000;
+  await assert.rejects(
+    () => devices.reserve({ workloadKey: 'job:second' }),
+    (error: any) => error?.code === 'DEVICE_POOL_NO_ELIGIBLE_DEVICE'
+  );
+  loseReservation = true;
+  const blocked = await ops.refresh(operation.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.match(blocked.lastBlockReason ?? '', /DEVICE_POOL_RESERVATION_LOST/);
 });
 
 

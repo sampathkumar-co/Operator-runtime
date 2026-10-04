@@ -27,6 +27,7 @@ type LegacyRoutingState = { version: 1; bindings: ProjectDeviceBinding[] };
 export interface OnlineDeviceDescriptor {
   deviceId: string;
   sessionId: string;
+  logicalSessionId?: string;
   capabilities: string[];
   connectedAt: string;
   lastSeenAt: string;

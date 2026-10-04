@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { TaskStore } from '../src/core/task-store.ts';
 import { createTask, type TaskCapsule } from '../src/core/task.ts';
+import { createDurableTaskPlan } from '../src/core/task-plan.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -182,6 +183,25 @@ test('TaskStore rejects malformed durable execution records and impossible timin
   await expectCorrupt(() => new TaskStore(state).get(value.id), /cannot finish while STARTED/);
 });
 
+test('TaskStore rejects a corrupt persisted hierarchical plan before execution', async (t) => {
+  const state = await tempDir(t, 'operator-task-bad-plan-');
+  const value = task();
+  const action = { capability: 'file.info', input: { path: 'C:/bounded' } };
+  const plan = createDurableTaskPlan({
+    taskId: value.id, objective: value.userObjective, constraints: ['bounded'], finalSuccessConditions: value.successConditions,
+    steps: [{ key: 'one', title: 'one', observe: action, action, verify: { ...action, assertions: [{ path: 'exists', operator: 'equals', value: true }] } }],
+    now: value.createdAt
+  });
+  plan.subgoals[0]!.id = 'forged-subgoal';
+  value.execution = {
+    schemaVersion: 1, plannerId: 'operator.autonomous-workflow.v1', goalKind: 'autonomous-workflow',
+    plannerState: { phase: 'start', durablePlan: plan }, maxSteps: 10, maxAttemptsPerStep: 2,
+    timeoutMs: 1000, stepCount: 0, records: []
+  };
+  await writePersisted(state, value.id, value);
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /durable task plan/);
+});
+
 test('TaskStore keeps observation schema v1 readable while validating normalized schema v2', async (t) => {
   const state = await tempDir(t, 'operator-task-observation-schema-');
   const value = task();
@@ -346,6 +366,29 @@ test('TaskStore reclaims an execution lease left by a crashed child process', as
   await recovered.release();
 });
 
+test('TaskStore reclaims a stale execution lease when its PID was reused by a different process instance', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-pid-reuse-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  await fs.writeFile(path.join(leases, `${value.id}.json`), JSON.stringify({
+    version: 2,
+    taskId: value.id,
+    ownerId: crypto.randomUUID(),
+    pid: 42001,
+    processInstance: { pid: 42001, started: 'old-instance' },
+    acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const store = new TaskStore(state, {
+    processInstance: { pid: 42002, started: 'new-owner' },
+    inspectProcessInstance: async (pid) => pid === 42001 ? { pid, started: 'reused-instance' } : null
+  });
+  const lease = await store.acquireExecutionLease(value.id);
+  await lease.assertOwned();
+  await lease.release();
+});
+
 test('TaskStore refuses a symlinked execution-lease directory', async (t) => {
   const state = await tempDir(t, 'operator-task-lease-link-state-');
   const outside = await tempDir(t, 'operator-task-lease-link-outside-');
@@ -372,4 +415,25 @@ test('TaskStore fails closed on malformed execution-lease ownership', async (t) 
     () => new TaskStore(state).acquireExecutionLease(value.id),
     (error: any) => error?.code === 'TASK_LEASE_CORRUPT' && /ownerId/.test(error.message)
   );
+});
+
+
+test('TaskStore recent listing sorts by updatedAt before applying the page limit', async (t) => {
+  const state = await tempDir(t, 'operator-task-recency-');
+  const store = new TaskStore(state);
+  const tasks: TaskCapsule[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    const value = task();
+    value.userObjective = `task-${index}`;
+    tasks.push(value);
+    await store.put(value);
+  }
+
+  const lexicallyLast = tasks.slice().sort((a, b) => a.id.localeCompare(b.id)).at(-1)!;
+  lexicallyLast.updatedAt = '2099-01-01T00:00:00.000Z';
+  await store.put(lexicallyLast);
+
+  const recent = await store.list(10);
+  assert.equal(recent[0]?.id, lexicallyLast.id);
+  assert.ok(recent.some((item) => item.id === lexicallyLast.id));
 });

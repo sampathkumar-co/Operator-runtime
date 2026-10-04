@@ -6,6 +6,9 @@ import { applyBoundedHttpServerPolicy, requireLiteralLoopbackBindHost } from '..
 import { PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import type { ActionRequest, ActionResult, PermissionProfile } from '../../../src/core/types.ts';
 import type { OperatorRuntime } from '../../../src/core/runtime.ts';
+import type { AgentKernel } from '../../../src/core/agent-kernel.ts';
+import { validIntentBinding, type IntentRegistry } from '../../../src/core/intent-registry.ts';
+import type { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import type { AuditLog } from '../../../src/core/audit.ts';
 import type { TaskStore } from '../../../src/core/task-store.ts';
 import type { TaskOrchestrator, SemanticTaskGoal, SubmitTaskOptions } from '../../../src/core/task-orchestrator.ts';
@@ -20,6 +23,7 @@ import type { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import type { EmergencyStopStore } from './emergency-stop.ts';
 import type { ApprovalAuthorityContext, ApprovalStore } from './approval-store.ts';
+import type { LocalActionExecutionStore } from './action-execution-store.ts';
 import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
@@ -33,6 +37,7 @@ import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts
 import { publishPerceptionFromActionResult } from '../../../src/core/perception-publication.ts';
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
+import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import {
   assertMigrationCapabilities,
   buildMigrationArtifacts,
@@ -91,6 +96,7 @@ function validateActionEnvelope(value: unknown): ActionRequest {
   const source = provenanceRaw.source === undefined ? undefined : boundedString(provenanceRaw.source, 'action.provenance.source', 512);
   const taskId = raw.taskId === undefined ? undefined : boundedString(raw.taskId, 'action.taskId', 256);
   const target = raw.target === undefined ? undefined : boundedString(raw.target, 'action.target', 4096);
+  const intent = raw.intent === undefined ? undefined : validIntentBinding(raw.intent);
   return {
     id,
     capability,
@@ -98,7 +104,8 @@ function validateActionEnvelope(value: unknown): ActionRequest {
     input: raw.input as Record<string, unknown>,
     provenance: { kind: provenanceRaw.kind as ActionRequest['provenance']['kind'], source },
     taskId,
-    target
+    target,
+    ...(intent ? { intent } : {})
   };
 }
 
@@ -195,10 +202,14 @@ function sendControlCenter(res: http.ServerResponse): void {
 
 export function createLocalAgentServer(options: {
   runtime: OperatorRuntime;
+  agentKernel?: AgentKernel;
+  intentRegistry?: IntentRegistry;
+  sagas?: DurableSagaKernel;
   token: string;
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
+  actionExecutions?: LocalActionExecutionStore;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
@@ -223,6 +234,7 @@ export function createLocalAgentServer(options: {
   deviceIdentity?: DeviceIdentityStore;
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
+  getRuntimeStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
   inlineApprovalWaitMs?: number;
@@ -251,16 +263,19 @@ export function createLocalAgentServer(options: {
     }
   };
 
-  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision) => {
+  const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision): number => {
     const waiters = approvalWaiters.get(actionId);
-    if (!waiters) return;
+    if (!waiters) return 0;
+    let notified = 0;
     for (const waiter of [...waiters]) {
       if (waiter.approvalRequestId !== approvalRequestId) continue;
       clearTimeout(waiter.timer);
       waiters.delete(waiter);
       waiter.resolve(decision);
+      notified += 1;
     }
     if (waiters.size === 0) approvalWaiters.delete(actionId);
+    return notified;
   };
 
   const waitForApprovalDecision = (
@@ -303,19 +318,49 @@ export function createLocalAgentServer(options: {
     signal?: AbortSignal,
     basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
-    const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, approvalAuthority) : false;
+    let approvalLeaseId: string | null = null;
+    if (options.approvals) {
+      try {
+        approvalLeaseId = await options.approvals.claim(action, approvalAuthority);
+      } catch (error) {
+        if (error instanceof OperatorError && error.code === 'APPROVAL_IN_USE') {
+          return {
+            ok: false,
+            capability: action.capability,
+            provider: 'policy',
+            evidence: [{ kind: 'approval', status: 'info', message: 'This approved action is already executing.', timestamp: new Date().toISOString() }],
+            error: { code: error.code, message: error.message, retryable: true, sideEffectState: 'none' },
+            durationMs: 0
+          };
+        }
+        throw error;
+      }
+    }
     const sessionPermissions = options.sessionApprovals
       ? options.sessionApprovals.permissionsFor(approvalAuthority, basePermissions)
       : basePermissions;
-    const permissions = oneTimeApproved
+    const permissions = approvalLeaseId
       ? {
           ...sessionPermissions,
           approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
         }
       : sessionPermissions;
-    if (oneTimeApproved) await options.approvals!.consume(action, approvalAuthority);
-    const result = await options.runtime.execute(action, permissions, { signal });
-    if (options.perception) {
+    let result: ActionResult;
+    try {
+      result = options.agentKernel
+        ? await options.agentKernel.execute(action, permissions, { signal })
+        : await options.runtime.execute(action, permissions, { signal });
+    } catch (error) {
+      if (approvalLeaseId) {
+        await options.approvals!.settle(action, approvalLeaseId, 'consume', approvalAuthority);
+      }
+      throw error;
+    }
+    if (approvalLeaseId) {
+      const outcome = !result.ok && result.error?.sideEffectState === 'none' ? 'release' : 'consume';
+      await options.approvals!.settle(action, approvalLeaseId, outcome, approvalAuthority);
+    }
+    if (options.perception && !options.agentKernel) {
       try {
         await publishPerceptionFromActionResult(options.perception, action, result);
       } catch (error) {
@@ -371,48 +416,52 @@ export function createLocalAgentServer(options: {
       }
     }
 
-    await options.audit?.append({
-      ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-      actionId: action.id,
-      providerId: result.provider,
-      capability: action.capability,
-      target: action.target,
-      result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
-      risk: action.risk,
-      details: {
-        studioWorkflow: true,
-        durationMs: result.durationMs,
-        errorCode: result.error?.code,
-        sideEffectState: result.error?.sideEffectState,
-        autoResumedAfterApproval
-      }
-    });
+    try {
+      await options.audit?.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id, providerId: result.provider, capability: action.capability, target: action.target,
+        result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure', risk: action.risk,
+        details: { studioWorkflow: true, durationMs: result.durationMs, errorCode: result.error?.code, sideEffectState: result.error?.sideEffectState, autoResumedAfterApproval }
+      });
+    } catch (error) {
+      result = resultWithAuditDegradation(result, error);
+    }
     return result;
   };
 
-  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => ({
-    permissionProvider: async (action: ActionRequest) => {
-      const oneTimeApproved = options.approvals ? await options.approvals.isApproved(action, authority) : false;
-      const sessionPermissions = options.sessionApprovals
-        ? options.sessionApprovals.permissionsFor(authority, basePermissions)
-        : basePermissions;
-      if (!oneTimeApproved) return sessionPermissions;
-      await options.approvals!.consume(action, authority);
-      return {
-        ...sessionPermissions,
-        approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
-      };
-    },
-    onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
-      if (!options.approvals) return undefined;
-      const pending = await options.approvals.register(action, authority);
-      if (!options.recoveryToken) return undefined;
-      const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
-      if (decision === 'approve' || decision === 'session') return 'retry' as const;
-      if (decision === 'deny') return 'deny' as const;
-      return undefined;
-    }
-  });
+  const taskAuthorization = (authority?: ApprovalAuthorityContext, basePermissions: PermissionProfile = options.permissions) => {
+    const approvalLeases = new Map<string, string>();
+    return {
+      permissionProvider: async (action: ActionRequest) => {
+        const executionLeaseId = options.approvals ? await options.approvals.claim(action, authority) : null;
+        const sessionPermissions = options.sessionApprovals
+          ? options.sessionApprovals.permissionsFor(authority, basePermissions)
+          : basePermissions;
+        if (!executionLeaseId) return sessionPermissions;
+        approvalLeases.set(action.id, executionLeaseId);
+        return {
+          ...sessionPermissions,
+          approvedActionIds: [...new Set([...(sessionPermissions.approvedActionIds ?? []), action.id])]
+        };
+      },
+      onActionResult: async (action: ActionRequest, result: ActionResult) => {
+        const executionLeaseId = approvalLeases.get(action.id);
+        if (!executionLeaseId || !options.approvals) return;
+        approvalLeases.delete(action.id);
+        const outcome = !result.ok && result.error?.sideEffectState === 'none' ? 'release' : 'consume';
+        await options.approvals.settle(action, executionLeaseId, outcome, authority);
+      },
+      onApprovalRequired: async (action: ActionRequest, remainingMs: number) => {
+        if (!options.approvals) return undefined;
+        const pending = await options.approvals.register(action, authority);
+        if (!options.recoveryToken) return undefined;
+        const decision = await waitForApprovalDecision(action.id, pending.approvalRequestId, remainingMs);
+        if (decision === 'approve' || decision === 'session') return 'retry' as const;
+        if (decision === 'deny') return 'deny' as const;
+        return undefined;
+      }
+    };
+  };
 
   const permissionsForRequest = async (
     relayRequest: boolean,
@@ -489,6 +538,138 @@ export function createLocalAgentServer(options: {
     }
     const requestPermissions = requestPermissionDecision.permissions;
 
+    const intentRoute = /^\/v1\/intents\/([A-Za-z0-9._:-]{1,128})$/.exec(pathname);
+    if (intentRoute && req.method === 'GET') {
+      if (!options.intentRegistry) {
+        send(res, 503, { ok: false, error: { code: 'INTENT_REGISTRY_NOT_CONFIGURED', message: 'Intent registry is not configured.' } });
+        return;
+      }
+      try {
+        const intent = await options.intentRegistry.current(intentRoute[1]!);
+        send(res, intent ? 200 : 404, intent
+          ? { ok: true, intent }
+          : { ok: false, error: { code: 'INTENT_NOT_FOUND', message: 'No current intent exists for this conversation.' } });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'INTENT_READ_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (intentRoute && req.method === 'POST') {
+      if (!options.intentRegistry) {
+        send(res, 503, { ok: false, error: { code: 'INTENT_REGISTRY_NOT_CONFIGURED', message: 'Intent registry is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const directive = String(body.directive ?? 'continue');
+        if (!['continue','refine','extend','pause','cancel','redirect','authorize','revoke'].includes(directive)) {
+          throw new OperatorError('INTENT_INPUT_INVALID', 'Intent directive is invalid.');
+        }
+        const intent = await options.intentRegistry.update(intentRoute[1]!, {
+          objective: String(body.objective ?? ''),
+          authorizedScope: Array.isArray(body.authorizedScope) ? body.authorizedScope.map(String) : [],
+          prohibitedScope: Array.isArray(body.prohibitedScope) ? body.prohibitedScope.map(String) : [],
+          directive: directive as 'continue' | 'refine' | 'extend' | 'pause' | 'cancel' | 'redirect' | 'authorize' | 'revoke',
+          sourceTurnId: String(body.sourceTurnId ?? '')
+        });
+        send(res, 200, {
+          ok: true,
+          intent,
+          binding: {
+            conversationId: intent.conversationId,
+            intentVersion: intent.intentVersion,
+            digest: intent.digest
+          }
+        });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'INTENT_UPDATE_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/sagas' && req.method === 'GET') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 100;
+      send(res, 200, { ok: true, sagas: await options.sagas.list(limit) });
+      return;
+    }
+
+    if (pathname === '/v1/sagas' && req.method === 'POST') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const rawSteps = Array.isArray(body.steps) ? body.steps : [];
+        const steps = rawSteps.map((value, index) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`steps[${index}] must be an object.`);
+          const raw = value as Record<string, unknown>;
+          return {
+            key: boundedString(raw.key, `steps[${index}].key`, 128),
+            action: validateActionEnvelope(raw.action),
+            ...(raw.compensation === undefined ? {} : { compensation: validateActionEnvelope(raw.compensation) })
+          };
+        });
+        const submitted = await options.sagas.submit({
+          ...(body.sagaId === undefined ? {} : { sagaId: String(body.sagaId) }),
+          objective: String(body.objective ?? ''),
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {}),
+          steps
+        });
+        if (body.run === true) {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Saga execution is disabled by the local emergency stop.' } });
+            return;
+          }
+          const saga = await options.sagas.run(submitted.id);
+          send(res, 200, { ok: true, saga });
+          return;
+        }
+        send(res, 202, { ok: true, saga: submitted });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_SUBMISSION_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const sagaRoute = /^\/v1\/sagas\/([0-9a-f-]{36})$/.exec(pathname);
+    if (sagaRoute && req.method === 'GET') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, saga: await options.sagas.inspect(sagaRoute[1]!) });
+      } catch (error) {
+        send(res, 404, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_NOT_FOUND', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    const sagaRunRoute = /^\/v1\/sagas\/([0-9a-f-]{36})\/run$/.exec(pathname);
+    if (sagaRunRoute && req.method === 'POST') {
+      if (!options.sagas) {
+        send(res, 503, { ok: false, error: { code: 'SAGA_KERNEL_NOT_CONFIGURED', message: 'Durable saga kernel is not configured.' } });
+        return;
+      }
+      if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+        send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Saga execution is disabled by the local emergency stop.' } });
+        return;
+      }
+      try {
+        send(res, 200, { ok: true, saga: await options.sagas.run(sagaRunRoute[1]!) });
+      } catch (error) {
+        send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'SAGA_EXECUTION_FAILED', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
     if (pathname === '/v1/enterprise-policy' && req.method === 'GET') {
       if (!options.enterprisePolicy) {
         send(res, 503, { ok: false, error: { code: 'ENTERPRISE_POLICY_NOT_CONFIGURED', message: 'Enterprise policy store is not configured.' } });
@@ -552,6 +733,22 @@ export function createLocalAgentServer(options: {
 
     if (pathname === '/v1/activity/summary' && req.method === 'GET') {
       send(res, 200, { ok: true, summary: options.audit ? await options.audit.summary() : null, configured: Boolean(options.audit) });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/runtime' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 200) : 100;
+      const [tasks, journal, approvals] = await Promise.all([
+        options.tasks ? options.tasks.list(limit) : [],
+        options.agentKernel ? options.agentKernel.journal.list(Math.min(1000, limit * 5)) : [],
+        options.approvals ? options.approvals.list() : []
+      ]);
+      send(res, 200, {
+        ok: true,
+        projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
+        configured: Boolean(options.tasks)
+      });
       return;
     }
 
@@ -815,7 +1012,8 @@ export function createLocalAgentServer(options: {
           ...(body.sessionId === undefined ? {} : { sessionId: String(body.sessionId) }),
           title: String(body.title ?? ''),
           objective: String(body.objective ?? ''),
-          scopeKey: String(body.scopeKey ?? '')
+          scopeKey: String(body.scopeKey ?? ''),
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {})
         });
         send(res, 201, { ok: true, session });
       } catch (error) {
@@ -849,7 +1047,7 @@ export function createLocalAgentServer(options: {
           const body = await readJson(req) as Record<string, unknown>;
           const receipt = await options.teachMode.verify(
             sessionId,
-            Array.isArray(body.checks) ? body.checks as any : []
+            body.verification ?? (Array.isArray(body.checks) ? body.checks : undefined)
           );
           send(res, 200, { ok: true, receipt });
           return;
@@ -900,7 +1098,8 @@ export function createLocalAgentServer(options: {
           const run = await options.studioExecutor.submit(
             workflowRoute[1]!,
             values,
-            body.runId === undefined ? undefined : String(body.runId)
+            body.runId === undefined ? undefined : String(body.runId),
+            body.intent && typeof body.intent === 'object' ? validIntentBinding(body.intent) : undefined
           );
           send(res, 201, { ok: true, run });
           return;
@@ -953,7 +1152,7 @@ export function createLocalAgentServer(options: {
           const body = await readJson(req) as Record<string, unknown>;
           const run = await options.studioExecutor.verify(
             runId,
-            Array.isArray(body.checks) ? body.checks as any : []
+            body.verification ?? (Array.isArray(body.checks) ? body.checks : undefined)
           );
           send(res, 200, { ok: true, run });
           return;
@@ -1219,7 +1418,8 @@ export function createLocalAgentServer(options: {
         const mission = await options.teams.submit({
           objective: body.objective as string,
           workItems: body.workItems as TeamWorkInput[],
-          budget: body.budget as any
+          budget: body.budget as any,
+          ...(body.intent && typeof body.intent === 'object' ? { intent: validIntentBinding(body.intent) } : {})
         });
         const result = body.run === true ? await options.teams.start(mission.id) : mission;
         send(res, body.run === true ? 200 : 202, { ok: true, mission: result });
@@ -1350,11 +1550,23 @@ export function createLocalAgentServer(options: {
         const ownedLease = authorization.workItem.lease;
         if (!ownedLease) throw new Error('Authorized team work lost its lease before execution.');
         const remainingLeaseMs = Math.max(1, Date.parse(ownedLease.expiresAt) - Date.now());
+        const { intent: _workerIntent, ...actionWithoutIntent } = action;
+        const teamAction: ActionRequest = {
+          ...actionWithoutIntent,
+          taskId: teamExecuteRoute[1]!,
+          ...(authorization.mission.intent ? { intent: authorization.mission.intent } : {})
+        };
+        const receipt = await options.teams.beginActionExecution(teamExecuteRoute[1]!, {
+          workerId, workItemId: teamExecuteRoute[2]!, leaseId, action: teamAction
+        });
+        if (receipt.status === 'completed') {
+          send(res, receipt.result.ok ? 200 : 409, receipt.result);
+          return;
+        }
         const controller = new AbortController();
         const actionKey = [teamExecuteRoute[1]!, teamExecuteRoute[2]!, leaseId, action.id].join(':');
         activeTeamActions.set(actionKey, { missionId: teamExecuteRoute[1]!, workItemId: teamExecuteRoute[2]!, workerId, controller });
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(remainingLeaseMs)]);
-        const teamAction: ActionRequest = { ...action, taskId: teamExecuteRoute[1]! };
         let result: ActionResult;
         let autoResumedAfterApproval = false;
         try {
@@ -1383,7 +1595,11 @@ export function createLocalAgentServer(options: {
             };
           }
         }
-        await options.audit?.append({
+        result = await options.teams.completeActionExecution(teamExecuteRoute[1]!, {
+          workerId, workItemId: teamExecuteRoute[2]!, leaseId, action: teamAction, result
+        });
+        try {
+          await options.audit?.append({
           traceId: teamExecuteRoute[1]!,
           missionId: teamExecuteRoute[1]!,
           workItemId: teamExecuteRoute[2]!,
@@ -1401,7 +1617,11 @@ export function createLocalAgentServer(options: {
             teamLeaseId: leaseId,
             autoResumedAfterApproval
           }
-        });
+          });
+        } catch (error) {
+          const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'AUDIT_APPEND_FAILED';
+          result = await options.teams.recordActionAuditFailure(teamExecuteRoute[1]!, teamAction.id, result, code);
+        }
         send(res, result.ok ? 200 : 409, result);
         } finally {
           activeTeamActions.delete(actionKey);
@@ -1424,7 +1644,9 @@ export function createLocalAgentServer(options: {
         const workItemId = worldPublishRoute[2]!;
         const mission = await options.teams.inspect(missionId);
         const item = mission.workItems.find((candidate) => candidate.id === workItemId);
-        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+        if (!item || item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true
+          || typeof item.result.verificationDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+          || !item.result.worldObservationDigest) {
           throw Object.assign(new Error('Completed verifier world-observation commitment is required.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
         }
         const prepared = prepareVerifierWorldObservations(body.worldObservations, missionId, workItemId);
@@ -1453,7 +1675,7 @@ export function createLocalAgentServer(options: {
             if (!options.world) throw Object.assign(new Error('World model is not configured.'), { code: 'WORLD_MODEL_NOT_CONFIGURED' });
             const before = await options.teams.inspect(id);
             const item = before.workItems.find((candidate) => candidate.id === workItemId);
-            if (!item || item.role !== 'verifier' || body.verificationPassed !== true) {
+            if (!item || item.role !== 'verifier') {
               throw Object.assign(new Error('Only a passing verifier may commit world observations.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
             }
             preparedWorld = prepareVerifierWorldObservations(body.worldObservations, id, workItemId);
@@ -1462,6 +1684,7 @@ export function createLocalAgentServer(options: {
             workerId: String(body.workerId ?? ''), workItemId, leaseId: String(body.leaseId ?? ''),
             summary: String(body.summary ?? ''), evidence: Array.isArray(body.evidence) ? body.evidence as any : [],
             verificationPassed: body.verificationPassed === true,
+            ...(body.verification !== undefined ? { verification: body.verification } : {}),
             ...(preparedWorld ? { worldObservationDigest: preparedWorld.digest } : {})
           });
           let worldObservationsPublished = 0;
@@ -1539,7 +1762,8 @@ export function createLocalAgentServer(options: {
           goal,
           maxSteps: body.maxSteps,
           maxAttemptsPerStep: body.maxAttemptsPerStep,
-          timeoutMs: body.timeoutMs
+          timeoutMs: body.timeoutMs,
+          ...(body.intent && typeof body.intent === 'object' ? { intent: body.intent } : {})
         } as SubmitTaskOptions);
         if (body.run === true && relayRequest) {
           const authorization = taskAuthorization(approvalAuthority, requestPermissions);
@@ -1656,7 +1880,8 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/settings' && req.method === 'GET') {
-      send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) } });
+      const runtimeStatus = options.getRuntimeStatus ? await options.getRuntimeStatus() : {};
+      send(res, 200, { ok: true, settings: { ...(options.settings ?? {}) }, runtime: runtimeStatus });
       return;
     }
 
@@ -1797,7 +2022,34 @@ export function createLocalAgentServer(options: {
           send(res, 400, { ok: false, error: { code: 'APPROVAL_DECISION_INVALID', message: 'decision must be approve, session, or deny.' } });
           return;
         }
-        notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
+        const notifiedWaiters = notifyApprovalDecision(actionId, approvalRequestId, decision as InlineApprovalDecision);
+        if ((decision === 'approve' || decision === 'session')
+          && notifiedWaiters === 0
+          && record.continuationTaskId
+          && options.taskOrchestrator
+          && options.tasks) {
+          const continuation = await options.tasks.get(record.continuationTaskId).catch(() => null);
+          const blocked = continuation?.execution?.records.find((item) => item.state === 'BLOCKED' && item.actionId === actionId);
+          if (continuation?.state === 'BLOCKED' && blocked) {
+            void options.taskOrchestrator.resume(
+              record.continuationTaskId,
+              [],
+              taskAuthorization(undefined, options.permissions)
+            ).catch(async (error) => {
+              try {
+                await options.audit?.append({
+                  traceId: record.continuationTaskId,
+                  taskId: record.continuationTaskId,
+                  actionId,
+                  capability: 'task.approval.continuation',
+                  result: 'failure',
+                  risk: 'read',
+                  details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TASK_APPROVAL_CONTINUATION_FAILED' }
+                });
+              } catch { /* blocked task remains durable and explicitly resumable */ }
+            });
+          }
+        }
         send(res, 200, {
           ok: true,
           approval: {
@@ -1878,6 +2130,57 @@ export function createLocalAgentServer(options: {
       return;
     }
 
+    if (pathname === '/v1/action-receipt' && req.method === 'POST') {
+      if (!options.actionExecutions) {
+        send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPTS_DISABLED', message: 'Local action execution receipts are not configured.' } });
+        return;
+      }
+      try {
+        const body = await readJson(req) as { action?: ActionRequest; approvalAuthority?: unknown };
+        if (!body.action || typeof body.action !== 'object') {
+          send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'action is required.' } });
+          return;
+        }
+        const action = validateActionEnvelope(body.action);
+        const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
+        assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        const receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        if (receipt.status === 'missing') {
+          send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND', message: 'No durable execution receipt exists for this exact action.' } });
+          return;
+        }
+        if (receipt.status === 'processing') {
+          send(res, 202, {
+            ok: true,
+            receipt: {
+              status: 'processing',
+              actionId: receipt.record.actionId,
+              startedAt: receipt.record.startedAt
+            }
+          });
+          return;
+        }
+        send(res, 200, {
+          ok: true,
+          receipt: {
+            status: 'completed',
+            actionId: receipt.record.actionId,
+            startedAt: receipt.record.startedAt,
+            completedAt: receipt.record.completedAt,
+            resultSha256: receipt.record.resultSha256
+          },
+          result: receipt.result
+        });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'BAD_REQUEST';
+        send(res, code.startsWith('ACTION_EXECUTION_') ? 409 : 400, {
+          ok: false,
+          error: { code, message: error instanceof Error ? error.message : String(error) }
+        });
+      }
+      return;
+    }
+
     if (pathname === '/v1/execute' && req.method === 'POST') {
       try {
         if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
@@ -1898,6 +2201,26 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
+        if (options.actionExecutions) {
+          const receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (receipt.status === 'completed') {
+            send(res, receipt.result.ok ? 200 : 409, receipt.result);
+            return;
+          }
+          if (receipt.status === 'processing') {
+            send(res, 409, {
+              ok: false,
+              error: {
+                code: 'ACTION_EXECUTION_IN_PROGRESS',
+                message: 'This exact action already has an unfinished durable execution receipt; it will not be replayed blindly.',
+                retryable: true,
+                sideEffectState: 'uncertain'
+              },
+              receipt: { actionId: receipt.record.actionId, startedAt: receipt.record.startedAt }
+            });
+            return;
+          }
+        }
         let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
@@ -1942,33 +2265,31 @@ export function createLocalAgentServer(options: {
             teachCaptureCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'TEACH_CAPTURE_FAILED';
           }
         }
-        await options.audit?.append({
-          ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-          actionId: action.id,
-          providerId: result.provider,
-          capability: action.capability,
-          target: action.target,
-          result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure',
-          risk: action.risk,
-          details: {
-            provenanceKind: action.provenance.kind,
-            durationMs: result.durationMs,
-            errorCode: result.error?.code,
-            sideEffectState: result.error?.sideEffectState,
-            sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
-            autoResumedAfterApproval,
-            enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
-            enterpriseRoleIds: requestPermissionDecision.roleIds,
-            enterpriseBindingIds: requestPermissionDecision.bindingIds,
-            teachCaptured,
-            teachCaptureCode
-          }
-        });
+        try {
+          await options.audit?.append({
+            ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+            actionId: action.id, providerId: result.provider, capability: action.capability, target: action.target,
+            result: result.ok ? 'success' : result.provider === 'policy' ? 'blocked' : 'failure', risk: action.risk,
+            details: {
+              provenanceKind: action.provenance.kind, durationMs: result.durationMs, errorCode: result.error?.code,
+              sideEffectState: result.error?.sideEffectState,
+              sessionApproved: Boolean(options.sessionApprovals?.allows(action, approvalAuthority, requestPermissions)),
+              autoResumedAfterApproval, enterprisePolicyApplied: requestPermissionDecision.enterpriseApplied,
+              enterpriseRoleIds: requestPermissionDecision.roleIds, enterpriseBindingIds: requestPermissionDecision.bindingIds,
+              teachCaptured, teachCaptureCode
+            }
+          });
+        } catch (error) {
+          result = resultWithAuditDegradation(result, error);
+        }
+        if (options.actionExecutions) await options.actionExecutions.complete(action, result, approvalAuthority);
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : 'BAD_REQUEST';
-        send(res, code === 'REQUEST_TOO_LARGE' ? 413 : 400, { ok: false, error: { code, message } });
+        const explicitCode = typeof (error as any)?.code === 'string' ? String((error as any).code) : undefined;
+        const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : explicitCode ?? 'BAD_REQUEST';
+        const status = code === 'REQUEST_TOO_LARGE' ? 413 : code.startsWith('ACTION_EXECUTION_') ? 409 : 400;
+        send(res, status, { ok: false, error: { code, message } });
       }
       return;
     }
@@ -1996,6 +2317,18 @@ export function createLocalAgentServer(options: {
       if (!server.listening) return;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
+  };
+}
+
+function resultWithAuditDegradation(result: ActionResult, error: unknown): ActionResult {
+  const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'AUDIT_APPEND_FAILED';
+  return {
+    ...result,
+    evidence: [...result.evidence, {
+      kind: 'audit_persistence', status: 'fail',
+      message: 'The primary action result is authoritative, but its post-execution audit record could not be persisted.',
+      data: { code }, timestamp: new Date().toISOString()
+    }]
   };
 }
 
@@ -2035,7 +2368,9 @@ async function publishVerifierWorldObservations(
   item: Awaited<ReturnType<TeamCoordinator['inspect']>>['workItems'][number],
   observations: Array<ReturnType<typeof validateWorldObservation>>
 ): Promise<number> {
-  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true || !item.result.worldObservationDigest) {
+  if (item.role !== 'verifier' || item.state !== 'COMPLETED' || item.result?.verificationPassed !== true
+    || typeof item.result.verificationDigest !== 'string' || !/^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+    || !item.result.worldObservationDigest) {
     throw Object.assign(new Error('World publication requires a completed passing verifier commitment.'), { code: 'TEAM_WORLD_OBSERVATION_DENIED' });
   }
   const evidenceDigest = crypto.createHash('sha256').update(JSON.stringify({
@@ -2044,6 +2379,7 @@ async function publishVerifierWorldObservations(
     workerId: item.result.workerId,
     completedAt: item.result.completedAt,
     verificationPassed: true,
+    verificationDigest: item.result.verificationDigest,
     worldObservationDigest: item.result.worldObservationDigest,
     evidence: item.result.evidence
   })).digest('hex');
@@ -2065,6 +2401,18 @@ function withinAuthorizedRoots(input: string, roots: string[]): boolean {
 
 function taskAuthorizedScope(goal: SemanticTaskGoal, roots: string[]): string[] | null {
   if (!goal || typeof goal !== 'object') return null;
+  if (goal.kind === 'autonomous-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) return null;
+    const selectedRoots = Array.isArray(goal.roots) ? goal.roots : [];
+    if (selectedRoots.some((root) => typeof root !== 'string' || !withinAuthorizedRoots(root, roots))) return null;
+    const browserOrigins = Array.isArray(goal.browserOrigins) ? goal.browserOrigins : [];
+    const scopes = [
+      ...selectedRoots.map((root) => path.resolve(root)),
+      ...browserOrigins.map((origin) => `browser:${origin}`),
+      ...(goal.application === true ? ['application:uia'] : [])
+    ];
+    return scopes.length > 0 ? [...new Set(scopes)].sort() : null;
+  }
   if (goal.kind === 'semantic-workflow') {
     if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) return null;
     const scopes: string[] = [];

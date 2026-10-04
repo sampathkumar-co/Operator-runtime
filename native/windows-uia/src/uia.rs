@@ -54,6 +54,10 @@ pub struct ElementSummary {
     pub process_id: u32,
     pub depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<Vec<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<ElementBounds>,
     pub patterns: PatternSupport,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,16 +124,17 @@ impl UiaEngine {
         };
         let event_root = start.clone();
 
-        let mut queue = VecDeque::from([(start, 0usize)]);
+        let mut queue = VecDeque::from([(start, 0usize, None::<String>)]);
         let mut elements = Vec::new();
         let mut truncated = false;
 
-        while let Some((element, depth)) = queue.pop_front() {
+        while let Some((element, depth, inherited_window_id)) = queue.pop_front() {
             if elements.len() >= max_nodes {
                 truncated = true;
                 break;
             }
-            elements.push(self.summarize(&element, depth));
+            let window_id = native_window_id(&element).or(inherited_window_id);
+            elements.push(self.summarize(&element, depth, window_id.clone()));
             if depth >= max_depth {
                 continue;
             }
@@ -139,7 +144,7 @@ impl UiaEngine {
                         truncated = true;
                         break;
                     }
-                    queue.push_back((child, depth + 1));
+                    queue.push_back((child, depth + 1, window_id.clone()));
                 }
             }
         }
@@ -166,7 +171,7 @@ impl UiaEngine {
         params.validate()?;
         let wait_ms = params.wait_ms();
         let (element, waited_ms) = self.find_unique_with_wait(&params.selector, wait_ms)?;
-        let before = self.summarize(&element, 0);
+        let before = self.summarize(&element, 0, self.containing_window_id(&element));
 
         match params.operation.as_str() {
             "invoke" => self.invoke(&element, waited_ms, before),
@@ -185,7 +190,7 @@ impl UiaEngine {
                 if !verified {
                     return Err("Focus postcondition failed: requested element is not focused".into());
                 }
-                let after = self.summarize(&focused, 0);
+                let after = self.summarize(&focused, 0, self.containing_window_id(&focused));
                 Ok(json!({
                     "operation": "focus",
                     "waited_ms": waited_ms,
@@ -203,7 +208,7 @@ impl UiaEngine {
                 if !selected {
                     return Err("Selection postcondition failed: requested element is not selected".into());
                 }
-                let after = self.summarize(&element, 0);
+                let after = self.summarize(&element, 0, self.containing_window_id(&element));
                 Ok(json!({
                     "operation": "select",
                     "waited_ms": waited_ms,
@@ -227,7 +232,7 @@ impl UiaEngine {
                 if actual != expected {
                     return Err(format!("ExpandCollapse postcondition failed: expected {expected}, observed {actual}"));
                 }
-                let after = self.summarize(&element, 0);
+                let after = self.summarize(&element, 0, self.containing_window_id(&element));
                 Ok(json!({
                     "operation": params.operation,
                     "waited_ms": waited_ms,
@@ -258,7 +263,7 @@ impl UiaEngine {
                         "Scroll postcondition failed: horizontal {before_horizontal}->{after_horizontal}, vertical {before_vertical}->{after_vertical}"
                     ));
                 }
-                let after = self.summarize(&element, 0);
+                let after = self.summarize(&element, 0, self.containing_window_id(&element));
                 Ok(json!({
                     "operation": "scroll",
                     "waited_ms": waited_ms,
@@ -278,7 +283,7 @@ impl UiaEngine {
     fn invoke(&self, element: &UIElement, waited_ms: u64, before: ElementSummary) -> Result<Value, String> {
         if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
             pattern.invoke().map_err(|e| format!("InvokePattern failed: {e}"))?;
-            let after = self.summarize(element, 0);
+            let after = self.summarize(element, 0, self.containing_window_id(element));
             return Ok(json!({
                 "operation": "invoke",
                 "waited_ms": waited_ms,
@@ -296,7 +301,7 @@ impl UiaEngine {
         legacy
             .do_default_action()
             .map_err(|e| format!("LegacyIAccessible DoDefaultAction fallback failed: {e}"))?;
-        let after = self.summarize(element, 0);
+        let after = self.summarize(element, 0, self.containing_window_id(element));
         Ok(json!({
             "operation": "invoke",
             "waited_ms": waited_ms,
@@ -325,7 +330,7 @@ impl UiaEngine {
             if actual != value {
                 return Err(format!("Value postcondition failed: expected {:?}, observed {:?}", value, actual));
             }
-            let after = self.summarize(element, 0);
+            let after = self.summarize(element, 0, self.containing_window_id(element));
             return Ok(json!({
                 "operation": "set_value",
                 "waited_ms": waited_ms,
@@ -348,7 +353,7 @@ impl UiaEngine {
         if actual != value {
             return Err(format!("Legacy value postcondition failed: expected {:?}, observed {:?}", value, actual));
         }
-        let after = self.summarize(element, 0);
+        let after = self.summarize(element, 0, self.containing_window_id(element));
         Ok(json!({
             "operation": "set_value",
             "waited_ms": waited_ms,
@@ -525,7 +530,18 @@ impl UiaEngine {
         true
     }
 
-    fn summarize(&self, element: &UIElement, depth: usize) -> ElementSummary {
+    fn containing_window_id(&self, element: &UIElement) -> Option<String> {
+        let mut current = element.clone();
+        for _ in 0..64 {
+            if let Some(window_id) = native_window_id(&current) {
+                return Some(window_id);
+            }
+            current = self.walker.get_parent(&current).ok()?;
+        }
+        None
+    }
+
+    fn summarize(&self, element: &UIElement, depth: usize, window_id: Option<String>) -> ElementSummary {
         let invoke = element.get_pattern::<UIInvokePattern>().is_ok();
         let value_pattern = element.get_pattern::<UIValuePattern>().ok();
         let selection_pattern = element.get_pattern::<UISelectionItemPattern>().ok();
@@ -568,6 +584,8 @@ impl UiaEngine {
             control_type: element.get_control_type().map(|value| format!("{value:?}")).unwrap_or_else(|_| "Unknown".into()),
             process_id: element.get_process_id().unwrap_or_default(),
             depth,
+            runtime_id: element.get_runtime_id().ok().filter(|value| !value.is_empty()),
+            window_id,
             bounds,
             patterns: PatternSupport {
                 invoke,
@@ -582,6 +600,20 @@ impl UiaEngine {
             expand_collapse_state,
             scroll,
         }
+    }
+}
+
+fn native_window_id(element: &UIElement) -> Option<String> {
+    let handle = element.get_native_window_handle().ok()?;
+    if handle.is_invalid() {
+        return None;
+    }
+    let rendered = format!("{handle:?}");
+    let value = rendered.strip_prefix("Handle(")?.strip_suffix(')')?;
+    if value.eq_ignore_ascii_case("0x0") {
+        None
+    } else {
+        Some(value.to_ascii_uppercase().replace("0X", "0x"))
     }
 }
 

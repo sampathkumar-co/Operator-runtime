@@ -49,7 +49,7 @@ export class DesiredStateReconciler {
   }
 
   async #run(): Promise<DesiredStateReconcilerResult> {
-    const contracts = await this.#controller.list(this.#maxPerTick);
+    const contracts = await this.#controller.listForReconciliation(this.#maxPerTick);
     const failed: Array<{ contractId: string; code: string }> = [];
     let reconciled = 0;
     for (const contract of contracts) {

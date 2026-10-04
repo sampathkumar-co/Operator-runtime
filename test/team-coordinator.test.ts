@@ -33,6 +33,27 @@ test('stage4 requires a verifier that covers every non-verifier work item', asyn
   );
 });
 
+test('team mission lock reclaims a reused PID only when the process instance identity changed', async (t) => {
+  const state = await stateDir(t);
+  const coordinator = new TeamCoordinator(state, {
+    processInstance: { pid: 44002, started: 'new-owner' },
+    inspectProcessInstance: async (pid) => pid === 44001 ? { pid, started: 'reused-instance' } : { pid, started: 'new-owner' }
+  });
+  const mission = await coordinator.submit({
+    objective: 'pid reuse lock recovery',
+    workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+  });
+  await fs.writeFile(path.join(state, 'team-mission-locks', `${mission.id}.lock`), JSON.stringify({
+    id: 'stale-lock',
+    pid: 44001,
+    processInstance: { pid: 44001, started: 'old-instance' },
+    at: new Date().toISOString()
+  }));
+
+  const started = await coordinator.start(mission.id);
+  assert.equal(started.state, 'RUNNING');
+});
+
 test('stage4 deterministically schedules dependencies and parallel independent resources', async (t) => {
   const coordinator = new TeamCoordinator(await stateDir(t));
   const mission = await coordinator.submit({
@@ -241,4 +262,22 @@ test('stage4 shared blackboard uses lease-bound CAS revisions to prevent lost up
   });
   assert.equal(second.blackboard[0]?.revision, 2);
   assert.deepEqual(second.blackboard[0]?.value, { choice: 'A', approved: true });
+});
+
+
+test('stage4 recent mission listing sorts by updatedAt before applying the page limit', async (t) => {
+  const coordinator = new TeamCoordinator(await stateDir(t));
+  const missions = [];
+  for (let index = 0; index < 20; index += 1) {
+    missions.push(await coordinator.submit({
+      objective: `mission-${index}`,
+      workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+    }));
+  }
+
+  const lexicallyLast = missions.slice().sort((a, b) => a.id.localeCompare(b.id)).at(-1)!;
+  await coordinator.start(lexicallyLast.id);
+  const recent = await coordinator.list(10);
+  assert.equal(recent[0]?.id, lexicallyLast.id);
+  assert.ok(recent.some((item) => item.id === lexicallyLast.id));
 });

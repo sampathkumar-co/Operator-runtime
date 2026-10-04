@@ -333,3 +333,78 @@ test('expired idempotent delivery keeps a payload-free replay tombstone and bloc
   assert.equal(retry.id, first.id);
   assert.equal(retry.status, 'expired');
 });
+
+
+test('relay terminal history compacts indefinitely without exhausting a tiny retained-delivery limit', async (t) => {
+  const state = await temp(t);
+  const store = new RelayDeliveryStore(state, { maxDeliveriesPerStream: 8, terminalReplayWindow: 2 });
+  let lastSeq = 0;
+  for (let index = 0; index < 200; index += 1) {
+    const queued = await store.enqueue(DEVICE, 'task.dispatch', { taskId: `task-${index}` });
+    lastSeq = queued.seq;
+    await store.acknowledge(DEVICE, queued.seq, queued.id);
+  }
+  assert.equal(lastSeq, 200);
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 200, highestEnqueuedSeq: 200 });
+  assert.deepEqual(await store.pending(DEVICE), []);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.equal(persisted.version, 2);
+  assert.equal(persisted.streams[0].baseSeq, 199);
+  assert.equal(persisted.streams[0].deliveries.length, 2);
+  assert.equal(persisted.streams[0].highestCompactedAckedSeq, 198);
+});
+
+
+test('compacted expired-only prefix remains resumable while compacted ACKed history remains fail-closed', async (t) => {
+  let nowMs = Date.parse('2026-09-20T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const expiredState = await temp(t);
+  const expiredStore = new RelayDeliveryStore(expiredState, {
+    clock, retentionMs: 60_000, maxDeliveriesPerStream: 8, terminalReplayWindow: 2
+  });
+  for (let index = 0; index < 12; index += 1) {
+    await expiredStore.enqueue(DEVICE, 'task.dispatch', { taskId: `expired-${index}` });
+    nowMs += 60_001;
+    await expiredStore.expirePending();
+  }
+  assert.deepEqual(await expiredStore.reconcileClientCursor(DEVICE, 0), {
+    lastAckedSeq: 12, advanced: 12, expiredThroughSeq: 12
+  });
+
+  const ackedState = await temp(t);
+  const ackedStore = new RelayDeliveryStore(ackedState, { maxDeliveriesPerStream: 8, terminalReplayWindow: 2 });
+  for (let index = 0; index < 12; index += 1) {
+    const queued = await ackedStore.enqueue(DEVICE, 'task.dispatch', { taskId: `acked-${index}` });
+    await ackedStore.acknowledge(DEVICE, queued.seq, queued.id);
+  }
+  await assert.rejects(
+    ackedStore.reconcileClientCursor(DEVICE, 0),
+    (error: any) => error?.code === 'RELAY_RESUME_BEHIND'
+  );
+});
+
+
+test('v1 relay state migrates to compactable v2 without resetting sequence watermarks', async (t) => {
+  const state = await temp(t);
+  const firstId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab';
+  const legacy = {
+    version: 1,
+    streams: [{ deviceId: DEVICE, nextSeq: 2, lastAckedSeq: 1, deliveries: [{
+      seq: 1, id: firstId, kind: 'task.dispatch', payload: {},
+      createdAt: '2026-09-20T10:00:00.000Z', status: 'acked', ackedAt: '2026-09-20T10:00:01.000Z'
+    }] }]
+  };
+  await fs.writeFile(path.join(state, 'relay-deliveries.json'), JSON.stringify(legacy, null, 2));
+  const store = new RelayDeliveryStore(state, { maxDeliveriesPerStream: 8, terminalReplayWindow: 1 });
+  assert.deepEqual(await store.cursor(DEVICE), { lastAckedSeq: 1, highestEnqueuedSeq: 1 });
+  const second = await store.enqueue(DEVICE, 'task.dispatch', { taskId: 'after-migration' });
+  assert.equal(second.seq, 2);
+
+  const persisted = JSON.parse(await fs.readFile(path.join(state, 'relay-deliveries.json'), 'utf8'));
+  assert.equal(persisted.version, 2);
+  assert.equal(persisted.streams[0].nextSeq, 3);
+  assert.equal(persisted.streams[0].lastAckedSeq, 1);
+  assert.equal(persisted.streams[0].baseSeq, 1);
+  assert.equal(persisted.streams[0].highestCompactedAckedSeq, 0);
+});

@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, PermissionProfile } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
 import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
@@ -10,10 +11,21 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
 import { classifyTaskFailure } from './task-failure.ts';
-import { verifyTaskCompletion } from './task-verifier.ts';
-import { conservativeSideEffectState, retrySafeWithoutReconciliation } from './side-effect.ts';
+import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
+import { postgresSelectActionInput } from './semantic-task-input.ts';
+import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
+import type { IntentRegistry } from './intent-registry.ts';
+import type { ActionTransitionJournal } from './action-transition-journal.ts';
+import { validIntentBinding } from './intent-registry.ts';
+import { plannerEventFromResult, type TaskPlannerEvent } from './task-planner-event.ts';
+import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
+import {
+  activateSubgoal, createDurableTaskPlan, nextReadySubgoal, normalizeDurableTaskPlan,
+  taskPlanComplete, verifySubgoal, type DurableTaskPlan
+} from './task-plan.ts';
+import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -32,6 +44,17 @@ export type AppPhysicalFallback = {
 export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
 export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
 export type ProjectQualityCheck = 'lint' | 'test' | 'build';
+export type AutonomousTaskAction = { capability: string; input: Record<string, unknown>; target?: string };
+export type AutonomousTaskStep = {
+  key: string;
+  title: string;
+  parentKey?: string;
+  dependsOn?: string[];
+  resourceScope?: string[];
+  observe: AutonomousTaskAction;
+  action: AutonomousTaskAction;
+  verify: AutonomousTaskAction & { assertions: TaskStateAssertion[] };
+};
 
 export type AtomicSemanticTaskGoal =
   | { kind: 'controlled-file-change'; root: string; path: string; content: string }
@@ -53,11 +76,55 @@ export type AtomicSemanticTaskGoal =
 export type SemanticTaskGoal =
   | AtomicSemanticTaskGoal
   | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
-  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] };
+  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] }
+  | { kind: 'autonomous-workflow'; roots?: string[]; browserOrigins?: string[]; application?: boolean; steps: AutonomousTaskStep[] };
 
 export interface TaskPlannerContext {
   task: TaskCapsule;
   goal: SemanticTaskGoal;
+  budget: {
+    maxSteps: number;
+    usedSteps: number;
+    remainingSteps: number;
+    plannerIterations: number;
+    preDispatchReobserves: number;
+    dispatchedActions: number;
+    maxAttemptsPerStep: number;
+    activeDeadlineMsRemaining: number;
+  };
+  recentEvents: TaskPlannerEvent[];
+  intelligence: TaskIntelligenceContext;
+  decisionBudget: TaskDecisionBudget;
+}
+
+export interface TaskIntelligenceContext {
+  retrievedAt: string;
+  scopeKey: string;
+  sceneKey?: string;
+  world: Array<{
+    entityKey: string; type: string; updatedAt: string;
+    facts: Array<{ key: string; claimCount: number; freshestAt?: string; maxConfidence: number; evidenceDigests: string[] }>;
+  }>;
+  procedures: Array<{
+    id: string; confidence: number; capabilities: string[]; verifiedRuns: number; failedRuns: number; verificationDigest: string;
+  }>;
+  perception: Array<{
+    nodeId: string; semanticId?: string; confidence: number; channels: string[]; role?: string; name?: string; bounds?: PerceptionBoundsLike;
+  }>;
+  strategies: Array<{ id: string; score: number; staticScore: number; learnedAdjustment: number; samples: number }>;
+}
+
+type PerceptionBoundsLike = { x: number; y: number; width: number; height: number };
+
+export interface TaskIntelligenceRequest {
+  task: TaskCapsule;
+  goal: SemanticTaskGoal;
+  budget: TaskPlannerContext['budget'];
+  recentEvents: TaskPlannerEvent[];
+}
+
+export interface TaskIntelligenceProvider {
+  retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
 }
 
 /** Stable semantic observation boundary. A future visual provider can populate the
@@ -82,12 +149,14 @@ export interface TaskPlanner {
   readonly id: string;
   supports(goal: SemanticTaskGoal): boolean;
   next(context: TaskPlannerContext): PlannerDecision;
+  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
   accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
   fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
 }
 
 export interface TaskRunAuthorization {
   permissionProvider?: (action: ActionRequest) => PermissionProfile | Promise<PermissionProfile>;
+  onActionResult?: (action: ActionRequest, result: ActionResult) => void | Promise<void>;
   onApprovalRequired?: (
     action: ActionRequest,
     remainingMs: number
@@ -104,6 +173,7 @@ export interface SubmitTaskOptions {
   maxSteps?: number;
   maxAttemptsPerStep?: number;
   timeoutMs?: number;
+  intent?: IntentBinding;
 }
 
 export class TaskOrchestrator {
@@ -117,6 +187,11 @@ export class TaskOrchestrator {
   #stateWriteTails = new Map<string, Promise<void>>();
   #executeAction: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
   #resourceLeases?: ResourceLeaseStore;
+  #intentRegistry?: IntentRegistry;
+  #actionJournal?: ActionTransitionJournal;
+  #wallNow: () => number;
+  #monotonicNow: () => number;
+  #intelligence?: TaskIntelligenceProvider;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -125,14 +200,24 @@ export class TaskOrchestrator {
     planners?: TaskPlanner[];
     executeAction?: (action: ActionRequest, permissions: PermissionProfile, context?: CapabilityExecutionContext) => Promise<ActionResult>;
     resourceLeases?: ResourceLeaseStore;
+    intentRegistry?: IntentRegistry;
+    actionJournal?: ActionTransitionJournal;
+    wallNow?: () => number;
+    monotonicNow?: () => number;
+    intelligence?: TaskIntelligenceProvider;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
-    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner()];
+    const planners = options.planners ?? [new ProjectQualityGatePlanner(), new SemanticTaskPlanner(), new SemanticWorkflowPlanner(), new AutonomousWorkflowPlanner()];
     this.#planners = new Map(planners.map((planner) => [planner.id, planner]));
     this.#permissions = structuredClone(options.permissions);
     this.#executeAction = options.executeAction ?? ((action, permissions, context) => this.#runtime.execute(action, permissions, context));
     this.#resourceLeases = options.resourceLeases;
+    this.#intentRegistry = options.intentRegistry;
+    this.#actionJournal = options.actionJournal;
+    this.#wallNow = options.wallNow ?? Date.now;
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.#intelligence = options.intelligence;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -148,8 +233,13 @@ export class TaskOrchestrator {
       successConditions: boundedTextArray(input.successConditions, 1000, 16_384, 'successConditions'),
       maxSteps: boundedInteger(input.maxSteps, 1, 100, 20),
       maxAttemptsPerStep: boundedInteger(input.maxAttemptsPerStep, 1, 5, 2),
-      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000)
+      timeoutMs: boundedInteger(input.timeoutMs, 100, 60 * 60_000, 10 * 60_000),
+      ...(input.intent ? { intent: validIntentBinding(input.intent) } : {})
     };
+    if (normalized.intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Task intent binding requires an IntentRegistry.');
+      await this.#intentRegistry.assertExecutable(normalized.intent);
+    }
     const requestId = input.requestId === undefined ? undefined : validTaskRequestId(input.requestId);
     if (requestId) {
       try {
@@ -168,18 +258,32 @@ export class TaskOrchestrator {
       interpretedObjective: `${goal.kind}:${normalized.userObjective}`,
       authorizedScope: normalized.authorizedScope,
       prohibitedScope: normalized.prohibitedScope,
-      successConditions: normalized.successConditions
+      successConditions: normalized.successConditions,
+      ...(normalized.intent ? { intent: normalized.intent } : {})
     });
     if (requestId) task.id = requestId;
+    const durablePlan = goal.kind === 'autonomous-workflow' ? createDurableTaskPlan({
+      taskId: task.id,
+      objective: normalized.userObjective,
+      constraints: [
+        ...normalized.authorizedScope.map((scope) => `authorized:${scope}`),
+        ...normalized.prohibitedScope.map((scope) => `prohibited:${scope}`)
+      ],
+      finalSuccessConditions: normalized.successConditions,
+      steps: goal.steps
+    }) : undefined;
     task.execution = {
       schemaVersion: 1,
       plannerId: planner.id,
       goalKind: goal.kind,
-      plannerState: { goal: structuredClone(goal), phase: 'start' },
+      plannerState: { goal: structuredClone(goal), phase: 'start', ...(durablePlan ? { durablePlan } : {}) },
       maxSteps: normalized.maxSteps,
       maxAttemptsPerStep: normalized.maxAttemptsPerStep,
       timeoutMs: normalized.timeoutMs,
       stepCount: 0,
+      plannerIterations: 0,
+      preDispatchReobserves: 0,
+      dispatchedActions: 0,
       records: []
     };
     if (!requestId) {
@@ -222,15 +326,34 @@ export class TaskOrchestrator {
   async #run(taskId: string, approvedActionIds: string[], authorization: TaskRunAuthorization, assertLease: () => Promise<void>, signal: AbortSignal): Promise<TaskCapsule> {
     let task = await this.#store.get(taskId);
     if (!task.execution) throw new OperatorError('TASK_EXECUTION_MISSING', 'Task has no execution metadata.');
+    if (task.intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Task intent binding requires an IntentRegistry.');
+      try {
+        await this.#intentRegistry.assertExecutable(task.intent);
+      } catch (error) {
+        if (error instanceof OperatorError && (error.code === 'INTENT_STALE' || error.code === 'INTENT_NOT_EXECUTABLE')) {
+          task.state = 'CANCELLED';
+          task.evidence.push(evidence('intent_superseded', 'info', 'Task was cancelled because a newer conversation intent superseded its durable binding.', {
+            conversationId: task.intent.conversationId,
+            intentVersion: task.intent.intentVersion
+          }));
+          await this.#store.put(task);
+          return task;
+        }
+        throw error;
+      }
+    }
     if (['VERIFIED', 'CANCELLED', 'FAILED'].includes(task.state)) return task;
     if (task.state === 'PAUSED') return task;
     const execution = task.execution;
     const planner = this.#planners.get(execution.plannerId);
     if (!planner) throw new OperatorError('TASK_PLANNER_UNAVAILABLE', `Task planner ${execution.plannerId} is unavailable.`);
     const goal = parseGoal(execution.plannerState.goal, execution.goalKind);
+    let activeDeadline = this.#monotonicNow() + Math.max(0, execution.deadlineAt ? Date.parse(execution.deadlineAt) - this.#wallNow() : execution.timeoutMs);
     if (!execution.startedAt) {
-      execution.startedAt = new Date().toISOString();
-      execution.deadlineAt = new Date(Date.now() + execution.timeoutMs).toISOString();
+      execution.startedAt = new Date(this.#wallNow()).toISOString();
+      execution.deadlineAt = new Date(this.#wallNow() + execution.timeoutMs).toISOString();
+      activeDeadline = this.#monotonicNow() + execution.timeoutMs;
     }
     task.state = 'RUNNING';
     await this.#persistRunState(task, assertLease);
@@ -239,18 +362,107 @@ export class TaskOrchestrator {
       task = await this.#store.get(task.id);
       await assertLease();
       if (task.state === 'PAUSED' || task.state === 'CANCELLED') return task;
+      if (task.intent) {
+        try {
+          await this.#intentRegistry!.assertExecutable(task.intent);
+        } catch (error) {
+          if (error instanceof OperatorError && (error.code === 'INTENT_STALE' || error.code === 'INTENT_NOT_EXECUTABLE')) {
+            task.state = 'CANCELLED';
+            task.evidence.push(evidence('intent_superseded', 'info', 'Task stopped before the next environment action because a newer intent superseded this execution.', {
+              conversationId: task.intent.conversationId,
+              intentVersion: task.intent.intentVersion
+            }));
+            await this.#persistRunState(task, assertLease);
+            return task;
+          }
+          throw error;
+        }
+      }
       const current = task.execution!;
-      const interrupted = this.#markInterrupted(task);
+      const interrupted = await this.#markInterrupted(task);
       if (interrupted > 0) {
-        current.deadlineAt = new Date(Date.now() + current.timeoutMs).toISOString();
+        current.deadlineAt = new Date(this.#wallNow() + current.timeoutMs).toISOString();
+        activeDeadline = this.#monotonicNow() + current.timeoutMs;
         task.evidence.push(evidence('task_recovery', 'info', 'Recovered interrupted action record(s), refreshed the active execution deadline, and preserved step/attempt budgets.', { count: interrupted }));
         await this.#persistRunState(task, assertLease);
       }
-      if (Date.now() >= Date.parse(current.deadlineAt!)) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
-      const context = { task, goal };
+      if (this.#monotonicNow() >= activeDeadline) return await this.#fail(task, 'TASK_TIMEOUT', 'Task execution exceeded its bounded active deadline.', assertLease);
+      if (current.plannerId === 'operator.semantic.v1'
+        && current.plannerState.phase !== 'complete'
+        && current.plannerState.phase !== 'physical-complete') {
+        const outcomeTruth = verifyGoalOutcomeTruth(task);
+        if (outcomeTruth.supported && outcomeTruth.ok) {
+          const priorPhase = String(current.plannerState.phase ?? 'start');
+          current.plannerState.phase = 'complete';
+          task.evidence.push(evidence('early_outcome_completion', 'pass', 'Stopped before another environment action because the typed goal outcome is already proven true by durable machine state.', {
+            goalKind: current.goalKind,
+            priorPhase,
+            supportingStateVersions: outcomeTruth.stateVersions
+          }));
+          await this.#persistRunState(task, assertLease);
+        }
+      }
+      current.plannerIterations = (current.plannerIterations ?? 0) + 1;
+      const decisionBudget = taskDecisionBudget(current, this.#wallNow());
+      const exhaustedDecisionDimension = decisionBudgetExhaustion(decisionBudget);
+      if (exhaustedDecisionDimension === 'plannerIterations') {
+        return await this.#fail(task, 'TASK_DECISION_BUDGET_EXHAUSTED', 'Task exhausted its bounded planner-iteration budget.', assertLease);
+      }
+      const budget: TaskPlannerContext['budget'] = {
+          maxSteps: current.maxSteps,
+          usedSteps: current.stepCount,
+          remainingSteps: Math.max(0, current.maxSteps - current.stepCount),
+          plannerIterations: current.plannerIterations ?? 0,
+          preDispatchReobserves: current.preDispatchReobserves ?? 0,
+          dispatchedActions: current.dispatchedActions ?? current.stepCount,
+          maxAttemptsPerStep: current.maxAttemptsPerStep,
+          activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
+      };
+      const recentEvents = structuredClone((current.plannerEvents ?? []).slice(-10));
+      let intelligence: TaskIntelligenceContext = emptyTaskIntelligence(goal, task.authorizedScope);
+      if (this.#intelligence) {
+        try {
+          intelligence = await this.#intelligence.retrieve({ task: structuredClone(task), goal: structuredClone(goal), budget: structuredClone(budget), recentEvents });
+          task.evidence.push(evidence('task_intelligence_context', 'info', 'Retrieved bounded relevant intelligence for this planner iteration.', {
+            scopeKey: intelligence.scopeKey,
+            sceneKey: intelligence.sceneKey,
+            worldEntities: intelligence.world.length,
+            procedures: intelligence.procedures.length,
+            perceptionTargets: intelligence.perception.length,
+            strategies: intelligence.strategies.length,
+            retrievedAt: intelligence.retrievedAt
+          }));
+        } catch (error) {
+          return await this.#fail(task, 'TASK_INTELLIGENCE_RETRIEVAL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        }
+      }
+      const context: TaskPlannerContext = {
+        task,
+        goal,
+        recentEvents,
+        intelligence,
+        budget,
+        decisionBudget
+      };
       let decision: PlannerDecision;
-      try { decision = planner.next(context); }
-      catch (error) { return await this.#fail(task, 'TASK_PLANNER_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
+      let rawDecision: unknown;
+      try {
+        rawDecision = planner.next(context);
+        decision = validatePlannerDecision(rawDecision);
+      } catch (error) {
+        const issue = error instanceof Error ? error.message : String(error);
+        if (!planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
+        try {
+          decision = validatePlannerDecision(planner.repair(context, rawDecision, issue));
+          task.evidence.push(evidence('planner_repair', 'info', 'Planner repaired one malformed typed decision before execution.', {
+            plannerId: planner.id,
+            issue,
+            remainingSteps: context.budget.remainingSteps
+          }));
+        } catch (repairError) {
+          return await this.#fail(task, 'TASK_PLANNER_FAILED', repairError instanceof Error ? repairError.message : String(repairError), assertLease);
+        }
+      }
       if (decision.type === 'complete') {
         const verification = verifyTaskCompletion(task);
         task.evidence.push(verification.evidence);
@@ -265,18 +477,22 @@ export class TaskOrchestrator {
       if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
 
       const inputHash = sha256(canonicalJson(decision.input));
-      if (detectPlannerLoop(current.records, decision.key, inputHash)) {
+      const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
+      const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
+      if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
         return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, assertLease);
       }
-      const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
-      const priorAttempts = current.records.filter((record) => record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED').length;
-      if (priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      const priorAttempts = current.records.filter((record) =>
+        record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED' && record.state !== 'STARTED'
+      ).length;
+      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
       catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
-      const attempt = blockedReplay?.attempt ?? priorAttempts + 1;
-      const actionId = blockedReplay?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
+      const replayRecord = blockedReplay ?? recoveryReplay;
+      const attempt = replayRecord?.attempt ?? priorAttempts + 1;
+      const actionId = replayRecord?.actionId ?? deterministicActionId(task.id, decision.key, attempt, inputHash);
       const executionNodeKey = stableTaskExecutionNodeKey(decision.key, attempt, inputHash);
       const priorNode = [...task.nodes].reverse().find((candidate) => candidate.state === 'VERIFIED' || candidate.state === 'SKIPPED');
       let node = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId);
@@ -298,17 +514,24 @@ export class TaskOrchestrator {
         dependsOn: priorNode ? [priorNode.id] : []
       });
       setNodeState(task, node.id, 'RUNNING');
-      const record: TaskActionRecord = blockedReplay ?? {
+      const record: TaskActionRecord = replayRecord ?? {
         stepKey: decision.key, actionId, capability: decision.capability, risk, inputHash, attempt,
         state: 'STARTED', startedAt: new Date().toISOString(), evidence: []
       };
-      if (!blockedReplay) current.records.push(record);
-      else { record.state = 'STARTED'; record.startedAt = new Date().toISOString(); delete record.finishedAt; delete record.errorCode; record.evidence = []; }
-      current.stepCount += 1;
+      if (!replayRecord) current.records.push(record);
+      else {
+        record.state = 'STARTED';
+        record.startedAt = new Date().toISOString();
+        delete record.finishedAt;
+        delete record.errorCode;
+        delete record.sideEffectState;
+        delete record.executionPhase;
+        delete record.observation;
+        record.evidence = [];
+      }
       const preDispatchControl = await this.#persistRunState(task, assertLease);
       if (preDispatchControl === 'PAUSED') {
         current.records = current.records.filter((candidate) => candidate !== record);
-        current.stepCount = Math.max(0, current.stepCount - 1);
         setNodeState(task, node.id, 'PENDING');
         await this.#persistRunState(task, assertLease);
         return task;
@@ -318,6 +541,7 @@ export class TaskOrchestrator {
         record.finishedAt = new Date().toISOString();
         record.errorCode = 'EXECUTION_ABORTED';
         record.sideEffectState = 'none';
+        record.executionPhase = 'pre_dispatch';
         setNodeState(task, node.id, 'SKIPPED');
         task.evidence.push(evidence('task_cancel', 'info', 'Task was cancelled before provider dispatch.'));
         await this.#persistRunState(task, assertLease);
@@ -327,7 +551,8 @@ export class TaskOrchestrator {
       const action: ActionRequest = {
         id: actionId, taskId: task.id, capability: decision.capability, risk,
         input: structuredClone(decision.input), provenance: { kind: 'trusted_policy', source: `task-planner:${planner.id}` },
-        ...(decision.target ? { target: decision.target } : {})
+        ...(decision.target ? { target: decision.target } : {}),
+        ...(task.intent ? { intent: task.intent } : {})
       };
       const basePermissions = authorization.permissionProvider
         ? await authorization.permissionProvider(action)
@@ -337,8 +562,9 @@ export class TaskOrchestrator {
         approvedActionIds: [...new Set([...(basePermissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       const learningContext = semanticLearningContext(goal, task);
-      let result: ActionResult;
+      let result: ActionResult | undefined;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
+      let executionDispatched = false;
       try {
         if (this.#resourceLeases) {
           resourceLease = await this.#resourceLeases.acquire(
@@ -347,6 +573,7 @@ export class TaskOrchestrator {
             risk === 'read' ? 'shared' : 'exclusive'
           );
         }
+        executionDispatched = true;
         result = await this.#executeAction(action, permissions, { signal, learningContext });
       } catch (error) {
         const code = error instanceof OperatorError ? error.code : 'TASK_EXECUTOR_EXCEPTION';
@@ -360,7 +587,8 @@ export class TaskOrchestrator {
             code,
             message: error instanceof Error ? error.message : String(error),
             retryable: error instanceof OperatorError ? error.retryable : false,
-            sideEffectState: 'none'
+            sideEffectState: executorExceptionSideEffectState(risk, error, executionDispatched),
+            executionPhase: executorExceptionExecutionPhase(error, executionDispatched)
           }
         };
       } finally {
@@ -368,27 +596,90 @@ export class TaskOrchestrator {
           try {
             await resourceLease.release();
           } catch (error) {
+            const priorResult = result;
             result = {
               ok: false,
               capability: action.capability,
               provider: 'scheduler',
-              evidence: result!?.evidence ?? [],
-              durationMs: result!?.durationMs ?? 0,
+              evidence: priorResult?.evidence ?? [],
+              durationMs: priorResult?.durationMs ?? 0,
               error: {
                 code: 'RESOURCE_LEASE_RELEASE_FAILED',
                 message: error instanceof Error ? error.message : String(error),
                 retryable: false,
-                sideEffectState: risk === 'read' ? 'none' : result!?.ok ? 'known' : (result!?.error?.sideEffectState ?? 'uncertain')
+                sideEffectState: risk === 'read' ? 'none' : priorResult?.ok ? 'known' : (priorResult?.error?.sideEffectState ?? 'uncertain'),
+                executionPhase: priorResult ? conservativeExecutionPhase(priorResult) : executionDispatched ? 'dispatched' : 'pre_dispatch'
               }
             };
           }
         }
       }
+      if (!result) {
+        result = {
+          ok: false,
+          capability: action.capability,
+          provider: 'task-executor',
+          evidence: [],
+          durationMs: 0,
+          error: {
+            code: 'TASK_EXECUTOR_RESULT_MISSING',
+            message: 'Task action completed without a durable execution result.',
+            retryable: false,
+            sideEffectState: executionDispatched && risk !== 'read' ? 'uncertain' : 'none',
+            executionPhase: executionDispatched ? 'dispatched' : 'pre_dispatch'
+          }
+        };
+      }
+      if (authorization.onActionResult) {
+        try {
+          await authorization.onActionResult(action, result);
+        } catch (error) {
+          result = {
+            ok: false,
+            capability: action.capability,
+            provider: 'approval',
+            evidence: result.evidence,
+            durationMs: result.durationMs,
+            error: {
+              code: 'APPROVAL_SETTLEMENT_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+              retryable: false,
+              sideEffectState: result.ok ? 'known' : (result.error?.sideEffectState ?? 'uncertain'),
+              executionPhase: conservativeExecutionPhase(result)
+            }
+          };
+        }
+      }
       const latest = await this.#store.get(task.id);
       await assertLease();
-      const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED' ? latest.state : undefined;
+      const controlState = latest.state === 'PAUSED' || latest.state === 'CANCELLED'
+        ? latest.state
+        : this.#controlRequests.get(taskId);
       task = latest;
       const latestExecution = task.execution!;
+      const resultExecutionPhase = conservativeExecutionPhase(result);
+      if (resultExecutionPhase !== 'pre_dispatch') {
+        const dispatchedBefore = latestExecution.dispatchedActions ?? latestExecution.stepCount;
+        latestExecution.stepCount += 1;
+        latestExecution.dispatchedActions = dispatchedBefore + 1;
+      }
+      const postActionContext: TaskPlannerContext = {
+        task,
+        goal,
+        recentEvents: structuredClone((latestExecution.plannerEvents ?? []).slice(-10)),
+        intelligence,
+        decisionBudget: taskDecisionBudget(latestExecution, this.#wallNow()),
+        budget: {
+          maxSteps: latestExecution.maxSteps,
+          usedSteps: latestExecution.stepCount,
+          remainingSteps: Math.max(0, latestExecution.maxSteps - latestExecution.stepCount),
+          plannerIterations: latestExecution.plannerIterations ?? 0,
+          preDispatchReobserves: latestExecution.preDispatchReobserves ?? 0,
+          dispatchedActions: latestExecution.dispatchedActions ?? latestExecution.stepCount,
+          maxAttemptsPerStep: latestExecution.maxAttemptsPerStep,
+          activeDeadlineMsRemaining: Math.max(0, Math.floor(activeDeadline - this.#monotonicNow()))
+        }
+      };
       const latestRecord = latestExecution.records.find((candidate) => candidate.actionId === actionId);
       if (!latestRecord) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted action record disappeared during execution.', assertLease);
       const latestNode = task.nodes.find((candidate) => candidate.key === executionNodeKey || candidate.actionId === actionId)
@@ -399,12 +690,23 @@ export class TaskOrchestrator {
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
       latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
+      latestRecord.executionPhase = resultExecutionPhase;
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
+      const plannerEvent = plannerEventFromResult(result, result.ok ? undefined : classifyTaskFailure(result.error));
+      if (plannerEvent) {
+        latestExecution.plannerEvents ??= [];
+        latestExecution.plannerEvents.push(plannerEvent);
+        if (latestExecution.plannerEvents.length > 100) latestExecution.plannerEvents.splice(0, latestExecution.plannerEvents.length - 100);
+        postActionContext.recentEvents = structuredClone(latestExecution.plannerEvents.slice(-10));
+        task.evidence.push(evidence('planner_event', 'info', 'Normalized a runtime condition into a bounded planner event.', {
+          kind: plannerEvent.kind, decision: plannerEvent.decision, code: plannerEvent.code
+        }));
+      }
       if (result.ok) {
         try {
-          planner.accept({ task, goal }, decision, observation);
+          planner.accept(postActionContext, decision, observation);
         } catch (error) {
           await this.#recordLearning(task, result, 'failed', learningContext);
           const postconditionCode = error instanceof OperatorError ? error.code : 'TASK_POSTCONDITION_FAILED';
@@ -421,7 +723,7 @@ export class TaskOrchestrator {
             strategy: failureDecision.strategy,
             capability: result.capability
           }));
-          if (planner.fallback?.({ task, goal }, decision, postconditionObservation)) {
+          if (planner.fallback?.(postActionContext, decision, postconditionObservation)) {
             latestRecord.state = 'FAILED';
             latestRecord.errorCode = postconditionCode;
             setNodeState(task, latestNode.id, 'SKIPPED');
@@ -459,13 +761,12 @@ export class TaskOrchestrator {
         return task;
       }
       if (latestRecord.errorCode === 'APPROVAL_REQUIRED') {
-        const remainingMs = Math.max(0, Date.parse(latestExecution.deadlineAt!) - Date.now());
+        const remainingMs = Math.max(0, activeDeadline - this.#monotonicNow());
         const approvalOutcome = await authorization.onApprovalRequired?.(action, remainingMs);
         if (approvalOutcome === 'retry') {
           latestRecord.state = 'BLOCKED';
           setNodeState(task, latestNode.id, 'BLOCKED');
           task.state = 'RUNNING';
-          latestExecution.stepCount = Math.max(0, latestExecution.stepCount - 1);
           await this.#persistRunState(task, assertLease);
           continue;
         }
@@ -482,7 +783,7 @@ export class TaskOrchestrator {
         return task;
       }
       await this.#recordLearning(task, result, 'failed', learningContext);
-      if (planner.fallback?.({ task, goal }, decision, observation)) {
+      if (planner.fallback?.(postActionContext, decision, observation)) {
         latestRecord.state = 'FAILED';
         setNodeState(task, latestNode.id, 'SKIPPED');
         if (controlState) task.state = controlState;
@@ -497,9 +798,62 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (failureDecision.retryable && retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain') && failureDecision.strategy === 'retry') {
+      const retrySafe = retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain');
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'reobserve'
+        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')) {
         setNodeState(task, latestNode.id, 'SKIPPED');
-        task.evidence.push(evidence('strategy_retry', 'info', 'Superseded the failed read-only attempt and scheduled a bounded retry under the same policy and attempt budget.', {
+        latestExecution.records = latestExecution.records.filter((candidate) => candidate !== latestRecord);
+        latestExecution.preDispatchReobserves = (latestExecution.preDispatchReobserves ?? 0) + 1;
+        task.evidence.push(evidence('strategy_reobserve', 'info', 'Superseded a pre-dispatch stale-state attempt and returned control for fresh observation without charging an environment-action step.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          strategy: failureDecision.strategy,
+          actionId: latestRecord.actionId,
+          sideEffectState: latestRecord.sideEffectState ?? 'none',
+          executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'repair') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_repair', 'info', 'Returned control to the planner after a proven no-side-effect target/precondition drift so it can deterministically repair the next action.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          actionId: latestRecord.actionId,
+          executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
+      if (failureDecision.strategy === 'replan') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_replan', 'info', 'Returned control to the planner after a completed action produced no meaningful progress; the same mutation is not blindly retried.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          actionId: latestRecord.actionId
+        }));
+        await this.#persistRunState(task, assertLease);
+        continue;
+      }
+      if (failureDecision.strategy === 'reconcile') {
+        latestRecord.state = 'BLOCKED';
+        setNodeState(task, latestNode.id, 'BLOCKED');
+        task.state = 'BLOCKED';
+        task.evidence.push(evidence('strategy_reconcile', 'info', 'Paused automatic execution because dispatch may have occurred and side effects are uncertain; durable reconciliation is required before retry.', {
+          code: failureDecision.code,
+          class: failureDecision.class,
+          actionId: latestRecord.actionId,
+          risk,
+          sideEffectState: latestRecord.sideEffectState ?? 'uncertain',
+          executionPhase: latestRecord.executionPhase ?? 'dispatched'
+        }));
+        await this.#persistRunState(task, assertLease);
+        return task;
+      }
+      if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'retry') {
+        setNodeState(task, latestNode.id, 'SKIPPED');
+        task.evidence.push(evidence('strategy_retry', 'info', 'Scheduled a bounded retry because the failed attempt is proven safe to retry under the same authority boundary.', {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
@@ -521,11 +875,9 @@ export class TaskOrchestrator {
     }
   }
 
-  async pause(taskId: string): Promise<TaskCapsule> { return await this.#setControlState(taskId, 'PAUSED'); }
+  async pause(taskId: string): Promise<TaskCapsule> { return await this.#requestControl(taskId, 'PAUSED'); }
   async cancel(taskId: string): Promise<TaskCapsule> {
-    const task = await this.#setControlState(taskId, 'CANCELLED');
-    this.#controllers.get(taskId)?.abort();
-    return task;
+    return await this.#requestControl(taskId, 'CANCELLED');
   }
   async resume(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
@@ -540,7 +892,7 @@ export class TaskOrchestrator {
       task.state = 'PENDING';
       for (const node of task.nodes) if (node.state === 'BLOCKED') node.state = 'PENDING';
       if (task.execution?.startedAt) {
-        task.execution.deadlineAt = new Date(Date.now() + task.execution.timeoutMs).toISOString();
+        task.execution.deadlineAt = new Date(this.#wallNow() + task.execution.timeoutMs).toISOString();
         task.evidence.push(evidence('task_resume', 'info', 'Resumed task with a fresh active execution deadline; step and attempt budgets were preserved.'));
       }
       await this.#store.put(task);
@@ -565,6 +917,23 @@ export class TaskOrchestrator {
         if (!this.#active.has(taskId)) this.#controlRequests.delete(taskId);
         return task;
       });
+    } catch (error) {
+      if (previous) this.#controlRequests.set(taskId, previous);
+      else this.#controlRequests.delete(taskId);
+      throw error;
+    }
+  }
+
+  async #requestControl(taskId: string, state: 'PAUSED' | 'CANCELLED'): Promise<TaskCapsule> {
+    const active = this.#active.get(taskId);
+    if (!active) return await this.#setControlState(taskId, state);
+    const previous = this.#controlRequests.get(taskId);
+    this.#controlRequests.set(taskId, state);
+    if (state === 'CANCELLED') this.#controllers.get(taskId)?.abort();
+    try {
+      // A terminal/paused state is not returned until the active provider has
+      // settled and the runner has durably recorded its side-effect truth.
+      return await active;
     } catch (error) {
       if (previous) this.#controlRequests.set(taskId, previous);
       else this.#controlRequests.delete(taskId);
@@ -633,15 +1002,36 @@ export class TaskOrchestrator {
     }
   }
 
-  #markInterrupted(task: TaskCapsule): number {
+  async #markInterrupted(task: TaskCapsule): Promise<number> {
     const execution = task.execution;
     if (!execution) return 0;
     let count = 0;
     for (const record of execution.records) if (record.state === 'STARTED') {
+      if (this.#actionJournal) {
+        try {
+          const entry = await this.#actionJournal.inspect(record.actionId);
+          record.evidence.push(evidence(
+            'task_recovery_journal',
+            'info',
+            'Preserved the original action identity for crash recovery through the central transition journal.',
+            { actionId: record.actionId, journalState: entry.state }
+          ));
+          count += 1;
+          continue;
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'ACTION_JOURNAL_NOT_FOUND') throw error;
+        }
+      }
       record.state = 'INTERRUPTED';
       record.finishedAt = new Date().toISOString();
       record.errorCode = 'TASK_ACTION_INTERRUPTED';
       record.sideEffectState = record.risk === 'read' ? 'none' : 'uncertain';
+      if (record.executionPhase === undefined) {
+        record.executionPhase = 'dispatched';
+        const dispatchedBefore = execution.dispatchedActions ?? execution.stepCount;
+        execution.stepCount = Math.min(execution.maxSteps, execution.stepCount + 1);
+        execution.dispatchedActions = Math.min(execution.maxSteps, dispatchedBefore + 1);
+      }
       const node = task.nodes.find((candidate) => candidate.actionId === record.actionId);
       if (node && (node.state === 'RUNNING' || node.state === 'PENDING' || node.state === 'BLOCKED')) {
         node.state = 'SKIPPED';
@@ -665,6 +1055,21 @@ export class TaskOrchestrator {
     else await this.#store.put(task);
     return task;
   }
+}
+
+function executorExceptionExecutionPhase(error: unknown, dispatched: boolean): ExecutionPhase {
+  if (error instanceof OperatorError && error.details?.executionPhase !== undefined) {
+    try { return validExecutionPhase(error.details.executionPhase); } catch { /* fail closed below */ }
+  }
+  return dispatched ? 'dispatched' : 'pre_dispatch';
+}
+
+function executorExceptionSideEffectState(risk: ActionRisk, error: unknown, dispatched: boolean): SideEffectState {
+  if (risk === 'read' || !dispatched) return 'none';
+  if (error instanceof OperatorError && error.details?.sideEffectState !== undefined) {
+    try { return validSideEffectState(error.details.sideEffectState); } catch { /* fail closed below */ }
+  }
+  return 'uncertain';
 }
 
 export class ProjectQualityGatePlanner implements TaskPlanner {
@@ -766,6 +1171,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a workflow envelope.');
     if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute a project quality gate envelope.');
+    if (goal.kind === 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot execute an autonomous workflow envelope.');
     const state = task.execution!.plannerState;
     const phase = String(state.phase ?? 'start');
     if (goal.kind === 'controlled-file-change') {
@@ -813,11 +1219,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
       };
       if (phase === 'select') return {
         type: 'step', key: 'select-postgres-rows', title: 'Read bounded PostgreSQL rows',
-        capability: 'postgres.select', input: {
-          path: goal.root, profileId: goal.profileId, schema: goal.schema ?? 'public', table: goal.table,
-          columns: goal.columns ?? [], filters: goal.filters ?? [], orderBy: goal.orderBy ?? [],
-          limit: goal.limit ?? 100, offset: goal.offset ?? 0, timeoutMs: goal.timeoutMs ?? 5_000
-        },
+        capability: 'postgres.select', input: postgresSelectActionInput(goal),
         target: goal.root
       };
       return { type: 'complete', message: 'PostgreSQL task satisfied trusted-profile, current-column, and bounded read-only SELECT postconditions.' };
@@ -888,6 +1290,7 @@ export class SemanticTaskPlanner implements TaskPlanner {
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, result: TaskObservation): void {
     if (goal.kind === 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a workflow envelope.');
     if (goal.kind === 'project-quality-gate') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept a project quality gate envelope.');
+    if (goal.kind === 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Atomic semantic planner cannot accept an autonomous workflow envelope.');
     const state = task.execution!.plannerState;
     if (goal.kind === 'controlled-file-change') {
       if (step.key === 'list-parent') state.phase = 'create';
@@ -1076,6 +1479,84 @@ export class SemanticTaskPlanner implements TaskPlanner {
   }
 }
 
+export class AutonomousWorkflowPlanner implements TaskPlanner {
+  readonly id = 'operator.autonomous-workflow.v1';
+
+  supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'autonomous-workflow'; }
+
+  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+    if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
+    const state = task.execution!.plannerState;
+    const plan = autonomousPlan(task, goal);
+    if (taskPlanComplete(plan)) return { type: 'complete', message: `Autonomous workflow completed ${plan.subgoals.filter((item) => item.status === 'VERIFIED').length} independently verified subgoal(s).` };
+    const selectedId = typeof state.activeSubgoalId === 'string' ? state.activeSubgoalId : nextReadySubgoal(plan)?.id;
+    if (!selectedId) throw new OperatorError('TASK_PLAN_BLOCKED', 'No autonomous subgoal is ready; the remaining dependency graph is blocked.');
+    const item = activateSubgoal(plan, selectedId);
+    state.durablePlan = plan;
+    state.activeSubgoalId = item.id;
+    const index = item.sourceIndex;
+    const phase = String(state.autonomousPhase ?? 'observe');
+    const selected = phase === 'observe' ? item.execution.observe : phase === 'action' ? item.execution.action : phase === 'verify' ? item.successContract : undefined;
+    if (!selected) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow phase is invalid.');
+    return {
+      type: 'step', key: `autonomous:${index}:${phase}`,
+      title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.description}`,
+      capability: selected.capability, input: structuredClone(selected.input),
+      ...(selected.target ? { target: selected.target } : {})
+    };
+  }
+
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>): void {
+    if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
+    const state = task.execution!.plannerState;
+    const plan = autonomousPlan(task, goal);
+    const item = plan.subgoals.find((candidate) => candidate.id === state.activeSubgoalId);
+    if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no active subgoal.');
+    const index = item.sourceIndex;
+    if (step.key === `autonomous:${index}:observe`) {
+      state.autonomousPhase = 'action';
+      return;
+    }
+    if (step.key === `autonomous:${index}:action`) {
+      state.autonomousPhase = 'verify';
+      return;
+    }
+    if (step.key !== `autonomous:${index}:verify`) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow decision does not match its durable phase.');
+    const record = [...task.execution!.records].reverse().find((candidate) => candidate.stepKey === step.key && candidate.observation?.schemaVersion === 2);
+    if (!record?.observation || record.observation.schemaVersion !== 2) throw new OperatorError('TASK_AUTONOMOUS_VERIFICATION_FAILED', 'Autonomous verification did not produce durable machine state.');
+    assertTaskMachineState(record.observation.importantState, item.successContract.assertions);
+    verifySubgoal(plan, item.id);
+    state.durablePlan = plan;
+    state.workflowIndex = plan.subgoals.filter((candidate) => candidate.status === 'VERIFIED').length;
+    delete state.activeSubgoalId;
+    state.autonomousPhase = 'observe';
+    task.evidence.push(evidence('autonomous_step_verified', 'pass', 'Independent read-only observation satisfied the declared machine-state assertions.', {
+      stepKey: item.key, subgoalId: item.id, planRevision: plan.revision, index, stateVersion: record.observation.stateVersion
+    }));
+  }
+
+  fallback({ task, goal, recentEvents }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    if (goal.kind !== 'autonomous-workflow') return false;
+    const state = task.execution!.plannerState;
+    const plan = autonomousPlan(task, goal);
+    const item = plan.subgoals.find((candidate) => candidate.id === state.activeSubgoalId);
+    if (!item) return false;
+    const index = item.sourceIndex;
+    if (step.key === `autonomous:${index}:action`) {
+      const phase = observation.error?.executionPhase;
+      const sideEffect = observation.error?.sideEffectState;
+      const reobserve = recentEvents.some((event) => event.decision === 'REOBSERVE' || event.decision === 'REPLAN');
+      if (phase === 'pre_dispatch' && sideEffect === 'none' && reobserve) {
+        state.autonomousPhase = 'observe';
+        task.evidence.push(evidence('autonomous_reobserve', 'info', 'Action was proven not dispatched; returning to fresh observation before replanning the same bounded subgoal.', { stepKey: item.key, subgoalId: item.id }));
+        return true;
+      }
+      return false;
+    }
+    return observation.error?.sideEffectState === 'none' && observation.error?.retryable === true;
+  }
+}
+
 
 export class SemanticWorkflowPlanner implements TaskPlanner {
   readonly id = 'operator.semantic-workflow.v1';
@@ -1083,7 +1564,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
 
   supports(goal: SemanticTaskGoal): boolean { return goal.kind === 'semantic-workflow'; }
 
-  next({ task, goal }: TaskPlannerContext): PlannerDecision {
+  next({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext): PlannerDecision {
     if (goal.kind !== 'semantic-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Workflow planner requires a semantic-workflow goal.');
     const state = task.execution!.plannerState;
     let index = workflowIndex(state, goal.steps.length);
@@ -1091,7 +1572,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
       const child = goal.steps[index]!;
       const childState = workflowChildState(state);
       const proxy = taskWithPlannerState(task, childState);
-      const decision = this.#atomic.next({ task: proxy, goal: child });
+      const decision = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence, decisionBudget });
       state.workflowChildState = proxy.execution!.plannerState;
       if (decision.type === 'complete') {
         task.evidence.push(evidence('workflow_step', 'pass', decision.message, { index, kind: child.kind }));
@@ -1109,20 +1590,20 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     return { type: 'complete', message: `Semantic workflow completed ${goal.steps.length} verified goal(s).` };
   }
 
-  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
-    const current = this.#current(task, goal, step);
-    this.#atomic.accept({ task: current.proxy, goal: current.child }, current.atomicStep, observation);
+  accept({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence, decisionBudget);
+    this.#atomic.accept({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence, decisionBudget }, current.atomicStep, observation);
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
   }
 
-  fallback({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
-    const current = this.#current(task, goal, step);
-    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child }, current.atomicStep, observation) ?? false;
+  fallback({ task, goal, budget, recentEvents, intelligence, decisionBudget }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
+    const current = this.#current(task, goal, step, budget, recentEvents, intelligence, decisionBudget);
+    const handled = this.#atomic.fallback?.({ task: current.proxy, goal: current.child, budget, recentEvents, intelligence, decisionBudget }, current.atomicStep, observation) ?? false;
     task.execution!.plannerState.workflowChildState = current.proxy.execution!.plannerState;
     return handled;
   }
 
-  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>): {
+  #current(task: TaskCapsule, goal: SemanticTaskGoal, step: Extract<PlannerDecision, { type: 'step' }>, budget: TaskPlannerContext['budget'], recentEvents: TaskPlannerEvent[], intelligence: TaskIntelligenceContext, decisionBudget: TaskDecisionBudget): {
     child: AtomicSemanticTaskGoal;
     proxy: TaskCapsule;
     atomicStep: Extract<PlannerDecision, { type: 'step' }>;
@@ -1133,7 +1614,7 @@ export class SemanticWorkflowPlanner implements TaskPlanner {
     const child = goal.steps[index];
     if (!child) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action has no current semantic child goal.');
     const proxy = taskWithPlannerState(task, workflowChildState(state));
-    const expected = this.#atomic.next({ task: proxy, goal: child });
+    const expected = this.#atomic.next({ task: proxy, goal: child, budget, recentEvents, intelligence, decisionBudget });
     if (expected.type !== 'step' || step.key !== `workflow:${index}:${expected.key}`) {
       throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow action does not match the current semantic child state.');
     }
@@ -1148,6 +1629,31 @@ function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): str
   const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
   if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
   return goal.steps[index]?.kind ?? 'semantic-workflow';
+}
+
+function autonomousPlan(task: TaskCapsule, goal: Extract<SemanticTaskGoal, { kind: 'autonomous-workflow' }>): DurableTaskPlan {
+  const stored = task.execution!.plannerState.durablePlan;
+  const plan = stored === undefined ? createDurableTaskPlan({
+    taskId: task.id,
+    objective: task.userObjective,
+    constraints: [
+      ...task.authorizedScope.map((scope) => `authorized:${scope}`),
+      ...task.prohibitedScope.map((scope) => `prohibited:${scope}`)
+    ],
+    finalSuccessConditions: task.successConditions,
+    steps: goal.steps
+  }) : normalizeDurableTaskPlan(stored);
+  if (plan.taskId !== task.id) throw new OperatorError('TASK_PLAN_INVALID', 'Durable task plan belongs to a different task.');
+  task.execution!.plannerState.durablePlan = plan;
+  return plan;
+}
+
+function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {
+  return {
+    retrievedAt: new Date().toISOString(),
+    scopeKey: authorizedScope[0] ?? `task:${goal.kind}`,
+    world: [], procedures: [], perception: [], strategies: []
+  };
 }
 
 function workflowIndex(state: Record<string, unknown>, length: number): number {
@@ -1249,6 +1755,44 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     goal.limit = boundedInteger(goal.limit, 1, 500, 100);
     goal.offset = boundedInteger(goal.offset, 0, 10_000, 0);
     goal.timeoutMs = boundedInteger(goal.timeoutMs, 100, 30_000, 5_000);
+  } else if (goal.kind === 'autonomous-workflow') {
+    if (!Array.isArray(goal.steps) || goal.steps.length < 1 || goal.steps.length > 20) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow requires 1-20 bounded steps.');
+    if (goal.roots !== undefined && (!Array.isArray(goal.roots) || goal.roots.length > 20)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow roots are invalid.');
+    goal.roots = [...new Set((goal.roots ?? []).map((root, index) => path.resolve(boundedText(root, 4096, `autonomous roots[${index}]`))))].sort();
+    if (goal.browserOrigins !== undefined && (!Array.isArray(goal.browserOrigins) || goal.browserOrigins.length > 20)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow browserOrigins are invalid.');
+    goal.browserOrigins = [...new Set((goal.browserOrigins ?? []).map((origin, index) => {
+      let parsed: URL;
+      try { parsed = new URL(boundedText(origin, 2048, `autonomous browserOrigins[${index}]`)); } catch { throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous browser origin is invalid.'); }
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.origin !== parsed.toString().replace(/\/$/, '')) {
+        throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous browserOrigins must be credential-free HTTP(S) origins.');
+      }
+      return parsed.origin;
+    }))].sort();
+    if (goal.application !== undefined && typeof goal.application !== 'boolean') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow application must be boolean.');
+    if (goal.roots.length === 0 && goal.browserOrigins.length === 0 && goal.application !== true) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow must declare at least one bounded root, browser origin, or application scope.');
+    const keys = new Set<string>();
+    goal.steps = goal.steps.map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${index} is invalid.`);
+      const raw = step as unknown as Record<string, unknown>;
+      const key = boundedText(raw.key, 128, `autonomous steps[${index}].key`);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key) || keys.has(key)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous step keys must be unique bounded identifiers.');
+      keys.add(key);
+      const title = boundedText(raw.title, 512, `autonomous steps[${index}].title`);
+      const parentKey = raw.parentKey === undefined ? undefined : boundedText(raw.parentKey, 128, `autonomous steps[${index}].parentKey`);
+      const dependsOn = raw.dependsOn === undefined ? undefined : boundedTextArray(raw.dependsOn, 20, 128, `autonomous steps[${index}].dependsOn`);
+      const resourceScope = raw.resourceScope === undefined ? undefined : boundedTextArray(raw.resourceScope, 100, 4096, `autonomous steps[${index}].resourceScope`);
+      const observe = normalizeAutonomousAction(raw.observe, `autonomous steps[${index}].observe`, true);
+      const action = normalizeAutonomousAction(raw.action, `autonomous steps[${index}].action`, false);
+      const verifyRaw = raw.verify && typeof raw.verify === 'object' && !Array.isArray(raw.verify) ? raw.verify as Record<string, unknown> : undefined;
+      if (!verifyRaw) throw new OperatorError('TASK_GOAL_INVALID', `autonomous steps[${index}].verify is invalid.`);
+      const verify = { ...normalizeAutonomousAction(verifyRaw, `autonomous steps[${index}].verify`, true), assertions: normalizeTaskStateAssertions(verifyRaw.assertions, `autonomous steps[${index}].verify.assertions`) };
+      return { key, title, ...(parentKey ? { parentKey } : {}), ...(dependsOn ? { dependsOn } : {}), ...(resourceScope ? { resourceScope } : {}), observe, action, verify };
+    });
+    const stepKeys = new Set(goal.steps.map((step) => step.key));
+    for (const step of goal.steps) {
+      if (step.parentKey !== undefined && (!stepKeys.has(step.parentKey) || step.parentKey === step.key)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${step.key} has an invalid parentKey.`);
+      if (step.dependsOn?.some((dependency) => !stepKeys.has(dependency) || dependency === step.key)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${step.key} has an invalid dependency.`);
+    }
   } else if (goal.kind === 'app-operation') {
     goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
     if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');
@@ -1267,6 +1811,19 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
     if (goal.physicalFallback !== undefined) goal.physicalFallback = normalizeAppPhysicalFallback(goal.physicalFallback, 'app physicalFallback');
   } else throw new OperatorError('TASK_GOAL_INVALID', 'Task goal kind is unsupported.');
   return goal;
+}
+
+function normalizeAutonomousAction(input: unknown, label: string, requireRead: boolean): AutonomousTaskAction {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_GOAL_INVALID', `${label} is invalid.`);
+  const raw = input as Record<string, unknown>;
+  const capability = boundedText(raw.capability, 256, `${label}.capability`);
+  const risk = capabilityRiskRule(capability);
+  if (requireRead && risk !== 'read') throw new OperatorError('TASK_GOAL_INVALID', `${label} must use a canonically read-only capability.`);
+  if (!raw.input || typeof raw.input !== 'object' || Array.isArray(raw.input)) throw new OperatorError('TASK_GOAL_INVALID', `${label}.input must be an object.`);
+  const actionInput = structuredClone(raw.input as Record<string, unknown>);
+  if (Buffer.byteLength(canonicalJson(actionInput)) > 256 * 1024) throw new OperatorError('TASK_GOAL_INVALID', `${label}.input is too large.`);
+  const target = raw.target === undefined ? undefined : boundedText(raw.target, 4096, `${label}.target`);
+  return { capability, input: actionInput, ...(target ? { target } : {}) };
 }
 
 function postgresIdentifier(input: unknown, label: string): string {
@@ -1613,6 +2170,7 @@ function sameTaskSubmission(
     maxSteps: number;
     maxAttemptsPerStep: number;
     timeoutMs: number;
+    intent?: IntentBinding;
   }
 ): boolean {
   const execution = task.execution;
@@ -1622,6 +2180,7 @@ function sameTaskSubmission(
     && canonicalJson(task.authorizedScope) === canonicalJson(normalized.authorizedScope)
     && canonicalJson(task.prohibitedScope) === canonicalJson(normalized.prohibitedScope)
     && canonicalJson(task.successConditions) === canonicalJson(normalized.successConditions)
+    && canonicalJson(task.intent ?? null) === canonicalJson(normalized.intent ?? null)
     && execution.plannerId === plannerId
     && execution.goalKind === goal.kind
     && canonicalJson(execution.plannerState.goal) === canonicalJson(goal)
@@ -1633,12 +2192,25 @@ function sameTaskSubmission(
 function deterministicActionId(taskId: string, stepKey: string, attempt: number, inputHash: string): string {
   return `task-${sha256(`${taskId}\0${stepKey}\0${attempt}\0${inputHash}`)}`;
 }
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  const input = value as Record<string, unknown>;
-  return `{${Object.keys(input).sort().filter((key) => input[key] !== undefined).map((key) => `${JSON.stringify(key)}:${canonicalJson(input[key])}`).join(',')}}`;
+function validatePlannerDecision(value: unknown): PlannerDecision {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner decision must be a structured object.');
+  const record = value as Record<string, unknown>;
+  if (record.type === 'complete') {
+    return { type: 'complete', message: boundedText(record.message, 4096, 'planner completion message') };
+  }
+  if (record.type !== 'step') throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner decision type must be complete or step.');
+  const input = record.input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('TASK_PLANNER_OUTPUT_INVALID', 'Planner step input must be a structured object.');
+  return {
+    type: 'step',
+    key: boundedText(record.key, 256, 'planner step key'),
+    title: boundedText(record.title, 512, 'planner step title'),
+    capability: boundedText(record.capability, 256, 'planner capability'),
+    input: structuredClone(input as Record<string, unknown>),
+    ...(record.target === undefined ? {} : { target: boundedText(record.target, 4096, 'planner target') })
+  };
 }
+
 function sha256(value: string): string { return crypto.createHash('sha256').update(value).digest('hex'); }
 function observe(result: ActionResult): TaskObservation {
   const channel: TaskObservation['channel'] = result.capability === 'visual.capture' || result.capability === 'input.operate' ? 'visual' : 'semantic';
@@ -1651,7 +2223,9 @@ function observe(result: ActionResult): TaskObservation {
   };
 }
 function detectPlannerLoop(records: TaskActionRecord[], stepKey: string, inputHash: string): boolean {
-  const signatures = records.filter((record) => record.state !== 'BLOCKED').map((record) => `${record.stepKey}:${record.inputHash}`);
+  const signatures = records
+    .filter((record) => record.state !== 'BLOCKED' && record.state !== 'STARTED')
+    .map((record) => `${record.stepKey}:${record.inputHash}`);
   signatures.push(`${stepKey}:${inputHash}`);
   for (const width of [1, 2, 3]) {
     if (signatures.length < 3 * width) continue;

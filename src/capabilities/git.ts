@@ -37,6 +37,7 @@ export class GitProvider implements CapabilityProvider {
     this.#process = new ProcessProvider({
       allowedRoots: options.allowedRoots,
       allowedExecutables: ['git'],
+      maxOutputBytes: 16 * 1024 * 1024,
       environmentOverrides: READ_ONLY_GIT_ENV
     });
   }
@@ -93,13 +94,15 @@ export class GitProvider implements CapabilityProvider {
     }
 
     const prefix = publicLiteral ? PUBLIC_GIT_PREFIX : SAFE_GIT_PREFIX;
+    const summary = action.capability === 'git.diff' && action.input.summary === true;
     const args = action.capability === 'git.status'
       ? [...SAFE_GIT_PREFIX, 'status', '--porcelain=v1', '-z', '--branch', '--ignore-submodules=all']
       : action.capability === 'git.diff'
-        ? [...prefix, 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths]
+        ? [...prefix, 'diff', ...(summary ? ['--stat', '--summary'] : []), '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--', ...paths]
         : [...SAFE_GIT_PREFIX, 'rev-parse', '--show-toplevel'];
     const result = await this.#run(action, cwd, args, context);
-    return action.capability === 'git.status' && result.ok ? structuredGitStatus(result) : result;
+    if (action.capability === 'git.status' && result.ok) return structuredGitStatus(result, action.input);
+    return action.capability === 'git.diff' && result.ok ? boundedGitDiff(result, action.input) : result;
   }
 
   async #rejectContentFilters(action: ActionRequest, cwd: string, context: CapabilityExecutionContext): Promise<ActionResult | undefined> {
@@ -130,7 +133,27 @@ export class GitProvider implements CapabilityProvider {
   }
 }
 
-function structuredGitStatus(result: ActionResult): ActionResult {
+function boundedGitDiff(result: ActionResult, input: Record<string, unknown>): ActionResult {
+  const raw = result.output as { stdout?: unknown; stderr?: unknown; truncated?: unknown } | undefined;
+  const bytes = Buffer.from(String(raw?.stdout ?? ''), 'utf8');
+  const offset = boundedGitInteger(input.offset, 0, 0, 16 * 1024 * 1024);
+  const maxBytes = boundedGitInteger(input.maxBytes, 48 * 1024, 1024, 128 * 1024);
+  const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + maxBytes));
+  const nextOffset = offset + chunk.byteLength;
+  const truncated = nextOffset < bytes.length || raw?.truncated === true;
+  return {
+    ...result,
+    output: { stdout: chunk.toString('utf8'), stderr: String(raw?.stderr ?? '').slice(0, 16_384), offset, returnedBytes: chunk.byteLength, truncated, ...(truncated ? { nextOffset } : {}) }
+  };
+}
+
+function boundedGitInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const number = value === undefined ? fallback : Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) throw new OperatorError('GIT_INPUT_INVALID', 'Git output range is invalid.');
+  return number;
+}
+
+function structuredGitStatus(result: ActionResult, input: Record<string, unknown>): ActionResult {
   const raw = result.output as { stdout?: unknown; truncated?: unknown } | undefined;
   const records = String(raw?.stdout ?? '').split('\0').filter(Boolean);
   let branch: string | null = null;
@@ -158,7 +181,18 @@ function structuredGitStatus(result: ActionResult): ActionResult {
     }
     entries.push(entry);
   }
-  return { ...result, output: { branch, detached, clean: entries.length === 0, entries, truncated: raw?.truncated === true } };
+  const offset = boundedGitInteger(input.offset, 0, 0, 1_000_000);
+  const maxBytes = boundedGitInteger(input.maxBytes, 64 * 1024, 1024, 128 * 1024);
+  const page: Array<Record<string, unknown>> = [];
+  let bytes = 2;
+  for (const entry of entries.slice(offset)) {
+    const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8') + (page.length > 0 ? 1 : 0);
+    if (bytes + entryBytes > maxBytes) break;
+    page.push(entry); bytes += entryBytes;
+  }
+  const nextOffset = offset + page.length;
+  const truncated = nextOffset < entries.length || raw?.truncated === true;
+  return { ...result, output: { branch, detached, clean: entries.length === 0, entries: page, offset, returnedBytes: bytes, truncated, ...(truncated ? { nextOffset } : {}) } };
 }
 
 async function validatePublicLiteralPaths(

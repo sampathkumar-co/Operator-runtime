@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
+import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-org-'));
@@ -131,6 +132,49 @@ test('stage8 rejects targets outside explicit organization scope prefixes', asyn
   );
 });
 
+test('stage8 bounded retention reclaims only the oldest terminal program beyond 500 entries', async (t) => {
+  const state = await tempDir(t);
+  const org = new OrganizationCoordinator(state, new TeamCoordinator(state));
+  const seed = await org.create({
+    objective: 'retention seed',
+    policy: { allowedScopePrefixes: ['org:test'] },
+    targets: [{ key: 'seed', scopeKey: 'org:test:seed', workItems: work('seed') }]
+  });
+  const file = path.join(state, 'organization-programs.json');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  const oldestId = crypto.randomUUID();
+  persisted.programs = Array.from({ length: 500 }, (_, index) => ({
+    ...structuredClone(seed),
+    id: index === 0 ? oldestId : crypto.randomUUID(),
+    objective: `terminal-${index}`,
+    state: 'VERIFIED',
+    createdAt: new Date(index * 1000).toISOString(),
+    updatedAt: new Date(index * 1000).toISOString()
+  }));
+  await fs.writeFile(file, JSON.stringify(persisted));
+
+  const created = await new OrganizationCoordinator(state, new TeamCoordinator(state)).create({
+    objective: 'new after terminal retention',
+    policy: { allowedScopePrefixes: ['org:test'] },
+    targets: [{ key: 'new', scopeKey: 'org:test:new', workItems: work('new') }]
+  });
+  const after = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  assert.equal(after.programs.length, 500);
+  assert.equal(after.programs.some((item: any) => item.id === oldestId), false);
+  assert.equal(after.programs.some((item: any) => item.id === created.id), true);
+
+  after.programs = after.programs.map((item: any) => ({ ...item, state: 'PENDING' }));
+  await fs.writeFile(file, JSON.stringify(after));
+  await assert.rejects(
+    () => new OrganizationCoordinator(state, new TeamCoordinator(state)).create({
+      objective: 'must not evict active',
+      policy: { allowedScopePrefixes: ['org:test'] },
+      targets: [{ key: 'blocked', scopeKey: 'org:test:blocked', workItems: work('blocked') }]
+    }),
+    (error: any) => error?.code === 'ORGANIZATION_PROGRAM_LIMIT'
+  );
+});
+
 
 test('stage8 compensates already-created missions when a later wave target fails to start', async (t) => {
   const state = await tempDir(t);
@@ -164,4 +208,109 @@ test('stage8 compensates already-created missions when a later wave target fails
   assert.equal(persisted.state, 'PENDING');
   assert.equal(persisted.waves[0]?.state, 'PENDING');
   assert.ok(persisted.targets.every((target) => target.missionId === undefined && target.state === 'PENDING'));
+});
+
+test('stage8 child cancel failure keeps target live and program non-terminal across restart', async (t) => {
+  const state = await tempDir(t);
+  let failCancel = true;
+  const missions = new Map<string, string>();
+  const fakeTeams = {
+    async submit() { const id = crypto.randomUUID(); missions.set(id, 'PENDING'); return { id }; },
+    async start(id: string) { missions.set(id, 'RUNNING'); return { id, state: 'RUNNING' }; },
+    async cancel(id: string) {
+      if (failCancel) throw Object.assign(new Error('child still running'), { code: 'TEAM_CANCEL_FAILED' });
+      missions.set(id, 'CANCELLED'); return { id, state: 'CANCELLED' };
+    }
+  };
+  const org = new OrganizationCoordinator(state, fakeTeams as any);
+  const program = await org.create({
+    objective: 'Truthful cancellation', policy: { allowedScopePrefixes: ['org:safe'] },
+    targets: [{ key: 'one', scopeKey: 'org:safe:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  const blocked = await org.cancel(program.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.targets[0]?.state, 'RUNNING');
+  assert.equal(blocked.targets[0]?.controlFailure?.code, 'TEAM_CANCEL_FAILED');
+
+  failCancel = false;
+  const restarted = new OrganizationCoordinator(state, fakeTeams as any);
+  const cancelled = await restarted.cancel(program.id);
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.targets[0]?.state, 'CANCELLED');
+  assert.equal(cancelled.targets[0]?.controlFailure, undefined);
+});
+
+test('stage8 child pause failure keeps program blocked instead of falsely paused', async (t) => {
+  const state = await tempDir(t);
+  const fakeTeams = {
+    async submit() { return { id: crypto.randomUUID() }; },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async pause() { throw Object.assign(new Error('pause failed'), { code: 'TEAM_PAUSE_FAILED' }); }
+  };
+  const org = new OrganizationCoordinator(state, fakeTeams as any);
+  const program = await org.create({
+    objective: 'Truthful pause', policy: { allowedScopePrefixes: ['org:safe'] },
+    targets: [{ key: 'one', scopeKey: 'org:safe:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  const blocked = await org.pause(program.id);
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.targets[0]?.state, 'RUNNING');
+  assert.equal(blocked.targets[0]?.controlFailure?.operation, 'pause');
+});
+
+
+test('stage8 restart recovery cancels a child mission created before parent rollout state was committed', async (t) => {
+  const state = await tempDir(t);
+  const teams = new TeamCoordinator(state);
+  const org = new OrganizationCoordinator(state, teams);
+  const program = await org.create({
+    objective: 'Crash-safe rollout',
+    policy: { allowedScopePrefixes: ['org:crash'] },
+    targets: [{ key: 'canary', scopeKey: 'org:crash:canary', workItems: work('canary') }]
+  });
+
+  const orphanMissionId = crypto.randomUUID();
+  const orphan = await teams.submit({
+    missionId: orphanMissionId,
+    objective: 'Crash-safe rollout [canary]',
+    workItems: work('canary')
+  });
+  await teams.start(orphan.id);
+
+  const journal = new DurableCompensationJournal(state);
+  await journal.prepare({
+    id: `test-orphan:${program.id}`,
+    ownerKind: 'organization',
+    ownerId: program.id,
+    operation: 'cancel-team-mission',
+    targetId: orphan.id,
+    subjectKey: 'canary'
+  });
+
+  const restarted = new OrganizationCoordinator(state, teams);
+  const recovery = await restarted.recoverPendingCompensations();
+  assert.equal(recovery.recovered, 1);
+  assert.equal(recovery.pending, 0);
+  assert.equal((await teams.inspect(orphan.id)).state, 'CANCELLED');
+
+  const persisted = await restarted.inspect(program.id);
+  assert.equal(persisted.state, 'PENDING');
+  assert.equal(persisted.targets[0]?.missionId, undefined);
+});
+
+test('stage8 successful parent commit clears durable child compensation intent', async (t) => {
+  const state = await tempDir(t);
+  const teams = new TeamCoordinator(state);
+  const org = new OrganizationCoordinator(state, teams);
+  const program = await org.create({
+    objective: 'Committed rollout',
+    policy: { allowedScopePrefixes: ['org:commit'] },
+    targets: [{ key: 'canary', scopeKey: 'org:commit:canary', workItems: work('canary') }]
+  });
+  const started = await org.start(program.id);
+  assert.ok(started.targets[0]?.missionId);
+  const pending = await new DurableCompensationJournal(state).pending('organization');
+  assert.equal(pending.length, 0);
 });

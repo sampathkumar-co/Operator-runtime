@@ -7,6 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { PUBLIC_NOTICES_FINAL_ACK } from '../src/public-pages.ts';
 
+const MCP_ROOT = path.resolve(import.meta.dirname, '..');
+
 async function reservePort(): Promise<number> {
   const server = http.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -76,7 +78,7 @@ test('public MCP edge serves OAuth metadata and challenges unauthenticated calle
   t.after(() => rmSync(noticesDir, { recursive: true, force: true }));
   let stderr = '';
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
-    cwd: process.cwd(),
+    cwd: MCP_ROOT,
     env: {
       ...process.env,
       OPERATOR_EXECUTION_MODE: 'relay',

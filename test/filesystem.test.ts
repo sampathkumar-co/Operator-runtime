@@ -26,6 +26,28 @@ test('filesystem provider performs atomic write/read with SHA postcondition', as
   assert.equal((read.output as { sha256: string }).sha256, (write.output as { afterSha256: string }).afterSha256);
 });
 
+test('file.read paginates large content below the hosted relay result ceiling', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-paged-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const filePath = path.join(root, 'large.txt');
+  const expected = '0123456789abcdef'.repeat(20_000);
+  await fs.writeFile(filePath, expected);
+  let offset = 0;
+  let combined = '';
+  do {
+    const result = await provider.execute(action('file.read', { path: filePath, offset, maxBytes: 32 * 1024 }));
+    assert.equal(result.ok, true, result.error?.message);
+    assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') < 256 * 1024);
+    const output = result.output as any;
+    combined += output.content;
+    if (!output.truncated) break;
+    assert.ok(output.nextOffset > offset);
+    offset = output.nextOffset;
+  } while (true);
+  assert.equal(combined, expected);
+});
+
 
 test('write reports a missing parent explicitly instead of a generic path-lease failure', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-missing-parent-'));

@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { RelayControlService } from '../src/control-service.ts';
 
 const TOKEN = 'relay-control-token-0123456789abcdef';
 const DEVICE_ID = '33333333-3333-4333-8333-333333333333';
 const ACCOUNT_A = '11111111-1111-4111-8111-111111111111';
 const ACCOUNT_B = '22222222-2222-4222-8222-222222222222';
+
+async function tempState(t: test.TestContext, prefix: string): Promise<string> {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  return state;
+}
 
 function action() {
   return {
@@ -424,6 +434,144 @@ test('device enrollment can explicitly select the newly paired device as account
 });
 
 
+test('safe reads transparently recover a brief unpinned route outage', async (t) => {
+  let dispatchCalls = 0;
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch() {
+      dispatchCalls += 1;
+      if (dispatchCalls === 1) throw new OperatorError('ROUTE_NO_DEVICE', 'temporary route gap');
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'recovered-read', seq: 1 } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get() {
+      return {
+        deliveryId: 'recovered-read',
+        result: { ok: true, capability: 'computer.inspect', provider: 'test', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, action: action(), waitMs: 1000 });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(dispatchCalls, 2);
+});
+
+test('declared read risk cannot turn a canonical write capability into an unpinned transparent retry', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      async recoverIdempotent() { return null; },
+      async dispatch() {
+        dispatchCalls += 1;
+        throw new OperatorError('ROUTE_NO_DEVICE', 'temporary route gap');
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, {
+    accountId: ACCOUNT_A,
+    publicBoundary: true,
+    action: {
+      ...writeAction(),
+      risk: 'read'
+    },
+    waitMs: 1000
+  });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'ROUTE_NO_DEVICE');
+  assert.equal(dispatchCalls, 1);
+});
+
+test('idempotent mutation recovery pins the already-routed device and reuses the same receipt', async (t) => {
+  let dispatchCalls = 0;
+  const keys: string[] = [];
+  const devices: Array<string | undefined> = [];
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keys.push(input.idempotencyKey);
+      devices.push(input.explicitDeviceId);
+      if (dispatchCalls === 1) {
+        throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'socket replaced', {
+          retryable: true,
+          details: { deviceId: DEVICE_ID, recoverability: 'automatic', transportChanged: true, safeToRetry: true }
+        });
+      }
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: 'recovered-write', seq: 1 } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey() { return null; },
+    async get() {
+      return {
+        deliveryId: 'recovered-write',
+        result: { ok: true, capability: 'file.create', provider: 'filesystem.native', evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any,
+    results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, publicBoundary: true, action: writeAction(), waitMs: 1000 });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(dispatchCalls, 2);
+  assert.equal(keys[0], keys[1], 'transport retry must reuse the exact same idempotency receipt');
+  assert.deepEqual(devices, [undefined, DEVICE_ID], 'retry must pin the device identified before transport churn');
+});
+
+test('authority change is never hidden by transparent transport retry', async (t) => {
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      async recoverIdempotent() { return null; },
+      async dispatch() {
+        dispatchCalls += 1;
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'authority generation changed', {
+          retryable: false,
+          details: { deviceId: DEVICE_ID, authorityChanged: true, safeToRetry: false }
+        });
+      }
+    } as any,
+    results: { findByIdempotencyKey: async () => null, get: async () => null } as any,
+    accounts: {} as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const response = await post(port, { accountId: ACCOUNT_A, action: action(), waitMs: 1000 });
+  assert.equal(response.status, 409);
+  const body = await response.json() as any;
+  assert.equal(body.error.code, 'RELAY_AUTHORITY_CHANGED');
+  assert.equal(dispatchCalls, 1);
+});
+
 test('read requests dispatch fresh work even when a stateless MCP client reuses its invocation ID', async (t) => {
   const keyBySeq = new Map<number, string>();
   const completedByKey = new Map<string, any>();
@@ -535,6 +683,62 @@ test('precondition-guarded public file writes re-evaluate reused stateless invoc
     });
     assert.equal(response.status, 200, await response.text());
   }
+  assert.equal(dispatchCalls, 2);
+  assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
+});
+
+test('trusted command execution retries recover the same invocation while a fresh identical invocation executes again', async (t) => {
+  const keyBySeq = new Map<number, string>();
+  const completedByKey = new Map<string, any>();
+  let dispatchCalls = 0;
+  let trustedRegistrationVersion = 'trusted-registration-v1';
+  const hub = {
+    async recoverIdempotent() { return null; },
+    async dispatch(input: any) {
+      dispatchCalls += 1;
+      keyBySeq.set(dispatchCalls, input.idempotencyKey);
+      return { route: { deviceId: DEVICE_ID }, delivery: { id: `trusted-command-${dispatchCalls}`, seq: dispatchCalls } };
+    }
+  };
+  const results = {
+    async findByIdempotencyKey(key: string) { return completedByKey.get(key) ?? null; },
+    async get(_deviceId: string, seq: number) {
+      const key = keyBySeq.get(seq)!;
+      const result = {
+        deliveryId: `trusted-command-${seq}`,
+        result: { ok: true, capability: 'project.command.run', provider: trustedRegistrationVersion, evidence: [], durationMs: 1 },
+        replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+      };
+      completedByKey.set(key, { deviceId: DEVICE_ID, result: { seq, ...result } });
+      return result;
+    }
+  };
+  const service = new RelayControlService({
+    hub: hub as any, results: results as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    token: TOKEN
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+
+  const command = {
+    id: 'stable-command-action', capability: 'project.command.run', risk: 'write',
+    input: { commandId: 'benchmark-command', args: ['inspect'] }, provenance: { kind: 'chatgpt' }
+  };
+  const first = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-a' }, waitMs: 1000 });
+  const firstResult = await first.json() as any;
+  assert.equal(firstResult.provider, 'trusted-registration-v1');
+
+  // A retry with the same request identity recovers the durable result.
+  const retry = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-a' }, waitMs: 1000 });
+  assert.equal((await retry.json() as any).provider, 'trusted-registration-v1');
+  assert.equal(dispatchCalls, 1);
+
+  // The trusted registration changes, but payload/action content remains identical.
+  // A new MCP invocation identity must dispatch and execute under the new binding.
+  trustedRegistrationVersion = 'trusted-registration-v2';
+  const fresh = await post(port, { accountId: ACCOUNT_A, action: { ...command, taskId: 'mcp-invocation-b' }, waitMs: 1000 });
+  assert.equal((await fresh.json() as any).provider, 'trusted-registration-v2');
   assert.equal(dispatchCalls, 2);
   assert.notEqual(keyBySeq.get(1), keyBySeq.get(2));
 });
@@ -998,4 +1202,107 @@ test('stage7 uses procedure capability requirements only as trusted routing filt
   assert.equal(response.status, 200, await response.text());
   assert.deepEqual(reservedRequest.requiredCapabilities, ['browser.inspect']);
   assert.deepEqual(dispatched.requiredCapabilities, ['browser.inspect']);
+});
+
+test('relay reservation renewal failure remains durable and blocks unsafe operation routing', async (t) => {
+  const state = await tempState(t, 'operator-relay-reservation-renew-');
+  const reconciliations = new RelayReservationReconciliationStore(state);
+  const operationId = '18181818-1818-4181-8181-181818181818';
+  await reconciliations.record({
+    accountId: ACCOUNT_A, operationId, workloadKey: `operation:${operationId}`,
+    reservationId: '19191919-1919-4191-8191-191919191919', sessionId: '20202020-2020-4202-8202-202020202020',
+    action: 'renew', leaseMs: 60_000, errorCode: 'DEVICE_POOL_HEARTBEAT_FAILED'
+  });
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      heartbeatDeviceReservation: async () => { throw new OperatorError('DEVICE_POOL_HEARTBEAT_FAILED', 'still unavailable'); },
+      dispatch: async () => { dispatchCalls += 1; throw new Error('must not dispatch'); }
+    } as any,
+    results: {} as any,
+    accounts: {} as any,
+    reservationReconciliations: reconciliations,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESERVATION_RECONCILIATION_REQUIRED');
+  assert.equal(dispatchCalls, 0);
+  assert.equal((await reconciliations.pending()).length, 1);
+});
+
+test('relay restart retries and resolves durable reservation cleanup before routing', async (t) => {
+  const state = await tempState(t, 'operator-relay-reservation-restart-');
+  const first = new RelayReservationReconciliationStore(state);
+  const operationId = '21212121-2121-4212-8212-212121212121';
+  const reservationId = '22222222-2222-4222-8222-222222222223';
+  await first.record({
+    accountId: ACCOUNT_A, operationId, workloadKey: `operation:${operationId}`,
+    reservationId, sessionId: '23232323-2323-4232-8232-232323232323', action: 'release', errorCode: 'DEVICE_POOL_RELEASE_FAILED'
+  });
+  const restarted = new RelayReservationReconciliationStore(state);
+  const released: string[] = [];
+  const service = new RelayControlService({
+    hub: {
+      releaseDeviceReservation: async (_accountId: string, id: string) => { released.push(id); },
+      boundProjectDevice: async () => { throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'expected after cleanup'); }
+    } as any,
+    results: {} as any,
+    accounts: {} as any,
+    reservationReconciliations: restarted,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+  });
+  assert.deepEqual(released, [reservationId]);
+  assert.deepEqual(await restarted.pending(), []);
+});
+
+test('completed operation stays completed while release failure is marked for reconciliation', async (t) => {
+  const state = await tempState(t, 'operator-relay-reservation-release-');
+  const reconciliations = new RelayReservationReconciliationStore(state);
+  const operationId = '24242424-2424-4242-8242-242424242424';
+  const reservation = {
+    id: '25252525-2525-4252-8252-252525252525', workloadKey: `operation:${operationId}`, deviceId: DEVICE_ID,
+    sessionId: '26262626-2626-4262-8262-262626262626', requiredCapabilities: [], requiredTags: [], minMemoryMb: 0,
+    requireGpu: false, slots: 1, acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), state: 'ACTIVE'
+  };
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => DEVICE_ID,
+      listDeviceReservations: async () => [reservation],
+      heartbeatDeviceReservation: async () => reservation,
+      dispatch: async () => ({ route: { deviceId: DEVICE_ID }, delivery: { id: 'release-failure', seq: 1 } }),
+      releaseDeviceReservation: async () => { throw new OperatorError('DEVICE_POOL_RELEASE_FAILED', 'simulated release failure'); }
+    } as any,
+    results: { get: async () => ({
+      deliveryId: 'release-failure', result: { ok: true, operation: { id: operationId, state: 'VERIFIED' } },
+      replayAuthority: { accountId: ACCOUNT_A, deviceId: DEVICE_ID, generation: 1 }
+    }) } as any,
+    accounts: { activeMembershipForDevice: async () => ({ accountId: ACCOUNT_A, deviceId: DEVICE_ID, authorityGeneration: 1 }) } as any,
+    reservationReconciliations: reconciliations,
+    token: TOKEN,
+    developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0); t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  const body = await response.json() as any;
+  assert.equal(body.operation.state, 'VERIFIED');
+  assert.deepEqual(body.reservationReconciliation.required, true);
+  assert.equal(body.reservationReconciliation.action, 'release');
+  assert.equal((await reconciliations.pending()).length, 1);
 });

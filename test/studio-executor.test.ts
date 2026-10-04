@@ -184,6 +184,30 @@ test('stage19 uncertain mutation blocks replay until explicit verified reconcili
   assert.equal(provider.calls, 2);
 });
 
+test('stage19 post-mutation executor exception immediately blocks for reconciliation', async (t) => {
+  const state = await temp(t, 'operator-studio-exception-state-');
+  const root = await temp(t, 'operator-studio-exception-root-');
+  const file = path.join(root, 'a.txt');
+  const teach = new TeachModeStore(state);
+  const workflow = await compiledWorkflow(teach, { capability: 'file.write', risk: 'write', file });
+  const executor = new StudioWorkflowExecutor(state, {
+    teach, runtime: new OperatorRuntime(), leases: new ResourceLeaseStore(state),
+    permissions: { allowedCapabilities: ['file.write'], allowedRoots: [root] }
+  });
+  const submitted = await executor.submit(workflow.id, {});
+  const blocked = await executor.execute(submitted.id, {
+    executeAction: async () => {
+      await fs.writeFile(file, 'mutated', 'utf8');
+      throw new Error('post-action audit failed');
+    }
+  });
+  assert.equal(await fs.readFile(file, 'utf8'), 'mutated');
+  assert.equal(blocked.state, 'BLOCKED');
+  assert.equal(blocked.steps[0]?.state, 'NEEDS_RECONCILIATION');
+  assert.equal(blocked.steps[0]?.sideEffectState, 'uncertain');
+  assert.equal(blocked.steps[0]?.errorCode, 'STUDIO_EXECUTOR_EXCEPTION');
+});
+
 test('stage19 failed final verification cannot be upgraded by replaying execution', async (t) => {
   const state = await temp(t, 'operator-studio-verify-state-');
   const root = await temp(t, 'operator-studio-verify-root-');

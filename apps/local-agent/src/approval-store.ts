@@ -9,6 +9,7 @@ const MAX_RECORDS = 2000;
 const RETENTION_MS = 24 * 60 * 60_000;
 const PENDING_TTL_MS = 10 * 60_000;
 const APPROVAL_TTL_MS = 10 * 60_000;
+const EXECUTION_LEASE_MS = 2 * 60_000;
 
 export type ApprovalStatus = 'pending' | 'approved' | 'consumed' | 'denied';
 export type ApprovalAuthorityContext = {
@@ -32,6 +33,9 @@ export type ApprovalRecord = {
   approvalExpiresAt?: string;
   consumedAt?: string;
   deniedAt?: string;
+  executionLeaseId?: string;
+  executionLeaseExpiresAt?: string;
+  continuationTaskId?: string;
 };
 
 type State = { version: 2; records: ApprovalRecord[] };
@@ -57,6 +61,12 @@ export class ApprovalStore {
       if (existing && existing.actionHash !== hash) {
         throw new OperatorError('APPROVAL_ACTION_MISMATCH', 'Action ID is already bound to different action content.');
       }
+      if (existing?.status === 'approved') {
+        clearExpiredExecutionLease(existing, now.getTime());
+        if (activeExecutionLease(existing, now.getTime())) {
+          throw new OperatorError('APPROVAL_IN_USE', 'Approved action is already executing.', { retryable: true });
+        }
+      }
       if (
         existing
         && existing.authorityHash === boundAuthority
@@ -79,6 +89,7 @@ export class ApprovalStore {
         capability: action.capability,
         risk: action.risk,
         target: action.target,
+        ...(authority === undefined && action.taskId && isUuid(action.taskId) ? { continuationTaskId: action.taskId } : {}),
         status: 'pending',
         createdAt: now.toISOString(),
         pendingExpiresAt: new Date(now.getTime() + PENDING_TTL_MS).toISOString()
@@ -87,7 +98,10 @@ export class ApprovalStore {
         approvedAt: undefined,
         approvalExpiresAt: undefined,
         consumedAt: undefined,
-        deniedAt: undefined
+        deniedAt: undefined,
+        executionLeaseId: undefined,
+        executionLeaseExpiresAt: undefined,
+        continuationTaskId: record.continuationTaskId
       });
       else {
         if (state.records.length >= MAX_RECORDS) throw new OperatorError('APPROVAL_STORE_LIMIT', 'Approval store is full.');
@@ -130,6 +144,12 @@ export class ApprovalStore {
       const record = requireRecord(state, actionId);
       requireApprovalRequest(record, approvalRequestId);
       const now = this.#clock();
+      if (record.status === 'approved') {
+        clearExpiredExecutionLease(record, now.getTime());
+        if (activeExecutionLease(record, now.getTime())) {
+          throw new OperatorError('APPROVAL_IN_USE', 'Approved action is already executing and cannot be denied mid-dispatch.', { retryable: true });
+        }
+      }
       const expired = record.status === 'pending'
         ? Date.parse(record.pendingExpiresAt) <= now.getTime()
         : record.status === 'approved'
@@ -154,12 +174,67 @@ export class ApprovalStore {
     const expectedHash = actionHash(action);
     const expectedAuthority = approvalAuthorityFingerprint(authority);
     return await this.#mutate((state) => {
-      prune(state, this.#clock().getTime());
+      const now = this.#clock().getTime();
+      prune(state, now);
       const record = state.records.find((entry) => entry.actionId === action.id);
       if (!record || record.status !== 'approved') return false;
       if (record.actionHash !== expectedHash || record.authorityHash !== expectedAuthority) return false;
+      clearExpiredExecutionLease(record, now);
+      if (activeExecutionLease(record, now)) return false;
       if (!record.approvalExpiresAt) return false;
-      return Date.parse(record.approvalExpiresAt) > this.#clock().getTime();
+      return Date.parse(record.approvalExpiresAt) > now;
+    });
+  }
+
+  async claim(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<string | null> {
+    const expectedHash = actionHash(action);
+    const expectedAuthority = approvalAuthorityFingerprint(authority);
+    return await this.#mutate((state) => {
+      const now = this.#clock();
+      prune(state, now.getTime());
+      const record = state.records.find((entry) => entry.actionId === action.id);
+      if (!record || record.status !== 'approved') return null;
+      if (record.actionHash !== expectedHash || record.authorityHash !== expectedAuthority) return null;
+      clearExpiredExecutionLease(record, now.getTime());
+      if (activeExecutionLease(record, now.getTime())) {
+        throw new OperatorError('APPROVAL_IN_USE', 'Approved action is already executing.', { retryable: true });
+      }
+      if (!record.approvalExpiresAt || Date.parse(record.approvalExpiresAt) <= now.getTime()) return null;
+      const leaseId = crypto.randomUUID();
+      record.executionLeaseId = leaseId;
+      record.executionLeaseExpiresAt = new Date(now.getTime() + EXECUTION_LEASE_MS).toISOString();
+      return leaseId;
+    });
+  }
+
+  async settle(
+    action: ActionRequest,
+    executionLeaseId: string,
+    outcome: 'consume' | 'release',
+    authority?: ApprovalAuthorityContext
+  ): Promise<void> {
+    const expectedHash = actionHash(action);
+    const expectedAuthority = approvalAuthorityFingerprint(authority);
+    await this.#mutate((state) => {
+      const record = requireRecord(state, action.id);
+      if (record.status !== 'approved' || record.actionHash !== expectedHash || record.authorityHash !== expectedAuthority) {
+        throw new OperatorError('APPROVAL_NOT_VALID', 'Action approval is not valid for this exact action and authority.');
+      }
+      if (!isUuid(executionLeaseId) || record.executionLeaseId !== executionLeaseId) {
+        throw new OperatorError('APPROVAL_EXECUTION_LEASE_MISMATCH', 'Approval execution lease is stale or invalid.');
+      }
+      if (outcome === 'consume') {
+        record.status = 'consumed';
+        record.consumedAt = this.#clock().toISOString();
+        record.executionLeaseId = undefined;
+        record.executionLeaseExpiresAt = undefined;
+        return;
+      }
+      record.executionLeaseId = undefined;
+      record.executionLeaseExpiresAt = undefined;
+      if (!record.approvalExpiresAt || Date.parse(record.approvalExpiresAt) <= this.#clock().getTime()) {
+        removeRecord(state, action.id);
+      }
     });
   }
 
@@ -171,7 +246,12 @@ export class ApprovalStore {
       if (record.status !== 'approved' || record.actionHash !== expectedHash || record.authorityHash !== expectedAuthority) {
         throw new OperatorError('APPROVAL_NOT_VALID', 'Action approval is not valid for this exact action and authority.');
       }
-      if (!record.approvalExpiresAt || Date.parse(record.approvalExpiresAt) <= this.#clock().getTime()) {
+      const now = this.#clock().getTime();
+      clearExpiredExecutionLease(record, now);
+      if (activeExecutionLease(record, now)) {
+        throw new OperatorError('APPROVAL_IN_USE', 'Approved action is already executing.', { retryable: true });
+      }
+      if (!record.approvalExpiresAt || Date.parse(record.approvalExpiresAt) <= now) {
         removeRecord(state, action.id);
         return { expired: true as const };
       }
@@ -253,9 +333,25 @@ function prune(state: State, now: number): void {
   state.records = state.records.filter((entry) => {
     if (Date.parse(entry.createdAt) < now - RETENTION_MS) return false;
     if (entry.status === 'pending' && Date.parse(entry.pendingExpiresAt) <= now) return false;
-    if (entry.status === 'approved' && (!entry.approvalExpiresAt || Date.parse(entry.approvalExpiresAt) <= now)) return false;
+    if (entry.status === 'approved') {
+      clearExpiredExecutionLease(entry, now);
+      if (activeExecutionLease(entry, now)) return true;
+      if (!entry.approvalExpiresAt || Date.parse(entry.approvalExpiresAt) <= now) return false;
+    }
     return true;
   });
+}
+
+function activeExecutionLease(record: ApprovalRecord, now: number): boolean {
+  return Boolean(record.executionLeaseId && record.executionLeaseExpiresAt && Date.parse(record.executionLeaseExpiresAt) > now);
+}
+
+function clearExpiredExecutionLease(record: ApprovalRecord, now: number): void {
+  if (!record.executionLeaseId && !record.executionLeaseExpiresAt) return;
+  if (!record.executionLeaseExpiresAt || Date.parse(record.executionLeaseExpiresAt) <= now) {
+    record.executionLeaseId = undefined;
+    record.executionLeaseExpiresAt = undefined;
+  }
 }
 
 function clone(record: ApprovalRecord): ApprovalRecord { return { ...record }; }
@@ -291,19 +387,26 @@ function validateState(input: State): State {
     const approvalExpiresAt = raw.approvalExpiresAt === undefined ? undefined : validIso(raw.approvalExpiresAt, 'approvalExpiresAt');
     const consumedAt = raw.consumedAt === undefined ? undefined : validIso(raw.consumedAt, 'consumedAt');
     const deniedAt = raw.deniedAt === undefined ? undefined : validIso(raw.deniedAt, 'deniedAt');
+    const executionLeaseId = raw.executionLeaseId === undefined ? undefined : String(raw.executionLeaseId);
+    const executionLeaseExpiresAt = raw.executionLeaseExpiresAt === undefined ? undefined : validIso(raw.executionLeaseExpiresAt, 'executionLeaseExpiresAt');
+    const continuationTaskId = raw.continuationTaskId === undefined ? undefined : validUuid(raw.continuationTaskId, 'continuationTaskId');
+    if (Boolean(executionLeaseId) !== Boolean(executionLeaseExpiresAt)) throw corrupt('Approval execution lease metadata is incomplete.');
+    if (executionLeaseId && !isUuid(executionLeaseId)) throw corrupt('Approval execution lease ID is invalid.');
 
-    if (status === 'pending' && (approvedAt || approvalExpiresAt || consumedAt || deniedAt)) throw corrupt('Pending approval metadata is inconsistent.');
+    if (status === 'pending' && (approvedAt || approvalExpiresAt || consumedAt || deniedAt || executionLeaseId)) throw corrupt('Pending approval metadata is inconsistent.');
     if (status === 'approved' && (!approvedAt || !approvalExpiresAt || consumedAt || deniedAt)) throw corrupt('Approved metadata is inconsistent.');
-    if (status === 'consumed' && (!approvedAt || !approvalExpiresAt || !consumedAt || deniedAt)) throw corrupt('Consumed approval metadata is inconsistent.');
-    if (status === 'denied' && (!deniedAt || consumedAt)) throw corrupt('Denied approval metadata is inconsistent.');
+    if (status === 'consumed' && (!approvedAt || !approvalExpiresAt || !consumedAt || deniedAt || executionLeaseId)) throw corrupt('Consumed approval metadata is inconsistent.');
+    if (status === 'denied' && (!deniedAt || consumedAt || executionLeaseId)) throw corrupt('Denied approval metadata is inconsistent.');
     if (approvedAt && Date.parse(approvedAt) < Date.parse(createdAt)) throw corrupt('Approval timestamp ordering is invalid.');
     if (approvalExpiresAt && (!approvedAt || Date.parse(approvalExpiresAt) <= Date.parse(approvedAt))) throw corrupt('Approval expiry ordering is invalid.');
     if (consumedAt && approvedAt && Date.parse(consumedAt) < Date.parse(approvedAt)) throw corrupt('Approval consumption ordering is invalid.');
+    if (executionLeaseExpiresAt && approvedAt && Date.parse(executionLeaseExpiresAt) <= Date.parse(approvedAt)) throw corrupt('Approval execution lease expiry ordering is invalid.');
 
     return {
       actionId, actionHash: actionHashValue, authorityHash, approvalRequestId,
       capability, risk: risk as ActionRequest['risk'], target, status: status as ApprovalStatus,
-      createdAt, pendingExpiresAt, approvedAt, approvalExpiresAt, consumedAt, deniedAt
+      createdAt, pendingExpiresAt, approvedAt, approvalExpiresAt, consumedAt, deniedAt,
+      executionLeaseId, executionLeaseExpiresAt, continuationTaskId
     } satisfies ApprovalRecord;
   });
   return { version: 2, records };

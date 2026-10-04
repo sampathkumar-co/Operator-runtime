@@ -8,6 +8,7 @@ import { createRuntime } from './runtime-factory.ts';
 import { createLocalAgentServer } from './server.ts';
 import { EmergencyStopStore } from './emergency-stop.ts';
 import { ApprovalStore } from './approval-store.ts';
+import { LocalActionExecutionStore } from './action-execution-store.ts';
 import { SessionApprovalStore } from './session-approval.ts';
 import { LocalPrivacyDataStore } from './privacy-data.ts';
 import { LocalAgentRelayRunner } from './relay-agent.ts';
@@ -39,6 +40,11 @@ import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
+import { AgentKernel } from '../../../src/core/agent-kernel.ts';
+import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
+import { IntentRegistry } from '../../../src/core/intent-registry.ts';
+import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
+import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -72,8 +78,26 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const stateInstanceLock = await acquireLocalAgentStateInstanceLock(stateDir);
+const remoteLauncherIpc = process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function';
+let launcherShutdownRequested = false;
+let launcherShutdownReason = 'launcher-disconnected';
+let launcherShutdownHandler: (() => void) | null = null;
+if (remoteLauncherIpc) {
+  process.once('disconnect', () => {
+    launcherShutdownRequested = true;
+    launcherShutdownReason = 'launcher-disconnected';
+    launcherShutdownHandler?.();
+  });
+  process.on('message', (message) => {
+    const signal = launcherShutdownSignal(message);
+    if (!signal) return;
+    launcherShutdownRequested = true;
+    launcherShutdownReason = `launcher-${signal.toLowerCase()}`;
+    launcherShutdownHandler?.();
+  });
+}
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.navigate', 'browser.interact', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -81,15 +105,18 @@ const permissions = {
 };
 const emergencyStop = new EmergencyStopStore(stateDir);
 const approvals = new ApprovalStore(stateDir);
+const actionExecutions = new LocalActionExecutionStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
 const audit = new AuditLog(stateDir);
 const tasks = new TaskStore(stateDir);
 const resourceLeases = new ResourceLeaseStore(stateDir);
-const teams = new TeamCoordinator(stateDir);
+const actionJournal = new ActionTransitionJournal(stateDir);
+const intentRegistry = new IntentRegistry(stateDir);
 const procedures = new ProcedureMemoryStore(stateDir);
 const world = new WorldModelStore(stateDir);
 const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
+const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
 const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const semanticMigration = new SemanticCheckpointManager(stateDir, {
@@ -98,9 +125,7 @@ const semanticMigration = new SemanticCheckpointManager(stateDir, {
 });
 const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
 const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
-const organizations = new OrganizationCoordinator(stateDir, teams);
 const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const teachMode = new TeachModeStore(stateDir);
 const events = new DurableEventRuntime(stateDir);
 const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
@@ -142,11 +167,56 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+const agentKernel = new AgentKernel({
+  stateDir,
+  runtime,
+  leases: resourceLeases,
+  journal: actionJournal,
+  intents: intentRegistry,
+  observeResult: async (action, result) => {
+    try {
+      await publishPerceptionFromActionResult(perception, action, result);
+    } catch (error) {
+      await audit.append({
+        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
+        actionId: action.id,
+        providerId: 'perception.graph',
+        capability: 'perception.publish',
+        result: 'failure',
+        risk: 'write',
+        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
+      });
+      throw error;
+    }
+  }
+});
+const teams = new TeamCoordinator(stateDir, {
+  requireKernelVerification: true,
+  intentRegistry,
+  actionJournal,
+  agentKernel,
+  permissions
+});
+const organizations = new OrganizationCoordinator(stateDir, teams);
+const organizationRecovery = await organizations.recoverPendingCompensations();
+if (organizationRecovery.pending > 0) {
+  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+}
+const teachMode = new TeachModeStore(stateDir, {
+  journal: actionJournal,
+  requireKernelVerification: true,
+  intentRegistry,
+  agentKernel,
+  permissions
+});
+const sagas = new DurableSagaKernel(stateDir, { kernel: agentKernel, permissions });
 const studioExecutor = new StudioWorkflowExecutor(stateDir, {
   teach: teachMode,
   runtime,
   leases: resourceLeases,
-  permissions
+  permissions,
+  agentKernel,
+  intentRegistry
 });
 const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
@@ -180,20 +250,46 @@ let relayRunner: LocalAgentRelayRunner | null = null;
 let relayRun: Promise<void> | null = null;
 let relaySessionCredentials: RelaySessionCredentialManager | null = null;
 let localAgentBaseUrl = '';
+let relayConnectionStatus: Record<string, unknown> = {
+  state: relayUrl ? 'STARTING' : 'DISABLED',
+  updatedAt: new Date().toISOString()
+};
 let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
 
 function stopRelay(): void {
   relayRunner?.stop();
+  relaySessionCredentials?.stop();
+}
+
+async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
+  if (shutdownPromise) return await shutdownPromise;
+  shuttingDown = true;
+  shutdownPromise = (async () => {
+    console.error(`[operator] shutting down (${reason})`);
+    stopRelay();
+    // Fatal relay shutdown is invoked from relayRun's own rejection chain. Do
+    // not make that path wait on itself; signal/launcher shutdown still drains
+    // the independent active relay promise before releasing durable state.
+    const pendingRelay = options.awaitRelay === false ? null : relayRun;
+    await Promise.allSettled([
+      pendingRelay,
+      desiredStateReconciler.stop(),
+      eventTicker.stop(),
+      agent.close(),
+      runtime.close()
+    ].filter(Boolean) as Array<Promise<unknown>>);
+    await stateInstanceLock.release();
+    process.exitCode = exitCode;
+  })();
+  return await shutdownPromise;
 }
 
 async function failRequiredRelay(error: unknown): Promise<void> {
   if (!relayRequired || shuttingDown) return;
-  shuttingDown = true;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
-  stopRelay();
-  await Promise.allSettled([desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close()]);
-  process.exitCode = 1;
+  await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
   setImmediate(() => process.exit(1));
 }
 
@@ -208,9 +304,7 @@ function startRelay(): void {
         const url = new URL(pairUrl);
         url.searchParams.set('code', userCode);
         console.error(`[operator] pair this device: ${url.toString()}`);
-        if (process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function') {
-          process.send({ type: 'mecord-pairing-required', url: url.toString(), expiresAt });
-        }
+        if (remoteLauncherIpc) sendLauncherMessage({ type: 'mecord-pairing-required', url: url.toString(), expiresAt });
       }
     }
   });
@@ -221,7 +315,17 @@ function startRelay(): void {
     protector: windowsBootstrapProtector(),
     allowLoopbackInsecure: relayAllowInsecureLoopback,
     enrollment,
-    onBackgroundRefreshFailure: () => relayRunner?.reconnect()
+    onCredentialRotated: () => relayRunner?.reconnect(),
+    onBackgroundRefreshFailure: ({ code, retryable }) => {
+      relayConnectionStatus = {
+        state: 'DEGRADED',
+        code,
+        recoverable: retryable,
+        credentialRefreshPending: true,
+        updatedAt: new Date().toISOString()
+      };
+      console.error(`[operator] relay credential refresh pending (${code}); keeping the current transport alive while recovery continues`);
+    }
   });
   relaySessionCredentials = sessionCredentials;
   relayRunner = new LocalAgentRelayRunner({
@@ -234,14 +338,16 @@ function startRelay(): void {
     localAgentBaseUrl,
     agentToken: token,
     getSupportedCapabilities: () => runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES),
-    onStatus: (status) => {
-      if (status.state === 'socket-connected') {
-        console.error('[operator] relay socket connected; authenticating');
-      } else if (status.state === 'authenticated-ready') {
-        console.error(`[operator] relay authenticated and ready (${status.capabilityCount} capabilities)`);
-      } else {
-        console.error(`[operator] relay reconnect scheduled (${status.code}, ${status.delayMs}ms)`);
-      }
+    onConnectionState: (status) => {
+      relayConnectionStatus = { ...status, updatedAt: new Date().toISOString() };
+      if (status.state === 'STARTING') console.error('[operator] relay starting');
+      else if (status.state === 'CONNECTING') console.error(status.attempt === 1 ? '[operator] connecting to relay' : `[operator] recovering relay connection (attempt ${status.attempt})`);
+      else if (status.state === 'AUTHENTICATING') console.error('[operator] relay connected; authenticating');
+      else if (status.state === 'READY') console.error(`[operator] Mecord ready (${status.capabilityCount} capabilities)`);
+      else if (status.state === 'RECONNECTING') console.error(`[operator] recovering connection (${status.code}, retry in ${status.delayMs}ms)`);
+      else if (status.state === 'DEGRADED') console.error(`[operator] relay degraded (${status.code})${status.recoverable ? '; recovery is automatic' : ''}`);
+      else if (status.state === 'REVOKED') console.error(`[operator] relay authority revoked (${status.code})`);
+      else if (status.state === 'SHUTTING_DOWN') console.error('[operator] relay shutting down');
     },
     allowLoopbackInsecure: relayAllowInsecureLoopback
   });
@@ -287,7 +393,9 @@ const taskOrchestrator = new TaskOrchestrator({
   runtime,
   store: tasks,
   permissions,
-  resourceLeases,
+  intentRegistry,
+  actionJournal,
+  intelligence: taskIntelligence,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
@@ -299,20 +407,11 @@ const taskOrchestrator = new TaskOrchestrator({
         durationMs: 0
       };
     }
-    const result = await runtime.execute(action, actionPermissions, context);
-    try {
-      await publishPerceptionFromActionResult(perception, action, result);
-    } catch (error) {
-      await audit.append({
-        ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
-        actionId: action.id,
-        providerId: 'perception.graph',
-        capability: 'perception.publish',
-        result: 'failure',
-        risk: 'write',
-        details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
-      });
-    }
+    const result = await agentKernel.execute(action, actionPermissions, {
+      ...context,
+      ownerKind: 'task',
+      ownerId: action.taskId ?? action.id
+    });
     await audit.append({
       ...(action.taskId ? { traceId: action.taskId, taskId: action.taskId } : {}),
       actionId: action.id,
@@ -333,10 +432,14 @@ const taskOrchestrator = new TaskOrchestrator({
 
 const agent = createLocalAgentServer({
   runtime,
+  agentKernel,
+  intentRegistry,
+  sagas,
   token,
   recoveryToken,
   emergencyStop,
   approvals,
+  actionExecutions,
   sessionApprovals,
   audit,
   tasks,
@@ -364,6 +467,14 @@ const agent = createLocalAgentServer({
     try { startRelay(); }
     catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
   },
+  getRuntimeStatus: () => ({
+    relay: {
+      ...relayConnectionStatus,
+      configured: Boolean(relayUrl),
+      required: relayRequired,
+      continuity: relayUrl ? 'automatic' : 'disabled'
+    }
+  }),
   settings: {
     recoveryConfigured: Boolean(recoveryToken),
     browserAutoLaunch,
@@ -396,10 +507,17 @@ const host = process.env.OPERATOR_AGENT_HOST ?? '127.0.0.1';
 const port = Number(process.env.OPERATOR_AGENT_PORT ?? 47100);
 const bound = await agent.listen(host, port);
 localAgentBaseUrl = relayUrl ? `http://${loopbackAddressForBoundHost(bound.host)}:${bound.port}` : '';
-console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
-if (process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function') {
-  process.send({ type: 'mecord-local-agent-ready', host: bound.host, port: bound.port });
+if (remoteLauncherIpc) {
+  launcherShutdownHandler = () => {
+    void shutdownRuntime(0, launcherShutdownReason).finally(() => process.exit(0));
+  };
+  if (launcherShutdownRequested) {
+    await shutdownRuntime(0, launcherShutdownReason);
+    process.exit(0);
+  }
 }
+console.error(`[operator] local agent listening on http://${bound.host}:${bound.port}`);
+if (remoteLauncherIpc) sendLauncherMessage({ type: 'mecord-local-agent-ready', host: bound.host, port: bound.port });
 console.error(`[operator] authorized roots: ${allowedRoots.join(', ')}`);
 console.error(`[operator] protected state directory: ${stateDir}`);
 console.error(`[operator] recovery API: ${recoveryToken ? 'configured' : 'disabled until OPERATOR_RECOVERY_TOKEN is set'}`);
@@ -432,13 +550,24 @@ if (relayUrl && emergencyStatus.engaged) {
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, async () => {
+  process.on(signal, () => {
     if (shuttingDown) return;
-    shuttingDown = true;
-    stopRelay();
-    await Promise.allSettled([relayRun, desiredStateReconciler.stop(), eventTicker.stop(), agent.close(), runtime.close(), stateInstanceLock.release()].filter(Boolean) as Array<Promise<unknown>>);
-    process.exit(0);
+    void shutdownRuntime(0, signal.toLowerCase()).finally(() => process.exit(0));
   });
+}
+
+function launcherShutdownSignal(input: unknown): 'SIGINT' | 'SIGTERM' | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const raw = input as Record<string, unknown>;
+  if (raw.type !== 'mecord-shutdown') return null;
+  const keys = Object.keys(raw);
+  if (keys.some((key) => key !== 'type' && key !== 'signal')) return null;
+  return raw.signal === 'SIGINT' || raw.signal === 'SIGTERM' ? raw.signal : null;
+}
+
+function sendLauncherMessage(message: Record<string, unknown>): void {
+  if (!remoteLauncherIpc || !process.connected || typeof process.send !== 'function') return;
+  try { process.send(message); } catch { /* parent loss is handled by the disconnect lifecycle */ }
 }
 
 function loopbackAddressForBoundHost(hostInput: string): string {

@@ -117,15 +117,34 @@ async function ensureRuntimeReady(config: Awaited<ReturnType<BootstrapConfigStor
       OPERATOR_WINDOWS_PATH_LEASE_PATH: pathLease
     },
     shell: false,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
     windowsHide: true
   });
+  let startupStderr = '';
+  let childExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  child.stderr?.setEncoding('utf8');
+  child.stderr?.on('data', (chunk: string) => {
+    startupStderr = (startupStderr + chunk).slice(-16 * 1024);
+  });
+  child.once('exit', (code, signal) => { childExit = { code, signal }; });
   child.unref();
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // A clean packaged start performs durable-state recovery before both health
+  // surfaces become ready. Keep setup bounded, but allow slower hosted Windows
+  // runners enough time to complete that certified startup path.
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250));
-    if (await runtimeHealthy(config)) return;
+    if (await runtimeHealthy(config)) {
+      child.stderr?.destroy();
+      return;
+    }
+    if (childExit) break;
   }
-  throw new OperatorError('BOOTSTRAP_RUNTIME_START_FAILED', 'Operator runtime did not become healthy after setup. Run "operator verify" for diagnostics.');
+  child.stderr?.destroy();
+  const exit = childExit as { code: number | null; signal: NodeJS.Signals | null } | null;
+  const lifecycle = exit ? ` Child exit: code=${exit.code ?? 'none'}, signal=${exit.signal ?? 'none'}.` : '';
+  const diagnostic = startupStderr.trim().replace(/[\r\n]+/g, ' | ');
+  const detail = diagnostic ? ` Startup diagnostic: ${diagnostic}` : '';
+  throw new OperatorError('BOOTSTRAP_RUNTIME_START_FAILED', `Operator runtime did not become healthy after setup.${lifecycle}${detail} Run "operator verify" for diagnostics.`);
 }
 
 async function runtimeHealthy(config: Awaited<ReturnType<BootstrapConfigStore['load']>>): Promise<boolean> {

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { ActionRequest, ActionResult } from './types.ts';
 import { perceptionDigest, type PerceptionBounds, type PerceptionGraphStore, type PerceptionObservation } from './perception-graph.ts';
+import { validateRenderedEvidence, type RenderedEvidence } from './rendered-evidence.ts';
 
 const MAX_ELEMENTS = 1500;
 
@@ -18,7 +19,7 @@ export async function publishPerceptionFromActionResult(
 async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionResult): Promise<number> {
   const output = asRecord(result.output);
   const elements = Array.isArray(output.elements) ? output.elements.slice(0, MAX_ELEMENTS) : [];
-  let published = 0;
+  const observations: PerceptionObservation[] = [];
   for (const raw of elements) {
     const element = asRecord(raw);
     const processId = safeInteger(element.process_id, 0, 0xffff_ffff);
@@ -27,6 +28,8 @@ async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionR
     const controlType = safeString(element.control_type, 256);
     const name = safeString(element.name, 1024);
     const depth = safeInteger(element.depth, 0, 1000);
+    const windowId = safeString(element.window_id, 256);
+    const runtimeId = normalizeRuntimeId(element.runtime_id);
     const bounds = normalizeBounds(element.bounds);
     if (!name && !automationId && !controlType && !bounds) continue;
 
@@ -37,19 +40,26 @@ async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionR
       ...(typeof element.selected === 'boolean' ? { selected: element.selected } : {}),
       ...(safeString(element.expand_collapse_state, 128) ? { expandCollapseState: safeString(element.expand_collapse_state, 128)! } : {})
     };
-    const identity = {
+    const stableIdentity = {
       processId,
       automationId,
       className,
       controlType,
-      name,
-      bounds
+      ...(runtimeId ? { runtimeId } : {})
     };
-    const semanticId = automationId
-      ? `uia:${processId}:${crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 32)}`
+    const semanticId = automationId || runtimeId
+      ? `uia:${processId}:${crypto.createHash('sha256').update(JSON.stringify(stableIdentity)).digest('hex').slice(0, 32)}`
       : undefined;
+    const evidenceDigest = perceptionDigest({
+      capability: result.capability,
+      provider: result.provider,
+      stableIdentity,
+      name,
+      bounds,
+      state
+    });
     const observation: PerceptionObservation = {
-      sceneKey: processId > 0 ? `uia:process:${processId}` : 'uia:desktop',
+      sceneKey: windowId ? windowSceneKey(windowId) : processId > 0 ? `uia:process:${processId}` : 'uia:desktop',
       channel: 'uia',
       source: result.provider,
       ...(semanticId ? { semanticId } : {}),
@@ -59,17 +69,24 @@ async function publishUiaInspection(graph: PerceptionGraphStore, result: ActionR
       state,
       confidence: 1,
       ttlMs: 30_000,
-      evidenceDigest: perceptionDigest({
-        capability: result.capability,
-        provider: result.provider,
-        identity,
-        state
-      })
+      evidenceDigest,
+      correlationKey: `uia:${processId}:${runtimeId?.join('.') ?? automationId ?? evidenceDigest}`,
+      coordinates: {
+        from: 'native-screen',
+        to: 'native-screen',
+        originX: 0,
+        originY: 0,
+        scaleX: 1,
+        scaleY: 1,
+        generation: evidenceDigest,
+        provenance: `${result.provider}:app.inspect`
+      }
     };
-    await graph.observe(observation);
-    published += 1;
+    observations.push(observation);
   }
-  return published;
+  if (observations.length === 0) return 0;
+  await graph.observeBatch(observations);
+  return observations.length;
 }
 
 async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionResult): Promise<number> {
@@ -80,21 +97,32 @@ async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionR
   const height = safeInteger(output.height, 0, 720);
   if (!captureId || !sha256 || !/^[0-9a-f]{64}$/.test(sha256) || width < 1 || height < 1) return 0;
   const source = safeString(output.source, 64) ?? 'unknown';
+  const rendered = output.renderedEvidence === undefined
+    ? undefined
+    : validateRenderedEvidence(output.renderedEvidence as RenderedEvidence);
   const windowId = safeString(output.windowId, 256);
+  const originX = finite(output.originX) ?? 0;
+  const originY = finite(output.originY) ?? 0;
+  const sourceWidth = safePositive(output.sourceWidth) ?? width;
+  const sourceHeight = safePositive(output.sourceHeight) ?? height;
+  const scaleX = safePositive(output.scaleX) ?? sourceWidth / width;
+  const scaleY = safePositive(output.scaleY) ?? sourceHeight / height;
   const state: Record<string, string | number | boolean | null> = {
     captureId,
     sha256,
     source,
+    ...(rendered ? { renderedTier: rendered.tier, renderedEvidenceDigest: rendered.evidenceDigest } : {}),
+    ...(rendered?.targetAssociation ? { targetAssociation: rendered.targetAssociation } : {}),
     ...(windowId ? { windowId } : {})
   };
   await graph.observe({
-    sceneKey: `capture:${captureId}`,
+    sceneKey: rendered?.sceneKey ?? (windowId ? windowSceneKey(windowId) : 'visual:screen'),
     channel: 'visual',
     source: result.provider,
     semanticId: `capture:${captureId}`,
     role: 'capture',
     name: source,
-    bounds: { x: 0, y: 0, width, height },
+    bounds: rendered?.region ?? { x: 0, y: 0, width, height },
     state,
     confidence: 1,
     ttlMs: 90_000,
@@ -106,8 +134,24 @@ async function publishVisualCapture(graph: PerceptionGraphStore, result: ActionR
       source,
       windowId,
       width,
-      height
-    })
+      height,
+      renderedEvidenceDigest: rendered?.evidenceDigest
+    }),
+    correlationKey: `capture:${captureId}:${sha256}`,
+    coordinates: rendered?.transform ?? {
+      from: 'capture-image',
+      to: 'native-screen',
+      originX,
+      originY,
+      scaleX,
+      scaleY,
+      sourceWidth: width,
+      sourceHeight: height,
+      targetWidth: sourceWidth,
+      targetHeight: sourceHeight,
+      generation: sha256,
+      provenance: `${result.provider}:visual.capture:${captureId}`
+    }
   });
   return 1;
 }
@@ -133,7 +177,21 @@ function safeInteger(input: unknown, min: number, max: number): number {
   const value = Number(input);
   return Number.isSafeInteger(value) && value >= min && value <= max ? value : 0;
 }
+function safePositive(input: unknown): number | undefined {
+  const value = finite(input);
+  return value !== undefined && value > 0 && value <= 100_000 ? value : undefined;
+}
 function finite(input: unknown): number | undefined {
   const value = Number(input);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeRuntimeId(input: unknown): number[] | undefined {
+  if (!Array.isArray(input) || input.length < 1 || input.length > 64) return undefined;
+  const values = input.map(Number);
+  return values.every((value) => Number.isSafeInteger(value)) ? values : undefined;
+}
+
+function windowSceneKey(windowId: string): string {
+  return `desktop:window:${windowId.toLocaleLowerCase()}`;
 }

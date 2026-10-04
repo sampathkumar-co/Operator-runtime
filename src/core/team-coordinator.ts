@@ -3,8 +3,24 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
-import type { ActionRisk, SideEffectState } from './types.ts';
+import type { ActionRisk, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
 import { validSideEffectState } from './side-effect.ts';
+import type { ActionRequest, ActionResult } from './types.ts';
+import { canonicalJson } from './action-identity.ts';
+import type { ActionTransitionJournal } from './action-transition-journal.ts';
+import { kernelVerificationDigest } from './action-verification.ts';
+import { VerificationKernel } from './verification-kernel.ts';
+import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
+import type { AgentKernel } from './agent-kernel.ts';
+import { executeCanonicalVerification } from './canonical-verification.ts';
+import {
+  currentProcessInstance,
+  inspectProcessInstance,
+  sameProcessInstance,
+  type ProcessInstanceIdentity,
+  type ProcessInstanceInspector,
+  validProcessInstance
+} from './process-instance.ts';
 
 export type TeamRole = 'supervisor' | 'planner' | 'coder' | 'tester' | 'browser' | 'ui' | 'verifier' | 'general';
 export type TeamMissionState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
@@ -69,6 +85,7 @@ export interface TeamWorkItem {
     summary: string;
     evidence: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>;
     verificationPassed?: boolean;
+    verificationDigest?: string;
     worldObservationDigest?: string;
     completedAt: string;
     workerId: string;
@@ -88,6 +105,7 @@ export interface TeamMission {
   version: 1;
   id: string;
   objective: string;
+  intent?: IntentBinding;
   state: TeamMissionState;
   epoch: number;
   budget: TeamBudget;
@@ -96,8 +114,25 @@ export interface TeamMission {
   workItems: TeamWorkItem[];
   blackboard: TeamBlackboardEntry[];
   events: TeamEvent[];
+  actionReceipts: TeamActionReceipt[];
   startedAt?: string;
   deadlineAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamActionReceipt {
+  missionId: string;
+  workItemId: string;
+  workerId: string;
+  leaseId: string;
+  actionId: string;
+  actionDigest: string;
+  capability: string;
+  risk: ActionRisk;
+  state: 'DISPATCHING' | 'COMPLETED' | 'UNCERTAIN';
+  verificationDigest?: string;
+  result?: ActionResult;
   createdAt: string;
   updatedAt: string;
 }
@@ -129,6 +164,7 @@ const MAX_RESOURCES = 5000;
 const MAX_EVENTS = 20_000;
 const MAX_BLACKBOARD_ENTRIES = 2000;
 const MAX_BLACKBOARD_VALUE_BYTES = 64 * 1024;
+const MAX_ACTION_RECEIPTS = 4000;
 const STORE_OPTIONS = {
   maxBytes: MAX_MISSION_BYTES,
   errorCode: 'TEAM_STATE_CORRUPT',
@@ -137,22 +173,50 @@ const STORE_OPTIONS = {
 
 export class TeamCoordinator {
   #store: TeamStore;
+  #requireKernelVerification: boolean;
+  #intentRegistry?: IntentRegistry;
+  #actionJournal?: ActionTransitionJournal;
+  #agentKernel?: AgentKernel;
+  #permissions?: PermissionProfile;
 
-  constructor(stateDir: string) {
-    this.#store = new TeamStore(stateDir);
+  constructor(stateDir: string, options: {
+    inspectProcessInstance?: ProcessInstanceInspector;
+    processInstance?: ProcessInstanceIdentity;
+    requireKernelVerification?: boolean;
+    intentRegistry?: IntentRegistry;
+    actionJournal?: ActionTransitionJournal;
+    agentKernel?: AgentKernel;
+    permissions?: PermissionProfile;
+  } = {}) {
+    this.#store = new TeamStore(stateDir, {
+      inspectProcessInstance: options.inspectProcessInstance,
+      processInstance: options.processInstance
+    });
+    this.#requireKernelVerification = options.requireKernelVerification === true;
+    this.#intentRegistry = options.intentRegistry;
+    this.#actionJournal = options.actionJournal;
+    this.#agentKernel = options.agentKernel;
+    this.#permissions = options.permissions ? structuredClone(options.permissions) : undefined;
   }
 
   async submit(input: {
+    missionId?: string;
     objective: string;
     workItems: TeamWorkInput[];
     budget?: Partial<TeamBudget>;
+    intent?: IntentBinding;
   }): Promise<TeamMission> {
     const objective = boundedText(input.objective, 16_384, 'objective');
+    const intent = input.intent ? validIntentBinding(input.intent) : undefined;
+    if (intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Team missions require an intent registry.');
+      await this.#intentRegistry.assertExecutable(intent);
+    }
     if (!Array.isArray(input.workItems) || input.workItems.length < 1 || input.workItems.length > MAX_WORK_ITEMS) {
       throw new OperatorError('TEAM_INPUT_INVALID', `workItems must contain 1-${MAX_WORK_ITEMS} entries.`);
     }
     const now = new Date().toISOString();
-    const missionId = crypto.randomUUID();
+    const missionId = input.missionId === undefined ? crypto.randomUUID() : validUuid(input.missionId, 'missionId');
     const keys = new Set<string>();
     const resources = new Set<string>();
     const workItems: TeamWorkItem[] = input.workItems.map((item, index) => {
@@ -193,6 +257,7 @@ export class TeamCoordinator {
       version: 1,
       id: missionId,
       objective,
+      ...(intent ? { intent } : {}),
       state: 'PENDING',
       epoch: 1,
       budget,
@@ -201,6 +266,7 @@ export class TeamCoordinator {
       workItems,
       blackboard: [],
       events: [],
+      actionReceipts: [],
       createdAt: now,
       updatedAt: now
     };
@@ -218,6 +284,7 @@ export class TeamCoordinator {
   }
 
   async start(missionId: string): Promise<TeamMission> {
+    await this.#assertForwardIntent(missionId);
     return await this.#store.update(missionId, (mission) => {
       reapExpired(mission);
       if (mission.state === 'VERIFIED' || mission.state === 'FAILED' || mission.state === 'CANCELLED') {
@@ -246,6 +313,7 @@ export class TeamCoordinator {
   }
 
   async resume(missionId: string): Promise<TeamMission> {
+    await this.#assertForwardIntent(missionId);
     return await this.#store.update(missionId, (mission) => {
       if (mission.state !== 'PAUSED' && mission.state !== 'BLOCKED') throw new OperatorError('TEAM_STATE_INVALID', 'Only paused/blocked missions can be resumed.');
       if (mission.resources.some((resource) => resource.uncertain)) throw new OperatorError('TEAM_RECONCILIATION_REQUIRED', 'Uncertain resources must be reconciled before resume.');
@@ -332,6 +400,7 @@ export class TeamCoordinator {
   }
 
   async claim(missionId: string, input: { workerId: string }): Promise<{ mission: TeamMission; workItem?: TeamWorkItem }> {
+    await this.#assertForwardIntent(missionId);
     let claimed: TeamWorkItem | undefined;
     const mission = await this.#store.update(missionId, (current) => {
       reapExpired(current);
@@ -431,6 +500,7 @@ export class TeamCoordinator {
     risk: ActionRisk;
     resourceKeys?: string[];
   }): Promise<{ mission: TeamMission; workItem: TeamWorkItem }> {
+    await this.#assertForwardIntent(missionId);
     let authorized: TeamWorkItem | undefined;
     let gateError: { code: string; message: string } | undefined;
     const mission = await this.#store.update(missionId, (current) => {
@@ -480,6 +550,110 @@ export class TeamCoordinator {
     return { mission, workItem: authorized };
   }
 
+  async beginActionExecution(missionId: string, input: {
+    workerId: string; workItemId: string; leaseId: string; action: ActionRequest;
+  }): Promise<{ status: 'dispatch' } | { status: 'completed'; result: ActionResult }> {
+    let outcome: { status: 'dispatch' } | { status: 'completed'; result: ActionResult } | { status: 'uncertain' } | undefined;
+    const digest = actionDigest(input.action);
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      if (canonicalJson(input.action.intent ?? null) !== canonicalJson(mission.intent ?? null)) {
+        throw new OperatorError('TEAM_INTENT_MISMATCH', 'Team action intent binding does not match the durable mission intent.');
+      }
+      const item = requireWorkItem(mission, input.workItemId);
+      requireLease(item, input.workerId, input.leaseId, mission.epoch);
+      const sameId = mission.actionReceipts.find((receipt) => receipt.actionId === input.action.id);
+      if (sameId) {
+        if (sameId.missionId !== mission.id || sameId.workItemId !== item.id || sameId.workerId !== input.workerId
+          || sameId.leaseId !== input.leaseId || sameId.actionDigest !== digest
+          || sameId.capability !== input.action.capability || sameId.risk !== input.action.risk) {
+          throw new OperatorError('TEAM_ACTION_RECEIPT_CONFLICT', 'Action id is already bound to a different team execution identity or payload.');
+        }
+        if (sameId.state === 'COMPLETED' && sameId.result) {
+          outcome = { status: 'completed', result: structuredClone(sameId.result) };
+          return mission;
+        }
+        if (this.#actionJournal && (sameId.state === 'DISPATCHING' || sameId.state === 'UNCERTAIN')) {
+          outcome = { status: 'dispatch' };
+          appendEvent(mission, 'work.action_recovery_routed', input.workerId, item.id, { actionId: input.action.id });
+          return mission;
+        }
+        if (sameId.state === 'DISPATCHING') {
+          sameId.state = 'UNCERTAIN';
+          sameId.updatedAt = new Date().toISOString();
+          appendEvent(mission, 'work.action_uncertain', input.workerId, item.id, { actionId: input.action.id });
+        }
+        outcome = { status: 'uncertain' };
+        return mission;
+      }
+      if (mission.actionReceipts.length >= MAX_ACTION_RECEIPTS) throw new OperatorError('TEAM_ACTION_RECEIPT_LIMIT', 'Team action receipt limit reached.');
+      const now = new Date().toISOString();
+      mission.actionReceipts.push({
+        missionId: mission.id, workItemId: item.id, workerId: input.workerId, leaseId: input.leaseId,
+        actionId: input.action.id, actionDigest: digest, capability: input.action.capability, risk: input.action.risk,
+        state: 'DISPATCHING', createdAt: now, updatedAt: now
+      });
+      mission.updatedAt = now;
+      appendEvent(mission, 'work.action_dispatching', input.workerId, item.id, { actionId: input.action.id, capability: input.action.capability });
+      outcome = { status: 'dispatch' };
+      return mission;
+    });
+    if (outcome?.status === 'uncertain') throw new OperatorError('TEAM_ACTION_RECONCILIATION_REQUIRED', 'A prior dispatch of this team action has uncertain outcome and cannot be replayed.');
+    if (!outcome) throw new OperatorError('TEAM_EXECUTION_DENIED', 'Team action receipt could not be prepared.');
+    return outcome;
+  }
+
+  async completeActionExecution(missionId: string, input: {
+    workerId: string; workItemId: string; leaseId: string; action: ActionRequest; result: ActionResult;
+  }): Promise<ActionResult> {
+    const digest = actionDigest(input.action);
+    const verificationDigest = kernelVerificationDigest(input.result);
+    if (input.result.ok && this.#requireKernelVerification && !verificationDigest) {
+      throw new OperatorError('TEAM_KERNEL_VERIFICATION_REQUIRED', 'Successful team actions must carry an Agent Kernel verification proof.');
+    }
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      const receipt = mission.actionReceipts.find((candidate) => candidate.actionId === input.action.id);
+      if (!receipt || receipt.workItemId !== input.workItemId || receipt.workerId !== input.workerId
+        || receipt.leaseId !== input.leaseId || receipt.actionDigest !== digest) {
+        throw new OperatorError('TEAM_ACTION_RECEIPT_CONFLICT', 'Team action completion does not match its durable dispatch receipt.');
+      }
+      if (receipt.state === 'UNCERTAIN' && !this.#actionJournal) throw new OperatorError('TEAM_ACTION_RECONCILIATION_REQUIRED', 'Uncertain team action cannot be completed without reconciliation.');
+      if (receipt.state === 'COMPLETED') return mission;
+      receipt.result = structuredClone(input.result);
+      receipt.updatedAt = new Date().toISOString();
+      mission.updatedAt = receipt.updatedAt;
+      if (!input.result.ok && input.result.error?.sideEffectState === 'uncertain') {
+        receipt.state = 'UNCERTAIN';
+        appendEvent(mission, 'work.action_uncertain', input.workerId, input.workItemId, { actionId: input.action.id });
+        return mission;
+      }
+      receipt.state = 'COMPLETED';
+      if (verificationDigest) receipt.verificationDigest = verificationDigest;
+      appendEvent(mission, 'work.action_completed', input.workerId, input.workItemId, { actionId: input.action.id, ok: input.result.ok });
+      return mission;
+    });
+    return structuredClone(input.result);
+  }
+
+  async recordActionAuditFailure(missionId: string, actionId: string, result: ActionResult, code: string): Promise<ActionResult> {
+    const degraded: ActionResult = {
+      ...structuredClone(result),
+      evidence: [...result.evidence, { kind: 'audit_persistence', status: 'fail', message: 'The action result is authoritative, but its post-execution audit record could not be persisted.', data: { code }, timestamp: new Date().toISOString() }]
+    };
+    await this.#store.update(missionId, (mission) => {
+      mission.actionReceipts ??= [];
+      const receipt = mission.actionReceipts.find((candidate) => candidate.actionId === actionId && candidate.state === 'COMPLETED');
+      if (!receipt) throw new OperatorError('TEAM_ACTION_RECEIPT_NOT_FOUND', 'Completed team action receipt was not found for audit degradation.');
+      receipt.result = structuredClone(degraded);
+      receipt.updatedAt = new Date().toISOString();
+      mission.updatedAt = receipt.updatedAt;
+      appendEvent(mission, 'work.action_audit_degraded', receipt.workerId, receipt.workItemId, { actionId, code });
+      return mission;
+    });
+    return degraded;
+  }
+
   async complete(missionId: string, input: {
     workerId: string;
     workItemId: string;
@@ -487,8 +661,40 @@ export class TeamCoordinator {
     summary: string;
     evidence?: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>;
     verificationPassed?: boolean;
+    verification?: unknown;
     worldObservationDigest?: string;
   }): Promise<TeamMission> {
+    let canonical: Awaited<ReturnType<typeof executeCanonicalVerification>> | undefined;
+    let verificationStateDigest: string | undefined;
+    if (this.#requireKernelVerification) {
+      const before = await this.#store.get(missionId);
+      reapExpired(before);
+      const beforeWorker = requireWorker(before, input.workerId);
+      const beforeItem = requireWorkItem(before, input.workItemId);
+      const beforeLease = requireLease(beforeItem, beforeWorker.id, input.leaseId, before.epoch);
+      for (const [resourceKey, baseRevision] of Object.entries(beforeLease.baseResourceRevisions)) {
+        const resource = requireResource(before, resourceKey);
+        if (resource.uncertain || resource.lock?.leaseId !== beforeLease.id || resource.revision !== baseRevision) {
+          throw new OperatorError('TEAM_ARTIFACT_CONFLICT', `Resource ${resourceKey} changed or lost lock ownership during work.`);
+        }
+      }
+      if (beforeItem.role === 'verifier') {
+        if (!this.#agentKernel || !this.#permissions) {
+          throw new OperatorError('TEAM_CANONICAL_VERIFICATION_UNAVAILABLE', 'Production Team verification requires the Agent Kernel and permission profile.');
+        }
+        verificationStateDigest = teamVerificationStateDigest(before, beforeItem.id);
+        canonical = await executeCanonicalVerification({
+          request: input.verification,
+          kernel: this.#agentKernel,
+          permissions: this.#permissions,
+          subjectKind: 'team-mission',
+          subjectId: `${before.id}:${beforeItem.id}`,
+          ownerKind: 'team-verifier',
+          ownerId: beforeItem.id,
+          ...(before.intent ? { intent: before.intent } : {})
+        });
+      }
+    }
     return await this.#store.update(missionId, (mission) => {
       reapExpired(mission);
       const worker = requireWorker(mission, input.workerId);
@@ -500,11 +706,109 @@ export class TeamCoordinator {
           throw new OperatorError('TEAM_ARTIFACT_CONFLICT', `Resource ${resourceKey} changed or lost lock ownership during work.`);
         }
       }
-      if (item.role === 'verifier' && input.verificationPassed !== true) {
+      if (item.role === 'verifier' && !this.#requireKernelVerification && input.verificationPassed !== true) {
         throw new OperatorError('TEAM_VERIFICATION_REQUIRED', 'Verifier work can complete only with verificationPassed=true.');
       }
+      let canonicalVerificationDigest: string | undefined;
+      if (item.role === 'verifier') {
+        if (this.#requireKernelVerification && (!canonical || verificationStateDigest !== teamVerificationStateDigest(mission, item.id))) {
+          throw new OperatorError('TEAM_VERIFICATION_STATE_CHANGED', 'Team mission state changed while canonical verification was running; verify the current state again.');
+        }
+        const covered = mission.workItems.filter((candidate) =>
+          candidate.id !== item.id && transitivelyDependsOn(item.key, candidate.key, mission.workItems)
+        );
+        const coveredIds = new Set(covered.map((candidate) => candidate.id));
+        const coveredReceipts = mission.actionReceipts.filter((receipt) => coveredIds.has(receipt.workItemId));
+        const completedActions = coveredReceipts.filter((receipt) => receipt.state === 'COMPLETED' && receipt.result?.ok);
+        const actionBackedCoveredWork = covered.every((candidate) =>
+          candidate.allowedCapabilities.length === 0
+          || completedActions.some((action) => action.workItemId === candidate.id)
+        );
+        const coveredActionEvidence = completedActions.every((action) =>
+          action.result?.evidence.some((entry) => entry.status === 'pass') === true
+        );
+        const verifierActionEvidence = canonical !== undefined && canonical.checks.length > 0
+          && canonical.checks.every((check) => check.ok && (check.evidenceDigests?.length ?? 0) >= 3);
+        const receipt = new VerificationKernel().verify({
+          subjectKind: 'team-verifier',
+          subjectId: `${mission.id}:${item.id}`,
+          contract: {
+            version: 1,
+            missionId: mission.id,
+            verifierWorkItemId: item.id,
+            coveredWorkItems: covered.map((candidate) => ({
+              id: candidate.id,
+              key: candidate.key,
+              state: candidate.state,
+              risk: candidate.risk,
+              attempts: candidate.attempts
+            })),
+            completedActionDigests: completedActions.map((action) => action.actionDigest).sort(),
+            verificationRequest: canonical?.request ?? null
+          },
+          checks: [
+            {
+              name: 'covered-work-completed',
+              ok: covered.every((candidate) => candidate.state === 'COMPLETED'),
+              detail: covered.every((candidate) => candidate.state === 'COMPLETED')
+                ? 'Every work item covered by this verifier is durably completed.'
+                : 'Verifier coverage contains incomplete work.'
+            },
+            {
+              name: 'covered-work-action-backed',
+              ok: !this.#requireKernelVerification || actionBackedCoveredWork,
+              detail: !this.#requireKernelVerification
+                ? 'Legacy coordinator mode permits caller-supplied completion evidence; production mode requires action-backed work.'
+                : actionBackedCoveredWork
+                  ? 'Every covered work item that declares executable capabilities has a durable successful action receipt.'
+                  : 'One or more executable covered work items has no successful durable action receipt.'
+            },
+            {
+              name: 'covered-action-evidence',
+              ok: !this.#requireKernelVerification || coveredActionEvidence,
+              detail: !this.#requireKernelVerification
+                ? 'Legacy coordinator mode permits caller-supplied completion evidence.'
+                : coveredActionEvidence
+                  ? 'Every successful covered action has passing provider evidence.'
+                  : 'One or more successful covered actions lacks passing provider evidence.'
+            },
+            {
+              name: 'verifier-observation-evidence',
+              ok: !this.#requireKernelVerification || verifierActionEvidence,
+              detail: !this.#requireKernelVerification
+                ? 'Legacy coordinator mode permits direct verifier completion for isolated scheduling tests.'
+                : verifierActionEvidence
+                  ? 'The verifier has durable passing evidence from its own fresh read-only observation action.'
+                  : 'The verifier has no durable passing read-only observation action.'
+            },
+            {
+              name: 'kernel-action-proofs',
+              ok: !this.#requireKernelVerification
+                || completedActions.every((action) => Boolean(action.verificationDigest)),
+              detail: !this.#requireKernelVerification
+                || completedActions.every((action) => Boolean(action.verificationDigest))
+                ? this.#requireKernelVerification
+                  ? 'Every successful covered action is bound to an Agent Kernel verification digest; fresh verifier probes carry their own kernel proofs.'
+                  : 'Legacy team mode does not require Agent Kernel action proofs.'
+                : 'One or more successful covered/verifier actions lacks an Agent Kernel verification digest.'
+            },
+            {
+              name: 'resources-certain',
+              ok: mission.resources.every((resource) => !resource.uncertain),
+              detail: mission.resources.every((resource) => !resource.uncertain)
+                ? 'No mission resource has unresolved uncertain side effects.'
+                : 'Mission still contains an uncertain resource.'
+            },
+            ...(canonical?.checks ?? [])
+          ]
+        });
+        if (!receipt.verified) {
+          throw new OperatorError('TEAM_VERIFICATION_REQUIRED', 'Canonical Team verification rejected the verifier completion.');
+        }
+        canonicalVerificationDigest = receipt.digest;
+      }
       if (input.worldObservationDigest !== undefined) {
-        if (item.role !== 'verifier' || input.verificationPassed !== true) {
+        if (item.role !== 'verifier' || (!this.#requireKernelVerification && input.verificationPassed !== true)) {
           throw new OperatorError('TEAM_WORLD_OBSERVATION_DENIED', 'Only a passing verifier may commit world observations.');
         }
         if (!/^[0-9a-f]{64}$/i.test(input.worldObservationDigest)) {
@@ -515,7 +819,10 @@ export class TeamCoordinator {
       item.result = {
         summary: boundedText(input.summary, 64 * 1024, 'completion summary'),
         evidence: validateEvidence(input.evidence ?? []),
-        ...(item.role === 'verifier' ? { verificationPassed: true } : {}),
+        ...(item.role === 'verifier' ? {
+          verificationPassed: true,
+          ...(canonicalVerificationDigest ? { verificationDigest: canonicalVerificationDigest } : {})
+        } : {}),
         ...(input.worldObservationDigest ? { worldObservationDigest: input.worldObservationDigest.toLowerCase() } : {}),
         completedAt: now,
         workerId: worker.id
@@ -586,16 +893,21 @@ export class TeamCoordinator {
       if (!['supervisor', 'verifier'].includes(worker.role)) throw new OperatorError('TEAM_RECONCILIATION_DENIED', 'Only supervisor/verifier workers may reconcile uncertain work.');
       const item = requireWorkItem(mission, input.workItemId);
       if (item.state !== 'NEEDS_RECONCILIATION') throw new OperatorError('TEAM_RECONCILIATION_INVALID', 'Work item is not awaiting reconciliation.');
-      const now = new Date().toISOString();
-      for (const resourceKey of item.resources) {
-        const resource = requireResource(mission, resourceKey);
-        resource.uncertain = false;
-        resource.revision += 1;
-        delete resource.lock;
-        resource.updatedAt = now;
+      if (this.#requireKernelVerification && input.resolution !== 'failed') {
+        throw new OperatorError('TEAM_CANONICAL_RECONCILIATION_REQUIRED', 'Uncertain Team work can resume only after exact Agent Kernel/provider reconciliation; caller summaries cannot establish completed or not-applied state.');
       }
+      const now = new Date().toISOString();
       if (!['completed', 'retry', 'failed'].includes(input.resolution)) throw new OperatorError('TEAM_INPUT_INVALID', 'Reconciliation resolution is invalid.');
       const evidence = validateEvidence(input.evidence ?? []);
+      if (!this.#requireKernelVerification) {
+        for (const resourceKey of item.resources) {
+          const resource = requireResource(mission, resourceKey);
+          resource.uncertain = false;
+          resource.revision += 1;
+          delete resource.lock;
+          resource.updatedAt = now;
+        }
+      }
       if (input.resolution === 'completed') {
         item.state = 'COMPLETED';
         item.result = {
@@ -621,6 +933,15 @@ export class TeamCoordinator {
     });
   }
 
+  async #assertForwardIntent(missionId: string): Promise<void> {
+    const mission = await this.#store.get(missionId);
+    if (!mission.intent) return;
+    if (!this.#intentRegistry) {
+      throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Team missions require an intent registry.');
+    }
+    await this.#intentRegistry.assertExecutable(mission.intent);
+  }
+
   async revokeWorker(missionId: string, input: { workerId: string }): Promise<TeamMission> {
     return await this.#store.update(missionId, (mission) => {
       const worker = requireWorker(mission, input.workerId);
@@ -639,11 +960,15 @@ export class TeamCoordinator {
 class TeamStore {
   #dir: string;
   #lockDir: string;
+  #inspectProcessInstance: ProcessInstanceInspector;
+  #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'team-missions');
     this.#lockDir = path.join(root, 'team-mission-locks');
+    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#processInstance = options.processInstance;
   }
 
   async create(mission: TeamMission): Promise<void> {
@@ -684,11 +1009,14 @@ class TeamStore {
     const limit = boundedInteger(limitInput, 1, 500, 'limit');
     const names = (await fs.readdir(this.#dir)).filter((name) => name.endsWith('.json')).sort();
     const missions: TeamMission[] = [];
-    for (const name of names.slice(0, limit)) {
+    for (const name of names) {
       const id = validUuid(name.slice(0, -5), 'missionId');
       missions.push(await this.get(id));
     }
-    return missions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, objective, state, updatedAt }) => ({ id, objective, state, updatedAt }));
+    return missions
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map(({ id, objective, state, updatedAt }) => ({ id, objective, state, updatedAt }));
   }
 
   async #init(): Promise<void> {
@@ -704,7 +1032,8 @@ class TeamStore {
 
   async #acquire(id: string): Promise<() => Promise<void>> {
     const file = path.join(this.#lockDir, `${id}.lock`);
-    const owner = { id: crypto.randomUUID(), pid: process.pid, at: new Date().toISOString() };
+    const processInstance = this.#processInstance ?? await currentProcessInstance();
+    const owner = { id: crypto.randomUUID(), pid: processInstance.pid, processInstance, at: new Date().toISOString() };
     for (let attempt = 0; attempt < 80; attempt += 1) {
       try {
         const handle = await fs.open(file, 'wx', 0o600);
@@ -725,9 +1054,11 @@ class TeamStore {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       }
       try {
-        const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown };
+        const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
-        if (Number.isSafeInteger(pid) && pid > 0 && !processAlive(pid)) {
+        const storedIdentity = validProcessInstance(current.processInstance);
+        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
+        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
           await fs.rm(file, { force: true });
           continue;
         }
@@ -798,7 +1129,13 @@ function invalidateLiveLeases(mission: TeamMission, reason: string): void {
 
 function finalizeIfVerified(mission: TeamMission): void {
   if (mission.workItems.some((item) => ['FAILED', 'CANCELLED', 'NEEDS_RECONCILIATION', 'LEASED', 'PENDING', 'BLOCKED'].includes(item.state))) return;
-  const verifier = mission.workItems.find((item) => item.role === 'verifier' && item.state === 'COMPLETED' && item.result?.verificationPassed === true);
+  const verifier = mission.workItems.find((item) =>
+    item.role === 'verifier'
+    && item.state === 'COMPLETED'
+    && item.result?.verificationPassed === true
+    && typeof item.result.verificationDigest === 'string'
+    && /^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+  );
   if (!verifier) {
     mission.state = 'BLOCKED';
     appendEvent(mission, 'mission.verifier_required');
@@ -859,6 +1196,7 @@ function validateMission(input: unknown): TeamMission {
   if (mission.version !== 1) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission version is invalid.');
   validUuid(mission.id, 'mission id');
   boundedText(mission.objective, 16_384, 'mission objective');
+  if (mission.intent !== undefined) validIntentBinding(mission.intent);
   if (!['PENDING', 'RUNNING', 'PAUSED', 'BLOCKED', 'FAILED', 'CANCELLED', 'VERIFIED'].includes(mission.state)) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission state is invalid.');
   boundedInteger(mission.epoch, 1, Number.MAX_SAFE_INTEGER, 'mission epoch');
   normalizeBudget(mission.budget);
@@ -873,7 +1211,40 @@ function validateMission(input: unknown): TeamMission {
     cloneBoundedJson(entry.value, MAX_BLACKBOARD_VALUE_BYTES, 'blackboard value');
   }
   if (!Array.isArray(mission.events) || mission.events.length > MAX_EVENTS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission events are invalid.');
+  if (mission.actionReceipts === undefined) mission.actionReceipts = [];
+  if (!Array.isArray(mission.actionReceipts) || mission.actionReceipts.length > MAX_ACTION_RECEIPTS) throw new OperatorError('TEAM_STATE_CORRUPT', 'Mission action receipts are invalid.');
+  for (const receipt of mission.actionReceipts) {
+    if (receipt.verificationDigest !== undefined && !/^[0-9a-f]{64}$/i.test(receipt.verificationDigest)) {
+      throw new OperatorError('TEAM_STATE_CORRUPT', 'Team action verification digest is invalid.');
+    }
+  }
+  for (const item of mission.workItems) {
+    if (item.result?.verificationDigest !== undefined && !/^[0-9a-f]{64}$/i.test(item.result.verificationDigest)) {
+      throw new OperatorError('TEAM_STATE_CORRUPT', 'Team verifier receipt digest is invalid.');
+    }
+  }
   return mission;
+}
+
+function actionDigest(action: ActionRequest): string {
+  return crypto.createHash('sha256').update(canonicalJson(action)).digest('hex');
+}
+
+function teamVerificationStateDigest(mission: TeamMission, verifierWorkItemId: string): string {
+  return crypto.createHash('sha256').update(canonicalJson({
+    missionId: mission.id,
+    epoch: mission.epoch,
+    state: mission.state,
+    intent: mission.intent ?? null,
+    verifierWorkItemId,
+    workItems: mission.workItems.map((item) => ({
+      id: item.id, key: item.key, role: item.role, risk: item.risk, dependsOn: item.dependsOn,
+      resources: item.resources, allowedCapabilities: item.allowedCapabilities, state: item.state,
+      attempts: item.attempts, lease: item.lease ?? null, result: item.result ?? null, failure: item.failure ?? null
+    })),
+    resources: mission.resources,
+    actionReceipts: mission.actionReceipts
+  })).digest('hex');
 }
 
 function validateEvidence(input: Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }>): Array<{ kind: string; status: 'pass' | 'fail' | 'info'; message: string }> {
@@ -930,11 +1301,6 @@ function transitivelyDependsOn(sourceKey: string, targetKey: string, items: Team
     return false;
   };
   return visit(sourceKey);
-}
-
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
 function validRole(input: unknown): TeamRole {

@@ -14,6 +14,7 @@ import {
   parseDevToolsActivePort,
   type BrowserEndpointLauncher
 } from '../src/capabilities/browser-managed.ts';
+import type { ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
 
 async function listen(t: any, handler: Parameters<typeof http.createServer>[0]): Promise<string> {
   const server = http.createServer(handler);
@@ -162,6 +163,59 @@ test('managed browser provider recovers a dead CDP endpoint through the launcher
   assert.equal(result.evidence.some((item) => item.kind === 'browser_lifecycle' && item.status === 'pass'), true);
 });
 
+const FAKE_SCORE: CapabilityScore = { reliability: 1, latency: 0, determinism: 1, security: 1, reversibility: 1, informationQuality: 1, interactionCost: 0 };
+
+function managedDelegate(results: ActionResult[], contexts: CapabilityExecutionContext[]): CapabilityProvider {
+  return {
+    name: 'fake.cdp',
+    supports: () => true,
+    score: () => FAKE_SCORE,
+    execute: async (_action, context = {}) => {
+      contexts.push(context);
+      const result = results.shift();
+      if (!result) throw new Error('unexpected delegate replay');
+      return result;
+    }
+  };
+}
+
+test('managed browser never replays an interaction after ambiguous CDP loss', async () => {
+  const contexts: CapabilityExecutionContext[] = [];
+  let launches = 0;
+  const failed: ActionResult = {
+    ok: false, capability: 'browser.interact', provider: 'fake.cdp', evidence: [], durationMs: 1,
+    error: { code: 'CDP_CONNECTION_CLOSED', message: 'lost after click', retryable: true }
+  };
+  const provider = new ManagedBrowserProvider({
+    endpoint: 'http://127.0.0.1:9222',
+    delegate: managedDelegate([failed], contexts),
+    launcher: { async ensureEndpoint() { launches += 1; return 'http://127.0.0.1:9222'; }, close() {} }
+  });
+  const result = await provider.execute({ id: 'mutate', capability: 'browser.interact', risk: 'external', input: {}, provenance: { kind: 'runtime' } });
+  assert.equal(contexts.length, 1);
+  assert.equal(launches, 0);
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+});
+
+test('managed browser safely retries read-only inspection and propagates cancellation context', async () => {
+  const contexts: CapabilityExecutionContext[] = [];
+  const controller = new AbortController();
+  const failed: ActionResult = {
+    ok: false, capability: 'browser.inspect', provider: 'fake.cdp', evidence: [], durationMs: 1,
+    error: { code: 'CDP_CONNECTION_CLOSED', message: 'temporary', retryable: true }
+  };
+  const succeeded: ActionResult = { ok: true, capability: 'browser.inspect', provider: 'fake.cdp', output: {}, evidence: [], durationMs: 1 };
+  const provider = new ManagedBrowserProvider({
+    endpoint: 'http://127.0.0.1:9222',
+    delegate: managedDelegate([failed, succeeded], contexts),
+    launcher: { async ensureEndpoint() { return 'http://127.0.0.1:9222'; }, close() {} }
+  });
+  const result = await provider.execute({ id: 'read', capability: 'browser.inspect', risk: 'read', input: {}, provenance: { kind: 'runtime' } }, { signal: controller.signal });
+  assert.equal(result.ok, true);
+  assert.equal(contexts.length, 2);
+  assert.equal(contexts.every((context) => context.signal === controller.signal), true);
+});
+
 
 test('managed browser ignores healthy non-managed profile endpoints unless explicitly configured', async (t) => {
   const profileDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-user-profile-cdp-'));
@@ -182,4 +236,46 @@ test('managed browser ignores healthy non-managed profile endpoints unless expli
   const launcher = new ManagedChromiumLauncher({ endpoint: 'http://127.0.0.1:1', autoLaunch: false, dataDir: managedDir });
   t.after(() => launcher.close());
   await assert.rejects(launcher.ensureEndpoint(), /managed auto-launch is disabled/);
+});
+
+
+test('managed browser delegates reconciliation without replay or launcher recovery', async () => {
+  let reconciliations = 0;
+  let launches = 0;
+  const delegate: CapabilityProvider = {
+    name: 'fake.cdp.reconcile',
+    supports: () => true,
+    score: () => FAKE_SCORE,
+    execute: async () => { throw new Error('execute must not be called during reconciliation'); },
+    reconcile: async ({ action }) => {
+      reconciliations += 1;
+      const result: ActionResult = {
+        ok: true,
+        capability: action.capability,
+        provider: 'fake.cdp.reconcile',
+        output: { targetId: 'tab-1', closed: true },
+        evidence: [{ kind: 'browser_reconciliation', status: 'pass', message: 'Target is absent.', timestamp: new Date().toISOString() }],
+        durationMs: 0
+      };
+      return { status: 'completed', result, evidence: result.evidence };
+    }
+  };
+  const provider = new ManagedBrowserProvider({
+    endpoint: 'http://127.0.0.1:9222',
+    delegate,
+    launcher: { async ensureEndpoint() { launches += 1; return 'http://127.0.0.1:9222'; }, close() {} }
+  });
+  const outcome = await provider.reconcile!({
+    action: {
+      id: 'managed-reconcile-close',
+      capability: 'browser.tab.close',
+      risk: 'write',
+      input: { targetId: 'tab-1' },
+      provenance: { kind: 'runtime' }
+    }
+  });
+  assert.equal(outcome.status, 'completed');
+  assert.equal(outcome.result?.provider, 'browser.managed');
+  assert.equal(reconciliations, 1);
+  assert.equal(launches, 0);
 });

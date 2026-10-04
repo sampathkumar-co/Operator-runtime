@@ -8,6 +8,8 @@ const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_STATE_BYTES = 128 * 1024;
 const DEFAULT_REFRESH_SKEW_MS = 60_000;
 const RETRY_REFRESH_MS = 10_000;
+const BACKGROUND_RETRY_BASE_MS = 2_000;
+const BACKGROUND_RETRY_MAX_MS = 60_000;
 const MIN_REMAINING_MS = 5_000;
 const MAX_SESSION_LIFETIME_MS = 30 * 60_000;
 
@@ -27,6 +29,7 @@ type StoredCredential = {
 };
 
 export interface RelayEnrollmentProvider {
+  recover?(): Promise<string>;
   enroll(): Promise<string>;
   stop(): void;
 }
@@ -35,6 +38,11 @@ export interface RelaySessionCredentialProvider {
   forConnection(): Promise<string>;
   forRequest(): Promise<string>;
   stop(): void;
+}
+
+export interface RelayBackgroundRefreshFailure {
+  code: string;
+  retryable: boolean;
 }
 
 export interface RelaySessionCredentialManagerOptions {
@@ -47,7 +55,9 @@ export interface RelaySessionCredentialManagerOptions {
   fetchImpl?: typeof fetch;
   clock?: () => Date;
   enrollment?: RelayEnrollmentProvider;
-  onBackgroundRefreshFailure?: () => void;
+  onCredentialRotated?: (details: { previousJti: string; currentJti: string; expiresAt: string }) => void;
+  onBackgroundRefreshFailure?: (details: RelayBackgroundRefreshFailure) => void;
+  random?: () => number;
 }
 
 type TokenMetadata = {
@@ -70,9 +80,12 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
   #fetch: typeof fetch;
   #clock: () => Date;
   #enrollment?: RelayEnrollmentProvider;
-  #onBackgroundRefreshFailure?: () => void;
+  #onCredentialRotated?: (details: { previousJti: string; currentJti: string; expiresAt: string }) => void;
+  #onBackgroundRefreshFailure?: (details: RelayBackgroundRefreshFailure) => void;
+  #random: () => number;
   #timer: NodeJS.Timeout | null = null;
   #queue: Promise<void> = Promise.resolve();
+  #backgroundRetryAttempt = 0;
   #stopped = false;
 
   constructor(options: RelaySessionCredentialManagerOptions) {
@@ -91,14 +104,16 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
     this.#fetch = options.fetchImpl ?? fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#enrollment = options.enrollment;
+    this.#onCredentialRotated = options.onCredentialRotated;
     this.#onBackgroundRefreshFailure = options.onBackgroundRefreshFailure;
+    this.#random = options.random ?? Math.random;
   }
 
   async forConnection(): Promise<string> { return await this.#freshToken(); }
   async forReset(): Promise<string> {
     const token = await this.#exclusive(async () => {
       let current = await this.#loadOrMigrate(true);
-      if (current.metadata.expiresAtMs <= this.#clock().getTime()) current = await this.#enrollAndPersist();
+      if (current.metadata.expiresAtMs <= this.#clock().getTime()) current = await this.#recoverOrEnrollAndPersist();
       return current.token;
     });
     this.stop();
@@ -129,14 +144,14 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
       const now = this.#clock().getTime();
       if (current.metadata.expiresAtMs <= now) {
         if (!this.#enrollment) throw new OperatorError('RELAY_SESSION_REENROLL_REQUIRED', 'Relay session expired before it could be refreshed.', { retryable: false });
-        current = await this.#enrollAndPersist();
+        current = await this.#recoverOrEnrollAndPersist(current.metadata);
       }
       if (current.metadata.expiresAtMs - now <= this.#refreshSkewMs) {
         try {
           current = await this.#rotate(current);
         } catch (error) {
           if (error instanceof OperatorError && error.code === 'RELAY_SESSION_REENROLL_REQUIRED' && this.#enrollment) {
-            current = await this.#enrollAndPersist();
+            current = await this.#recoverOrEnrollAndPersist(current.metadata);
             this.#schedule(current.metadata.expiresAtMs);
             return current.token;
           }
@@ -160,7 +175,7 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
     try { token = await readRelaySessionTokenFile(this.#legacyTokenFile); }
     catch (error) {
       if (allowEnrollment && this.#enrollment && error instanceof OperatorError && error.code === 'RELAY_SESSION_TOKEN_FILE_MISSING') {
-        return await this.#enrollAndPersist();
+        return await this.#recoverOrEnrollAndPersist();
       }
       throw error;
     }
@@ -170,12 +185,33 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
     return { token, metadata };
   }
 
-  async #enrollAndPersist(): Promise<LoadedCredential> {
+  async #recoverOrEnrollAndPersist(previous?: TokenMetadata): Promise<LoadedCredential> {
+    if (!this.#enrollment) throw new OperatorError('RELAY_SESSION_REENROLL_REQUIRED', 'Relay session requires device enrollment.', { retryable: false });
+    if (this.#enrollment.recover) {
+      try {
+        const token = validateTokenText(await this.#enrollment.recover());
+        const metadata = parseTokenMetadata(token);
+        if (metadata.expiresAtMs <= this.#clock().getTime()) {
+          throw new OperatorError('DEVICE_SESSION_RECOVERY_INVALID', 'Known-device recovery returned an expired session credential.', { retryable: false });
+        }
+        await this.#persist(token, metadata);
+        this.#backgroundRetryAttempt = 0;
+        this.#notifyCredentialReplacement(previous, metadata);
+        return { token, metadata };
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'RELAY_SESSION_REENROLL_REQUIRED') throw error;
+      }
+    }
+    return await this.#enrollAndPersist(previous);
+  }
+
+  async #enrollAndPersist(previous?: TokenMetadata): Promise<LoadedCredential> {
     if (!this.#enrollment) throw new OperatorError('RELAY_SESSION_REENROLL_REQUIRED', 'Relay session requires device enrollment.', { retryable: false });
     const token = validateTokenText(await this.#enrollment.enroll());
     const metadata = parseTokenMetadata(token);
     if (metadata.expiresAtMs <= this.#clock().getTime()) throw new OperatorError('DEVICE_ENROLLMENT_SESSION_INVALID', 'Device enrollment returned an expired session credential.');
     await this.#persist(token, metadata);
+    this.#notifyCredentialReplacement(previous, metadata);
     return { token, metadata };
   }
 
@@ -230,7 +266,20 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
       throw new OperatorError('RELAY_SESSION_REFRESH_INVALID', 'Relay returned an invalid replacement session.', { retryable: false });
     }
     await this.#persist(token, metadata);
+    this.#backgroundRetryAttempt = 0;
+    this.#notifyCredentialReplacement(current.metadata, metadata);
     return { token, metadata };
+  }
+
+  #notifyCredentialReplacement(previous: TokenMetadata | undefined, current: TokenMetadata): void {
+    if (!previous || previous.jti === current.jti) return;
+    try {
+      this.#onCredentialRotated?.({
+        previousJti: previous.jti,
+        currentJti: current.jti,
+        expiresAt: current.expiresAt
+      });
+    } catch { /* transport handoff notification must not invalidate the credential */ }
   }
 
   async #persist(token: string, metadata: TokenMetadata): Promise<void> {
@@ -276,11 +325,29 @@ export class RelaySessionCredentialManager implements RelaySessionCredentialProv
   }
 
   async #refreshFromTimer(): Promise<void> {
-    try { await this.#freshToken(); }
-    catch {
+    try {
+      await this.#freshToken();
+      this.#backgroundRetryAttempt = 0;
+    } catch (error) {
       if (this.#stopped) return;
-      try { this.#onBackgroundRefreshFailure?.(); } catch { /* liveness callback is best-effort */ }
+      const details: RelayBackgroundRefreshFailure = {
+        code: error instanceof OperatorError ? error.code : 'RELAY_SESSION_REFRESH_FAILED',
+        retryable: error instanceof OperatorError ? error.retryable : true
+      };
+      try { this.#onBackgroundRefreshFailure?.(details); } catch { /* diagnostics must never affect credential recovery */ }
+      this.#scheduleBackgroundRetry();
     }
+  }
+
+  #scheduleBackgroundRetry(): void {
+    if (this.#stopped) return;
+    if (this.#timer) clearTimeout(this.#timer);
+    const exponent = Math.min(this.#backgroundRetryAttempt++, 5);
+    const ceiling = Math.min(BACKGROUND_RETRY_MAX_MS, BACKGROUND_RETRY_BASE_MS * 2 ** exponent);
+    const jitter = 0.75 + (this.#random() * 0.5);
+    const delay = Math.max(1_000, Math.round(ceiling * jitter));
+    this.#timer = setTimeout(() => { void this.#refreshFromTimer(); }, delay);
+    this.#timer.unref();
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {

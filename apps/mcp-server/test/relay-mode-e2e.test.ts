@@ -13,6 +13,7 @@ const CONTROL_TOKEN = 'relay-control-ci-0123456789abcdef0123456789';
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
 const DEVICE_ID = '22222222-2222-4222-8222-222222222222';
 const PROJECT_KEY = 'ci-project';
+const MCP_ROOT = path.resolve(import.meta.dirname, '..');
 async function reservePort(): Promise<number> {
   const server = http.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -70,9 +71,9 @@ function send(res: http.ServerResponse, status: number, value: unknown): void {
 }
 
 async function runInspector(mcpUrl: string, home: string): Promise<Record<string, unknown>> {
-  const inspectorEntry = path.join(process.cwd(), 'node_modules', '@modelcontextprotocol', 'inspector', 'clients', 'launcher', 'build', 'index.js');
+  const inspectorEntry = path.join(MCP_ROOT, 'node_modules', '@modelcontextprotocol', 'inspector', 'clients', 'launcher', 'build', 'index.js');
   const child = spawn(process.execPath, [inspectorEntry, '--cli', '--server-url', mcpUrl, '--transport', 'http', '--method', 'tools/list'], {
-    cwd: process.cwd(),
+    cwd: MCP_ROOT,
     env: { ...process.env, HOME: home },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -148,7 +149,7 @@ test('official MCP client and Inspector execute through relay control mode with 
   const mcpPort = await reservePort();
   let stderr = '';
   const mcp = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
-    cwd: process.cwd(),
+    cwd: MCP_ROOT,
     env: {
       ...process.env,
       OPERATOR_EXECUTION_MODE: 'relay',

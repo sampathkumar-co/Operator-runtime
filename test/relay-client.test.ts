@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
-import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
 
 class FakeSocket implements RelaySocketLike {
   readyState = 0;
@@ -49,6 +49,13 @@ class StubbornCloseSocket extends FakeSocket {
   }
 }
 
+class StrictSocket extends FakeSocket {
+  override send(data: string): void {
+    if (this.readyState !== 1) throw new Error(`socket is not open (readyState=${this.readyState})`);
+    super.send(data);
+  }
+}
+
 async function stateDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -63,6 +70,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
   const delivered: any[] = [];
   const acknowledged: any[] = [];
   const statuses: RelayClientStatus[] = [];
+  const connectionStates: RelayConnectionState[] = [];
   let client!: RelayClient;
 
   const factory = () => {
@@ -104,6 +112,7 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     onDelivery: async (delivery) => { delivered.push(delivery); },
     onAcknowledged: async (delivery) => { acknowledged.push({ delivery, state: await client.state() }); },
     onStatus: (status) => statuses.push(status),
+    onConnectionState: (status) => connectionStates.push(status),
     random: () => 0,
     sleep: async () => {}
   });
@@ -122,9 +131,13 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
     { state: 'socket-connected' },
     { state: 'authenticated-ready', capabilityCount: 2 },
     { state: 'reconnect-wait', code: 'RELAY_SOCKET_CLOSED', delayMs: 250 },
-    { state: 'socket-connected' },
-    { state: 'authenticated-ready', capabilityCount: 2 }
+    { state: 'socket-connected' }
   ]);
+  assert.deepEqual(connectionStates.map((item) => item.state), [
+    'STARTING', 'CONNECTING', 'AUTHENTICATING', 'READY',
+    'RECONNECTING', 'CONNECTING', 'AUTHENTICATING', 'SHUTTING_DOWN'
+  ]);
+  assert.deepEqual(connectionStates[4], { state: 'RECONNECTING', code: 'RELAY_SOCKET_CLOSED', delayMs: 250, attempt: 2 });
 });
 
 
@@ -194,6 +207,60 @@ test('negotiated read window executes read deliveries concurrently but ACKs them
   assert.deepEqual(ackOrder, [1, 2]);
   assert.equal((await client.state()).lastAckedServerSeq, 2);
   assert.equal((await client.state()).processing, undefined);
+});
+
+test('serialization barrier drains active concurrent reads without reconnecting', async (t) => {
+  const state = await stateDir(t, 'operator-relay-read-barrier-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Read Barrier PC');
+  const socket = new FakeSocket();
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const ackOrder: number[] = [];
+  const deliveryOrder: string[] = [];
+  let connectionCount = 0;
+  let client!: RelayClient;
+
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({ type: 'welcome', protocol: 1, connectionId: 'barrier-1', resumeFromSeq: 0, heartbeatMs: 60_000, readConcurrency: 2 });
+      socket.server({ type: 'delivery', seq: 1, id: 'read-1', kind: 'action', payload: { action: { risk: 'read' } } });
+      socket.server({ type: 'delivery', seq: 2, id: 'write-2', kind: 'action', payload: { action: { risk: 'write' } } });
+      setTimeout(releaseRead, 25);
+      return;
+    }
+    if (frame.type === 'ack') {
+      ackOrder.push(frame.seq);
+      if (frame.seq === 2) { client.stop(); socket.close(); }
+    }
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => { connectionCount += 1; queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session',
+    maxConcurrentReadDeliveries: 2,
+    onDelivery: async (delivery) => {
+      deliveryOrder.push(`start-${delivery.seq}`);
+      if (delivery.seq === 1) {
+        await readGate;
+        deliveryOrder.push('done-1');
+        return;
+      }
+      assert.equal(delivery.seq, 2);
+      assert.equal(deliveryOrder.includes('done-1'), true);
+      deliveryOrder.push('done-2');
+    },
+    sleep: async () => {}
+  });
+
+  await client.run();
+  assert.equal(connectionCount, 1);
+  assert.deepEqual(ackOrder, [1, 2]);
+  assert.deepEqual(deliveryOrder, ['start-1', 'done-1', 'start-2', 'done-2']);
 });
 
 test('relay recomputes signed capabilities before every reconnect hello', async (t) => {
@@ -495,6 +562,368 @@ test('explicit reconnect does not depend on the current WebSocket emitting close
   assert.equal(sockets[0]?.readyState, 2);
 });
 
+
+test('explicit reconnect drains an in-flight destructive delivery before opening the replacement transport', async (t) => {
+  const state = await stateDir(t, 'operator-relay-reconnect-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Reconnect Drain PC');
+  const sockets: FakeSocket[] = [];
+  const events: string[] = [];
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket: FakeSocket = connectionNumber === 1 ? new StubbornCloseSocket() : new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type === 'hello') {
+        events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
+        socket.server({
+          type: 'welcome',
+          protocol: 1,
+          connectionId: `drain-${connectionNumber}`,
+          resumeFromSeq: frame.payload.resumeAfterSeq,
+          heartbeatMs: 60_000,
+          capabilityBinding: 1,
+          capabilities: ['file.replace']
+        });
+        if (connectionNumber === 1) {
+          socket.server({
+            type: 'delivery',
+            seq: 1,
+            id: 'destructive-1',
+            kind: 'action',
+            payload: { action: { id: 'destructive-1', capability: 'file.replace', risk: 'destructive' } }
+          });
+        } else {
+          setTimeout(() => { client.stop(); socket.close(); }, 0);
+        }
+      }
+      if (frame.type === 'ack' && frame.seq === 1) events.push('ack-1');
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      events.push('delivery-start');
+      markStarted();
+      await deliveryGate;
+      events.push('delivery-durable');
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+  client.reconnect();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(sockets.length, 1, 'replacement transport must wait until accepted destructive work reaches its durable boundary');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+  assert.ok(events.indexOf('delivery-durable') < events.indexOf('ack-1'));
+  assert.ok(events.indexOf('ack-1') < events.indexOf('hello-2-resume-1'));
+});
+
+test('unexpected network loss drains an in-flight destructive delivery before reconnecting', async (t) => {
+  const state = await stateDir(t, 'operator-relay-network-loss-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Network Loss Drain PC');
+  const sockets: FakeSocket[] = [];
+  const events: string[] = [];
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket: FakeSocket = connectionNumber === 1 ? new StrictSocket() : new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type !== 'hello') return;
+      events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: `network-loss-${connectionNumber}`,
+        resumeFromSeq: frame.payload.resumeAfterSeq,
+        heartbeatMs: 60_000,
+        capabilityBinding: 1,
+        capabilities: ['file.replace']
+      });
+      if (connectionNumber === 1) {
+        socket.server({
+          type: 'delivery',
+          seq: 1,
+          id: 'network-loss-destructive-1',
+          kind: 'action',
+          payload: { action: { id: 'network-loss-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+        });
+      } else {
+        setTimeout(() => { client.stop(); socket.close(); }, 0);
+      }
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: factory,
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      events.push('delivery-start');
+      markStarted();
+      await deliveryGate;
+      events.push('delivery-durable');
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+  sockets[0]!.close(1006, 'simulated network loss');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(sockets.length, 1, 'natural reconnect must wait for accepted destructive work to become durable');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+  assert.ok(events.indexOf('delivery-durable') < events.indexOf('hello-2-resume-1'));
+  assert.equal(sockets[0]!.sent.some((frame) => frame.type === 'ack' && frame.seq === 1), false, 'dead transport must not turn a lost ACK frame into a delivery failure');
+});
+
+test('controlled shutdown waits for an in-flight destructive delivery to reach the durable boundary', async (t) => {
+  const state = await stateDir(t, 'operator-relay-shutdown-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Shutdown Drain PC');
+  const socket = new FakeSocket();
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let runSettled = false;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    socket.server({
+      type: 'welcome',
+      protocol: 1,
+      connectionId: 'shutdown-drain',
+      resumeFromSeq: 0,
+      heartbeatMs: 60_000,
+      capabilityBinding: 1,
+      capabilities: ['file.replace']
+    });
+    socket.server({
+      type: 'delivery',
+      seq: 1,
+      id: 'shutdown-destructive-1',
+      kind: 'action',
+      payload: { action: { id: 'shutdown-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+    });
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async (delivery) => {
+      assert.equal(delivery.seq, 1);
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run().finally(() => { runSettled = true; });
+  await deliveryStarted;
+  client.stop();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(runSettled, false, 'shutdown must not let the process owner exit while accepted destructive work is still running');
+  assert.equal(socket.readyState, 1, 'transport remains open only while the accepted delivery drains');
+
+  releaseDelivery();
+  await run;
+
+  assert.equal(runSettled, true);
+  assert.equal(socket.readyState, 3);
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('protocol failure waits for accepted destructive work to become durable before failing closed', async (t) => {
+  const state = await stateDir(t, 'operator-relay-protocol-drain-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Protocol Drain PC');
+  const socket = new FakeSocket();
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let runSettled = false;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    socket.server({
+      type: 'welcome',
+      protocol: 1,
+      connectionId: 'protocol-drain',
+      resumeFromSeq: 0,
+      heartbeatMs: 60_000,
+      capabilityBinding: 1,
+      capabilities: ['file.replace']
+    });
+    socket.server({
+      type: 'delivery',
+      seq: 1,
+      id: 'protocol-drain-destructive-1',
+      kind: 'action',
+      payload: { action: { id: 'protocol-drain-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+    });
+  };
+
+  const client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    onDelivery: async () => {
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run().finally(() => { runSettled = true; });
+  await deliveryStarted;
+  socket.server({ type: 'not-a-relay-frame' });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(runSettled, false, 'protocol failure must not outrun already-accepted destructive work');
+
+  releaseDelivery();
+  await assert.rejects(run, (error: any) => error?.code === 'RELAY_PROTOCOL_ERROR');
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+});
+
+test('heartbeat pong bypasses a long serialized delivery so healthy transport does not false-timeout', { timeout: 7_000 }, async (t) => {
+  const state = await stateDir(t, 'operator-relay-heartbeat-long-delivery-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Heartbeat Long Delivery PC');
+  const socket = new FakeSocket();
+  let nowMs = 0;
+  let client!: RelayClient;
+  let releaseDelivery!: () => void;
+  let markStarted!: () => void;
+  let markPing!: () => void;
+  const deliveryStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+  const pingObserved = new Promise<void>((resolve) => { markPing = resolve; });
+
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      socket.server({
+        type: 'welcome',
+        protocol: 1,
+        connectionId: 'heartbeat-long-delivery',
+        resumeFromSeq: 0,
+        heartbeatMs: 5_000,
+        capabilityBinding: 1,
+        capabilities: ['file.replace']
+      });
+      socket.server({
+        type: 'delivery',
+        seq: 1,
+        id: 'heartbeat-long-delivery-1',
+        kind: 'action',
+        payload: { action: { id: 'heartbeat-long-delivery-1', capability: 'file.replace', risk: 'destructive' } }
+      });
+      return;
+    }
+    if (frame.type === 'ping') markPing();
+  };
+
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity,
+    socketFactory: () => {
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+    getSessionToken: async () => 'session',
+    supportedCapabilities: ['file.replace'],
+    clock: () => new Date(nowMs),
+    onDelivery: async () => {
+      markStarted();
+      await deliveryGate;
+    },
+    sleep: async () => {}
+  });
+
+  const run = client.run();
+  await deliveryStarted;
+
+  // Advance the injected clock close to the timeout boundary while the
+  // destructive delivery still owns the serialized message queue. A healthy
+  // pong must update liveness immediately rather than waiting behind delivery.
+  nowMs = 10_000;
+  socket.server({ type: 'pong', nonce: 'healthy-during-long-work' });
+  nowMs = 16_000;
+
+  await Promise.race([
+    pingObserved,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('heartbeat ping was suppressed by a false timeout')), 5_500))
+  ]);
+  assert.equal(socket.readyState, 1, 'healthy relay transport must stay open while long accepted work is still executing');
+
+  releaseDelivery();
+  client.stop();
+  await run;
+  assert.deepEqual(await client.state(), { version: 1, lastAckedServerSeq: 1 });
+});
 
 test('stage7 relay signs bounded resource profile into authenticated hello', async (t) => {
   const state = await stateDir(t, 'operator-relay-resource-profile-');

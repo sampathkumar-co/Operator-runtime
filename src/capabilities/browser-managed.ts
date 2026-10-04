@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
@@ -37,6 +37,8 @@ export type ManagedBrowserOptions = {
   discoveryDataDirs?: string[];
   launchTimeoutMs?: number;
   launcher?: BrowserEndpointLauncher;
+  /** Test/integration seam for a protocol-compatible CDP delegate. */
+  delegate?: CapabilityProvider;
 };
 
 export type BrowserEndpointLauncher = {
@@ -247,13 +249,14 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   }
 
   #discoveryDataDirs(): string[] {
-    const values = [this.#managedDataDir()];
+    const values: string[] = [];
     for (const candidate of this.#options.discoveryDataDirs ?? []) {
       if (!path.isAbsolute(candidate)) {
         throw new OperatorError('UNSAFE_BROWSER_DISCOVERY_DIR', 'Browser discovery data directories must be absolute paths.');
       }
       values.push(path.resolve(candidate));
     }
+    values.push(this.#managedDataDir());
     // Do not auto-attach to normal Chrome/Edge user profiles. A configured CDP endpoint
     // or an explicit discoveryDataDirs entry is required for non-managed profiles.
     return values;
@@ -285,37 +288,50 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
 
 export class ManagedBrowserProvider implements CapabilityProvider {
   readonly name = 'browser.managed';
-  #delegate: BrowserCdpProvider;
+  #delegate: CapabilityProvider;
   #launcher: BrowserEndpointLauncher;
   #endpoint: string;
 
   constructor(options: ManagedBrowserOptions = {}) {
     this.#endpoint = options.endpoint ?? 'http://127.0.0.1:9222';
-    this.#delegate = new BrowserCdpProvider(this.#endpoint);
+    this.#delegate = options.delegate ?? new BrowserCdpProvider(this.#endpoint);
     this.#launcher = options.launcher ?? new ManagedChromiumLauncher(options);
   }
 
-  supports(action: ActionRequest): boolean {
+  supports(action: ActionRequest): boolean | Promise<boolean> {
     return this.#delegate.supports(action);
   }
 
   score(): CapabilityScore { return SCORE; }
 
-  async execute(action: ActionRequest): Promise<ActionResult> {
+  async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
-    const first = await this.#delegate.execute(action);
+    const first = await this.#delegate.execute(action, context);
     if (first.ok || !first.error?.code || !RECOVERABLE_CDP_CODES.has(first.error.code)) {
       return { ...first, provider: this.name };
+    }
+
+    if (action.risk !== 'read') {
+      return {
+        ...first,
+        provider: this.name,
+        evidence: [
+          ...first.evidence,
+          evidence('browser_lifecycle', 'fail', 'Refused to replay a browser mutation after ambiguous CDP transport failure; explicit post-state reconciliation is required.', { code: first.error.code })
+        ],
+        error: { ...first.error, sideEffectState: 'uncertain' },
+        durationMs: Math.round(performance.now() - started)
+      };
     }
 
     try {
       const endpoint = await this.#launcher.ensureEndpoint();
       if (endpoint !== this.#endpoint) {
-        this.#delegate.close();
+        await this.#delegate.close?.();
         this.#endpoint = endpoint;
         this.#delegate = new BrowserCdpProvider(endpoint);
       }
-      const retried = await this.#delegate.execute(action);
+      const retried = await this.#delegate.execute(action, context);
       return {
         ...retried,
         provider: this.name,
@@ -338,8 +354,26 @@ export class ManagedBrowserProvider implements CapabilityProvider {
     }
   }
 
+  async reconcile(
+    request: ProviderReconciliationRequest,
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    if (!this.#delegate.reconcile) {
+      return {
+        status: 'uncertain',
+        evidence: [evidence('browser_reconciliation', 'info', 'Managed browser delegate does not implement reconciliation.')]
+      };
+    }
+    const outcome = await this.#delegate.reconcile(request, context);
+    return {
+      ...outcome,
+      ...(outcome.result ? { result: { ...outcome.result, provider: this.name } } : {}),
+      evidence: outcome.evidence
+    };
+  }
+
   close(): void {
-    this.#delegate.close();
+    void this.#delegate.close?.();
     this.#launcher.close();
   }
 }

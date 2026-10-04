@@ -11,6 +11,9 @@ import { TOOL_NAMES } from '../src/tool-surface.ts';
 import { runLocalCertificationPreflight } from '../scripts/live-cert-preflight.ts';
 
 const TOKEN = 'operator-ci-token-0123456789abcdef0123456789';
+const MAX_COMMAND_OUTPUT_CHARS = 4 * 1024 * 1024;
+const MCP_ROOT = path.resolve(import.meta.dirname, '..');
+const REPOSITORY_ROOT = path.resolve(MCP_ROOT, '..', '..');
 
 type CommandResult = {
   code: number | null;
@@ -61,13 +64,13 @@ async function waitForHealth(label: string, url: string, child: ChildProcess, st
 }
 
 async function runCommand(executable: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs = 20_000): Promise<CommandResult> {
-  const child = spawn(executable, args, { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, args, { cwd: MCP_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
-  child.stdout?.on('data', (chunk: string) => { stdout = `${stdout}${chunk}`.slice(-128_000); });
-  child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-128_000); });
+  child.stdout?.on('data', (chunk: string) => { stdout = `${stdout}${chunk}`.slice(-MAX_COMMAND_OUTPUT_CHARS); });
+  child.stderr?.on('data', (chunk: string) => { stderr = `${stderr}${chunk}`.slice(-MAX_COMMAND_OUTPUT_CHARS); });
   const completed = new Promise<CommandResult>((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code) => resolve({ code, stdout, stderr }));
@@ -84,11 +87,19 @@ async function runCommand(executable: string, args: string[], env: NodeJS.Proces
 
 function parseInspectorJson(stdout: string): Record<string, unknown> {
   const trimmed = stdout.trim();
-  try { return JSON.parse(trimmed) as Record<string, unknown>; } catch { /* try NDJSON/log-tolerant parsing below */ }
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  try {
+    const record = asRecord(JSON.parse(trimmed));
+    if (record) return record;
+  } catch { /* try NDJSON/log-tolerant parsing below */ }
   for (const line of trimmed.split(/\r?\n/).reverse()) {
-    try { return JSON.parse(line) as Record<string, unknown>; } catch { /* next */ }
+    try {
+      const record = asRecord(JSON.parse(line));
+      if (record && ('tools' in record || 'result' in record)) return record;
+    } catch { /* next */ }
   }
-  throw new Error(`MCP Inspector did not emit JSON: ${trimmed.slice(-2_000)}`);
+  throw new Error(`MCP Inspector did not emit a complete JSON object: ${trimmed.slice(-2_000)}`);
 }
 
 test('official MCP client and Inspector traverse the real local-agent boundary while risky actions remain approval-gated', async (t) => {
@@ -179,10 +190,10 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   }, null, 2));
 
   const agentPort = await reserveLoopbackPort();
-  const agentEntry = path.resolve(process.cwd(), '..', 'local-agent', 'src', 'main.ts');
+  const agentEntry = path.join(REPOSITORY_ROOT, 'apps', 'local-agent', 'src', 'main.ts');
   let agentStderr = '';
   const agent = spawn(process.execPath, ['--experimental-strip-types', agentEntry], {
-    cwd: process.cwd(),
+    cwd: REPOSITORY_ROOT,
     env: {
       ...process.env,
       OPERATOR_AGENT_HOST: '127.0.0.1',
@@ -208,7 +219,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const mcpPort = await reserveLoopbackPort();
   let mcpStderr = '';
   const mcp = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
-    cwd: process.cwd(),
+    cwd: MCP_ROOT,
     env: {
       ...process.env,
       OPERATOR_AGENT_URL: `http://127.0.0.1:${agentPort}`,
@@ -235,6 +246,28 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
 
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), TOOL_NAMES);
+  const browserInteract = tools.tools.find((tool) => tool.name === 'browser.interact');
+  assert.ok(browserInteract, 'browser.interact must remain on the private Developer MCP surface');
+  const browserSchema = browserInteract.inputSchema as any;
+  assert.equal(browserSchema.required.includes('target'), false, 'tab focus/close must not require an element selector');
+  assert.equal(browserSchema.properties.operation.enum.includes('tab_focus'), true);
+  assert.equal(browserSchema.properties.operation.enum.includes('tab_close'), true);
+  assert.ok(browserSchema.properties.expect, 'browser.interact must expose an explicit post-state reconciliation contract');
+  const computeRun = tools.tools.find((tool) => tool.name === 'compute.run');
+  assert.ok(computeRun, 'sandboxed compute runtime must be reachable from the private Developer MCP surface');
+  const computeSchema = computeRun.inputSchema as any;
+  assert.deepEqual(computeSchema.properties.language.enum, ['javascript', 'python']);
+  assert.equal(computeSchema.properties.code.maxLength, 256 * 1024);
+  assert.equal(computeSchema.properties.memoryMb.maximum, 512);
+  assert.equal(computeSchema.properties.cpu.maximum, 2);
+  const fileWrite = tools.tools.find((tool) => tool.name === 'file.write');
+  assert.ok(fileWrite, 'file write modes must remain on the private Developer MCP surface');
+  const fileWriteSchema = fileWrite.inputSchema as any;
+  assert.deepEqual(fileWriteSchema.properties.mode.enum, ['write', 'create', 'replace']);
+  const gitStatus = tools.tools.find((tool) => tool.name === 'git.status');
+  assert.ok(gitStatus, 'Git root resolution must remain reachable through the Git status surface');
+  const gitStatusSchema = gitStatus.inputSchema as any;
+  assert.deepEqual(gitStatusSchema.properties.operation.enum, ['status', 'root']);
 
   const durableTaskId = crypto.randomUUID();
   const submittedTask = await client.callTool({
@@ -494,7 +527,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
       expectedCurrentFingerprint: stagedFingerprint
     }
   });
-  assert.notEqual(committed.isError, true);
+  assert.notEqual(committed.isError, true, JSON.stringify(committed));
   const committedStructured = committed.structuredContent as Record<string, unknown> | undefined;
   assert.equal(committedStructured?.ok, true);
   assert.equal(committedStructured?.provider, 'git.write.native');
@@ -516,7 +549,7 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   const inspectorHome = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-mcp-inspector-'));
   t.after(() => fs.rm(inspectorHome, { recursive: true, force: true }));
   const inspectorEntry = path.join(
-    process.cwd(),
+    MCP_ROOT,
     'node_modules',
     '@modelcontextprotocol',
     'inspector',
@@ -535,5 +568,5 @@ test('official MCP client and Inspector traverse the real local-agent boundary w
   assert.equal(inspector.code, 0, `MCP Inspector failed: ${inspector.stderr}`);
   const inspectorResult = parseInspectorJson(inspector.stdout);
   const inspectorTools = Array.isArray(inspectorResult.tools) ? inspectorResult.tools as Array<Record<string, unknown>> : [];
-  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), TOOL_NAMES);
+  assert.deepEqual(inspectorTools.map((tool) => String(tool.name ?? '')).sort(), TOOL_NAMES, `Inspector stdout: ${inspector.stdout.slice(-12000)}`);
 });

@@ -24,6 +24,7 @@ export interface EventWait {
   wakeAt?: string;
   satisfiedBy?: string;
   satisfiedAt?: string;
+  terminalAt?: string;
 }
 
 interface EventState {
@@ -34,6 +35,8 @@ interface EventState {
 
 const MAX_EVENTS = 20_000;
 const MAX_WAITS = 20_000;
+const DEFAULT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const MAX_TERMINAL_RETENTION_MS = 365 * 24 * 60 * 60_000;
 const STATE_OPTIONS = {
   maxBytes: 24 * 1024 * 1024,
   errorCode: 'EVENT_STATE_CORRUPT',
@@ -43,11 +46,24 @@ const STATE_OPTIONS = {
 export class DurableEventRuntime {
   #file: string;
   #clock: () => Date;
+  #maxWaits: number;
+  #terminalRetentionMs: number;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: {
+    clock?: () => Date;
+    maxWaits?: number;
+    terminalRetentionMs?: number;
+  } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'events.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#maxWaits = boundedRuntimeInteger(options.maxWaits ?? MAX_WAITS, 1, MAX_WAITS, 'maxWaits');
+    this.#terminalRetentionMs = boundedRuntimeInteger(
+      options.terminalRetentionMs ?? DEFAULT_TERMINAL_RETENTION_MS,
+      1_000,
+      MAX_TERMINAL_RETENTION_MS,
+      'terminalRetentionMs'
+    );
   }
 
   async wait(input: {
@@ -83,7 +99,7 @@ export class DurableEventRuntime {
         if (!same) throw new OperatorError('EVENT_WAIT_ID_CONFLICT', 'waitId is already bound to a different event contract.');
         return existing;
       }
-      if (state.waits.length >= MAX_WAITS) throw new OperatorError('EVENT_WAIT_LIMIT', 'Event wait limit reached.');
+      if (state.waits.length >= this.#maxWaits) throw new OperatorError('EVENT_WAIT_LIMIT', `Event wait limit of ${this.#maxWaits} active/retained waits reached.`);
       state.waits.push(candidate);
       satisfyFromHistory(state, candidate, now.getTime());
       return candidate;
@@ -111,6 +127,7 @@ export class DurableEventRuntime {
         wait.state = 'SATISFIED';
         wait.satisfiedBy = event.id;
         wait.satisfiedAt = now.toISOString();
+        wait.terminalAt = wait.satisfiedAt;
         satisfiedWaitIds.push(wait.id);
       }
       return { event, satisfiedWaitIds: satisfiedWaitIds.sort() };
@@ -127,11 +144,13 @@ export class DurableEventRuntime {
           wait.state = 'SATISFIED';
           wait.satisfiedAt = now.toISOString();
           wait.satisfiedBy = `timer:${wait.id}`;
+          wait.terminalAt = wait.satisfiedAt;
           woke.push(wait.id);
           continue;
         }
         if (wait.deadlineAt && Date.parse(wait.deadlineAt) <= now.getTime()) {
           wait.state = 'TIMED_OUT';
+          wait.terminalAt = now.toISOString();
           timedOut.push(wait.id);
         }
       }
@@ -140,11 +159,14 @@ export class DurableEventRuntime {
   }
 
   async cancel(waitIdInput: string): Promise<EventWait> {
-    return await this.#mutate((state) => {
+    return await this.#mutate((state, now) => {
       const id = uuid(waitIdInput, 'waitId');
       const wait = state.waits.find((item) => item.id === id);
       if (!wait) throw new OperatorError('EVENT_WAIT_NOT_FOUND', `Event wait ${id} was not found.`);
-      if (wait.state === 'WAITING') wait.state = 'CANCELLED';
+      if (wait.state === 'WAITING') {
+        wait.state = 'CANCELLED';
+        wait.terminalAt = now.toISOString();
+      }
       return wait;
     });
   }
@@ -163,6 +185,7 @@ export class DurableEventRuntime {
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const now = this.#clock();
+      pruneTerminalWaits(state, now.getTime(), this.#terminalRetentionMs);
       output = await fn(state, now);
       state.events.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
       state.waits.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
@@ -199,6 +222,7 @@ function satisfyFromHistory(state: EventState, wait: EventWait, now: number): vo
     wait.state = 'SATISFIED';
     wait.satisfiedBy = event.id;
     wait.satisfiedAt = new Date(now).toISOString();
+    wait.terminalAt = wait.satisfiedAt;
   }
 }
 
@@ -238,8 +262,37 @@ function validateState(input: unknown): EventState {
     if (wait.notBefore) iso(wait.notBefore, 'wait.notBefore');
     if (wait.deadlineAt) iso(wait.deadlineAt, 'wait.deadlineAt');
     if (wait.wakeAt) iso(wait.wakeAt, 'wait.wakeAt');
+    if (wait.satisfiedAt) iso(wait.satisfiedAt, 'wait.satisfiedAt');
+    if (wait.terminalAt) iso(wait.terminalAt, 'wait.terminalAt');
+    if (wait.state === 'WAITING') {
+      if (wait.terminalAt) throw new OperatorError('EVENT_STATE_CORRUPT', 'Waiting event wait cannot have terminalAt.');
+    } else if (!wait.terminalAt) {
+      wait.terminalAt = wait.state === 'SATISFIED' && wait.satisfiedAt
+        ? wait.satisfiedAt
+        : wait.state === 'TIMED_OUT' && wait.deadlineAt
+          ? wait.deadlineAt
+          : wait.createdAt;
+    }
   }
   return state;
+}
+
+function pruneTerminalWaits(state: EventState, now: number, retentionMs: number): number {
+  const before = state.waits.length;
+  state.waits = state.waits.filter((wait) => {
+    if (wait.state === 'WAITING') return true;
+    const terminalAt = wait.terminalAt ?? wait.satisfiedAt ?? wait.deadlineAt ?? wait.createdAt;
+    return Date.parse(terminalAt) > now - retentionMs;
+  });
+  return before - state.waits.length;
+}
+
+function boundedRuntimeInteger(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new OperatorError('EVENT_RUNTIME_CONFIG_INVALID', `${label} must be an integer between ${min} and ${max}.`);
+  }
+  return value;
 }
 
 function boundedType(input: unknown): string {

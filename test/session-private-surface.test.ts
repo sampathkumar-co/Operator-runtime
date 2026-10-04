@@ -7,9 +7,9 @@ import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.t
 import { PolicyEngine } from '../src/core/policy.ts';
 import type { ActionRequest, PermissionProfile } from '../src/core/types.ts';
 
-test('private developer MCP surface remains exactly 32 grouped semantic tools', () => {
-  assert.equal(TOOL_NAMES.length, 32);
-  for (const name of ['operations', 'knowledge.inspect', 'file.info', 'file.search', 'file.manage', 'terminal.session', 'process.inspect', 'process.manage']) assert.ok(TOOL_NAMES.includes(name));
+test('private developer MCP surface remains exactly 34 grouped semantic tools', () => {
+  assert.equal(TOOL_NAMES.length, 34);
+  for (const name of ['operations', 'knowledge.inspect', 'file.info', 'file.search', 'file.manage', 'compute.run', 'terminal.session', 'process.inspect', 'process.manage', 'browser.verify']) assert.ok(TOOL_NAMES.includes(name));
 });
 
 test('session grant suppresses risk prompts but never expands capability or root scope', () => {

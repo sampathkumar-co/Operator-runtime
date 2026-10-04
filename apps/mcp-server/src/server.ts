@@ -26,6 +26,7 @@ import { loadPublicServicePages, PUBLIC_SERVICE_PAGE_PATHS } from './public-page
 import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/product-identity.ts';
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 import { TOOL_NAMES } from './tool-surface.ts';
+import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -328,6 +329,20 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       physicalFallback: taskPhysicalFallback.optional()
     })
   ]);
+  const autonomousCapability = z.enum(Object.keys(CAPABILITY_RISK_RULES) as [string, ...string[]]);
+  const autonomousAction = z.object({
+    capability: autonomousCapability,
+    input: z.record(z.string(), z.unknown()),
+    target: z.string().min(1).max(4096).optional()
+  });
+  const autonomousReadAction = autonomousAction.refine((action) => CAPABILITY_RISK_RULES[action.capability] === 'read', 'Observation and verification actions must be canonically read-only.');
+  const autonomousAssertion = z.object({
+    path: z.string().regex(/^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,15}$/).max(256),
+    operator: z.enum(['exists', 'equals', 'not_equals', 'includes']),
+    value: z.unknown().optional()
+  });
+  const autonomousVerifyAction = autonomousAction.extend({ assertions: z.array(autonomousAssertion).min(1).max(20) })
+    .refine((action) => CAPABILITY_RISK_RULES[action.capability] === 'read', 'Verification actions must be canonically read-only.');
   const taskGoal = z.union([
     atomicTaskGoal,
     z.object({
@@ -336,7 +351,23 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       checks: z.array(z.enum(['lint', 'test', 'build'])).min(1).max(3).optional(),
       requireAll: z.boolean().optional()
     }),
-    z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) })
+    z.object({ kind: z.literal('semantic-workflow'), steps: z.array(atomicTaskGoal).min(1).max(20) }),
+    z.object({
+      kind: z.literal('autonomous-workflow'),
+      roots: z.array(z.string().min(1).max(4096)).max(20).optional(),
+      browserOrigins: z.array(z.url().max(2048)).max(20).optional(),
+      application: z.boolean().optional(),
+      steps: z.array(z.object({
+        key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+        title: z.string().min(1).max(512),
+        parentKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
+        dependsOn: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)).max(20).optional(),
+        resourceScope: z.array(z.string().min(1).max(4096)).max(100).optional(),
+        observe: autonomousReadAction,
+        action: autonomousAction,
+        verify: autonomousVerifyAction
+      })).min(1).max(20)
+    })
   ]);
 
   const operationCondition = z.object({
@@ -478,7 +509,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('task.submit', {
     title: 'Submit durable semantic task',
-    description: 'Create one durable, UUID-addressed semantic task or bounded semantic workflow and optionally start it. The UUID makes submission retry-safe. Workflow children remain typed and every action still passes local capability, policy, approval, and postcondition checks; this tool cannot grant approval.',
+    description: 'Create one durable, UUID-addressed semantic task, typed workflow, or capability-agnostic autonomous workflow and optionally start it. Autonomous steps require fresh read-only observation plus independent read-only machine-state verification. Every action still passes intent, local capability, policy, approval, lease, reconciliation, budget, and postcondition checks; this tool cannot grant approval.',
     inputSchema: z.object({
       requestId: taskUuid, objective: z.string().min(1).max(16_384), successConditions: z.array(z.string().min(1).max(16_384)).min(1).max(1000),
       prohibitedScope: z.array(z.string().min(1).max(4096)).max(1000).optional(), goal: taskGoal,
@@ -578,9 +609,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
-    inputSchema: z.object({ path: z.string().min(1), encoding: z.enum(['utf8', 'base64']).default('utf8') }),
+    inputSchema: z.object({
+      path: z.string().min(1), encoding: z.enum(['utf8', 'base64']).default('utf8'),
+      offset: z.number().int().min(0).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152)
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path, encoding }) => invoke('file.read', 'read', { path, encoding }, path));
+  }, async ({ path, encoding, offset, maxBytes }) => invoke('file.read', 'read', { path, encoding, offset, maxBytes }, path));
 
   server.registerTool('file.list', {
     title: 'List project directory',
@@ -591,14 +625,33 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('file.write', {
     title: 'Write project file',
-    description: 'Atomically write a file inside an authorized root. Supply expectedSha256 after reading an existing file to prevent stale overwrites.',
+    description: 'Write an authorized file using one of three closed semantics: write (atomic write, optional SHA precondition), create (create-only and refuse overwrite), or replace (destructive SHA-guarded replacement of an existing file).',
     inputSchema: z.object({
+      mode: z.enum(['write', 'create', 'replace']).default('write'),
       path: z.string().min(1),
       content: z.string(),
       expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i).optional()
     }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ path, content, expectedSha256 }) => invoke('file.write', 'write', { path, content, expectedSha256 }, path));
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
+  }, async ({ mode, path, content, expectedSha256 }) => {
+    if (mode === 'replace' && !expectedSha256) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'file.write replace requires expectedSha256 from a fresh file.read.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'file.replace',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'PRECONDITION_REQUIRED', message: 'file.replace requires expectedSha256.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    const capability = mode === 'create' ? 'file.create' : mode === 'replace' ? 'file.replace' : 'file.write';
+    const risk = mode === 'replace' ? 'destructive' : 'write';
+    return invoke(capability, risk, { path, content, expectedSha256 }, path);
+  });
 
   server.registerTool('file.info', {
     title: 'Inspect file or directory metadata',
@@ -638,18 +691,28 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   });
 
   server.registerTool('git.status', {
-    title: 'Git status',
-    description: 'Read repository status using the Git CLI directly rather than visual UI automation.',
-    inputSchema: z.object({ cwd: z.string().min(1) }),
+    title: 'Inspect Git repository state',
+    description: 'Read structured repository status or resolve the canonical repository root using Git directly rather than visual UI automation.',
+    inputSchema: z.object({
+      operation: z.enum(['status', 'root']).default('status'),
+      cwd: z.string().min(1), offset: z.number().int().min(0).max(1000000).default(0),
+      maxBytes: z.number().int().min(1024).max(131072).default(65536)
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd }) => invoke('git.status', 'read', { cwd }, cwd));
+  }, async ({ operation, cwd, offset, maxBytes }) => operation === 'root'
+    ? invoke('git.rev-parse', 'read', { cwd }, cwd)
+    : invoke('git.status', 'read', { cwd, offset, maxBytes }, cwd));
 
   server.registerTool('git.diff', {
     title: 'Git diff',
     description: 'Read a bounded Git diff using Git directly, optionally scoped to paths.',
-    inputSchema: z.object({ cwd: z.string().min(1), paths: z.array(z.string()).max(100).default([]) }),
+    inputSchema: z.object({
+      cwd: z.string().min(1), paths: z.array(z.string()).max(100).default([]),
+      offset: z.number().int().min(0).max(16777216).default(0), maxBytes: z.number().int().min(1024).max(131072).default(49152),
+      summary: z.boolean().default(false)
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ cwd, paths }) => invoke('git.diff', 'read', { cwd, paths }, cwd));
+  }, async ({ cwd, paths, offset, maxBytes, summary }) => invoke('git.diff', 'read', { cwd, paths, offset, maxBytes, summary }, cwd));
 
   server.registerTool('git.checkpoint', {
     title: 'Checkpoint or restore Git worktree state',
@@ -729,6 +792,25 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     timeoutMs
   }, path));
 
+  server.registerTool('compute.run', {
+    title: 'Run isolated sandboxed compute',
+    description: 'Execute bounded JavaScript or Python in a local Docker sandbox with no network, no host mounts, a read-only root filesystem, dropped Linux capabilities, no privilege escalation, and bounded CPU/memory/PID/output limits. Images are locally configured by Operator and are never caller-selected.',
+    inputSchema: z.object({
+      language: z.enum(['javascript', 'python']),
+      code: z.string().min(1).max(256 * 1024),
+      timeoutMs: z.number().int().min(1000).max(120000).default(30000),
+      memoryMb: z.number().int().min(32).max(512).default(128),
+      cpu: z.number().min(0.1).max(2).default(0.5)
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ language, code, timeoutMs, memoryMb, cpu }) => invoke('compute.run', 'write', {
+    language,
+    code,
+    timeoutMs,
+    memoryMb,
+    cpu
+  }));
+
   const postgresIdentifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_$]{0,62}$/);
   const postgresFilter = z.object({
     column: postgresIdentifier,
@@ -751,10 +833,11 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       orderBy: z.array(postgresOrder).max(10).default([]),
       limit: z.number().int().min(1).max(500).default(100),
       offset: z.number().int().min(0).max(10000).default(0),
+      maxBytes: z.number().int().min(1024).max(131072).default(65536),
       timeoutMs: z.number().int().min(100).max(30000).default(5000)
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  }, async ({ operation, path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }) => {
+  }, async ({ operation, path, profileId, schema, table, columns, filters, orderBy, limit, offset, maxBytes, timeoutMs }) => {
     if (operation === 'select') {
       if (!profileId || !table) {
         return {
@@ -770,7 +853,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
           }
         };
       }
-      return invoke('postgres.select', 'read', { path, profileId, schema, table, columns, filters, orderBy, limit, offset, timeoutMs }, path);
+      return invoke('postgres.select', 'read', { path, profileId, schema, table, columns, filters, orderBy, limit, offset, maxBytes, timeoutMs }, path);
     }
     if (operation !== 'profiles' && !profileId) {
       return {
@@ -894,7 +977,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       input: z.string().max(65536).optional(),
       afterCursor: z.number().int().min(0).optional(),
       maxEvents: z.number().int().min(1).max(500).default(100),
-      maxBytes: z.number().int().min(1024).max(2097152).default(262144)
+      maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
   }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
@@ -926,10 +1009,60 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.inspect', {
     title: 'Inspect browser',
-    description: 'Inspect compact Chromium tab state or a bounded semantic/accessibility snapshot of one target. Raw HTML and DevTools WebSocket URLs are not returned.',
-    inputSchema: z.object({ targetId: z.string().min(1).optional() }),
+    description: 'Inspect compact Chromium tab state or a bounded Browser Observation V2 semantic/accessibility snapshot of one target. Optional offsets paginate controls/text/visuals, while focusRef/groupRef/role/text/region rank relevant candidates before truncation and return a fresh observation generation without keeping stale refs alive. Raw HTML and DevTools WebSocket URLs are never returned.',
+    inputSchema: z.object({
+      targetId: z.string().min(1).optional(),
+      observation: z.object({
+        controlOffset: z.number().int().min(0).max(10_000).optional(),
+        textOffset: z.number().int().min(0).max(10_000).optional(),
+        visualOffset: z.number().int().min(0).max(10_000).optional(),
+        maxControls: z.number().int().min(1).max(160).optional(),
+        maxText: z.number().int().min(1).max(240).optional(),
+        maxVisuals: z.number().int().min(1).max(160).optional(),
+        maxBytes: z.number().int().min(16 * 1024).max(128 * 1024).optional(),
+        focusRef: z.string().min(1).max(128).optional(),
+        focusGroupRef: z.string().min(1).max(128).optional(),
+        focusRole: z.string().min(1).max(100).optional(),
+        focusText: z.string().min(1).max(500).optional(),
+        focusRegion: z.object({
+          x: z.number().finite().min(-100000).max(100000),
+          y: z.number().finite().min(-100000).max(100000),
+          width: z.number().finite().gt(0).max(100000),
+          height: z.number().finite().gt(0).max(100000)
+        }).optional()
+      }).optional()
+    }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
-  }, async ({ targetId }) => invoke('browser.inspect', 'read', { targetId }));
+  }, async ({ targetId, observation }) => invoke('browser.inspect', 'read', { targetId, observation }));
+
+  server.registerTool('browser.verify', {
+    title: 'Verify browser goal state',
+    description: 'Independently verify bounded visible browser postconditions without using hidden page state or benchmark reward. Returns VERIFIED, NOT_COMPLETE, or INCONCLUSIVE. Target-state checks may use the short-lived observed ref returned by browser.inspect.',
+    inputSchema: z.object({
+      targetId: z.string().min(1),
+      target: z.object({
+        ref: z.string().min(1).max(128).optional(),
+        css: z.string().min(1).max(500).optional(),
+        text: z.string().min(1).max(500).optional(),
+        role: z.string().min(1).max(100).optional(),
+        name: z.string().min(1).max(500).optional(),
+        renderedColor: z.string().min(1).max(64).optional()
+      }).optional(),
+      expect: z.object({
+        exists: z.boolean().optional(),
+        value: z.string().max(100000).optional(),
+        checked: z.boolean().optional(),
+        selected: z.boolean().optional(),
+        expanded: z.boolean().optional(),
+        current: z.string().max(256).optional(),
+        active: z.boolean().optional(),
+        urlContains: z.string().min(1).max(2000).optional(),
+        titleContains: z.string().min(1).max(500).optional(),
+        textContains: z.string().min(1).max(1000).optional()
+      })
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }, async ({ targetId, target, expect }) => invoke('browser.verify', 'read', { targetId, target, expect }, targetId));
 
   server.registerTool('browser.navigate', {
     title: 'Navigate browser',
@@ -944,20 +1077,67 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('browser.interact', {
     title: 'Interact with browser control',
-    description: 'Semantically click, type, or select a browser control by CSS, text, or role+accessible name. This can cause external side effects, so the local policy treats it as an external action.',
+    description: 'Interact with an observed browser target using native pointer, wheel, or keyboard input plus bounded semantic text/select operations, or focus/close an exact observed tab. Prefer the short-lived ref returned by browser.inspect; CSS, text, rendered color, and role+accessible name remain compatibility fallbacks. Optional expect binds an explicit post-state contract so uncertain transport loss can be reconciled without replay. Ref-bounded scroll uses native CDP wheel input and observation exposes bounded scroll state. Observed refs fail stale rather than silently binding to replacement nodes. Native keyboard supports bounded navigation/editing keys and modifier chords; select_text_range uses visible text offsets. This can cause external side effects, so the local policy treats it as an external action.',
     inputSchema: z.object({
       targetId: z.string().min(1),
-      operation: z.enum(['click', 'type', 'select']),
+      operation: z.enum(['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range', 'tab_focus', 'tab_close']),
       target: z.object({
+        ref: z.string().min(1).max(128).optional(),
         css: z.string().min(1).max(500).optional(),
         text: z.string().min(1).max(500).optional(),
         role: z.string().min(1).max(100).optional(),
-        name: z.string().min(1).max(500).optional()
-      }),
-      value: z.string().max(100000).optional()
+        name: z.string().min(1).max(500).optional(),
+        renderedColor: z.string().min(1).max(64).optional()
+      }).optional(),
+      toTarget: z.object({
+        ref: z.string().min(1).max(128).optional(),
+        css: z.string().min(1).max(500).optional(),
+        text: z.string().min(1).max(500).optional(),
+        role: z.string().min(1).max(100).optional(),
+        name: z.string().min(1).max(500).optional(),
+        renderedColor: z.string().min(1).max(64).optional()
+      }).optional(),
+      deltaX: z.number().finite().min(-2000).max(2000).optional(),
+      deltaY: z.number().finite().min(-2000).max(2000).optional(),
+      xRatio: z.number().finite().min(0).max(1).optional(),
+      yRatio: z.number().finite().min(0).max(1).optional(),
+      key: z.string().min(1).max(32).optional(),
+      keys: z.array(z.string().min(1).max(32)).min(1).max(4).optional(),
+      start: z.number().int().min(0).max(100000).optional(),
+      end: z.number().int().min(0).max(100000).optional(),
+      value: z.union([
+        z.string().max(100000),
+        z.array(z.string().max(100000)).min(1).max(100)
+      ]).optional(),
+      expect: z.object({
+        exists: z.boolean().optional(),
+        value: z.string().max(100000).optional(),
+        checked: z.boolean().optional(),
+        selected: z.boolean().optional(),
+        expanded: z.boolean().optional(),
+        current: z.string().max(256).optional(),
+        active: z.boolean().optional(),
+        urlContains: z.string().min(1).max(2000).optional(),
+        titleContains: z.string().min(1).max(500).optional(),
+        textContains: z.string().min(1).max(1000).optional()
+      }).optional()
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-  }, async ({ targetId, operation, target, value }) => invoke('browser.interact', 'external', { targetId, operation, target, value }, targetId));
+  }, async ({ targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, expect }) => {
+    if (operation === 'tab_focus') return invoke('browser.tab.focus', 'write', { targetId }, targetId);
+    if (operation === 'tab_close') return invoke('browser.tab.close', 'write', { targetId }, targetId);
+    if (!target) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'Browser control interaction requires an observed semantic target.' }],
+        structuredContent: {
+          ok: false, capability: 'browser.interact', provider: 'mcp.validation', evidence: [],
+          error: { code: 'BROWSER_TARGET_REQUIRED', message: 'Browser control interaction requires target.', retryable: false }, durationMs: 0
+        }
+      };
+    }
+    return invoke('browser.interact', 'external', { targetId, operation, target, toTarget, value, deltaX, deltaY, xRatio, yRatio, key, keys, start, end, expect }, targetId);
+  });
 
   const appSelector = z.object({
     name: z.string().min(1).max(512).optional(),

@@ -5,6 +5,7 @@ import { readDurableStateText, writeDurableStateText } from './durable-state.ts'
 
 const MAX_STREAMS = 10_000;
 const MAX_DELIVERIES_PER_STREAM = 10_000;
+const DEFAULT_TERMINAL_REPLAY_WINDOW = 256;
 const MAX_PAYLOAD_BYTES = 128 * 1024;
 const MAX_KIND = 128;
 const MAX_PENDING_RETURN = 500;
@@ -39,13 +40,17 @@ export interface StoredRelayDelivery {
 
 interface DeviceDeliveryStream {
   deviceId: string;
+  /** First sequence still represented by a retained delivery record. */
+  baseSeq: number;
   nextSeq: number;
   lastAckedSeq: number;
+  /** Highest compacted sequence that represented an executed/ACKed delivery. */
+  highestCompactedAckedSeq: number;
   deliveries: StoredRelayDelivery[];
 }
 
 interface RelayDeliveryState {
-  version: 1;
+  version: 2;
   streams: DeviceDeliveryStream[];
 }
 
@@ -53,12 +58,21 @@ export class RelayDeliveryStore {
   #file: string;
   #clock: Clock;
   #retentionMs: number;
+  #maxDeliveriesPerStream: number;
+  #terminalReplayWindow: number;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: Clock; retentionMs?: number } = {}) {
+  constructor(stateDir: string, options: {
+    clock?: Clock;
+    retentionMs?: number;
+    maxDeliveriesPerStream?: number;
+    terminalReplayWindow?: number;
+  } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-deliveries.json');
     this.#clock = options.clock ?? (() => new Date());
     this.#retentionMs = boundedRetention(options.retentionMs);
+    this.#maxDeliveriesPerStream = boundedMaxDeliveries(options.maxDeliveriesPerStream);
+    this.#terminalReplayWindow = boundedReplayWindow(options.terminalReplayWindow, this.#maxDeliveriesPerStream);
   }
 
   async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority, idempotencyKeyInput?: string, requiredCapabilitiesInput: readonly string[] = []): Promise<StoredRelayDelivery> {
@@ -69,7 +83,7 @@ export class RelayDeliveryStore {
     const idempotencyKey = idempotencyKeyInput === undefined ? undefined : validIdempotencyKey(idempotencyKeyInput);
     const requiredCapabilities = safeRequiredCapabilities(requiredCapabilitiesInput);
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       if (idempotencyKey) {
         for (const existingStream of state.streams) {
           const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
@@ -82,8 +96,8 @@ export class RelayDeliveryStore {
         }
       }
       const stream = getOrCreateStream(state, deviceId);
-      if (stream.deliveries.length >= MAX_DELIVERIES_PER_STREAM) {
-        throw new OperatorError('RELAY_QUEUE_LIMIT', `Device relay queue has reached ${MAX_DELIVERIES_PER_STREAM} retained deliveries.`);
+      if (stream.deliveries.length >= this.#maxDeliveriesPerStream) {
+        throw new OperatorError('RELAY_QUEUE_LIMIT', `Device relay queue has reached ${this.#maxDeliveriesPerStream} live/replay-window deliveries.`);
       }
       const delivery: StoredRelayDelivery = {
         seq: stream.nextSeq,
@@ -105,7 +119,7 @@ export class RelayDeliveryStore {
   async findIdempotent(idempotencyKeyInput: string): Promise<{ deviceId: string; delivery: StoredRelayDelivery } | null> {
     const idempotencyKey = validIdempotencyKey(idempotencyKeyInput);
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       let found: { deviceId: string; delivery: StoredRelayDelivery } | null = null;
       for (const stream of state.streams) {
         for (const delivery of stream.deliveries) {
@@ -122,7 +136,7 @@ export class RelayDeliveryStore {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const seq = validSeq(seqInput);
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       const delivery = state.streams.find((stream) => stream.deviceId === deviceId)?.deliveries.find((entry) => entry.seq === seq);
       return delivery ? cloneDelivery(delivery) : null;
     });
@@ -132,7 +146,7 @@ export class RelayDeliveryStore {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const limit = boundedLimit(limitInput);
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) return [];
       return stream.deliveries.filter((delivery) => delivery.seq > stream.lastAckedSeq && delivery.status === 'pending').slice(0, limit).map(cloneDelivery);
@@ -142,7 +156,7 @@ export class RelayDeliveryStore {
   async cursor(deviceIdInput: string): Promise<{ lastAckedSeq: number; highestEnqueuedSeq: number }> {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       return stream ? { lastAckedSeq: stream.lastAckedSeq, highestEnqueuedSeq: stream.nextSeq - 1 } : { lastAckedSeq: 0, highestEnqueuedSeq: 0 };
     });
@@ -153,8 +167,14 @@ export class RelayDeliveryStore {
     const seq = validSeq(seqInput);
     const deliveryId = validUuid(deliveryIdInput, 'deliveryId');
     return await this.#mutate((state) => {
+      this.#maintain(state);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) throw new OperatorError('RELAY_ACK_UNKNOWN_STREAM', 'Cannot acknowledge a delivery for an unknown device stream.');
+      if (seq < stream.baseSeq) {
+        throw new OperatorError('RELAY_ACK_COMPACTED', 'Relay acknowledgement is older than the bounded replay tombstone window.', {
+          details: { seq, baseSeq: stream.baseSeq, lastAckedSeq: stream.lastAckedSeq }
+        });
+      }
       const delivery = stream.deliveries.find((candidate) => candidate.seq === seq);
       if (!delivery || delivery.id !== deliveryId) throw new OperatorError('RELAY_ACK_MISMATCH', 'Relay acknowledgement does not match the stored delivery sequence and ID.');
       if (seq <= stream.lastAckedSeq) {
@@ -170,6 +190,7 @@ export class RelayDeliveryStore {
       delivery.requiredCapabilities = undefined;
       delivery.authority = undefined;
       stream.lastAckedSeq = seq;
+      compactStream(stream, this.#terminalReplayWindow);
       return { lastAckedSeq: stream.lastAckedSeq, duplicate: false };
     });
   }
@@ -178,19 +199,24 @@ export class RelayDeliveryStore {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const clientSeq = validNonNegativeSeq(clientSeqInput);
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream) {
         if (clientSeq === 0) return { lastAckedSeq: 0, advanced: 0 };
         throw new OperatorError('RELAY_RESUME_AHEAD', 'Client resume cursor references deliveries the server has never enqueued.');
       }
       if (clientSeq < stream.lastAckedSeq) {
-        const crossed = stream.deliveries.filter((delivery) => delivery.seq > clientSeq && delivery.seq <= stream.lastAckedSeq);
-        if (crossed.length === stream.lastAckedSeq - clientSeq && crossed.every((delivery) => delivery.status === 'expired' && Object.keys(delivery.payload).length === 0 && delivery.authority === undefined)) {
+        const retainedFrom = Math.max(clientSeq + 1, stream.baseSeq);
+        const crossed = stream.deliveries.filter((delivery) => delivery.seq >= retainedFrom && delivery.seq <= stream.lastAckedSeq);
+        const expectedRetained = Math.max(0, stream.lastAckedSeq - retainedFrom + 1);
+        const compactedCrossingContainsAck = stream.highestCompactedAckedSeq > clientSeq;
+        if (!compactedCrossingContainsAck
+          && crossed.length === expectedRetained
+          && crossed.every((delivery) => delivery.status === 'expired' && Object.keys(delivery.payload).length === 0 && delivery.authority === undefined)) {
           return { lastAckedSeq: stream.lastAckedSeq, advanced: stream.lastAckedSeq - clientSeq, expiredThroughSeq: stream.lastAckedSeq };
         }
         throw new OperatorError('RELAY_RESUME_BEHIND', 'Client resume cursor is behind executed relay history; automatic replay is unsafe.', {
-          details: { clientSeq, serverSeq: stream.lastAckedSeq }
+          details: { clientSeq, serverSeq: stream.lastAckedSeq, baseSeq: stream.baseSeq, highestCompactedAckedSeq: stream.highestCompactedAckedSeq }
         });
       }
       const highest = stream.nextSeq - 1;
@@ -212,6 +238,7 @@ export class RelayDeliveryStore {
         delivery.authority = undefined;
       }
       stream.lastAckedSeq = clientSeq;
+      compactStream(stream, this.#terminalReplayWindow);
       return { lastAckedSeq: clientSeq, advanced: clientSeq - from + 1 };
     });
   }
@@ -224,7 +251,7 @@ export class RelayDeliveryStore {
     const deviceId = validUuid(deviceIdInput, 'deviceId');
     const supported = new Set(safeRequiredCapabilities([...supportedCapabilitiesInput]));
     return await this.#mutate((state) => {
-      expirePending(state, this.#clock().getTime(), this.#retentionMs);
+      this.#maintain(state);
       const stream = state.streams.find((candidate) => candidate.deviceId === deviceId);
       if (!stream || !canCommit()) return 0;
       let expired = 0;
@@ -240,12 +267,13 @@ export class RelayDeliveryStore {
         stream.lastAckedSeq = next.seq;
         expired += 1;
       }
+      compactStream(stream, this.#terminalReplayWindow);
       return expired;
     });
   }
 
   async expirePending(): Promise<number> {
-    return await this.#mutate((state) => expirePending(state, this.#clock().getTime(), this.#retentionMs));
+    return await this.#mutate((state) => this.#maintain(state));
   }
 
   async purgeDevice(deviceIdInput: string): Promise<number> {
@@ -267,8 +295,15 @@ export class RelayDeliveryStore {
         delivery.idempotencyReleasedAt = undefined;
       }
       stream.lastAckedSeq = stream.nextSeq - 1;
+      compactStream(stream, this.#terminalReplayWindow);
       return scrubbed;
     });
+  }
+
+  #maintain(state: RelayDeliveryState): number {
+    const expired = expirePending(state, this.#clock().getTime(), this.#retentionMs);
+    compactStreams(state, this.#terminalReplayWindow);
+    return expired;
   }
 
   async #read(): Promise<RelayDeliveryState> {
@@ -280,7 +315,7 @@ export class RelayDeliveryStore {
       });
       return validateState(JSON.parse(text));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, streams: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, streams: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state could not be read.');
     }
@@ -311,6 +346,23 @@ export class RelayDeliveryStore {
   }
 }
 
+function boundedMaxDeliveries(value: number | undefined): number {
+  if (value === undefined) return MAX_DELIVERIES_PER_STREAM;
+  if (!Number.isSafeInteger(value) || value < 2 || value > MAX_DELIVERIES_PER_STREAM) {
+    throw new OperatorError('RELAY_DELIVERY_LIMIT_INVALID', `Relay maxDeliveriesPerStream must be between 2 and ${MAX_DELIVERIES_PER_STREAM}.`);
+  }
+  return value;
+}
+
+function boundedReplayWindow(value: number | undefined, maxDeliveries: number): number {
+  const fallback = Math.min(DEFAULT_TERMINAL_REPLAY_WINDOW, Math.max(1, maxDeliveries - 1));
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1 || value >= maxDeliveries) {
+    throw new OperatorError('RELAY_REPLAY_WINDOW_INVALID', 'Relay terminalReplayWindow must be at least 1 and smaller than maxDeliveriesPerStream.');
+  }
+  return value;
+}
+
 function boundedRetention(value: number | undefined): number {
   if (value === undefined) return DEFAULT_RETENTION_MS;
   if (!Number.isFinite(value) || value < 60_000 || value > MAX_RETENTION_MS) {
@@ -331,7 +383,12 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       expired += 1;
     }
     for (const delivery of stream.deliveries) {
-      if (delivery.status === 'acked' && delivery.idempotencyKey && delivery.ackedAt && Date.parse(delivery.ackedAt) <= now - retentionMs) { delivery.idempotencyKey = undefined; delivery.idempotencyReleasedAt = undefined; }
+      if (!delivery.idempotencyKey) continue;
+      const terminalAt = delivery.status === 'acked' ? delivery.ackedAt : delivery.status === 'expired' ? delivery.expiredAt : undefined;
+      if (!terminalAt || Date.parse(terminalAt) > now - retentionMs) continue;
+      delivery.idempotencyKey = undefined;
+      delivery.idempotencyReleasedAt = undefined;
+      delivery.replayAuthority = undefined;
     }
   }
   return expired;
@@ -348,28 +405,69 @@ function expireDelivery(delivery: StoredRelayDelivery, expiredAt: string): void 
   delivery.idempotencyReleasedAt = undefined;
 }
 
+function compactStreams(state: RelayDeliveryState, replayWindow: number): number {
+  let compacted = 0;
+  for (const stream of state.streams) compacted += compactStream(stream, replayWindow);
+  return compacted;
+}
+
+function compactStream(stream: DeviceDeliveryStream, replayWindow: number): number {
+  let terminalCount = 0;
+  for (const delivery of stream.deliveries) {
+    if (delivery.seq > stream.lastAckedSeq) break;
+    terminalCount += 1;
+  }
+  let removable = Math.max(0, terminalCount - replayWindow);
+  let compacted = 0;
+  while (removable > 0) {
+    const delivery = stream.deliveries[0];
+    if (!delivery || delivery.seq !== stream.baseSeq || delivery.seq > stream.lastAckedSeq || delivery.status === 'pending') break;
+    if (delivery.idempotencyKey || delivery.replayAuthority) break;
+    if (delivery.status === 'acked') stream.highestCompactedAckedSeq = Math.max(stream.highestCompactedAckedSeq, delivery.seq);
+    stream.deliveries.shift();
+    stream.baseSeq = delivery.seq + 1;
+    removable -= 1;
+    compacted += 1;
+  }
+  if (stream.deliveries.length === 0) stream.baseSeq = stream.nextSeq;
+  return compacted;
+}
+
 function getOrCreateStream(state: RelayDeliveryState, deviceId: string): DeviceDeliveryStream {
   const existing = state.streams.find((stream) => stream.deviceId === deviceId);
   if (existing) return existing;
   if (state.streams.length >= MAX_STREAMS) throw new OperatorError('RELAY_STREAM_LIMIT', `At most ${MAX_STREAMS} device streams may be stored.`);
-  const stream: DeviceDeliveryStream = { deviceId, nextSeq: 1, lastAckedSeq: 0, deliveries: [] };
+  const stream: DeviceDeliveryStream = { deviceId, baseSeq: 1, nextSeq: 1, lastAckedSeq: 0, highestCompactedAckedSeq: 0, deliveries: [] };
   state.streams.push(stream);
   state.streams.sort((a, b) => a.deviceId.localeCompare(b.deviceId));
   return stream;
 }
 
-function validateState(input: RelayDeliveryState): RelayDeliveryState {
-  if (!input || typeof input !== 'object' || input.version !== 1 || !Array.isArray(input.streams) || input.streams.length > MAX_STREAMS) {
+function validateState(input: unknown): RelayDeliveryState {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
+  }
+  const rawState = input as Record<string, unknown>;
+  const version = Number(rawState.version);
+  if ((version !== 1 && version !== 2) || !Array.isArray(rawState.streams) || rawState.streams.length > MAX_STREAMS) {
     throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
   }
   const devices = new Set<string>();
-  const streams = input.streams.map((raw) => {
+  const streams = rawState.streams.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay device stream is invalid.');
+    const raw = entry as Record<string, any>;
     const deviceId = validUuid(raw.deviceId, 'stream deviceId');
     if (devices.has(deviceId)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state contains duplicate device streams.');
     devices.add(deviceId);
     const nextSeq = validPositiveSeq(raw.nextSeq);
     const lastAckedSeq = validNonNegativeSeq(raw.lastAckedSeq);
+    const baseSeq = version === 1 ? 1 : validPositiveSeq(raw.baseSeq);
+    const highestCompactedAckedSeq = version === 1 ? 0 : validNonNegativeSeq(raw.highestCompactedAckedSeq);
     if (lastAckedSeq >= nextSeq) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream acknowledgement cursor must be lower than next sequence.');
+    if (baseSeq > nextSeq || lastAckedSeq < baseSeq - 1) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay compacted prefix is inconsistent with its acknowledgement cursor.');
+    if (highestCompactedAckedSeq >= baseSeq || highestCompactedAckedSeq > lastAckedSeq) {
+      throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay compacted ACK watermark is outside the compacted terminal prefix.');
+    }
     if (!Array.isArray(raw.deliveries) || raw.deliveries.length > MAX_DELIVERIES_PER_STREAM) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream deliveries exceed the bounded limit.');
     const seenSeq = new Set<number>();
     const seenIds = new Set<string>();
@@ -378,7 +476,7 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       const id = validUuid(entry.id, 'deliveryId');
       if (seenSeq.has(seq) || seenIds.has(id)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains duplicate sequence or delivery ID.');
       seenSeq.add(seq); seenIds.add(id);
-      if (seq >= nextSeq) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Retained delivery sequence must be lower than next sequence.');
+      if (seq < baseSeq || seq >= nextSeq) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Retained delivery sequence must fall inside the retained stream window.');
       const kind = validKind(entry.kind);
       const payload = safePayload(entry.payload);
       const authority = entry.authority === undefined ? undefined : safeAuthority(entry.authority, deviceId);
@@ -401,12 +499,15 @@ function validateState(input: RelayDeliveryState): RelayDeliveryState {
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
       return { seq, id, kind, payload, requiredCapabilities, authority, replayAuthority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
-    for (let seq = 1; seq < nextSeq; seq += 1) {
-      if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay stream contains a sequence gap.');
+    for (let seq = baseSeq; seq < nextSeq; seq += 1) {
+      if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay retained stream contains a sequence gap.');
     }
-    return { deviceId, nextSeq, lastAckedSeq, deliveries };
+    if ((deliveries.length === 0 && baseSeq !== nextSeq) || (deliveries.length > 0 && deliveries[0]!.seq !== baseSeq)) {
+      throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay retained stream does not begin at baseSeq.');
+    }
+    return { deviceId, baseSeq, nextSeq, lastAckedSeq, highestCompactedAckedSeq, deliveries };
   });
-  return { version: 1, streams };
+  return { version: 2, streams };
 }
 
 function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {

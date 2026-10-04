@@ -87,11 +87,13 @@ export class RelayResultService {
         }
         const isResultRequest = request.url === '/v1/device-result';
         const isRotateRequest = request.url === '/v1/device-session/rotate';
+        const isRecoveryChallenge = request.url === '/v1/device-session/recover/challenge';
+        const isRecoveryRequest = request.url === '/v1/device-session/recover';
         const isEnrollmentChallenge = request.url === '/v1/device-enrollment/challenge';
         const isEnrollmentComplete = request.url === '/v1/device-enrollment/complete';
         const isEnrollmentPoll = request.url === '/v1/device-enrollment/poll';
         const isResetRequest = request.url === '/v1/device-self/reset';
-        const accepted = isResultRequest || isRotateRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
+        const accepted = isResultRequest || isRotateRequest || isRecoveryChallenge || isRecoveryRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
         if (request.method !== 'POST' || !accepted) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
@@ -101,12 +103,37 @@ export class RelayResultService {
           send(response, 429, { ok: false, error: { code: 'RELAY_RESULT_RATE_LIMITED', message: 'Relay requests are rate limited.' } }, { 'retry-after': String(requestDecision.retryAfterSeconds) });
           return;
         }
-        if (isEnrollmentChallenge) {
+        if (isEnrollmentChallenge || isRecoveryChallenge) {
           const body = await readJson(request) as { deviceId?: unknown };
           const deviceId = uuid(String(body.deviceId ?? ''), 'deviceId');
           const issuer = await this.#identity.loadOrCreate();
           const challenge = await this.#devices.issuePairingChallenge(issuer, { expectedPeerDeviceId: deviceId });
           send(response, 200, { ok: true, challenge });
+          return;
+        }
+        if (isRecoveryRequest) {
+          const body = await readJson(request) as { pairingResponse?: unknown };
+          const pairing = pairingResponse(body.pairingResponse);
+          const peer = await this.#devices.verifyPairingForEnrollment(pairing, { allowExactReplay: true });
+          const registered = (await this.#devices.listDevices()).find((device) => device.deviceId === peer.deviceId);
+          if (!registered || registered.status !== 'active' || registered.fingerprint !== peer.fingerprint) {
+            throw new OperatorError('DEVICE_SESSION_RECOVERY_TRUST_REVOKED', 'Known-device recovery trust is no longer active.');
+          }
+          const before = await this.#accounts.activeMembershipForDevice(peer.deviceId);
+          if (!before) throw new OperatorError('DEVICE_SESSION_RECOVERY_AUTHORITY_REVOKED', 'Device no longer has active account authority.');
+          const issued = await this.#sessions.issueOrRecover({
+            jti: pairing.challengeId,
+            subjectDeviceId: peer.deviceId,
+            audience: 'operator-relay',
+            scopes: relaySessionScopesForAccount(before.accountId)
+          });
+          const after = await this.#accounts.activeMembershipForDevice(peer.deviceId);
+          if (!after || after.accountId !== before.accountId || after.authorityGeneration !== before.authorityGeneration) {
+            try { await this.#sessions.revoke(issued.payload.jti, 'account authority changed during known-device recovery'); }
+            catch (error) { if (!(error instanceof OperatorError && error.code === 'SESSION_NOT_FOUND')) throw error; }
+            throw new OperatorError('DEVICE_SESSION_RECOVERY_AUTHORITY_REVOKED', 'Device account authority changed during known-device recovery.');
+          }
+          send(response, 200, { ok: true, recovery: { status: 'recovered', deviceId: peer.deviceId }, session: { token: issued.token, expiresAt: issued.payload.expiresAt, scopes: [...issued.payload.scopes] } });
           return;
         }
         if (isEnrollmentComplete) {

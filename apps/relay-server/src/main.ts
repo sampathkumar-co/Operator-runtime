@@ -8,10 +8,12 @@ import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
+import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayControlService } from './control-service.ts';
 import { RelayHub } from './relay-hub.ts';
 import { RelayResultService } from './result-service.ts';
+import { acquireRelayStateInstanceLock, type RelayStateInstanceLock } from './state-instance-lock.ts';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8788;
@@ -59,6 +61,7 @@ function createRelayStores(stateDir: string) {
   });
   const deliveries = new RelayDeliveryStore(stateDir);
   const results = new RelayResultStore(stateDir);
+  const reservationReconciliations = new RelayReservationReconciliationStore(stateDir);
   const enrollments = new DeviceEnrollmentStore(stateDir);
   const accounts = new AccountDeviceRegistry(stateDir, devices, {
     onReleaseDevice: async (deviceId, accountId, reason) => {
@@ -87,34 +90,51 @@ function createRelayStores(stateDir: string) {
     }
   });
   return {
-    identity, devices, sessions, deliveries, results, accounts, enrollments,
+    identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments,
     attachHub(hub: RelayHub) { liveHub = hub; }
   };
 }
 
 export async function runRelayService(config = readRelayServiceConfig()): Promise<RelayHub> {
-  const stores = createRelayStores(config.stateDir);
-  const { identity, devices, sessions, deliveries, accounts } = stores;
-  const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
-  stores.attachHub(hub);
-  await accounts.recoverReleases();
-  await accounts.recoverErasures();
-  const listening = await hub.listen(config.host, config.port);
-  logListening('operator-relay', listening.host, listening.port, config.stateDir, isLoopbackHost(config.host) ? 'local-plain-websocket' : 'plain-websocket-behind-required-tls-proxy');
-  return hub;
+  const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
+  let lockOwned = true;
+  try {
+    const stores = createRelayStores(config.stateDir);
+    const { identity, devices, sessions, deliveries, accounts } = stores;
+    const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
+    stores.attachHub(hub);
+    await accounts.recoverReleases();
+    await accounts.recoverErasures();
+    const listening = await hub.listen(config.host, config.port);
+    logListening('operator-relay', listening.host, listening.port, config.stateDir, isLoopbackHost(config.host) ? 'local-plain-websocket' : 'plain-websocket-behind-required-tls-proxy');
+    releaseLockWhenHubCloses(hub, instanceLock);
+    lockOwned = false;
+    return hub;
+  } finally {
+    if (lockOwned) await instanceLock.release();
+  }
 }
 
 export async function runRelayResultService(config = readRelayServiceConfig()): Promise<RelayResultService> {
-  const service = new RelayResultService({ stateDir: config.stateDir });
-  const listening = await service.listen(config.resultHost, config.resultPort);
-  logListening('operator-relay-results', listening.host, listening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
-  return service;
+  const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
+  let lockOwned = true;
+  try {
+    const service = new RelayResultService({ stateDir: config.stateDir });
+    const listening = await service.listen(config.resultHost, config.resultPort);
+    logListening('operator-relay-results', listening.host, listening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
+    releaseLockWhenServiceCloses(service, instanceLock);
+    lockOwned = false;
+    return service;
+  } finally {
+    if (lockOwned) await instanceLock.release();
+  }
 }
 
 async function main(): Promise<void> {
   const config = readRelayServiceConfig();
+  const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   const stores = createRelayStores(config.stateDir);
-  const { identity, devices, sessions, deliveries, results, accounts, enrollments } = stores;
+  const { identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments } = stores;
 
   const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
   stores.attachHub(hub);
@@ -130,7 +150,7 @@ async function main(): Promise<void> {
     logListening('operator-relay-results', resultListening.host, resultListening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     if (config.controlToken) {
       controlService = new RelayControlService({
-        hub, results, accounts, enrollments, devices, token: config.controlToken,
+        hub, results, accounts, enrollments, devices, reservationReconciliations, token: config.controlToken,
         onDiagnostic: (event) => process.stderr.write(JSON.stringify(event) + '\n')
       });
       const controlListening = await controlService.listen(config.controlHost, config.controlPort);
@@ -140,6 +160,7 @@ async function main(): Promise<void> {
     }
   } catch (error) {
     await Promise.allSettled([controlService?.close(), resultService.close(), hub.close()].filter(Boolean) as Array<Promise<unknown>>);
+    await instanceLock.release();
     throw error;
   }
 
@@ -155,10 +176,21 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
+    await instanceLock.release();
     process.exitCode = 0;
   };
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
   process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+}
+
+function releaseLockWhenHubCloses(hub: RelayHub, lock: RelayStateInstanceLock): void {
+  const close = hub.close.bind(hub);
+  hub.close = async () => { try { await close(); } finally { await lock.release(); } };
+}
+
+function releaseLockWhenServiceCloses(service: RelayResultService, lock: RelayStateInstanceLock): void {
+  const close = service.close.bind(service);
+  service.close = async () => { try { await close(); } finally { await lock.release(); } };
 }
 
 function logListening(service: string, host: string, port: number, stateDir: string, transport: string): void {

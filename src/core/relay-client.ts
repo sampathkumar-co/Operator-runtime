@@ -68,6 +68,16 @@ export type RelayClientStatus =
   | { state: 'authenticated-ready'; capabilityCount: number }
   | { state: 'reconnect-wait'; code: string; delayMs: number };
 
+export type RelayConnectionState =
+  | { state: 'STARTING' }
+  | { state: 'CONNECTING'; attempt: number }
+  | { state: 'AUTHENTICATING' }
+  | { state: 'READY'; capabilityCount: number }
+  | { state: 'DEGRADED'; code: string; recoverable: boolean }
+  | { state: 'RECONNECTING'; code: string; delayMs: number; attempt: number }
+  | { state: 'REVOKED'; code: string }
+  | { state: 'SHUTTING_DOWN' };
+
 interface RelayState {
   version: 1;
   lastAckedServerSeq: number;
@@ -82,6 +92,7 @@ interface WelcomeFrame {
   type: 'welcome';
   protocol: 1;
   connectionId: string;
+  logicalSessionId?: string;
   resumeFromSeq: number;
   expiredThroughSeq?: number;
   heartbeatMs?: number;
@@ -107,6 +118,7 @@ export interface RelayClientOptions {
   url: string;
   identity: DeviceIdentityStore;
   socketFactory?: RelaySocketFactory;
+  logicalSessionId?: string;
   getSessionToken: () => Promise<string>;
   supportedCapabilities?: readonly string[];
   getSupportedCapabilities?: () => Promise<readonly string[]>;
@@ -117,6 +129,7 @@ export interface RelayClientOptions {
   onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
   onStatus?: (status: RelayClientStatus) => void;
+  onConnectionState?: (status: RelayConnectionState) => void;
   allowLoopbackInsecureWs?: boolean;
   random?: () => number;
   clock?: () => Date;
@@ -130,6 +143,7 @@ export class RelayClient {
   #url: string;
   #identity: DeviceIdentityStore;
   #socketFactory: RelaySocketFactory;
+  #logicalSessionId: string;
   #getSessionToken: () => Promise<string>;
   #getSupportedCapabilities: () => Promise<string[]>;
   #requireCapabilityBinding: boolean;
@@ -139,6 +153,7 @@ export class RelayClient {
   #onExpiredRecovery?: (context: RelayExpiredRecoveryContext) => Promise<RelayExpiredRecoveryDecision>;
   #onAcknowledged?: (delivery: Pick<RelayDelivery, 'seq' | 'id'>) => Promise<void> | void;
   #onStatus?: (status: RelayClientStatus) => void;
+  #onConnectionState?: (status: RelayConnectionState) => void;
   #random: () => number;
   #clock: () => Date;
   #sleep: (ms: number) => Promise<void>;
@@ -149,13 +164,14 @@ export class RelayClient {
   #attempt = 0;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #lastPongAt = 0;
-  #interruptConnection: (() => void) | null = null;
+  #interruptConnection: ((mode?: 'reconnect' | 'shutdown') => void) | null = null;
 
   constructor(options: RelayClientOptions) {
     this.#stateFile = path.join(path.resolve(options.stateDir), 'relay-client.json');
     this.#url = validateRelayUrl(options.url, Boolean(options.allowLoopbackInsecureWs));
     this.#identity = options.identity;
     this.#socketFactory = options.socketFactory ?? nativeSocketFactory;
+    this.#logicalSessionId = options.logicalSessionId === undefined ? crypto.randomUUID() : validLogicalSessionId(options.logicalSessionId);
     this.#getSessionToken = options.getSessionToken;
     if (options.supportedCapabilities !== undefined && options.getSupportedCapabilities) {
       throw new OperatorError('RELAY_CAPABILITIES_CONFIGURATION_INVALID', 'Configure either static or dynamic relay capabilities, not both.');
@@ -179,6 +195,7 @@ export class RelayClient {
     this.#onExpiredRecovery = options.onExpiredRecovery;
     this.#onAcknowledged = options.onAcknowledged;
     this.#onStatus = options.onStatus;
+    this.#onConnectionState = options.onConnectionState;
     this.#random = options.random ?? Math.random;
     this.#clock = options.clock ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -188,27 +205,39 @@ export class RelayClient {
 
   async run(): Promise<void> {
     this.#stopped = false;
+    this.#emitConnectionState({ state: 'STARTING' });
     while (!this.#stopped) {
+      this.#emitConnectionState({ state: 'CONNECTING', attempt: this.#attempt + 1 });
       try {
         await this.#connectOnce();
         this.#attempt = 0;
       } catch (error) {
         if (this.#stopped) break;
-        if (error instanceof OperatorError && !error.retryable) throw error;
-        const delay = reconnectDelay(this.#attempt++, this.#random());
-        this.#emitStatus({
-          state: 'reconnect-wait',
-          code: error instanceof OperatorError ? error.code : 'RELAY_CONNECTION_FAILED',
-          delayMs: delay
-        });
+        const code = error instanceof OperatorError ? error.code : 'RELAY_CONNECTION_FAILED';
+        if (error instanceof OperatorError && !error.retryable) {
+          if (isRevocationCode(code)) this.#emitConnectionState({ state: 'REVOKED', code });
+          else this.#emitConnectionState({ state: 'DEGRADED', code, recoverable: false });
+          throw error;
+        }
+        const requestedReconnect = code === 'RELAY_RECONNECT_REQUESTED';
+        const delay = requestedReconnect ? 0 : reconnectDelay(this.#attempt++, this.#random());
+        this.#emitStatus({ state: 'reconnect-wait', code, delayMs: delay });
+        this.#emitConnectionState({ state: 'RECONNECTING', code, delayMs: delay, attempt: this.#attempt + 1 });
         await this.#sleep(delay);
       }
     }
   }
 
   stop(): void {
+    if (this.#stopped) return;
     this.#stopped = true;
+    this.#emitConnectionState({ state: 'SHUTTING_DOWN' });
     this.#clearHeartbeat();
+    const interrupt = this.#interruptConnection;
+    if (interrupt) {
+      interrupt('shutdown');
+      return;
+    }
     try { this.#socket?.close(1000, 'operator stopping'); } catch { /* already closed */ }
     this.#socket = null;
   }
@@ -217,7 +246,7 @@ export class RelayClient {
     if (this.#stopped) return;
     const interrupt = this.#interruptConnection;
     if (interrupt) {
-      interrupt();
+      interrupt('reconnect');
       return;
     }
     try { this.#socket?.close(1012, 'session refresh recovery'); } catch { /* reconnect loop handles the next attempt */ }
@@ -244,11 +273,13 @@ export class RelayClient {
       throw new OperatorError('RELAY_SOCKET_DESTINATION_CHANGED', 'Opened relay WebSocket destination differs from the authorized endpoint.', { retryable: false });
     }
     if (this.#stopped) return;
+    this.#emitConnectionState({ state: 'AUTHENTICATING' });
     this.#emitStatus({ state: 'socket-connected' });
 
     const identity = await this.#identity.loadOrCreate();
     const helloPayload = {
       protocol: PROTOCOL,
+      logicalSessionId: this.#logicalSessionId,
       deviceId: identity.deviceId,
       deviceName: identity.deviceName,
       fingerprint: identity.fingerprint,
@@ -266,11 +297,15 @@ export class RelayClient {
       let welcomed = false;
       let settled = false;
       let messageQueue: Promise<void> = Promise.resolve();
-      let interrupt: (() => void) | null = null;
+      let interrupt: ((mode?: 'reconnect' | 'shutdown') => void) | null = null;
+      let reconnectRequested = false;
+      let drainRequested = false;
+      let connectionDrain: Promise<void> | null = null;
       let readConcurrency = 1;
       let nextReceiveSeq = state.lastAckedServerSeq + 1;
       let nextAckSeq = state.lastAckedServerSeq + 1;
       const activeReads = new Set<number>();
+      const activeReadTasks = new Map<number, Promise<void>>();
       const completedReads = new Map<number, RelayDelivery>();
       let readAckQueue: Promise<void> = Promise.resolve();
 
@@ -294,30 +329,56 @@ export class RelayClient {
         try { socket.close(4002, 'protocol/recovery error'); } catch { /* noop */ }
         reject(error instanceof OperatorError ? error : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true }));
       };
-      const onError = () => fail(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
-      const onClose = () => {
-        if (this.#stopped) succeed();
-        else fail(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
+      const drainConnection = (error: OperatorError | null, explicitReconnect = false) => {
+        if (settled || drainRequested) return;
+        drainRequested = true;
+        if (explicitReconnect) reconnectRequested = true;
+        socket.removeEventListener?.('message', onMessage);
+        this.#clearHeartbeat();
+        connectionDrain = (async () => {
+          // Once the transport is ending, stop accepting fresh work but let
+          // every already-accepted delivery reach its durable result/cursor
+          // boundary before a replacement connection or process exit.
+          try { await messageQueue; }
+          catch { /* the initiating connection/protocol error remains authoritative; accepted parallel work still drains */ }
+          while (activeReadTasks.size > 0) {
+            await Promise.all([...activeReadTasks.values()]);
+          }
+          await readAckQueue;
+          if (error) {
+            fail(error);
+            return;
+          }
+          try { socket.close(1000, 'operator stopping'); } catch { /* already closed */ }
+          succeed();
+        })();
+        void connectionDrain.catch(fail);
       };
-      interrupt = () => fail(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested.', { retryable: true }));
-      this.#interruptConnection = interrupt;
-      const processMessage = async (event: any) => {
-        const frame = parseServerFrame(event?.data);
+      const onError = () => {
+        drainConnection(new OperatorError('RELAY_SOCKET_ERROR', 'Relay socket reported an error.', { retryable: true }));
+      };
+      const onClose = () => {
+        if (this.#stopped) drainConnection(null);
+        else drainConnection(new OperatorError(welcomed ? 'RELAY_SOCKET_CLOSED' : 'RELAY_CONNECT_FAILED', welcomed ? 'Relay socket closed unexpectedly.' : 'Relay socket closed before handshake completion.', { retryable: true }));
+      };
+      const processMessage = async (frame: ServerFrame) => {
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
           const negotiated = await this.#validateWelcome(frame, state, supportedCapabilities);
+          if (this.#stopped) return;
           readConcurrency = negotiated.readConcurrency;
           nextReceiveSeq = frame.resumeFromSeq + 1;
           nextAckSeq = frame.resumeFromSeq + 1;
           welcomed = true;
           this.#attempt = 0;
-          this.#lastPongAt = Date.now();
+          this.#lastPongAt = this.#clock().getTime();
           this.#startHeartbeat(socket, boundedHeartbeat(frame.heartbeatMs));
           this.#emitStatus({ state: 'authenticated-ready', capabilityCount: negotiated.capabilities.length });
+          this.#emitConnectionState({ state: 'READY', capabilityCount: negotiated.capabilities.length });
           return;
         }
         if (frame.type === 'pong') {
-          this.#lastPongAt = Date.now();
+          this.#lastPongAt = this.#clock().getTime();
           return;
         }
         if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
@@ -326,7 +387,7 @@ export class RelayClient {
           const durable = await this.#readState();
           if (delivery.seq <= durable.lastAckedServerSeq) {
             await this.#notifyAcknowledged(delivery);
-            sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
+            sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
             return;
           }
           if (delivery.seq !== nextReceiveSeq) {
@@ -337,7 +398,7 @@ export class RelayClient {
           }
           nextReceiveSeq += 1;
           activeReads.add(delivery.seq);
-          void this.#onDelivery(delivery).then(() => {
+          const readTask = this.#onDelivery(delivery).then(() => {
             completedReads.set(delivery.seq, delivery);
             readAckQueue = readAckQueue.then(async () => {
               while (completedReads.has(nextAckSeq)) {
@@ -351,18 +412,23 @@ export class RelayClient {
                 }
                 await this.#writeState({ version: 1, lastAckedServerSeq: completed.seq });
                 await this.#notifyAcknowledged(completed);
-                sendFrame(socket, { type: 'ack', seq: completed.seq, id: completed.id });
+                sendAckFrame(socket, { type: 'ack', seq: completed.seq, id: completed.id });
                 completedReads.delete(completed.seq);
                 activeReads.delete(completed.seq);
                 nextAckSeq = completed.seq + 1;
               }
             });
             return readAckQueue;
-          }).catch(fail);
+          });
+          activeReadTasks.set(delivery.seq, readTask);
+          void readTask.finally(() => activeReadTasks.delete(delivery.seq)).catch(fail);
           return;
         }
         if (activeReads.size > 0) {
-          throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a serialization-barrier delivery before concurrent reads were acknowledged.', { retryable: true });
+          await Promise.all([...activeReadTasks.values()]);
+          if (activeReads.size > 0) {
+            throw new OperatorError('RELAY_READ_BARRIER_STALLED', 'Concurrent reads did not drain before a serialization-barrier delivery.', { retryable: true });
+          }
         }
         await this.#handleDelivery(socket, frame);
         const durable = await this.#readState();
@@ -370,13 +436,39 @@ export class RelayClient {
         nextAckSeq = durable.lastAckedServerSeq + 1;
       };
       const onMessage = (event: any) => {
-        messageQueue = messageQueue.then(() => processMessage(event));
-        void messageQueue.catch(fail);
+        let frame: ServerFrame;
+        try { frame = parseServerFrame(event?.data); }
+        catch (error) {
+          drainConnection(error instanceof OperatorError
+            ? error
+            : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true }));
+          return;
+        }
+        // Heartbeat control traffic must remain live while a legitimate long
+        // delivery owns the serialized work queue. It carries no execution
+        // authority and does not alter delivery ordering.
+        if (welcomed && frame.type === 'pong') {
+          this.#lastPongAt = this.#clock().getTime();
+          return;
+        }
+        messageQueue = messageQueue.then(() => processMessage(frame));
+        void messageQueue.catch((error) => drainConnection(error instanceof OperatorError
+          ? error
+          : new OperatorError('RELAY_PROTOCOL_ERROR', error instanceof Error ? error.message : String(error), { retryable: true })));
       };
 
       socket.addEventListener('message', onMessage);
       socket.addEventListener('error', onError);
       socket.addEventListener('close', onClose);
+      interrupt = (mode = 'reconnect') => {
+        if (settled || reconnectRequested) return;
+        if (mode === 'shutdown') {
+          drainConnection(null);
+          return;
+        }
+        drainConnection(new OperatorError('RELAY_RECONNECT_REQUESTED', 'Relay reconnect was requested after in-flight work drained.', { retryable: true }), true);
+      };
+      this.#interruptConnection = interrupt;
     });
 
     sendFrame(socket, { type: 'hello', payload: helloPayload, signature, sessionToken: token });
@@ -403,6 +495,9 @@ export class RelayClient {
       }
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
+    if (frame.logicalSessionId !== undefined && validLogicalSessionId(frame.logicalSessionId) !== this.#logicalSessionId) {
+      throw new OperatorError('RELAY_LOGICAL_SESSION_MISMATCH', 'Relay logical session acknowledgement does not match this running client.', { retryable: false });
+    }
     if (!Number.isSafeInteger(frame.resumeFromSeq) || frame.resumeFromSeq < 0) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay resume sequence is invalid.');
     const expiredThroughSeq = frame.expiredThroughSeq;
     if (expiredThroughSeq !== undefined && (!Number.isSafeInteger(expiredThroughSeq) || expiredThroughSeq < 1 || expiredThroughSeq !== frame.resumeFromSeq)) {
@@ -439,13 +534,17 @@ export class RelayClient {
     try { this.#onStatus?.(status); } catch { /* diagnostics must not affect relay authority */ }
   }
 
+  #emitConnectionState(status: RelayConnectionState): void {
+    try { this.#onConnectionState?.(status); } catch { /* diagnostics must not affect relay authority */ }
+  }
+
   async #handleDelivery(socket: RelaySocketLike, frame: DeliveryFrame): Promise<void> {
     const delivery = validateDelivery(frame);
     let state = await this.#readState();
 
     if (delivery.seq <= state.lastAckedServerSeq) {
       await this.#notifyAcknowledged(delivery);
-      sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
+      sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, duplicate: true });
       return;
     }
     if (delivery.seq !== state.lastAckedServerSeq + 1) {
@@ -468,7 +567,7 @@ export class RelayClient {
         const completed = { version: 1 as const, lastAckedServerSeq: delivery.seq };
         await this.#writeState(completed);
         await this.#notifyAcknowledged(delivery);
-        sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, recovered: true });
+        sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id, recovered: true });
         return;
       } else {
         throw new OperatorError('RELAY_RECOVERY_REQUIRED', 'Recovery callback returned an invalid decision.', { retryable: false });
@@ -480,7 +579,7 @@ export class RelayClient {
     await this.#onDelivery(delivery);
     await this.#writeState({ version: 1, lastAckedServerSeq: delivery.seq });
     await this.#notifyAcknowledged(delivery);
-    sendFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id });
+    sendAckFrame(socket, { type: 'ack', seq: delivery.seq, id: delivery.id });
   }
 
   async #notifyAcknowledged(delivery: Pick<RelayDelivery, 'seq' | 'id'>): Promise<void> {
@@ -491,12 +590,13 @@ export class RelayClient {
   #startHeartbeat(socket: RelaySocketLike, heartbeatMs: number): void {
     this.#clearHeartbeat();
     this.#heartbeatTimer = setInterval(() => {
-      if (Date.now() - this.#lastPongAt > heartbeatMs * 3) {
+      if (this.#clock().getTime() - this.#lastPongAt > heartbeatMs * 3) {
+        this.#emitConnectionState({ state: 'DEGRADED', code: 'RELAY_HEARTBEAT_TIMEOUT', recoverable: true });
         try { socket.close(4000, 'heartbeat timeout'); } catch { /* noop */ }
         return;
       }
       const nonce = crypto.randomBytes(12).toString('base64url');
-      try { sendFrame(socket, { type: 'ping', nonce, at: new Date().toISOString() }); } catch { /* close path handles reconnect */ }
+      try { sendFrame(socket, { type: 'ping', nonce, at: this.#clock().toISOString() }); } catch { /* close path handles reconnect */ }
     }, heartbeatMs);
     this.#heartbeatTimer.unref();
   }
@@ -529,6 +629,13 @@ export class RelayClient {
       invalidMessage: 'Relay client state is invalid.'
     });
   }
+}
+
+function isRevocationCode(code: string): boolean {
+  return code === 'DEVICE_REVOKED'
+    || code === 'SESSION_REVOKED'
+    || code === 'ACCOUNT_DISABLED'
+    || code === 'RELAY_AUTHORITY_CHANGED';
 }
 
 export function reconnectDelay(attemptInput: number, randomInput = Math.random()): number {
@@ -628,6 +735,14 @@ function validDeliveryId(value: string): string {
   return value;
 }
 
+function validLogicalSessionId(value: string): string {
+  const normalized = String(value ?? '').toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new OperatorError('RELAY_LOGICAL_SESSION_INVALID', 'Relay logical session ID must be a UUID.', { retryable: false });
+  }
+  return normalized;
+}
+
 function validIso(value: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('RELAY_STATE_CORRUPT', 'Relay state timestamp is invalid.');
@@ -644,6 +759,14 @@ function parseServerFrame(raw: unknown): ServerFrame {
   if (parsed.type === 'delivery') return parsed as DeliveryFrame;
   if (parsed.type === 'pong' && typeof parsed.nonce === 'string') return parsed as PongFrame;
   throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay frame type is unsupported.');
+}
+
+function sendAckFrame(socket: RelaySocketLike, frame: JsonObject): void {
+  // The durable cursor/result is authoritative. If the transport disappeared
+  // after that commit, the next hello reconciles the cursor instead of turning
+  // a harmless lost ACK frame into a delivery failure.
+  if (socket.readyState !== 1) return;
+  sendFrame(socket, frame);
 }
 
 function sendFrame(socket: RelaySocketLike, frame: JsonObject): void {

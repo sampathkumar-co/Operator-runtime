@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { conservativeSideEffectState, requiresReconciliation, retrySafeWithoutReconciliation } from '../src/core/side-effect.ts';
+import { conservativeExecutionPhase, conservativeSideEffectState, requiresReconciliation, retrySafeWithoutReconciliation } from '../src/core/side-effect.ts';
 import type { ActionResult } from '../src/core/types.ts';
 
 function result(input: Partial<ActionResult>): ActionResult {
@@ -21,6 +21,14 @@ test('failed mutations default to uncertain and require reconciliation', () => {
   assert.equal(state, 'uncertain');
   assert.equal(requiresReconciliation('write', state), true);
   assert.equal(retrySafeWithoutReconciliation('write', state), false);
+});
+
+test('pre-dispatch execution truth proves mutation side effects are absent', () => {
+  const actionResult = result({
+    error: { code: 'STALE', message: 'rejected before native dispatch', retryable: true, executionPhase: 'pre_dispatch' }
+  });
+  assert.equal(conservativeExecutionPhase(actionResult), 'pre_dispatch');
+  assert.equal(conservativeSideEffectState('write', actionResult), 'none');
 });
 
 test('trusted explicit no-side-effect failures may be retried without reconciliation', () => {

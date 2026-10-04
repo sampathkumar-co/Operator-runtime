@@ -111,12 +111,30 @@ export class AuthorityKernel {
     resolveDynamicRisk: RiskResolver,
     token?: CapabilityToken
   ): Promise<AuthorityDecision> {
+    const decision = await this.authorizeRecovery(action, permissions, resolveDynamicRisk, token);
+    this.policy.authorizeRisk(decision.canonicalAction, permissions);
+    return decision;
+  }
+
+  /**
+   * Non-dispatching recovery authority.
+   *
+   * Recovery may inspect durable provider/journal post-state after a crash even
+   * when a one-shot mutation approval has already been consumed. It still
+   * enforces provenance, capability/root scope, canonical risk identity, and
+   * any capability token. A fresh side effect must pass authorize() again.
+   */
+  async authorizeRecovery(
+    action: ActionRequest,
+    permissions: PermissionProfile,
+    resolveDynamicRisk: RiskResolver,
+    token?: CapabilityToken
+  ): Promise<AuthorityDecision> {
     this.policy.authorizeBase(action, permissions);
     const rule = capabilityRiskRule(action.capability);
     const canonicalRisk = rule === 'dynamic' ? await resolveDynamicRisk(action) : rule;
     assertCanonicalRisk(action, canonicalRisk);
     const canonicalAction = { ...action, risk: canonicalRisk };
-    this.policy.authorizeRisk(canonicalAction, permissions);
     if (token) this.verifyToken(token, canonicalAction, permissions);
     return { canonicalAction, canonicalRisk, capability: action.capability };
   }

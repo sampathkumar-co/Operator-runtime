@@ -3,24 +3,29 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AccountDeviceRegistry, type AccountPrincipal } from '../../../src/core/account-device-registry.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { developerAccountIds } from '../../../src/core/developer-relay-surface.ts';
 import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import type { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
-import type { RelayHub } from './relay-hub.ts';
+import type { RelayDispatchRequest, RelayHub } from './relay-hub.ts';
 import type { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import type { DeviceReservation } from '../../../src/core/device-pool.ts';
+import type { RelayReservationReconciliation, RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 
 const MAX_BODY_BYTES = 512 * 1024;
 const DEFAULT_WAIT_MS = 10 * 60_000;
 const MAX_WAIT_MS = 10 * 60_000;
+const TRANSPORT_RECOVERY_WINDOW_MS = 5_000;
+const TRANSPORT_RECOVERY_MAX_DELAY_MS = 750;
 
 export interface RelayControlDiagnostic {
   service: 'operator-relay-control';
-  status: 'request-failed';
+  status: 'request-failed' | 'reservation-reconciliation-required' | 'reservation-reconciled';
   code: string;
+  action?: 'renew' | 'release';
 }
 
 export class RelayControlService {
@@ -32,9 +37,10 @@ export class RelayControlService {
   #token: string;
   #developerAccounts: Set<string>;
   #onDiagnostic?: (event: RelayControlDiagnostic) => void;
+  #reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>;
   #server: http.Server | null = null;
 
-  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'releaseDeviceReservation'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
+  constructor(options: { hub: Pick<RelayHub, 'dispatch' | 'recoverIdempotent' | 'bindProject' | 'boundProjectDevice' | 'setDefaultDevice' | 'reserveDevice' | 'heartbeatDeviceReservation' | 'releaseDeviceReservation' | 'listDeviceReservations'>; results: Pick<RelayResultStore, 'get' | 'findByIdempotencyKey'>; accounts: Pick<AccountDeviceRegistry, 'resolveOrCreateAccount' | 'erasePrincipal' | 'bindDevice' | 'activeMembershipForDevice' | 'assertCanBindDevice'>; enrollments?: Pick<DeviceEnrollmentStore, 'reserve' | 'peerForClaim' | 'markBound'>; devices?: Pick<DeviceRegistryStore, 'registerVerifiedPeerTracked' | 'unregisterActiveDevice'>; reservationReconciliations?: Pick<RelayReservationReconciliationStore, 'record' | 'resolve' | 'pending'>; token: string; developerAccountIds?: string; onDiagnostic?: (event: RelayControlDiagnostic) => void }) {
     if (options.token.length < 32) throw new Error('Relay control token must be at least 32 characters.');
     this.#hub = options.hub;
     this.#results = options.results;
@@ -44,6 +50,7 @@ export class RelayControlService {
     this.#token = options.token;
     this.#developerAccounts = developerAccountIds(options.developerAccountIds ?? process.env.OPERATOR_DEVELOPER_ACCOUNT_IDS);
     this.#onDiagnostic = options.onDiagnostic;
+    this.#reservationReconciliations = options.reservationReconciliations;
   }
 
   async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
@@ -179,7 +186,7 @@ export class RelayControlService {
           routedDeviceId = recovered.deviceId;
           delivery = recovered.delivery;
         } else {
-          const dispatched = await this.#hub.dispatch({
+          const dispatched = await this.#dispatchWithRecovery({
             accountId,
             explicitDeviceId: deviceId,
             projectKey,
@@ -187,8 +194,8 @@ export class RelayControlService {
             kind: 'action',
             payload: { action, enterpriseContext: relayEnterpriseContext(accountId, projectKey), ...(publicBoundary ? { publicBoundary: true } : {}) },
             idempotencyKey
-          });
-          routedDeviceId = dispatched.route.deviceId;
+          }, { allowUnpinnedRouteRetry: capabilityRiskRule(action.capability) === 'read' });
+          routedDeviceId = dispatched.deviceId;
           delivery = dispatched.delivery;
         }
         const deadline = Date.now() + waitMs;
@@ -233,6 +240,51 @@ export class RelayControlService {
     return { host, port: address.port };
   }
 
+  async #dispatchWithRecovery(
+    request: RelayDispatchRequest,
+    options: { allowUnpinnedRouteRetry?: boolean; recoveryWindowMs?: number } = {}
+  ) {
+    const recoveryWindowMs = Math.max(0, Math.min(options.recoveryWindowMs ?? TRANSPORT_RECOVERY_WINDOW_MS, TRANSPORT_RECOVERY_WINDOW_MS));
+    const deadline = Date.now() + recoveryWindowMs;
+    let attempt = 0;
+    let pinnedDeviceId = request.explicitDeviceId;
+
+    while (true) {
+      try {
+        const dispatched = await this.#hub.dispatch({
+          ...request,
+          ...(pinnedDeviceId ? { explicitDeviceId: pinnedDeviceId } : {})
+        });
+        return { deviceId: dispatched.route.deviceId, delivery: dispatched.delivery, recovered: attempt > 0 };
+      } catch (error) {
+        if (!(error instanceof OperatorError) || !isRecoverableRelayDispatchError(error)) throw error;
+        if (!request.idempotencyKey) throw error;
+
+        const existing = await this.#hub.recoverIdempotent(request.idempotencyKey);
+        if (existing) {
+          if (existing.delivery.status === 'expired') {
+            throw new OperatorError(
+              'RELAY_EXECUTION_EXPIRED_UNCERTAIN',
+              'The invocation expired after dispatch began and cannot be safely replayed.',
+              { retryable: false, details: { deviceId: existing.deviceId, sideEffectState: 'uncertain', safeToRetry: false } }
+            );
+          }
+          return { deviceId: existing.deviceId, delivery: existing.delivery, recovered: true };
+        }
+
+        const errorDeviceId = typeof error.details?.deviceId === 'string' ? error.details.deviceId : undefined;
+        if (errorDeviceId) pinnedDeviceId = validUuid(errorDeviceId, 'recovery deviceId');
+        const routeIsPinned = Boolean(pinnedDeviceId);
+        if (!routeIsPinned && options.allowUnpinnedRouteRetry !== true) throw error;
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw error;
+        const delayMs = Math.min(remainingMs, relayRecoveryDelayMs(attempt++));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
   async #handleTaskRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const body = await readJson(request) as {
       accountId?: unknown; principal?: unknown; deviceId?: unknown; projectKey?: unknown; task?: unknown; developerBoundary?: unknown; waitMs?: unknown;
@@ -262,7 +314,7 @@ export class RelayControlService {
       throw new OperatorError('ROUTE_PROJECT_UNBOUND', 'Durable task control requires its persisted task-to-device binding.');
     }
 
-    const dispatched = await this.#hub.dispatch({
+    const dispatched = await this.#dispatchWithRecovery({
       accountId,
       explicitDeviceId: boundDeviceId ?? requestedDeviceId,
       projectKey: boundDeviceId ? bindingKey : requestedProjectKey,
@@ -271,7 +323,7 @@ export class RelayControlService {
       payload: { task: task.payload, enterpriseContext: relayEnterpriseContext(accountId, requestedProjectKey) },
       idempotencyKey: freshTaskReceiptKey(accountId, task.payload)
     });
-    const routedDeviceId = dispatched.route.deviceId;
+    const routedDeviceId = dispatched.deviceId;
     if (task.operation === 'submit') await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
 
     const deadline = Date.now() + waitMs;
@@ -306,7 +358,7 @@ export class RelayControlService {
     const projectKey = body.projectKey === undefined ? undefined : validProjectKey(String(body.projectKey));
     const query = validKnowledgeRelayQuery(body.query);
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
-    const dispatched = await this.#hub.dispatch({
+    const dispatched = await this.#dispatchWithRecovery({
       accountId,
       explicitDeviceId: deviceId,
       projectKey,
@@ -314,13 +366,13 @@ export class RelayControlService {
       kind: 'knowledge',
       payload: { query, enterpriseContext: relayEnterpriseContext(accountId, projectKey) },
       idempotencyKey: freshKnowledgeReceiptKey(accountId, query)
-    });
+    }, { allowUnpinnedRouteRetry: true });
     const deadline = Date.now() + waitMs;
     while (Date.now() <= deadline) {
       if (request.aborted || response.destroyed) return;
-      const stored = await this.#results.get(dispatched.route.deviceId, dispatched.delivery.seq);
+      const stored = await this.#results.get(dispatched.deviceId, dispatched.delivery.seq);
       if (stored && stored.deliveryId === dispatched.delivery.id) {
-        await this.#assertReplayAuthority(accountId, dispatched.route.deviceId, stored.replayAuthority);
+        await this.#assertReplayAuthority(accountId, dispatched.deviceId, stored.replayAuthority);
         const result = stored.result as unknown;
         if (!isKnowledgeTransportResult(result)) {
           send(response, 502, { ok: false, error: { code: 'RELAY_KNOWLEDGE_RESULT_INVALID', message: 'Device returned a malformed knowledge result.' } });
@@ -349,6 +401,12 @@ export class RelayControlService {
     const waitMs = body.waitMs === undefined ? DEFAULT_WAIT_MS : boundedWait(body.waitMs);
     const operation = validOperationRelayRequest(body.operation);
     const bindingKey = operationBindingKey(operation.operationId);
+    await this.#recoverReservationReconciliations();
+    const unresolved = (await this.#reservationReconciliations?.pending() ?? [])
+      .find((item) => item.accountId === accountId && item.workloadKey === bindingKey);
+    if (unresolved) {
+      throw new OperatorError('RELAY_RESERVATION_RECONCILIATION_REQUIRED', `Reservation ${unresolved.action} bookkeeping remains unresolved; refusing to route more operation work.`);
+    }
     const submitLeaseMs = operation.operation === 'submit' && operation.request
       ? operationReservationLeaseMs(operation.request)
       : undefined;
@@ -370,19 +428,32 @@ export class RelayControlService {
       try {
         return await this.#hub.heartbeatDeviceReservation(accountId, current.id, current.sessionId, renewMs);
       } catch (error) {
-        if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_SESSION_CHANGED') throw error;
-        try { await this.#hub.releaseDeviceReservation(accountId, current.id); } catch {}
-        const replacement = await this.#hub.reserveDevice(accountId, {
-          workloadKey: bindingKey,
-          ...(current.projectKey ? { projectKey: current.projectKey } : {}),
-          explicitDeviceId: current.deviceId,
-          requiredCapabilities: current.requiredCapabilities,
-          requiredTags: current.requiredTags,
-          minMemoryMb: current.minMemoryMb,
-          requireGpu: current.requireGpu,
-          slots: current.slots,
-          leaseMs: renewMs
-        });
+        if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_SESSION_CHANGED') {
+          await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation: current, action: 'renew', leaseMs: renewMs, error });
+          throw new OperatorError('RELAY_RESERVATION_RECONCILIATION_REQUIRED', 'Active reservation renewal failed; operation capacity ownership requires reconciliation.');
+        }
+        try { await this.#hub.releaseDeviceReservation(accountId, current.id); }
+        catch (releaseError) {
+          await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation: current, action: 'release', error: releaseError });
+          throw new OperatorError('RELAY_RESERVATION_RECONCILIATION_REQUIRED', 'Stale reservation could not be released; replacement capacity will not be allocated until reconciliation succeeds.');
+        }
+        let replacement: DeviceReservation;
+        try {
+          replacement = await this.#hub.reserveDevice(accountId, {
+            workloadKey: bindingKey,
+            ...(current.projectKey ? { projectKey: current.projectKey } : {}),
+            explicitDeviceId: current.deviceId,
+            requiredCapabilities: current.requiredCapabilities,
+            requiredTags: current.requiredTags,
+            minMemoryMb: current.minMemoryMb,
+            requireGpu: current.requireGpu,
+            slots: current.slots,
+            leaseMs: renewMs
+          });
+        } catch (reserveError) {
+          await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation: current, action: 'renew', leaseMs: renewMs, error: reserveError });
+          throw new OperatorError('RELAY_RESERVATION_RECONCILIATION_REQUIRED', 'Replacement reservation could not be established after session change.');
+        }
         reservationCreated = true;
         return replacement;
       }
@@ -424,12 +495,15 @@ export class RelayControlService {
         await this.#hub.bindProject(accountId, bindingKey, routedDeviceId);
       } catch (error) {
         if (reservationCreated) {
-          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); }
+          catch (releaseError) {
+            await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation, action: 'release', error: releaseError });
+          }
         }
         throw error;
       }
       try {
-        const dispatched = await this.#hub.dispatch({
+        const dispatched = await this.#dispatchWithRecovery({
           accountId,
           explicitDeviceId: routedDeviceId,
           requiredCapabilities,
@@ -440,7 +514,10 @@ export class RelayControlService {
         delivery = dispatched.delivery;
       } catch (error) {
         if (reservationCreated && reservation) {
-          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+          try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); }
+          catch (releaseError) {
+            await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation, action: 'release', error: releaseError });
+          }
         }
         throw error;
       }
@@ -468,7 +545,7 @@ export class RelayControlService {
           reservationCreated = true;
         }
       }
-      const dispatched = await this.#hub.dispatch({
+      const dispatched = await this.#dispatchWithRecovery({
         accountId,
         explicitDeviceId: boundDeviceId,
         requiredCapabilities: [],
@@ -494,9 +571,20 @@ export class RelayControlService {
         const terminal = state === 'VERIFIED' || state === 'FAILED' || state === 'CANCELLED';
         if (reservation) {
           if (terminal || (!result.ok && operation.operation === 'submit')) {
-            try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); } catch {}
+            try { await this.#hub.releaseDeviceReservation(accountId, reservation.id); }
+            catch (releaseError) {
+              const record = await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation, action: 'release', error: releaseError });
+              send(response, 200, { ...result, reservationReconciliation: { required: true, action: 'release', recordId: record?.id } });
+              return;
+            }
           } else if (result.ok) {
-            try { reservation = await renewReservation(reservation, submitLeaseMs ?? reservationLeaseDuration(reservation)); } catch {}
+            const leaseMs = submitLeaseMs ?? reservationLeaseDuration(reservation);
+            try { reservation = await renewReservation(reservation, leaseMs); }
+            catch (renewError) {
+              const record = await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation, action: 'renew', leaseMs, error: renewError });
+              send(response, 200, { ...result, reservationReconciliation: { required: true, action: 'renew', recordId: record?.id } });
+              return;
+            }
           }
         }
         send(response, 200, result);
@@ -507,6 +595,48 @@ export class RelayControlService {
     // Timeout is an uncertain transport result: keep the reservation alive so
     // an operation that may already be running is not silently overbooked.
     send(response, 504, { ok: false, error: { code: 'RELAY_OPERATION_RESULT_PENDING', message: 'The routed digital operation has no durable result yet; retry with the same operation UUID.' } });
+  }
+
+  async #recordReservationFailure(input: {
+    accountId: string;
+    operationId: string;
+    workloadKey: string;
+    reservation: DeviceReservation;
+    action: 'renew' | 'release';
+    leaseMs?: number;
+    error: unknown;
+  }): Promise<RelayReservationReconciliation | undefined> {
+    const code = safeDiagnosticCode(typeof (input.error as any)?.code === 'string' ? (input.error as any).code : 'RELAY_RESERVATION_BOOKKEEPING_FAILED');
+    const record = await this.#reservationReconciliations?.record({
+      accountId: input.accountId,
+      operationId: input.operationId,
+      workloadKey: input.workloadKey,
+      reservationId: input.reservation.id,
+      sessionId: input.reservation.sessionId,
+      action: input.action,
+      ...(input.leaseMs === undefined ? {} : { leaseMs: input.leaseMs }),
+      errorCode: code
+    });
+    this.#diagnostic({ service: 'operator-relay-control', status: 'reservation-reconciliation-required', code, action: input.action });
+    return record;
+  }
+
+  async #recoverReservationReconciliations(): Promise<void> {
+    if (!this.#reservationReconciliations) return;
+    for (const record of await this.#reservationReconciliations.pending()) {
+      try {
+        if (record.action === 'release') await this.#hub.releaseDeviceReservation(record.accountId, record.reservationId);
+        else await this.#hub.heartbeatDeviceReservation(record.accountId, record.reservationId, record.sessionId, record.leaseMs);
+        await this.#reservationReconciliations.resolve(record.id);
+        this.#diagnostic({ service: 'operator-relay-control', status: 'reservation-reconciled', code: 'RELAY_RESERVATION_RECONCILED', action: record.action });
+      } catch {
+        // The durable pending record remains authoritative and blocks new work for this workload.
+      }
+    }
+  }
+
+  #diagnostic(event: RelayControlDiagnostic): void {
+    try { this.#onDiagnostic?.(event); } catch { /* diagnostics cannot alter control authority */ }
   }
 
   async #assertReplayAuthority(accountId: string, deviceId: string, authority: { accountId: string; deviceId: string; generation: number } | undefined): Promise<void> {
@@ -897,6 +1027,19 @@ function freshExecutionReceiptKey(accountId: string, action: ActionRequest, publ
     .update(':')
     .update(crypto.randomBytes(32))
     .digest('hex');
+}
+
+function isRecoverableRelayDispatchError(error: OperatorError): boolean {
+  if (error.code === 'ROUTE_NO_DEVICE') return true;
+  if (!error.retryable) return false;
+  return error.code === 'RELAY_TRANSPORT_UNAVAILABLE' || error.code === 'ROUTE_DEVICE_OFFLINE';
+}
+
+function relayRecoveryDelayMs(attempt: number): number {
+  const exponent = Math.min(Math.max(Math.trunc(attempt), 0), 4);
+  const base = Math.min(TRANSPORT_RECOVERY_MAX_DELAY_MS, 75 * (2 ** exponent));
+  const jitter = crypto.randomInt(0, Math.max(1, Math.floor(base / 3) + 1));
+  return base + jitter;
 }
 
 function boundedWait(input: unknown): number {

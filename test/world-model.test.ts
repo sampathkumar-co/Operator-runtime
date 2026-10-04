@@ -123,3 +123,60 @@ test('stage6 rejects secret-bearing nested world values and obvious credential s
     (error: any) => error?.code === 'WORLD_SECRET_FACT_DENIED'
   );
 });
+
+
+test('stage6 expired unreferenced entity shells are reclaimed before new entity admission', async (t) => {
+  let nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const store = new WorldModelStore(await tempDir(t), { clock, maxEntities: 3 });
+
+  for (let index = 0; index < 3; index += 1) {
+    await store.observe({
+      entity: { key: `ephemeral:${index}`, type: 'ephemeral', scopeKey: 'scope:test', label: `Ephemeral ${index}` },
+      source: 'test', domain: 'other', evidenceDigest: String(index + 1).repeat(64),
+      facts: { state: 'present' }, ttlMs: 5_000
+    });
+  }
+  assert.equal((await store.listEntities({ limit: 10 })).length, 3);
+
+  nowMs += 5_001;
+  await store.observe({
+    entity: { key: 'ephemeral:new', type: 'ephemeral', scopeKey: 'scope:test', label: 'New' },
+    source: 'test', domain: 'other', evidenceDigest: 'a'.repeat(64),
+    facts: { state: 'fresh' }, ttlMs: 5_000
+  });
+  const entities = await store.listEntities({ limit: 10 });
+  assert.deepEqual(entities.map((entity) => entity.key), ['ephemeral:new']);
+});
+
+
+test('stage6 empty entities remain while referenced by a live relation', async (t) => {
+  let nowMs = Date.parse('2026-10-01T10:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const store = new WorldModelStore(await tempDir(t), { clock });
+
+  await store.observe({
+    entity: { key: 'node:b', type: 'node', scopeKey: 'scope:test', label: 'B' },
+    source: 'test', domain: 'other', evidenceDigest: 'b'.repeat(64)
+  });
+  await store.observe({
+    entity: { key: 'node:a', type: 'node', scopeKey: 'scope:test', label: 'A' },
+    source: 'test', domain: 'other', evidenceDigest: 'c'.repeat(64),
+    facts: { transient: true }, ttlMs: 5_000
+  });
+  await store.observe({
+    entity: { key: 'node:a', type: 'node', scopeKey: 'scope:test', label: 'A' },
+    source: 'relation-test', domain: 'other', evidenceDigest: 'd'.repeat(64),
+    relations: [{ type: 'links-to', toKey: 'node:b' }], ttlMs: 10_000
+  });
+
+  nowMs += 5_001;
+  await store.observe({
+    entity: { key: 'node:c', type: 'node', scopeKey: 'scope:test', label: 'C' },
+    source: 'test', domain: 'other', evidenceDigest: 'e'.repeat(64),
+    facts: { state: 'fresh' }, ttlMs: 5_000
+  });
+
+  const keys = (await store.listEntities({ limit: 10 })).map((entity) => entity.key).sort();
+  assert.deepEqual(keys, ['node:a', 'node:b', 'node:c']);
+});

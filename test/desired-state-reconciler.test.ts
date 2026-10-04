@@ -9,7 +9,7 @@ function contract(id: string, status: string) {
 test('stage20 reconciler skips paused contracts and isolates per-contract failures', async () => {
   const seen: string[] = [];
   const controller = {
-    async list() {
+    async listForReconciliation() {
       return [
         contract('00000000-0000-4000-8000-000000000001', 'HEALTHY'),
         contract('00000000-0000-4000-8000-000000000002', 'PAUSED'),
@@ -41,7 +41,7 @@ test('stage20 reconciler never overlaps runOnce executions', async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const controller = {
-    async list() { return [contract('00000000-0000-4000-8000-000000000004', 'DRIFTED')]; },
+    async listForReconciliation() { return [contract('00000000-0000-4000-8000-000000000004', 'DRIFTED')]; },
     async reconcile() {
       calls += 1;
       await gate;

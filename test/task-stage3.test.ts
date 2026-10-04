@@ -47,10 +47,19 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.deepEqual(classifyTaskFailure({ code: 'APPROVAL_REQUIRED', message: 'approval' }), {
     class: 'approval', strategy: 'block', retryable: false, code: 'APPROVAL_REQUIRED'
   });
-  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'pre_dispatch' }).strategy, 'reobserve');
+  assert.equal(classifyTaskFailure({ code: 'DOCKER_STATE_CHANGED', message: 'stale', sideEffectState: 'none', executionPhase: 'dispatched' }).strategy, 'repair');
+  assert.equal(classifyTaskFailure({ code: 'NETWORK_TIMEOUT', message: 'uncertain', retryable: true, sideEffectState: 'uncertain', executionPhase: 'dispatched' }).strategy, 'reconcile');
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
   assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
+  for (const code of ['BROWSER_POSTCONDITION_FAILED', 'DOCKER_POSTCONDITION_FAILED', 'PROCESS_TERMINATE_POSTCONDITION_FAILED']) {
+    assert.deepEqual(classifyTaskFailure({ code, message: 'verification failed', retryable: true, sideEffectState: 'uncertain' }), {
+      class: 'postcondition', strategy: 'fail', retryable: false, code
+    });
+  }
+  assert.equal(classifyTaskFailure({ code: 'PROJECT_ARTIFACT_MISMATCH', message: 'drift', sideEffectState: 'none' }).strategy, 'repair');
+  assert.equal(classifyTaskFailure({ code: 'PROJECT_ARTIFACT_MISMATCH', message: 'unknown', sideEffectState: 'uncertain' }).strategy, 'fail');
 });
 
 test('stage3 graph node identity is stable across reconstruction and dependencies remain explicit', () => {
@@ -107,6 +116,68 @@ test('stage3 independent verifier rejects in-flight graph state and emits a stab
   assert.match(verdict.bundle.digest, /^[0-9a-f]{64}$/);
   assert.equal(verdict.evidence.status, 'fail');
   assert.ok(verdict.bundle.checks.some((check) => check.name === 'no-inflight-actions' && !check.ok));
+});
+
+test('independent typed outcome verification rejects planner completion when machine state is false', () => {
+  const task = createTask({
+    userObjective: 'prove exact content independently',
+    interpretedObjective: 'controlled-file-change:prove exact content independently',
+    authorizedScope: ['/tmp/project'],
+    prohibitedScope: [],
+    successConditions: ['exact requested content is present']
+  });
+  const node = addTaskNode(task, 'Verify file', { key: 'verify-file', stepKey: 'verify-file', actionId: 'task-' + 'd'.repeat(64) });
+  node.state = 'VERIFIED';
+  const expected = 'expected content\n';
+  task.execution = {
+    schemaVersion: 1,
+    plannerId: 'operator.semantic.v1',
+    goalKind: 'controlled-file-change',
+    plannerState: {
+      phase: 'complete',
+      goal: { kind: 'controlled-file-change', root: '/tmp/project', path: '/tmp/project/a.txt', content: expected }
+    },
+    maxSteps: 5,
+    maxAttemptsPerStep: 2,
+    timeoutMs: 1000,
+    stepCount: 1,
+    dispatchedActions: 1,
+    plannerIterations: 2,
+    preDispatchReobserves: 0,
+    records: [{
+      stepKey: 'verify-file',
+      actionId: 'task-' + 'd'.repeat(64),
+      capability: 'file.read',
+      risk: 'read',
+      inputHash: 'e'.repeat(64),
+      attempt: 1,
+      state: 'SUCCEEDED',
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      sideEffectState: 'none',
+      executionPhase: 'effect_observed',
+      observation: {
+        schemaVersion: 2,
+        channel: 'semantic',
+        domain: 'filesystem',
+        provider: 'test',
+        capability: 'file.read',
+        entityId: 'filesystem:test',
+        observedAt: new Date().toISOString(),
+        stateVersion: 'f'.repeat(64),
+        importantState: { ok: true, sha256: crypto.createHash('sha256').update('wrong content\n').digest('hex') },
+        ambiguous: false,
+        confidence: 1,
+        evidenceRefs: []
+      },
+      evidence: [{ kind: 'read', status: 'pass', message: 'read file', timestamp: new Date().toISOString() }]
+    }]
+  };
+
+  const verdict = verifyTaskCompletion(task);
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.bundle.checks.some((check) => check.name === 'typed-goal-outcome-truth' && !check.ok));
+  assert.ok(verdict.bundle.checks.some((check) => check.name === 'declared-condition-1' && !check.ok));
 });
 
 test('stage3 repairs wrong existing file content with SHA precondition, explicit approval, and fresh verification', async (t) => {
@@ -237,7 +308,11 @@ test('stage3 crash recovery refreshes active deadline without resetting step or 
   task.execution!.plannerState.phase = 'create';
   task.execution!.startedAt = new Date(Date.now() - 60_000).toISOString();
   task.execution!.deadlineAt = new Date(Date.now() - 30_000).toISOString();
-  task.execution!.stepCount = 1;
+  // Environment-action accounting is charged only once dispatch is known. The
+  // interrupted STARTED record below is reconciled conservatively as dispatched.
+  task.execution!.stepCount = 0;
+  task.execution!.dispatchedActions = 0;
+  task.execution!.plannerIterations = 1;
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ content, path: target })).digest('hex');
   task.execution!.records.push({
     stepKey: 'create-file',
@@ -302,11 +377,14 @@ test('stage3 never blindly replays a retryable mutating action with uncertain si
   task.execution!.plannerState.phase = 'create';
   await new TaskStore(state).put(task);
 
-  const failed = await orchestrator.run(task.id);
-  assert.equal(failed.state, 'FAILED');
+  const blocked = await orchestrator.run(task.id);
+  assert.equal(blocked.state, 'BLOCKED');
   assert.equal(provider.calls, 1);
-  assert.equal(failed.failures.at(-1)?.code, 'TEMPORARY_WRITE_FAILURE');
-  assert.ok(failed.evidence.some((item) => item.kind === 'strategy_fail_closed'));
+  assert.equal(blocked.execution?.stepCount, 1);
+  assert.equal(blocked.execution?.dispatchedActions, 1);
+  assert.equal(blocked.execution?.records.at(-1)?.state, 'BLOCKED');
+  assert.equal(blocked.execution?.records.at(-1)?.executionPhase, 'dispatched');
+  assert.ok(blocked.evidence.some((item) => item.kind === 'strategy_reconcile'));
 });
 
 test('stage3 quality gate fails closed when a required trusted check is unavailable', async (t) => {
@@ -408,7 +486,7 @@ test('stage3 mutating quality check runs transactionally and rolls back false-gr
   assert.ok(transaction);
   const failed = await orchestrator.resume(task.id, [transaction!.actionId]);
   assert.equal(failed.state, 'FAILED');
-  assert.equal(failed.failures.at(-1)?.code, 'TRANSACTION_FAILED_ROLLED_BACK');
+  assert.equal(failed.failures.at(-1)?.code, 'TRANSACTION_FAILED_GIT_STATE_RESTORED');
   assert.equal(await fs.readFile(path.join(root, 'app.txt'), 'utf8'), 'base\n');
   const status = await new Promise<string>((resolve, reject) =>
     execFile('git', ['status', '--porcelain=v1'], { cwd: root, encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout))

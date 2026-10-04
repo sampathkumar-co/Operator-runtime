@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
@@ -115,7 +115,12 @@ export class DockerProvider implements CapabilityProvider {
       if (before.fingerprint !== expectedCurrentFingerprint) {
         throw new OperatorError('DOCKER_STATE_CHANGED', 'Docker project state changed after the supplied precondition was captured.', {
           retryable: true,
-          details: { expectedCurrentFingerprint, actualCurrentFingerprint: before.fingerprint }
+          details: {
+            expectedCurrentFingerprint,
+            actualCurrentFingerprint: before.fingerprint,
+            sideEffectState: 'none',
+            executionPhase: 'pre_dispatch'
+          }
         });
       }
 
@@ -159,9 +164,75 @@ export class DockerProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('docker', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code,
+          message: op.message,
+          retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState))
+            ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' }
+            : {}),
+          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase))
+            ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' }
+            : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
+    }
+  }
+
+  async reconcile(
+    { action }: { action: ActionRequest; priorResult?: ActionResult },
+    context: CapabilityExecutionContext = {}
+  ): Promise<ProviderReconciliationResult> {
+    if (action.capability !== 'docker.manage') {
+      return reconciliation('uncertain', 'Docker reconciliation applies only to lifecycle mutations.');
+    }
+    const operation = String(action.input.operation ?? '');
+    if (!['start', 'stop', 'restart'].includes(operation)) {
+      return reconciliation('uncertain', 'Docker lifecycle operation is invalid for reconciliation.');
+    }
+    if (operation === 'restart') {
+      return reconciliation('uncertain', 'A final running state cannot prove that a restart actually occurred.');
+    }
+    const services = validateServices(action.input.services);
+    try {
+      const state = await this.#inspectProject(String(action.input.path ?? ''), context.signal);
+      const selected = state.containers.filter((container) => services.includes(container.service));
+      const missing = services.filter((service) => !selected.some((container) => container.service === service));
+      if (missing.length > 0) {
+        return reconciliation('uncertain', 'One or more requested Compose services is missing during reconciliation.');
+      }
+      const expected = operation === 'stop' ? 'exited' : 'running';
+      const summaries = summarizeServices(selected);
+      const states = summaries.flatMap((item) => item.states);
+      if (states.length > 0 && states.every((value) => value === expected)) {
+        const result: ActionResult = {
+          ok: true,
+          capability: action.capability,
+          provider: this.name,
+          output: {
+            operation,
+            root: state.root,
+            services,
+            afterFingerprint: state.fingerprint,
+            states: summaries,
+            reconciled: true
+          },
+          evidence: [
+            evidence('docker_reconciliation', 'pass', `Fresh Docker inspection proves every requested service is ${expected}.`, { services }),
+            evidence('postcondition', 'pass', 'Docker reconciliation used current project-scoped container state.', { fingerprint: state.fingerprint })
+          ],
+          durationMs: 0
+        };
+        return { status: 'completed', result, evidence: result.evidence };
+      }
+      const opposite = operation === 'stop' ? 'running' : 'exited';
+      if (states.length > 0 && states.every((value) => value === opposite)) {
+        return reconciliation('not_applied', `Fresh Docker inspection shows every requested service is still ${opposite}.`);
+      }
+      return reconciliation('uncertain', 'Requested Docker services are in mixed states and cannot be reconciled safely.');
+    } catch (error) {
+      return reconciliation('uncertain', error instanceof Error ? error.message : 'Docker reconciliation failed.');
     }
   }
 
@@ -359,6 +430,13 @@ function dockerEnvironment(): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return env;
+}
+
+function reconciliation(status: ProviderReconciliationResult['status'], message: string): ProviderReconciliationResult {
+  return {
+    status,
+    evidence: [evidence('docker_reconciliation', status === 'completed' ? 'pass' : 'info', message)]
+  };
 }
 
 async function runDocker(executable: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<DockerOutput> {

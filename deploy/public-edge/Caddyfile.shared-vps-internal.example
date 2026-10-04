@@ -80,7 +80,7 @@
 		}
 	}
 
-	@device_api path /v1/device-result /v1/device-session/rotate /v1/device-enrollment/challenge /v1/device-enrollment/complete /v1/device-enrollment/poll /v1/device-self/reset
+	@device_api path /v1/device-result /v1/device-session/rotate /v1/device-session/recover/challenge /v1/device-session/recover /v1/device-enrollment/challenge /v1/device-enrollment/complete /v1/device-enrollment/poll /v1/device-self/reset
 	handle @device_api {
 		request_body {
 			max_size 256KB

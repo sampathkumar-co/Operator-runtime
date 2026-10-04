@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { ProcessProvider } from '../src/capabilities/process.ts';
+import { ProcessProvider, processInstanceFingerprint } from '../src/capabilities/process.ts';
 import type { ActionRisk } from '../src/core/types.ts';
 
 function request(executable: string, args: string[], cwd: string, risk: ActionRisk = 'write') {
@@ -13,6 +13,12 @@ function request(executable: string, args: string[], cwd: string, risk: ActionRi
     input: { executable, args, cwd, timeoutMs: 5000 }, provenance: { kind: 'chatgpt' as const }
   };
 }
+
+test('process instance fingerprint rejects same-PID reuse with a different creation time', () => {
+  const first = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:00:00.000Z');
+  const reused = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:01:00.000Z');
+  assert.notEqual(first, reused);
+});
 
 test('process provider uses allowlisted argv execution', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-'));
@@ -113,6 +119,25 @@ test('process arguments reject NUL and excessive entries before spawn', async (t
   assert.equal(tooMany.error?.code, 'PROCESS_INPUT_INVALID');
 });
 
+test('Windows terminal timeout quiesces a detached descendant before returning', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows process-tree containment regression');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-tree-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'survived.txt');
+  const descendant = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'survived'),1500)`;
+  const parent = `const{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:'ignore'});c.unref();setInterval(()=>{},1000)`;
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const result = await provider.execute({
+    id: crypto.randomUUID(), capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'node', args: ['-e', parent], cwd: root, timeoutMs: 200 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'PROCESS_TIMEOUT');
+  assert.equal(result.error?.sideEffectState, 'uncertain');
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  await assert.rejects(fs.access(marker));
+});
+
 test('Windows executable lookup ignores an authorized cwd shadow binary', async (t) => {
   if (process.platform !== 'win32') return t.skip('Windows cwd-first executable lookup regression');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-proc-shadow-'));
@@ -150,15 +175,22 @@ test('interactive terminal session supports start, stdin, cursor output, list an
   });
   assert.equal(write.ok, true, write.error?.message);
 
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  const read = await provider.execute({
-    id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
-    input: { operation: 'read', sessionId, afterCursor: 0, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
-  });
-  assert.equal(read.ok, true, read.error?.message);
-  const events = (read.output as any).events as Array<{ stream: string; text: string; cursor: number }>;
+  let read: Awaited<ReturnType<ProcessProvider['execute']>> | undefined;
+  let events: Array<{ stream: string; text: string; cursor: number }> = [];
+  let cursor = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    read = await provider.execute({
+      id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
+      input: { operation: 'read', sessionId, afterCursor: cursor, maxEvents: 50 }, provenance: { kind: 'chatgpt' as const }
+    });
+    assert.equal(read.ok, true, read.error?.message);
+    const batch = (read.output as any).events as Array<{ stream: string; text: string; cursor: number }>;
+    events.push(...batch);
+    cursor = (read.output as any).cursor as number;
+    if (events.some((event) => event.stream === 'stdout' && event.text.includes('echo:hello'))) break;
+  }
   assert.ok(events.some((event) => event.stream === 'stdout' && event.text.includes('echo:hello')));
-  const cursor = (read.output as any).cursor as number;
 
   const emptyRead = await provider.execute({
     id: crypto.randomUUID(), capability: 'terminal.session', risk: 'read',
@@ -214,6 +246,35 @@ test('Windows process inspection returns bounded metadata without command lines'
 });
 
 
+test('Windows process inspection collection queries avoid verbose global tasklist', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows-only process inspection');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-collection-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+
+  const listed = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+    input: { limit: 5 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(listed.ok, true, listed.error?.message);
+  assert.ok(((listed.output as any).processes as any[]).length > 0);
+
+  const named = await provider.execute({
+    id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+    input: { name: 'node', limit: 5 }, provenance: { kind: 'chatgpt' as const }
+  });
+  assert.equal(named.ok, true, named.error?.message);
+  const processes = (named.output as any).processes as any[];
+  assert.ok(processes.some((entry) => String(entry.imageName).toLowerCase().includes('node')));
+  for (const entry of processes) {
+    assert.equal('commandLine' in entry, false);
+    assert.equal('environment' in entry, false);
+    assert.equal('userName' in entry, false);
+    assert.equal('windowTitle' in entry, false);
+  }
+});
+
+
 test('Windows process.manage requires fresh identity fingerprint and terminates only current-user target', async (ctx) => {
   if (process.platform !== 'win32') return ctx.skip('Windows-only process management');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-manage-'));
@@ -249,4 +310,45 @@ test('Windows process.manage requires fresh identity fingerprint and terminates 
     provenance: { kind: 'chatgpt' as const }
   });
   assert.equal(terminated.ok, true, terminated.error?.message);
+});
+
+
+test('Windows process termination reconciliation distinguishes still-present from completed exact identity', async (ctx) => {
+  if (process.platform !== 'win32') return ctx.skip('Windows-only process reconciliation');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-process-reconcile-'));
+  ctx.after(() => fs.rm(root, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, windowsHide: true, stdio: 'ignore' });
+  assert.ok(child.pid);
+  ctx.after(() => { try { child.kill(); } catch {} });
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+
+  let inspected: any;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = await provider.execute({
+      id: crypto.randomUUID(), capability: 'process.inspect', risk: 'read',
+      input: { pid: child.pid, limit: 10 }, provenance: { kind: 'runtime' as const }
+    });
+    if (result.ok && (result.output as any).processes.length) { inspected = (result.output as any).processes[0]; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(inspected);
+
+  const action = {
+    id: 'process-reconcile-terminate',
+    capability: 'process.manage',
+    risk: 'destructive' as const,
+    input: { operation: 'terminate', pid: child.pid, expectedFingerprint: inspected.fingerprint },
+    provenance: { kind: 'runtime' as const }
+  };
+
+  const before = await provider.reconcile({ action });
+  assert.equal(before.status, 'not_applied');
+
+  const terminated = await provider.execute(action);
+  assert.equal(terminated.ok, true, terminated.error?.message);
+
+  const after = await provider.reconcile({ action });
+  assert.equal(after.status, 'completed');
+  assert.equal(after.result?.ok, true);
+  assert.equal((after.result?.output as any).fingerprint, inspected.fingerprint);
 });

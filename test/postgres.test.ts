@@ -11,7 +11,7 @@ async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   return dir;
 }
 
-async function makeFakePsql(t: test.TestContext): Promise<{ executable: string; prefix: string[]; logPath: string }> {
+async function makeFakePsql(t: test.TestContext, largeRows = 0): Promise<{ executable: string; prefix: string[]; logPath: string }> {
   const dir = await tempDir(t, 'operator-fake-psql-');
   const scriptPath = path.join(dir, 'fake-psql.cjs');
   const logPath = path.join(dir, 'calls.ndjson');
@@ -50,7 +50,10 @@ if (sql.includes('information_schema.columns')) {
   process.stdout.write('column_name,data_type,is_nullable,ordinal_position\\nid,integer,NO,1\\nnote,text,YES,2\\n');
   process.exit(0);
 }
-process.stdout.write('id,note,empty_text,nullable\\n1,"hello,world","",\\n2,"line1\\nline2",value,something\\n');
+if (${largeRows} > 0) {
+  process.stdout.write('id,note\\n');
+  for (let index = 0; index < ${largeRows}; index += 1) process.stdout.write(String(index) + ',' + 'x'.repeat(200) + '\\n');
+} else process.stdout.write('id,note,empty_text,nullable\\n1,"hello,world","",\\n2,"line1\\nline2",value,something\\n');
 process.exit(0);
 `);
   return { executable: process.execPath, prefix: [scriptPath], logPath };
@@ -141,6 +144,25 @@ test('Structured SELECT keeps malicious values out of SQL text and parses bounde
   assert.equal(calls[0].env.PGUSER, null);
   assert.equal(calls[0].env.PGDATABASE, null);
   assert.equal(calls[0].env.PGPASSFILE, os.devNull);
+});
+
+test('PostgreSQL rows are byte-bounded with a continuation offset before relay serialization', async (t) => {
+  const projectRoot = await tempDir(t, 'operator-pg-paged-project-');
+  const authorityRoot = await tempDir(t, 'operator-pg-paged-authority-');
+  const registryPath = path.join(authorityRoot, 'postgres-profiles.json');
+  await writeRegistry(registryPath, [localProfile(projectRoot)]);
+  const fake = await makeFakePsql(t, 100);
+  const provider = new PostgresProvider({ allowedRoots: [projectRoot], registryPath, psqlExecutable: fake.executable, psqlArgsPrefix: fake.prefix });
+  const result = await provider.execute({
+    id: 'pg-paged', capability: 'postgres.select', risk: 'read', provenance: { kind: 'runtime' },
+    input: { path: projectRoot, profileId: 'local-dev', table: 'items', columns: ['id', 'note'], limit: 100, offset: 0, maxBytes: 1024 }
+  });
+  assert.equal(result.ok, true, result.error?.message);
+  const output = result.output as any;
+  assert.equal(output.truncated, true);
+  assert.equal(output.nextOffset, output.rowCount);
+  assert.ok(output.nextOffset > 0 && output.nextOffset < 100);
+  assert.ok(Buffer.byteLength(JSON.stringify(result), 'utf8') < 256 * 1024);
 });
 
 test('PostgreSQL fixed metadata inspection uses the same read-only session boundary', async (t) => {

@@ -4,7 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { EvaluationStore } from '../src/core/evaluation.ts';
+import { EvaluationStore, evaluationRunFromTask } from '../src/core/evaluation.ts';
+import { createTask } from '../src/core/task.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-eval-'));
@@ -113,4 +114,55 @@ test('stage18 run IDs are retry-idempotent but conflict-safe', async (t) => {
     () => store.recordRun({ ...run, verifiedSuccess: false }),
     (error: any) => error?.code === 'EVALUATION_RUN_CONFLICT'
   );
+});
+
+test('runtime-native evaluation derives action, planner, retry, reconciliation, verification and failure telemetry from durable Task truth', () => {
+  const task = createTask({
+    userObjective: 'evaluate', interpretedObjective: 'evaluate', authorizedScope: ['browser:https://example.test'],
+    prohibitedScope: [], successConditions: ['verified']
+  });
+  task.state = 'FAILED';
+  task.execution = {
+    schemaVersion: 1, plannerId: 'operator.autonomous-workflow.v1', goalKind: 'autonomous-workflow', plannerState: {},
+    maxSteps: 10, maxAttemptsPerStep: 2, timeoutMs: 60_000, stepCount: 2,
+    plannerIterations: 4, preDispatchReobserves: 1, dispatchedActions: 2,
+    startedAt: '2026-10-04T00:00:00.000Z', records: [{
+      stepKey: 'one', actionId: 'action-one', capability: 'browser.interact', risk: 'external',
+      inputHash: digest('input'), attempt: 2, state: 'FAILED', startedAt: '2026-10-04T00:00:01.000Z',
+      finishedAt: '2026-10-04T00:00:02.000Z', errorCode: 'BROWSER_NO_PROGRESS',
+      sideEffectState: 'uncertain', executionPhase: 'reconciled', evidence: []
+    }], plannerEvents: [{
+      kind: 'RECONCILIATION_REQUIRED', decision: 'RECONCILE', code: 'ACTION_RECONCILIATION_REQUIRED',
+      at: '2026-10-04T00:00:02.000Z', provider: 'browser.cdp', capability: 'browser.interact'
+    }]
+  };
+  task.failures.push({ at: '2026-10-04T00:00:03.000Z', code: 'TASK_PLANNER_FAILED', message: 'planner failed' });
+  task.evidence.push({ kind: 'independent_task_verification', status: 'pass', message: 'checked', timestamp: '2026-10-04T00:00:02.500Z' });
+  task.updatedAt = '2026-10-04T00:00:03.000Z';
+  const run = evaluationRunFromTask({
+    id: crypto.randomUUID(), scenarioId: 'browser.general', scenarioVersion: 1,
+    runtimeVersion: '4.0.0', sourceCommit: 'd'.repeat(40), candidateDirty: false,
+    runnerHash: digest('runner'), task, seed: 7, model: 'model-x', provider: 'provider-y',
+    modelConfigDigest: digest('config'), environmentDigest: digest('runtime-image-and-host'),
+    inputTokens: 100, cachedInputTokens: 40, outputTokens: 20,
+    plannerCalls: 3, modelLatencyMs: 500, runtimeLatencyMs: 1200
+  });
+  assert.equal(run.actionCount, 2);
+  assert.equal(run.plannerIterations, 4);
+  assert.equal(run.reobserves, 1);
+  assert.equal(run.providerRetries, 1);
+  assert.equal(run.reconciliationCount, 1);
+  assert.equal(run.verificationCount, 1);
+  assert.equal(run.uncertainMutationCount, 1);
+  assert.equal(run.plannerFailures, 1);
+  assert.equal(run.runtimeFailures, 1);
+  assert.equal(run.taskFailures, 1);
+  assert.equal(run.observationCount, 0);
+  assert.equal(run.visualCaptureCount, 0);
+  assert.equal(run.retryCount, 1);
+  assert.equal(run.duplicateActions, 0);
+  assert.equal(run.successfulSubgoals, 0);
+  assert.equal(run.tokenCount, 120);
+  assert.equal(run.cachedInputTokens, 40);
+  assert.equal(run.environmentDigest, digest('runtime-image-and-host'));
 });

@@ -122,3 +122,59 @@ test('stage19 requires independent verification digest and explicit parameter pa
     parameters: [{ name: 'missing', stepId: recorded.steps[0]!.id, jsonPointer: '/does-not-exist', required: true }]
   }), (error: any) => error?.code === 'TEACH_PARAMETER_INVALID');
 });
+
+
+test('stage19 workflow hot window archives immutable workflows without losing inspect or instantiate', async (t) => {
+  let nowMs = Date.parse('2026-10-01T00:00:00.000Z');
+  const clock = () => new Date(nowMs);
+  const state = await temp(t);
+  const store = new TeachModeStore(state, { clock, maxWorkflows: 2 });
+  const compiled: Array<{ sessionId: string; workflow: any; receipt: any }> = [];
+
+  for (let index = 0; index < 7; index += 1) {
+    const session = await store.start({
+      title: `Workflow ${index}`,
+      objective: `Compile workflow ${index}`,
+      scopeKey: 'project:archive'
+    });
+    const recorded = await store.record(session.id, {
+      action: {
+        id: `read-${index}`,
+        capability: 'file.read',
+        risk: 'read',
+        input: { path: `/workspace/${index}.txt` },
+        provenance: { kind: 'user' }
+      },
+      result: okResult('file.read')
+    });
+    await store.stop(session.id);
+    const receipt = await store.verify(session.id, [{
+      name: 'outcome',
+      ok: true,
+      detail: 'Captured action was independently verified.',
+      evidenceDigests: [recorded.steps[0]!.evidenceDigest]
+    }]);
+    const workflow = await store.compile(session.id, { verificationReceipt: receipt });
+    compiled.push({ sessionId: session.id, workflow, receipt });
+    nowMs += 1_000;
+  }
+
+  const hot = JSON.parse(await fs.readFile(path.join(state, 'studio-teach.json'), 'utf8'));
+  assert.equal(hot.workflows.length, 2);
+  const archivedNames = (await fs.readdir(path.join(state, 'studio-workflows'))).filter((name) => name.endsWith('.json'));
+  assert.equal(archivedNames.length, 5);
+
+  for (const item of compiled) {
+    const inspected = await store.inspectWorkflow(item.workflow.id);
+    assert.equal(inspected.digest, item.workflow.digest);
+    const instantiated = await store.instantiate(item.workflow.id, {});
+    assert.equal(instantiated.length, 1);
+  }
+  const first = compiled[0]!;
+  const retried = await store.compile(first.sessionId, { verificationReceipt: first.receipt });
+  assert.equal(retried.id, first.workflow.id);
+  assert.equal(retried.digest, first.workflow.digest);
+
+  const reloaded = new TeachModeStore(state, { clock, maxWorkflows: 2 });
+  assert.equal((await reloaded.inspectWorkflow(first.workflow.id)).id, first.workflow.id);
+});

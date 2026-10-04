@@ -14,6 +14,7 @@ internal static class Program
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BY_HANDLE_FILE_INFORMATION
@@ -40,6 +41,21 @@ internal static class Program
     private static extern bool GetFileInformationByHandle(
         SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(
+        IntPtr process, out System.Runtime.InteropServices.ComTypes.FILETIME creationTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME exitTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME kernelTime,
+        out System.Runtime.InteropServices.ComTypes.FILETIME userTime);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
     private sealed class Lease : IDisposable
     {
         private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
@@ -57,8 +73,9 @@ internal static class Program
         {
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
             if (args.Length == 1 && args[0] == "system-roots") return PrintSystemRoots();
+            if (args.Length == 2 && args[0] == "process-instance") return PrintProcessInstance(args[1]);
             if (args.Length != 4 || args[0] != "lease")
-                throw new InvalidOperationException("usage: operator-windows-path-lease lease <existing|parent> <root> <target>");
+                throw new InvalidOperationException("usage: operator-windows-path-lease <lease <existing|parent> <root> <target>|system-roots|process-instance <pid>>");
             string mode = args[1];
             if (mode != "existing" && mode != "parent") throw new InvalidOperationException("invalid lease mode");
 
@@ -161,6 +178,33 @@ internal static class Program
         return 0;
     }
 
+    private static int PrintProcessInstance(string pidInput)
+    {
+        int pid;
+        if (!Int32.TryParse(pidInput, out pid) || pid < 1)
+            throw new InvalidOperationException("invalid process id");
+        Console.Out.WriteLine(ProcessCreationFiletime((uint)pid).ToString());
+        return 0;
+    }
+
+    private static ulong ProcessCreationFiletime(uint pid)
+    {
+        IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException("cannot open process (Win32 " + Marshal.GetLastWin32Error() + ")");
+        try
+        {
+            System.Runtime.InteropServices.ComTypes.FILETIME creation;
+            System.Runtime.InteropServices.ComTypes.FILETIME exit;
+            System.Runtime.InteropServices.ComTypes.FILETIME kernel;
+            System.Runtime.InteropServices.ComTypes.FILETIME user;
+            if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
+                throw new InvalidOperationException("cannot inspect process (Win32 " + Marshal.GetLastWin32Error() + ")");
+            return ((ulong)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+        }
+        finally { CloseHandle(handle); }
+    }
+
     private static string TrustedFolder(Environment.SpecialFolder folder, string label)
     {
         string value = Environment.GetFolderPath(folder);
@@ -187,6 +231,8 @@ internal static class Program
             TrustedFolder(Environment.SpecialFolder.ProgramFilesX86, "ProgramFilesX86");
             TrustedFolder(Environment.SpecialFolder.UserProfile, "UserProfile");
             TrustedFolder(Environment.SpecialFolder.LocalApplicationData, "LocalApplicationData");
+            if (ProcessCreationFiletime((uint)System.Diagnostics.Process.GetCurrentProcess().Id) == 0)
+                throw new InvalidOperationException("current process creation identity is unavailable");
             Console.Out.WriteLine("operator-path-lease-self-test:ok");
             return 0;
         }

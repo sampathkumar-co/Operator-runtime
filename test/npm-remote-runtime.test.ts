@@ -70,6 +70,7 @@ test('remote CLI is explicit and bounded', () => {
     script: 'C:\\bench\\controller.py'
   });
   assert.deepEqual(parseApprovalConsoleCommand('approvals'), { kind: 'list' });
+  assert.deepEqual(parseApprovalConsoleCommand('status'), { kind: 'runtime-status' });
   assert.deepEqual(parseApprovalConsoleCommand('approve'), { kind: 'decision', decision: 'approve', selector: undefined });
   assert.deepEqual(parseApprovalConsoleCommand('deny abc123'), { kind: 'decision', decision: 'deny', selector: 'abc123' });
   assert.deepEqual(parseApprovalConsoleCommand('session'), { kind: 'decision', decision: 'session', selector: undefined });
@@ -232,6 +233,15 @@ test('relay-only entrypoint derives executable roots independently of npm enviro
   assert.doesNotMatch(source, /process\.env\.OPERATOR_RELAY_URL\s*\?\?/);
 });
 
+test('packaged desktop startup reports bounded diagnostics instead of an opaque timeout', async () => {
+  const source = await fs.readFile(path.resolve('apps/local-agent/src/cli.ts'), 'utf8');
+  assert.match(source, /stdio: \['ignore', 'ignore', 'pipe'\]/);
+  assert.match(source, /slice\(-16 \* 1024\)/);
+  assert.match(source, /child\.stderr\?\.destroy\(\)/);
+  assert.match(source, /Startup diagnostic:/);
+  assert.doesNotMatch(source, /startupStderr[\s\S]{0,500}(?:agentToken|recoveryToken)/);
+});
+
 test('relay-only main reports loopback readiness only to the trusted Mecord launcher IPC channel', async () => {
   const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
   assert.match(source, /process\.env\.OPERATOR_REMOTE_PACKAGE === 'mecord-connect'/);
@@ -242,12 +252,42 @@ test('relay-only main reports loopback readiness only to the trusted Mecord laun
   assert.match(source, /host: bound\.host, port: bound\.port/);
 });
 
+test('remote launcher owns child lifetime and orphaned runtime exits when IPC authority disappears', async () => {
+  const cli = await fs.readFile(path.resolve('packages/mecord-connect/src/cli.mjs'), 'utf8');
+  const main = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  assert.match(cli, /process\.once\('SIGINT', onSigint\)/);
+  assert.match(cli, /process\.once\('SIGTERM', onSigterm\)/);
+  assert.match(cli, /child\.send\(\{ type: 'mecord-shutdown', signal \}\)/);
+  assert.match(cli, /setTimeout\(\(\) => \{[\s\S]*child\.kill\('SIGTERM'\)[\s\S]*\}, 8_000\)/);
+  assert.match(main, /process\.once\('disconnect'/);
+  assert.match(main, /raw\.type !== 'mecord-shutdown'/);
+  assert.match(main, /await stateInstanceLock\.release\(\)/);
+  assert.match(main, /launcherShutdownHandler = \(\) =>/);
+});
+
+test('local runtime status exposes recovery state without leaking relay credentials', async () => {
+  const main = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  const server = await fs.readFile(path.resolve('apps/local-agent/src/server.ts'), 'utf8');
+  assert.match(main, /relayConnectionStatus = \{ \.\.\.status, updatedAt:/);
+  assert.match(main, /continuity: relayUrl \? 'automatic' : 'disabled'/);
+  assert.match(server, /getRuntimeStatus\?:/);
+  assert.match(server, /runtime: runtimeStatus/);
+  assert.doesNotMatch(server, /runtimeStatus[\s\S]{0,200}sessionToken/);
+  const backgroundStart = main.indexOf('onBackgroundRefreshFailure:');
+  const backgroundEnd = main.indexOf('\n    }', backgroundStart);
+  assert.ok(backgroundStart >= 0 && backgroundEnd > backgroundStart);
+  const backgroundHandler = main.slice(backgroundStart, backgroundEnd);
+  assert.doesNotMatch(backgroundHandler, /relayRunner\?\.reconnect\(\)/, 'refresh failure must not tear down a healthy transport');
+  assert.match(backgroundHandler, /credentialRefreshPending: true/);
+});
+
 test('relay-only main treats terminal relay loss and emergency stop as fatal', async () => {
   const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
   assert.match(source, /process\.env\.OPERATOR_RELAY_REQUIRED === '1'/);
   assert.match(source, /RELAY_REQUIRED_STOPPED/);
   assert.match(source, /RELAY_REQUIRED_EMERGENCY_STOP/);
   assert.match(source, /await failRequiredRelay\(error\)/);
+  assert.match(source, /shutdownRuntime\(1, 'required-relay-failure', \{ awaitRelay: false \}\)/);
   assert.match(source, /getSupportedCapabilities:\s*\(\) => runtime\.supportedCapabilities\(DEVELOPER_RELAY_CAPABILITIES\)/);
   assert.doesNotMatch(source, /const relaySupportedCapabilities = await runtime\.supportedCapabilities/);
 });

@@ -71,17 +71,20 @@ export class DesiredStateController {
   #world: WorldModelStore;
   #operations: DigitalOperationsLayer;
   #clock: () => Date;
+  #beforePersist?: () => void | Promise<void>;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, dependencies: {
     world: WorldModelStore;
     operations: DigitalOperationsLayer;
     clock?: () => Date;
+    beforePersist?: () => void | Promise<void>;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'desired-state.json');
     this.#world = dependencies.world;
     this.#operations = dependencies.operations;
     this.#clock = dependencies.clock ?? (() => new Date());
+    this.#beforePersist = dependencies.beforePersist;
   }
 
   async create(input: {
@@ -185,7 +188,7 @@ export class DesiredStateController {
       }
 
       const operation = await this.#operations.submit({
-        requestId: crypto.randomUUID(),
+        requestId: remediationRequestId(contract),
         objective: contract.remediation.objective,
         scopeKey: contract.scopeKey,
         successConditions: contract.remediation.successConditions,
@@ -244,7 +247,19 @@ export class DesiredStateController {
     const state = await this.#read();
     return state.contracts
       .slice()
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit)
+      .map((item) => structuredClone(item));
+  }
+
+  async listForReconciliation(limitInput = 100): Promise<DesiredStateContract[]> {
+    await this.#serial;
+    const limit = integer(limitInput, 1, 500, 'limit');
+    const state = await this.#read();
+    return state.contracts
+      .filter((contract) => contract.status !== 'PAUSED')
+      .slice()
+      .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id))
       .slice(0, limit)
       .map((item) => structuredClone(item));
   }
@@ -273,6 +288,7 @@ export class DesiredStateController {
       const state = await this.#read();
       output = await fn(state, this.#clock());
       validateState(state);
+      await this.#beforePersist?.();
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
     });
     this.#serial = run.then(() => undefined, () => undefined);
@@ -336,6 +352,19 @@ function contractDigest(input: ReturnType<typeof normalizeCreate>): string {
     remediation: input.remediation,
     policy: input.policy
   })).digest('hex');
+}
+
+function remediationRequestId(contract: DesiredStateContract): string {
+  const digest = crypto.createHash('sha256').update(canonicalJson({
+    contractId: contract.id,
+    contractDigest: contract.contractDigest,
+    remediationEpoch: contract.remediationHistory.length
+  })).digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function normalizeConditions(input: WorldCondition[]): WorldCondition[] {

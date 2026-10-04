@@ -5,11 +5,15 @@ import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import type { TeachModeStore, TeachWorkflowStep } from './studio-teach.ts';
 import type { OperatorRuntime } from './runtime.ts';
-import type { ActionRequest, ActionResult, PermissionProfile, SideEffectState } from './types.ts';
+import type { ActionRequest, ActionResult, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
 import { conservativeSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import { resourceKeysForAction } from './resource-identity.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
+import type { AgentKernel } from './agent-kernel.ts';
+import { kernelVerificationDigest } from './action-verification.ts';
+import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
+import { executeCanonicalVerification } from './canonical-verification.ts';
 
 export type StudioRunState =
   | 'PENDING'
@@ -37,6 +41,7 @@ export interface StudioRunStep {
   provider?: string;
   sideEffectState?: SideEffectState;
   evidenceDigest?: string;
+  verificationDigest?: string;
   errorCode?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -49,6 +54,7 @@ export interface StudioWorkflowRun {
   workflowDigest: string;
   scopeKey: string;
   parameterDigest: string;
+  intent?: IntentBinding;
   state: StudioRunState;
   steps: StudioRunStep[];
   verificationReceipt?: VerificationReceipt;
@@ -77,6 +83,8 @@ export class StudioWorkflowExecutor {
   #runtime: OperatorRuntime;
   #leases: ResourceLeaseStore;
   #permissions: PermissionProfile;
+  #agentKernel?: AgentKernel;
+  #intentRegistry?: IntentRegistry;
   #clock: () => Date;
   #serial: Promise<void> = Promise.resolve();
 
@@ -85,6 +93,8 @@ export class StudioWorkflowExecutor {
     runtime: OperatorRuntime;
     leases: ResourceLeaseStore;
     permissions: PermissionProfile;
+    agentKernel?: AgentKernel;
+    intentRegistry?: IntentRegistry;
     clock?: () => Date;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'studio-runs.json');
@@ -92,10 +102,22 @@ export class StudioWorkflowExecutor {
     this.#runtime = dependencies.runtime;
     this.#leases = dependencies.leases;
     this.#permissions = structuredClone(dependencies.permissions);
+    this.#agentKernel = dependencies.agentKernel;
+    this.#intentRegistry = dependencies.intentRegistry;
     this.#clock = dependencies.clock ?? (() => new Date());
   }
 
-  async submit(workflowIdInput: string, values: Record<string, unknown>, runIdInput?: string): Promise<StudioWorkflowRun> {
+  async submit(
+    workflowIdInput: string,
+    values: Record<string, unknown>,
+    runIdInput?: string,
+    intentInput?: IntentBinding
+  ): Promise<StudioWorkflowRun> {
+    const intent = intentInput ? validIntentBinding(intentInput) : undefined;
+    if (intent) {
+      if (!this.#intentRegistry) throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Studio runs require an intent registry.');
+      await this.#intentRegistry.assertExecutable(intent);
+    }
     const workflow = await this.#teach.inspectWorkflow(workflowIdInput);
     const steps = await this.#teach.instantiate(workflow.id, values);
     const runId = runIdInput === undefined ? crypto.randomUUID() : uuid(runIdInput, 'runId');
@@ -103,7 +125,8 @@ export class StudioWorkflowExecutor {
     return await this.#mutate((state, now) => {
       const existing = state.runs.find((item) => item.id === runId);
       if (existing) {
-        if (existing.workflowId !== workflow.id || existing.workflowDigest !== workflow.digest || existing.parameterDigest !== parameterDigest) {
+        if (existing.workflowId !== workflow.id || existing.workflowDigest !== workflow.digest || existing.parameterDigest !== parameterDigest
+          || canonicalJson(existing.intent ?? null) !== canonicalJson(intent ?? null)) {
           throw new OperatorError('STUDIO_RUN_CONFLICT', 'runId is already bound to a different workflow execution contract.');
         }
         return existing;
@@ -120,6 +143,7 @@ export class StudioWorkflowExecutor {
         workflowDigest: workflow.digest,
         scopeKey: workflow.scopeKey,
         parameterDigest,
+        ...(intent ? { intent } : {}),
         state: 'PENDING',
         steps: steps.map((step) => toRunStep(runId, step)),
         createdAt: now.toISOString(),
@@ -138,7 +162,7 @@ export class StudioWorkflowExecutor {
     const runId = uuid(runIdInput, 'runId');
     const runLease = await this.#leases.acquire(`studio-run:${runId}:${crypto.randomUUID()}`, [`studio-run:${runId}`], 'exclusive');
     try {
-      let run = await this.inspect(runId);
+      let run = await this.#gateRunIntent(runId);
       if (run.state === 'CANCELLED' || run.state === 'VERIFIED') return run;
       if (run.state === 'FAILED') throw new OperatorError('STUDIO_RUN_TERMINAL', 'Failed Studio workflow run cannot execute again.');
       if (run.state === 'BLOCKED') throw new OperatorError('STUDIO_RUN_RECONCILIATION_REQUIRED', 'Studio workflow run is blocked on uncertain side effects.');
@@ -164,7 +188,8 @@ export class StudioWorkflowExecutor {
         if (step.state !== 'PENDING') {
           throw new OperatorError('STUDIO_RUN_STATE_CORRUPT', `Step ${step.key} is not safely executable from state ${step.state}.`);
         }
-        const current = await this.inspect(runId);
+        const current = await this.#gateRunIntent(runId);
+        if (current.state === 'CANCELLED') return current;
         const freshStep = current.steps.find((item) => item.key === step.key)!;
         if (!freshStep.dependsOn.every((key) => current.steps.find((item) => item.key === key)?.state === 'SUCCEEDED')) {
           throw new OperatorError('STUDIO_DEPENDENCY_UNSATISFIED', `Dependencies for ${step.key} are not satisfied.`);
@@ -177,12 +202,15 @@ export class StudioWorkflowExecutor {
           input: structuredClone(freshStep.input),
           provenance: { kind: 'trusted_policy', source: `studio-workflow:${current.workflowId}` },
           ...(freshStep.target ? { target: freshStep.target } : {}),
-          taskId: current.id
+          taskId: current.id,
+          ...(current.intent ? { intent: current.intent } : {})
         };
         const derivedResources = resourceKeysForAction(action);
         const resources = [...new Set([...freshStep.resourceKeys, ...derivedResources])].sort();
         const leaseMode = freshStep.risk === 'read' ? 'shared' as const : 'exclusive' as const;
-        const stepLease = await this.#leases.acquire(`studio-step:${runId}:${freshStep.key}:${crypto.randomUUID()}`, resources, leaseMode);
+        const stepLease = this.#agentKernel
+          ? undefined
+          : await this.#leases.acquire(`studio-step:${runId}:${freshStep.key}:${crypto.randomUUID()}`, resources, leaseMode);
         try {
           await this.#update(runId, (mutable) => {
             const record = requireStep(mutable, freshStep.key);
@@ -193,17 +221,62 @@ export class StudioWorkflowExecutor {
             delete record.errorCode;
             delete record.provider;
             delete record.evidenceDigest;
+            delete record.verificationDigest;
             delete record.sideEffectState;
           });
           const execute = options.executeAction
-            ?? ((candidate: ActionRequest, permissions: PermissionProfile, signal?: AbortSignal) => this.#runtime.execute(candidate, permissions, { signal, learningContext: `studio:${current.workflowId}` }));
-          const result = await execute(action, this.#permissions, options.signal);
+            ?? (this.#agentKernel
+              ? ((candidate: ActionRequest, permissions: PermissionProfile, signal?: AbortSignal) => this.#agentKernel!.execute(candidate, permissions, {
+                  signal,
+                  learningContext: `studio:${current.workflowId}`,
+                  ownerKind: 'studio',
+                  ownerId: current.id
+                }))
+              : ((candidate: ActionRequest, permissions: PermissionProfile, signal?: AbortSignal) => this.#runtime.execute(candidate, permissions, {
+                  signal,
+                  learningContext: `studio:${current.workflowId}`
+                })));
+          let result: ActionResult;
+          try {
+            result = await execute(action, this.#permissions, options.signal);
+          } catch (error) {
+            const code = error instanceof OperatorError ? error.code : 'STUDIO_EXECUTOR_EXCEPTION';
+            const sideEffectState = freshStep.risk === 'read' ? 'none' : exceptionSideEffectState(error);
+            run = await this.#update(runId, (mutable) => {
+              const record = requireStep(mutable, freshStep.key);
+              record.provider = 'studio-executor';
+              record.sideEffectState = sideEffectState;
+              record.errorCode = code;
+              record.finishedAt = this.#clock().toISOString();
+              record.state = sideEffectState === 'uncertain' ? 'NEEDS_RECONCILIATION' : 'FAILED';
+              mutable.state = sideEffectState === 'uncertain' ? 'BLOCKED' : 'FAILED';
+            });
+            return run;
+          }
           const sideEffectState = conservativeSideEffectState(freshStep.risk, result);
+          const verificationDigest = kernelVerificationDigest(result);
+          if (result.ok && this.#agentKernel && !verificationDigest) {
+            result = {
+              ok: false,
+              capability: action.capability,
+              provider: 'studio-executor',
+              evidence: result.evidence,
+              error: {
+                code: 'STUDIO_KERNEL_VERIFICATION_REQUIRED',
+                message: 'Studio step succeeded without an Agent Kernel verification proof.',
+                retryable: false,
+                sideEffectState: freshStep.risk === 'read' ? 'none' : 'known',
+                executionPhase: 'effect_observed'
+              },
+              durationMs: result.durationMs
+            };
+          }
           run = await this.#update(runId, (mutable) => {
             const record = requireStep(mutable, freshStep.key);
             record.provider = result.provider;
             record.sideEffectState = sideEffectState;
             record.evidenceDigest = digest(result.evidence);
+            if (verificationDigest) record.verificationDigest = verificationDigest;
             record.finishedAt = this.#clock().toISOString();
             if (result.ok) {
               record.state = 'SUCCEEDED';
@@ -224,7 +297,7 @@ export class StudioWorkflowExecutor {
           executedThisCall += 1;
           if (!result.ok) return run;
         } finally {
-          await stepLease.release();
+          await stepLease?.release();
         }
       }
 
@@ -240,21 +313,70 @@ export class StudioWorkflowExecutor {
     }
   }
 
+  async #gateRunIntent(runIdInput: string): Promise<StudioWorkflowRun> {
+    const runId = uuid(runIdInput, 'runId');
+    const run = await this.inspect(runId);
+    if (!run.intent) return run;
+    if (!this.#intentRegistry) {
+      throw new OperatorError('INTENT_ENFORCEMENT_UNAVAILABLE', 'Intent-bound Studio runs require an intent registry.');
+    }
+    try {
+      await this.#intentRegistry.assertExecutable(run.intent);
+      return run;
+    } catch (error) {
+      if (!(error instanceof OperatorError) || (error.code !== 'INTENT_STALE' && error.code !== 'INTENT_NOT_EXECUTABLE')) throw error;
+      return await this.#update(runId, (current) => {
+        if (['VERIFIED','FAILED','CANCELLED'].includes(current.state)) return;
+        current.state = 'CANCELLED';
+        for (const step of current.steps) if (step.state === 'PENDING') step.state = 'SKIPPED';
+      });
+    }
+  }
+
   async verificationContract(runIdInput: string): Promise<Record<string, unknown>> {
     const run = await this.inspect(runIdInput);
     return runVerificationContract(run);
   }
 
-  async verify(runIdInput: string, checks: VerificationCheck[]): Promise<StudioWorkflowRun> {
+  async verify(runIdInput: string, verification: unknown): Promise<StudioWorkflowRun> {
     const runId = uuid(runIdInput, 'runId');
+    const gated = await this.#gateRunIntent(runId);
+    if (gated.state === 'CANCELLED' || gated.state === 'VERIFIED') return gated;
+    const checks = this.#agentKernel
+      ? (await executeCanonicalVerification({
+          request: verification,
+          kernel: this.#agentKernel,
+          permissions: this.#permissions,
+          subjectKind: 'studio-workflow-run',
+          subjectId: gated.id,
+          ownerKind: 'studio-verification',
+          ownerId: gated.id,
+          ...(gated.intent ? { intent: gated.intent } : {})
+        })).checks
+      : legacyVerificationChecks(verification, 'Studio');
     return await this.#update(runId, (run) => {
       if (run.state === 'VERIFIED') return;
       if (run.state !== 'AWAITING_VERIFICATION') throw new OperatorError('STUDIO_RUN_NOT_READY_FOR_VERIFICATION', 'Studio workflow run must complete all execution steps before verification.');
+      if (digest(runVerificationContract(run)) !== digest(runVerificationContract(gated))) {
+        throw new OperatorError('STUDIO_VERIFICATION_STALE', 'Studio run changed while canonical verification was executing.');
+      }
+      const canonicalActionProofs = !this.#agentKernel || run.steps.every((step) => Boolean(step.verificationDigest));
       const receipt = new VerificationKernel().verify({
         subjectKind: 'studio-workflow-run',
         subjectId: run.id,
         contract: runVerificationContract(run),
-        checks
+        checks: [
+          ...checks,
+          {
+            name: 'kernel-action-proofs',
+            ok: canonicalActionProofs,
+            detail: canonicalActionProofs
+              ? this.#agentKernel
+                ? 'Every Studio step is bound to an Agent Kernel action verification digest.'
+                : 'Legacy executor mode has no Agent Kernel dependency; caller checks remain authoritative for this test/runtime configuration.'
+              : 'One or more Studio steps lack an Agent Kernel action verification digest.'
+          }
+        ]
       });
       run.verificationReceipt = receipt;
       run.state = receipt.verified ? 'VERIFIED' : 'FAILED';
@@ -267,6 +389,55 @@ export class StudioWorkflowExecutor {
   }): Promise<StudioWorkflowRun> {
     const runId = uuid(runIdInput, 'runId');
     const stepKey = bounded(stepKeyInput, 128, 'stepKey');
+    if (this.#agentKernel) {
+      const run = await this.#gateRunIntent(runId);
+      if (run.state !== 'BLOCKED') throw new OperatorError('STUDIO_RUN_NOT_BLOCKED', 'Studio run is not awaiting reconciliation.');
+      const step = requireStep(run, stepKey);
+      if (step.state !== 'NEEDS_RECONCILIATION') throw new OperatorError('STUDIO_STEP_NOT_UNCERTAIN', 'Studio step is not awaiting reconciliation.');
+      if (!step.provider) throw new OperatorError('STUDIO_RECONCILIATION_UNAVAILABLE', 'Uncertain Studio step has no durable provider identity.');
+      const action: ActionRequest = {
+        id: step.actionId,
+        capability: step.capability,
+        risk: step.risk,
+        input: structuredClone(step.input),
+        provenance: { kind: 'trusted_policy', source: `studio-workflow:${run.workflowId}` },
+        ...(step.target ? { target: step.target } : {}),
+        taskId: run.id,
+        ...(run.intent ? { intent: run.intent } : {})
+      };
+      const outcome = await this.#agentKernel.reconcile(action, step.provider);
+      if (outcome.status === 'uncertain') {
+        throw new OperatorError('STUDIO_RECONCILIATION_UNVERIFIED', 'Provider state remains uncertain; the Studio step stays blocked.');
+      }
+      return await this.#update(runId, (current) => {
+        if (current.state !== 'BLOCKED') throw new OperatorError('STUDIO_RECONCILIATION_STALE', 'Studio run changed while provider reconciliation was executing.');
+        const mutable = requireStep(current, stepKey);
+        if (mutable.state !== 'NEEDS_RECONCILIATION' || mutable.inputDigest !== step.inputDigest || mutable.provider !== step.provider) {
+          throw new OperatorError('STUDIO_RECONCILIATION_STALE', 'Studio step changed while provider reconciliation was executing.');
+        }
+        if (outcome.status === 'completed' && outcome.result?.ok) {
+          const verificationDigest = kernelVerificationDigest(outcome.result);
+          if (!verificationDigest) throw new OperatorError('STUDIO_KERNEL_VERIFICATION_REQUIRED', 'Reconciled Studio completion lacks an Agent Kernel verification proof.');
+          mutable.state = 'SUCCEEDED';
+          mutable.sideEffectState = 'known';
+          mutable.provider = outcome.result.provider;
+          mutable.evidenceDigest = digest(outcome.result.evidence);
+          mutable.verificationDigest = verificationDigest;
+          delete mutable.errorCode;
+        } else if (outcome.status === 'not_applied') {
+          mutable.state = 'PENDING';
+          mutable.sideEffectState = 'none';
+          delete mutable.errorCode;
+          delete mutable.evidenceDigest;
+          delete mutable.verificationDigest;
+          delete mutable.startedAt;
+          delete mutable.finishedAt;
+        } else {
+          throw new OperatorError('STUDIO_RECONCILIATION_UNVERIFIED', 'Provider reconciliation did not establish a safe Studio transition.');
+        }
+        current.state = 'PENDING';
+      });
+    }
     return await this.#update(runId, (run) => {
       if (run.state !== 'BLOCKED') throw new OperatorError('STUDIO_RUN_NOT_BLOCKED', 'Studio run is not awaiting reconciliation.');
       const step = requireStep(run, stepKey);
@@ -288,6 +459,7 @@ export class StudioWorkflowExecutor {
         delete step.errorCode;
         delete step.provider;
         delete step.evidenceDigest;
+        delete step.verificationDigest;
         delete step.startedAt;
         delete step.finishedAt;
       } else {
@@ -319,7 +491,14 @@ export class StudioWorkflowExecutor {
           recovered += 1;
           continue;
         }
-        if (active.risk === 'read') {
+        if (this.#agentKernel) {
+          active.state = 'PENDING';
+          active.sideEffectState = active.risk === 'read' ? 'none' : 'uncertain';
+          active.errorCode = 'STUDIO_STEP_KERNEL_RECOVERY';
+          delete active.startedAt;
+          delete active.finishedAt;
+          run.state = 'PENDING';
+        } else if (active.risk === 'read') {
           active.state = 'PENDING';
           active.sideEffectState = 'none';
           delete active.startedAt;
@@ -415,6 +594,7 @@ function runVerificationContract(run: StudioWorkflowRun): Record<string, unknown
     workflowDigest: run.workflowDigest,
     scopeKey: run.scopeKey,
     parameterDigest: run.parameterDigest,
+    intent: run.intent ?? null,
     steps: run.steps.map((step) => ({
       key: step.key,
       actionId: step.actionId,
@@ -425,6 +605,7 @@ function runVerificationContract(run: StudioWorkflowRun): Record<string, unknown
       provider: step.provider ?? null,
       sideEffectState: step.sideEffectState ?? null,
       evidenceDigest: step.evidenceDigest ?? null,
+      verificationDigest: step.verificationDigest ?? null,
       state: step.state
     }))
   };
@@ -445,6 +626,11 @@ function reconciliationContract(run: StudioWorkflowRun, step: StudioRunStep, res
   };
 }
 
+function exceptionSideEffectState(error: unknown): 'none' | 'known' | 'uncertain' {
+  const stated = error instanceof OperatorError ? error.details?.sideEffectState : undefined;
+  return stated === 'none' || stated === 'known' || stated === 'uncertain' ? stated : 'uncertain';
+}
+
 function validateState(input: unknown): StudioRunStateFile {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
   const state = input as StudioRunStateFile;
@@ -458,6 +644,7 @@ function validateState(input: unknown): StudioRunStateFile {
     sha(run.workflowDigest, 'run.workflowDigest');
     sha(run.parameterDigest, 'run.parameterDigest');
     bounded(run.scopeKey, 512, 'run.scopeKey');
+    if (run.intent !== undefined) validIntentBinding(run.intent);
     if (!['PENDING','RUNNING','BLOCKED','FAILED','CANCELLED','AWAITING_VERIFICATION','VERIFIED'].includes(run.state)) throw corrupt('Run state is invalid.');
     if (!Array.isArray(run.steps) || run.steps.length < 1 || run.steps.length > 200) throw corrupt('Run steps are invalid.');
     const keys = new Set<string>();
@@ -473,6 +660,7 @@ function validateState(input: unknown): StudioRunStateFile {
       if (!['PENDING','RUNNING','SUCCEEDED','FAILED','NEEDS_RECONCILIATION','SKIPPED'].includes(step.state)) throw corrupt('Run step state is invalid.');
       if (step.sideEffectState && !['none','known','uncertain'].includes(step.sideEffectState)) throw corrupt('Run step side-effect state is invalid.');
       if (step.evidenceDigest) sha(step.evidenceDigest, 'step.evidenceDigest');
+      if (step.verificationDigest) sha(step.verificationDigest, 'step.verificationDigest');
     }
     if (run.verificationReceipt) {
       const receipt = run.verificationReceipt;
@@ -497,6 +685,10 @@ function validateState(input: unknown): StudioRunStateFile {
 }
 
 function digest(value: unknown): string { return crypto.createHash('sha256').update(canonicalJson(value)).digest('hex'); }
+function legacyVerificationChecks(input: unknown, owner: string): VerificationCheck[] {
+  if (!Array.isArray(input)) throw new OperatorError('CANONICAL_VERIFICATION_INVALID', `${owner} verification requires typed runtime probes in production.`);
+  return input as VerificationCheck[];
+}
 function sha(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${label} must be SHA-256.`);

@@ -81,6 +81,10 @@ export class CapabilityRouter {
     return [...risks][0]!;
   }
 
+  async provider(name: string): Promise<CapabilityProvider | undefined> {
+    return this.#providers.find((provider) => provider.name === name);
+  }
+
   async select(action: ActionRequest, learningContext = 'global'): Promise<CapabilityProvider> {
     const ranked = await this.rank(action, learningContext);
     if (!ranked[0]) {

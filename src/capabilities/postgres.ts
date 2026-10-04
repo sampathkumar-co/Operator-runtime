@@ -143,21 +143,27 @@ export class PostgresProvider implements CapabilityProvider {
       const limit = boundedInteger(action.input.limit, 100, 1, MAX_ROWS);
       const offset = boundedInteger(action.input.offset, 0, 0, 10_000);
       const timeoutMs = boundedTimeout(action.input.timeoutMs);
+      const maxBytes = boundedInteger(action.input.maxBytes, 64 * 1024, 1024, 128 * 1024);
       const built = buildSelect(schema, table, columns, filters, orderBy, limit, offset);
       const rows = await this.#query(profile, root, built.sql, built.variables, timeoutMs, context.signal);
+      const boundedRows = boundSerializedRows(rows, maxBytes);
       return success(action, started, {
         profileId: profile.id,
         schema,
         table,
         columns: columns.length === 0 ? ['*'] : columns,
-        rowCount: rows.length,
+        rowCount: boundedRows.rows.length,
+        queriedRowCount: rows.length,
         limit,
         offset,
-        rows
+        maxBytes,
+        rows: boundedRows.rows,
+        truncated: boundedRows.truncated,
+        ...(boundedRows.truncated ? { nextOffset: offset + boundedRows.rows.length } : {})
       }, [
         evidence('postgres_read_only', 'pass', 'Executed an Operator-constructed structured SELECT under a server-enforced read-only session with statement/lock timeouts.', {
           profileId: profile.id,
-          rowCount: rows.length,
+          rowCount: boundedRows.rows.length,
           filterCount: filters.length,
           orderCount: orderBy.length
         }),
@@ -174,7 +180,13 @@ export class PostgresProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('postgres', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code,
+          message: op.message,
+          retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(op.details ? { details: structuredClone(op.details) } : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }
@@ -552,6 +564,18 @@ function parseCsvObjects(csv: string, maxRows: number): Array<Record<string, str
     }
     return object;
   });
+}
+
+function boundSerializedRows(rows: Array<Record<string, string | null>>, maxBytes: number): { rows: Array<Record<string, string | null>>; truncated: boolean } {
+  const bounded: Array<Record<string, string | null>> = [];
+  let bytes = 2;
+  for (const row of rows) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row), 'utf8') + (bounded.length > 0 ? 1 : 0);
+    if (bytes + rowBytes > maxBytes) break;
+    bounded.push(row);
+    bytes += rowBytes;
+  }
+  return { rows: bounded, truncated: bounded.length < rows.length };
 }
 
 function success(action: ActionRequest, started: number, output: unknown, extraEvidence: ReturnType<typeof evidence>[]): ActionResult {

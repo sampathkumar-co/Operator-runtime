@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import type { TaskCapsule } from './task.ts';
 
 export type EvaluationCategory =
   | 'browser' | 'desktop' | 'developer' | 'office' | 'enterprise'
@@ -39,6 +40,38 @@ export interface EvaluationRun {
   fallbackCount: number;
   uncertainMutationCount: number;
   evidenceDigest: string;
+  candidateDirty?: boolean;
+  runnerHash?: string;
+  taskId?: string;
+  seed?: number;
+  model?: string;
+  provider?: string;
+  modelConfigDigest?: string;
+  environmentDigest?: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  plannerCalls?: number;
+  plannerIterations?: number;
+  reobserves?: number;
+  dispatchedActions?: number;
+  reconciliationCount?: number;
+  providerRetries?: number;
+  verificationCount?: number;
+  modelLatencyMs?: number;
+  runtimeLatencyMs?: number;
+  infrastructureFailures?: number;
+  runtimeFailures?: number;
+  modelFailures?: number;
+  plannerFailures?: number;
+  taskFailures?: number;
+  observationCount?: number;
+  visualCaptureCount?: number;
+  zeroProgressActions?: number;
+  duplicateActions?: number;
+  retryCount?: number;
+  successfulSubgoals?: number;
+  attemptedSubgoals?: number;
 }
 
 interface EvaluationState {
@@ -64,6 +97,17 @@ export interface EvaluationSummary {
   averageCostMicros: number;
   fallbackRate: number;
   uncertainMutationRate: number;
+  p50TaskLatencyMs: number;
+  p95TaskLatencyMs: number;
+  p50Actions: number;
+  p95Actions: number;
+  p50Tokens: number;
+  p95Tokens: number;
+  infrastructureFailures: number;
+  runtimeFailures: number;
+  modelFailures: number;
+  plannerFailures: number;
+  taskFailures: number;
 }
 
 export interface EvaluationRegression {
@@ -203,13 +247,100 @@ export function evaluationScenarioDigest(scenario: EvaluationScenario): string {
   return crypto.createHash('sha256').update(canonicalJson(normalizeScenario(scenario))).digest('hex');
 }
 
+export function evaluationRunFromTask(input: {
+  id: string;
+  scenarioId: string;
+  scenarioVersion: number;
+  runtimeVersion: string;
+  sourceCommit: string;
+  candidateDirty: boolean;
+  runnerHash: string;
+  task: TaskCapsule;
+  seed: number;
+  model: string;
+  provider: string;
+  modelConfigDigest: string;
+  environmentDigest: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  plannerCalls?: number;
+  modelLatencyMs?: number;
+  runtimeLatencyMs?: number;
+  costMicros?: number;
+  infrastructureFailures?: number;
+  modelFailures?: number;
+}): EvaluationRun {
+  const execution = input.task.execution;
+  if (!execution?.startedAt) throw new OperatorError('EVALUATION_INPUT_INVALID', 'Task execution metadata is required for runtime-native evaluation.');
+  const finishedAt = input.task.updatedAt;
+  const records = execution.records;
+  const inputTokens = input.inputTokens ?? 0;
+  const cachedInputTokens = input.cachedInputTokens ?? 0;
+  const outputTokens = input.outputTokens ?? 0;
+  const reconciliationCount = (execution.plannerEvents ?? []).filter((event) => event.decision === 'RECONCILE').length;
+  const providerRetries = records.reduce((count, record) => count + Math.max(0, record.attempt - 1), 0);
+  const verificationCount = input.task.evidence.filter((item) => item.kind.includes('verification') && item.status === 'pass').length;
+  const runtimeFailures = records.filter((record) => record.state === 'FAILED' && record.errorCode !== 'TASK_PLANNER_FAILED').length;
+  const plannerFailures = input.task.failures.filter((failure) => failure.code.includes('PLANNER')).length;
+  const planValue = execution.plannerState.durablePlan;
+  const planSubgoals = planValue && typeof planValue === 'object' && !Array.isArray(planValue)
+    && Array.isArray((planValue as Record<string, unknown>).subgoals)
+    ? (planValue as { subgoals: Array<Record<string, unknown>> }).subgoals : [];
+  const actionIdentities = records.map((record) => `${record.stepKey}\0${record.inputHash}`);
+  const evidenceDigest = crypto.createHash('sha256').update(canonicalJson({
+    taskId: input.task.id, state: input.task.state, records: records.map((record) => ({
+      actionId: record.actionId, state: record.state,
+      stateVersion: record.observation?.schemaVersion === 2 ? record.observation.stateVersion : undefined,
+      sideEffectState: record.sideEffectState, executionPhase: record.executionPhase
+    })), verification: input.task.evidence.filter((item) => item.kind.includes('verification')).map((item) => item.data)
+  })).digest('hex');
+  return normalizeRun({
+    id: input.id, scenarioId: input.scenarioId, scenarioVersion: input.scenarioVersion,
+    runtimeVersion: input.runtimeVersion, sourceCommit: input.sourceCommit,
+    startedAt: execution.startedAt, finishedAt,
+    claimedSuccess: input.task.state === 'VERIFIED', verifiedSuccess: input.task.state === 'VERIFIED',
+    recoveredFailure: input.task.evidence.some((item) => /recover|reconcil/i.test(item.kind)),
+    humanInterventions: records.filter((record) => record.errorCode === 'APPROVAL_REQUIRED').length,
+    actionCount: execution.dispatchedActions ?? execution.stepCount,
+    modelCalls: input.plannerCalls ?? 0,
+    tokenCount: inputTokens + outputTokens,
+    latencyMs: Math.max(0, Date.parse(finishedAt) - Date.parse(execution.startedAt)),
+    costMicros: input.costMicros ?? 0,
+    fallbackCount: input.task.evidence.filter((item) => item.kind.includes('fallback') || item.kind.includes('reobserve')).length,
+    uncertainMutationCount: records.filter((record) => record.sideEffectState === 'uncertain').length,
+    evidenceDigest,
+    candidateDirty: input.candidateDirty, runnerHash: input.runnerHash, taskId: input.task.id, seed: input.seed,
+    model: input.model, provider: input.provider, modelConfigDigest: input.modelConfigDigest,
+    environmentDigest: input.environmentDigest,
+    inputTokens, cachedInputTokens, outputTokens, plannerCalls: input.plannerCalls ?? 0,
+    plannerIterations: execution.plannerIterations ?? 0,
+    reobserves: execution.preDispatchReobserves ?? 0,
+    dispatchedActions: execution.dispatchedActions ?? execution.stepCount,
+    reconciliationCount, providerRetries, verificationCount,
+    modelLatencyMs: input.modelLatencyMs ?? 0, runtimeLatencyMs: input.runtimeLatencyMs ?? 0,
+    infrastructureFailures: input.infrastructureFailures ?? 0,
+    runtimeFailures, modelFailures: input.modelFailures ?? 0, plannerFailures,
+    taskFailures: input.task.state === 'FAILED' ? 1 : 0,
+    observationCount: records.filter((record) => record.observation !== undefined).length,
+    visualCaptureCount: records.filter((record) => record.observation?.channel === 'visual').length,
+    zeroProgressActions: (execution.plannerEvents ?? []).filter((event) => event.kind === 'ACTION_SUCCEEDED_BUT_NO_PROGRESS').length,
+    duplicateActions: actionIdentities.length - new Set(actionIdentities).size,
+    retryCount: providerRetries,
+    successfulSubgoals: planSubgoals.filter((subgoal) => subgoal.status === 'VERIFIED').length,
+    attemptedSubgoals: planSubgoals.filter((subgoal) => Number(subgoal.attempts ?? 0) > 0).length
+  });
+}
+
 function summarize(runs: EvaluationRun[]): EvaluationSummary {
   const count = runs.length;
   if (count === 0) return {
     runs: 0, claimedSuccesses: 0, verifiedSuccesses: 0, falseSuccesses: 0,
     verifiedSuccessRate: 0, falseSuccessRate: 0, recoveredFailures: 0, recoveryRate: 0,
     humanInterventionRate: 0, averageActions: 0, averageModelCalls: 0, averageTokens: 0,
-    averageLatencyMs: 0, averageCostMicros: 0, fallbackRate: 0, uncertainMutationRate: 0
+    averageLatencyMs: 0, averageCostMicros: 0, fallbackRate: 0, uncertainMutationRate: 0,
+    p50TaskLatencyMs: 0, p95TaskLatencyMs: 0, p50Actions: 0, p95Actions: 0, p50Tokens: 0, p95Tokens: 0,
+    infrastructureFailures: 0, runtimeFailures: 0, modelFailures: 0, plannerFailures: 0, taskFailures: 0
   };
   const claimedSuccesses = runs.filter((run) => run.claimedSuccess).length;
   const verifiedSuccesses = runs.filter((run) => run.verifiedSuccess).length;
@@ -233,8 +364,25 @@ function summarize(runs: EvaluationRun[]): EvaluationSummary {
     averageLatencyMs: sum((run) => run.latencyMs) / count,
     averageCostMicros: sum((run) => run.costMicros) / count,
     fallbackRate: ratio(sum((run) => run.fallbackCount), Math.max(sum((run) => run.actionCount), 1)),
-    uncertainMutationRate: ratio(sum((run) => run.uncertainMutationCount), Math.max(sum((run) => run.actionCount), 1))
+    uncertainMutationRate: ratio(sum((run) => run.uncertainMutationCount), Math.max(sum((run) => run.actionCount), 1)),
+    p50TaskLatencyMs: percentile(runs.map((run) => run.latencyMs), 0.5),
+    p95TaskLatencyMs: percentile(runs.map((run) => run.latencyMs), 0.95),
+    p50Actions: percentile(runs.map((run) => run.actionCount), 0.5),
+    p95Actions: percentile(runs.map((run) => run.actionCount), 0.95),
+    p50Tokens: percentile(runs.map((run) => run.tokenCount), 0.5),
+    p95Tokens: percentile(runs.map((run) => run.tokenCount), 0.95),
+    infrastructureFailures: sum((run) => run.infrastructureFailures ?? 0),
+    runtimeFailures: sum((run) => run.runtimeFailures ?? 0),
+    modelFailures: sum((run) => run.modelFailures ?? 0),
+    plannerFailures: sum((run) => run.plannerFailures ?? 0),
+    taskFailures: sum((run) => run.taskFailures ?? 0)
   };
+}
+
+function percentile(values: number[], quantile: number): number {
+  if (values.length === 0) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(sorted.length * quantile) - 1)]!;
 }
 
 function compareHigher(key: keyof EvaluationSummary, baseline: EvaluationSummary, candidate: EvaluationSummary, threshold: number, improved: string[], regressed: string[]): void {
@@ -283,8 +431,31 @@ function normalizeRun(input: EvaluationRun): EvaluationRun {
     costMicros: boundedInt(input.costMicros, 0, Number.MAX_SAFE_INTEGER, 'run.costMicros'),
     fallbackCount: boundedInt(input.fallbackCount, 0, 100_000_000, 'run.fallbackCount'),
     uncertainMutationCount: boundedInt(input.uncertainMutationCount, 0, 100_000_000, 'run.uncertainMutationCount'),
-    evidenceDigest: digest(input.evidenceDigest, 'run.evidenceDigest')
+    evidenceDigest: digest(input.evidenceDigest, 'run.evidenceDigest'),
+    ...(input.candidateDirty === undefined ? {} : { candidateDirty: input.candidateDirty === true }),
+    ...(input.runnerHash === undefined ? {} : { runnerHash: digest(input.runnerHash, 'run.runnerHash') }),
+    ...(input.taskId === undefined ? {} : { taskId: uuid(input.taskId, 'run.taskId') }),
+    ...(input.seed === undefined ? {} : { seed: boundedInt(input.seed, 0, 0xffff_ffff, 'run.seed') }),
+    ...(input.model === undefined ? {} : { model: bounded(input.model, 256, 'run.model') }),
+    ...(input.provider === undefined ? {} : { provider: bounded(input.provider, 256, 'run.provider') }),
+    ...(input.modelConfigDigest === undefined ? {} : { modelConfigDigest: digest(input.modelConfigDigest, 'run.modelConfigDigest') }),
+    ...(input.environmentDigest === undefined ? {} : { environmentDigest: digest(input.environmentDigest, 'run.environmentDigest') }),
+    ...optionalCounters(input)
   };
+}
+
+function optionalCounters(input: EvaluationRun): Partial<EvaluationRun> {
+  const output: Record<string, number> = {};
+  for (const key of [
+    'inputTokens', 'cachedInputTokens', 'outputTokens', 'plannerCalls', 'plannerIterations', 'reobserves',
+    'dispatchedActions', 'reconciliationCount', 'providerRetries', 'verificationCount', 'modelLatencyMs',
+    'runtimeLatencyMs', 'infrastructureFailures', 'runtimeFailures', 'modelFailures', 'plannerFailures', 'taskFailures',
+    'observationCount', 'visualCaptureCount', 'zeroProgressActions', 'duplicateActions', 'retryCount',
+    'successfulSubgoals', 'attemptedSubgoals'
+  ] as const) {
+    if (input[key] !== undefined) output[key] = boundedInt(input[key], 0, Number.MAX_SAFE_INTEGER, `run.${key}`);
+  }
+  return output;
 }
 function category(input: unknown): EvaluationCategory {
   if (!['browser','desktop','developer','office','enterprise','multi-agent','multi-device','recovery','security','long-running'].includes(String(input))) {

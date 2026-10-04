@@ -7,6 +7,8 @@ import test from 'node:test';
 import { TeamCoordinator } from '../src/core/team-coordinator.ts';
 import { createRuntime } from '../apps/local-agent/src/runtime-factory.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
+import type { ActionRequest, ActionResult, PermissionProfile } from '../src/core/types.ts';
+import type { OperatorRuntime } from '../src/core/runtime.ts';
 
 function resourceForFile(file: string): string {
   const normalized = path.resolve(file).replace(/\\/g, '/');
@@ -149,4 +151,74 @@ test('stage4 local API coordinates claimed worker execution through the real run
   const verified = await verifyComplete.json() as any;
   assert.equal(verified.mission.state, 'VERIFIED');
   assert.equal(verified.mission.resources[0].revision, 1);
+});
+
+test('team action receipt prevents duplicate mutation when post-action audit persistence fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-team-receipt-root-'));
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-team-receipt-state-'));
+  t.after(() => Promise.all([fs.rm(root, { recursive: true, force: true }), fs.rm(state, { recursive: true, force: true })]));
+  const target = path.join(root, 'append.txt');
+  const resource = resourceForFile(target);
+  let calls = 0;
+  const runtime = {
+    async execute(action: ActionRequest, _permissions: PermissionProfile): Promise<ActionResult> {
+      calls += 1;
+      await fs.appendFile(target, 'X', 'utf8');
+      return { ok: true, capability: action.capability, provider: 'test.append', output: { appended: true }, evidence: [], durationMs: 1 };
+    }
+  } as OperatorRuntime;
+  const teams = new TeamCoordinator(state);
+  const mission = await teams.submit({
+    objective: 'Append exactly once despite audit failure',
+    workItems: [
+      { key: 'write', title: 'append', role: 'coder', risk: 'write', resources: [resource], allowedCapabilities: ['file.write'] },
+      { key: 'verify', title: 'verify', role: 'verifier', risk: 'read', dependsOn: ['write'], allowedCapabilities: ['file.read'] }
+    ]
+  });
+  await teams.start(mission.id);
+  const registered = await teams.registerWorker(mission.id, { role: 'coder', label: 'coder', capabilities: ['file.write'] });
+  const claimed = await teams.claim(mission.id, { workerId: registered.worker.id });
+  const action = { id: crypto.randomUUID(), capability: 'file.write', risk: 'write' as const, input: { path: target }, provenance: { kind: 'chatgpt' as const } };
+  const token = 'r'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, teams, permissions: { allowedCapabilities: ['file.write'], allowedRoots: [root] },
+    audit: { async append() { throw new Error('forced audit failure'); } } as any
+  });
+  t.after(() => agent.close());
+  const bound = await agent.listen('127.0.0.1', 0);
+  const url = `http://127.0.0.1:${bound.port}/v1/teams/${mission.id}/work/${claimed.workItem!.id}/execute`;
+  const request = { workerId: registered.worker.id, leaseId: claimed.workItem!.lease!.id, action };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(url, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(request) });
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const result = await response.json() as ActionResult;
+    assert.equal(result.evidence.some((item) => item.kind === 'audit_persistence' && item.status === 'fail'), true);
+  }
+  assert.equal(calls, 1);
+  assert.equal(await fs.readFile(target, 'utf8'), 'X');
+  const persisted = await teams.inspect(mission.id);
+  assert.equal(persisted.actionReceipts[0]?.state, 'COMPLETED');
+});
+
+test('direct execution preserves the primary result when post-action audit fails', async (t) => {
+  const runtime = {
+    async execute(action: ActionRequest): Promise<ActionResult> {
+      return { ok: true, capability: action.capability, provider: 'test.success', output: { completed: true }, evidence: [], durationMs: 1 };
+    }
+  } as OperatorRuntime;
+  const token = 'a'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, permissions: { allowedCapabilities: ['file.read'], allowedRoots: [] },
+    audit: { async append() { throw new Error('forced audit failure'); } } as any
+  });
+  t.after(() => agent.close());
+  const bound = await agent.listen('127.0.0.1', 0);
+  const response = await fetch(`http://127.0.0.1:${bound.port}/v1/execute`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ action: { id: crypto.randomUUID(), capability: 'file.read', risk: 'read', input: {}, provenance: { kind: 'chatgpt' } } })
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json() as ActionResult;
+  assert.equal(result.ok, true);
+  assert.equal(result.evidence.some((item) => item.kind === 'audit_persistence'), true);
 });

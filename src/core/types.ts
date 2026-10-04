@@ -1,5 +1,6 @@
 export type ActionRisk = 'read' | 'write' | 'external' | 'system' | 'destructive';
 export type SideEffectState = 'none' | 'known' | 'uncertain';
+export type ExecutionPhase = 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled';
 export type TaskState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'CANCELLED' | 'BLOCKED' | 'FAILED' | 'VERIFIED' | 'SKIPPED';
 export type EvidenceStatus = 'pass' | 'fail' | 'info';
 export type ProvenanceKind =
@@ -25,6 +26,12 @@ export interface Evidence {
   timestamp: string;
 }
 
+export interface IntentBinding {
+  conversationId: string;
+  intentVersion: number;
+  digest: string;
+}
+
 export interface ActionRequest {
   id: string;
   capability: string;
@@ -33,6 +40,7 @@ export interface ActionRequest {
   provenance: Provenance;
   taskId?: string;
   target?: string;
+  intent?: IntentBinding;
 }
 
 export interface ActionResult {
@@ -46,6 +54,8 @@ export interface ActionResult {
     message: string;
     retryable?: boolean;
     sideEffectState?: SideEffectState;
+    executionPhase?: ExecutionPhase;
+    details?: Record<string, unknown>;
   };
   durationMs: number;
 }
@@ -88,6 +98,18 @@ export interface CapabilityExecutionContext {
   signal?: AbortSignal;
   learningContext?: string;
   authorityToken?: CapabilityAuthorityToken;
+  onProviderDispatch?: (providerName: string) => void | Promise<void>;
+}
+
+export interface ProviderReconciliationRequest {
+  action: ActionRequest;
+  priorResult?: ActionResult;
+}
+
+export interface ProviderReconciliationResult {
+  status: 'completed' | 'not_applied' | 'uncertain';
+  result?: ActionResult;
+  evidence: Evidence[];
 }
 
 export interface CapabilityProvider {
@@ -97,5 +119,6 @@ export interface CapabilityProvider {
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore>;
   resolveRisk?(action: ActionRequest): ActionRisk | Promise<ActionRisk>;
   execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult>;
+  reconcile?(request: ProviderReconciliationRequest, context?: CapabilityExecutionContext): Promise<ProviderReconciliationResult>;
   close?(): void | Promise<void>;
 }
