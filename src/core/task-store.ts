@@ -5,6 +5,7 @@ import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObserv
 import { validIntentBinding } from './intent-registry.ts';
 import type { Evidence, TaskState } from './types.ts';
 import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from './task-planner-event.ts';
+import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
@@ -322,6 +323,10 @@ function validateExecution(input: unknown): TaskExecution {
   const plannerId = boundedText(raw.plannerId, 256, 'execution plannerId');
   const goalKind = boundedText(raw.goalKind, 256, 'execution goalKind');
   const plannerState = jsonObject(raw.plannerState, 'execution plannerState');
+  if (plannerState.durablePlan !== undefined) {
+    try { plannerState.durablePlan = normalizeDurableTaskPlan(plannerState.durablePlan); }
+    catch { throw corrupt('execution durable task plan is invalid.'); }
+  }
   const maxSteps = boundedInteger(raw.maxSteps, 1, 1000, 'execution maxSteps');
   const maxAttemptsPerStep = boundedInteger(raw.maxAttemptsPerStep, 1, 20, 'execution maxAttemptsPerStep');
   const timeoutMs = boundedInteger(raw.timeoutMs, 100, 24 * 60 * 60 * 1000, 'execution timeoutMs');

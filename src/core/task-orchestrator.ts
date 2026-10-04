@@ -21,6 +21,10 @@ import type { ActionTransitionJournal } from './action-transition-journal.ts';
 import { validIntentBinding } from './intent-registry.ts';
 import { plannerEventFromResult, type TaskPlannerEvent } from './task-planner-event.ts';
 import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
+import {
+  activateSubgoal, createDurableTaskPlan, nextReadySubgoal, normalizeDurableTaskPlan,
+  taskPlanComplete, verifySubgoal, type DurableTaskPlan
+} from './task-plan.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -43,6 +47,9 @@ export type AutonomousTaskAction = { capability: string; input: Record<string, u
 export type AutonomousTaskStep = {
   key: string;
   title: string;
+  parentKey?: string;
+  dependsOn?: string[];
+  resourceScope?: string[];
   observe: AutonomousTaskAction;
   action: AutonomousTaskAction;
   verify: AutonomousTaskAction & { assertions: TaskStateAssertion[] };
@@ -253,11 +260,21 @@ export class TaskOrchestrator {
       ...(normalized.intent ? { intent: normalized.intent } : {})
     });
     if (requestId) task.id = requestId;
+    const durablePlan = goal.kind === 'autonomous-workflow' ? createDurableTaskPlan({
+      taskId: task.id,
+      objective: normalized.userObjective,
+      constraints: [
+        ...normalized.authorizedScope.map((scope) => `authorized:${scope}`),
+        ...normalized.prohibitedScope.map((scope) => `prohibited:${scope}`)
+      ],
+      finalSuccessConditions: normalized.successConditions,
+      steps: goal.steps
+    }) : undefined;
     task.execution = {
       schemaVersion: 1,
       plannerId: planner.id,
       goalKind: goal.kind,
-      plannerState: { goal: structuredClone(goal), phase: 'start' },
+      plannerState: { goal: structuredClone(goal), phase: 'start', ...(durablePlan ? { durablePlan } : {}) },
       maxSteps: normalized.maxSteps,
       maxAttemptsPerStep: normalized.maxAttemptsPerStep,
       timeoutMs: normalized.timeoutMs,
@@ -1461,15 +1478,20 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
   next({ task, goal }: TaskPlannerContext): PlannerDecision {
     if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
     const state = task.execution!.plannerState;
-    const index = workflowIndex(state, goal.steps.length);
-    if (index === goal.steps.length) return { type: 'complete', message: `Autonomous workflow completed ${goal.steps.length} independently verified step(s).` };
+    const plan = autonomousPlan(task, goal);
+    if (taskPlanComplete(plan)) return { type: 'complete', message: `Autonomous workflow completed ${plan.subgoals.filter((item) => item.status === 'VERIFIED').length} independently verified subgoal(s).` };
+    const selectedId = typeof state.activeSubgoalId === 'string' ? state.activeSubgoalId : nextReadySubgoal(plan)?.id;
+    if (!selectedId) throw new OperatorError('TASK_PLAN_BLOCKED', 'No autonomous subgoal is ready; the remaining dependency graph is blocked.');
+    const item = activateSubgoal(plan, selectedId);
+    state.durablePlan = plan;
+    state.activeSubgoalId = item.id;
+    const index = item.sourceIndex;
     const phase = String(state.autonomousPhase ?? 'observe');
-    const item = goal.steps[index]!;
-    const selected = phase === 'observe' ? item.observe : phase === 'action' ? item.action : phase === 'verify' ? item.verify : undefined;
+    const selected = phase === 'observe' ? item.execution.observe : phase === 'action' ? item.execution.action : phase === 'verify' ? item.successContract : undefined;
     if (!selected) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow phase is invalid.');
     return {
       type: 'step', key: `autonomous:${index}:${phase}`,
-      title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.title}`,
+      title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.description}`,
       capability: selected.capability, input: structuredClone(selected.input),
       ...(selected.target ? { target: selected.target } : {})
     };
@@ -1478,9 +1500,10 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
   accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>): void {
     if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
     const state = task.execution!.plannerState;
-    const index = workflowIndex(state, goal.steps.length);
-    const item = goal.steps[index];
-    if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no current step.');
+    const plan = autonomousPlan(task, goal);
+    const item = plan.subgoals.find((candidate) => candidate.id === state.activeSubgoalId);
+    if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no active subgoal.');
+    const index = item.sourceIndex;
     if (step.key === `autonomous:${index}:observe`) {
       state.autonomousPhase = 'action';
       return;
@@ -1492,25 +1515,31 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     if (step.key !== `autonomous:${index}:verify`) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow decision does not match its durable phase.');
     const record = [...task.execution!.records].reverse().find((candidate) => candidate.stepKey === step.key && candidate.observation?.schemaVersion === 2);
     if (!record?.observation || record.observation.schemaVersion !== 2) throw new OperatorError('TASK_AUTONOMOUS_VERIFICATION_FAILED', 'Autonomous verification did not produce durable machine state.');
-    assertTaskMachineState(record.observation.importantState, item.verify.assertions);
-    state.workflowIndex = index + 1;
+    assertTaskMachineState(record.observation.importantState, item.successContract.assertions);
+    verifySubgoal(plan, item.id);
+    state.durablePlan = plan;
+    state.workflowIndex = plan.subgoals.filter((candidate) => candidate.status === 'VERIFIED').length;
+    delete state.activeSubgoalId;
     state.autonomousPhase = 'observe';
     task.evidence.push(evidence('autonomous_step_verified', 'pass', 'Independent read-only observation satisfied the declared machine-state assertions.', {
-      stepKey: item.key, index, stateVersion: record.observation.stateVersion
+      stepKey: item.key, subgoalId: item.id, planRevision: plan.revision, index, stateVersion: record.observation.stateVersion
     }));
   }
 
   fallback({ task, goal, recentEvents }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean {
     if (goal.kind !== 'autonomous-workflow') return false;
     const state = task.execution!.plannerState;
-    const index = workflowIndex(state, goal.steps.length);
+    const plan = autonomousPlan(task, goal);
+    const item = plan.subgoals.find((candidate) => candidate.id === state.activeSubgoalId);
+    if (!item) return false;
+    const index = item.sourceIndex;
     if (step.key === `autonomous:${index}:action`) {
       const phase = observation.error?.executionPhase;
       const sideEffect = observation.error?.sideEffectState;
       const reobserve = recentEvents.some((event) => event.decision === 'REOBSERVE' || event.decision === 'REPLAN');
       if (phase === 'pre_dispatch' && sideEffect === 'none' && reobserve) {
         state.autonomousPhase = 'observe';
-        task.evidence.push(evidence('autonomous_reobserve', 'info', 'Action was proven not dispatched; returning to fresh observation before replanning the same bounded step.', { stepKey: goal.steps[index]?.key }));
+        task.evidence.push(evidence('autonomous_reobserve', 'info', 'Action was proven not dispatched; returning to fresh observation before replanning the same bounded subgoal.', { stepKey: item.key, subgoalId: item.id }));
         return true;
       }
       return false;
@@ -1591,6 +1620,23 @@ function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): str
   const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
   if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
   return goal.steps[index]?.kind ?? 'semantic-workflow';
+}
+
+function autonomousPlan(task: TaskCapsule, goal: Extract<SemanticTaskGoal, { kind: 'autonomous-workflow' }>): DurableTaskPlan {
+  const stored = task.execution!.plannerState.durablePlan;
+  const plan = stored === undefined ? createDurableTaskPlan({
+    taskId: task.id,
+    objective: task.userObjective,
+    constraints: [
+      ...task.authorizedScope.map((scope) => `authorized:${scope}`),
+      ...task.prohibitedScope.map((scope) => `prohibited:${scope}`)
+    ],
+    finalSuccessConditions: task.successConditions,
+    steps: goal.steps
+  }) : normalizeDurableTaskPlan(stored);
+  if (plan.taskId !== task.id) throw new OperatorError('TASK_PLAN_INVALID', 'Durable task plan belongs to a different task.');
+  task.execution!.plannerState.durablePlan = plan;
+  return plan;
 }
 
 function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {
@@ -1723,13 +1769,21 @@ function parseGoal(input: unknown, expectedKind: string): SemanticTaskGoal {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(key) || keys.has(key)) throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous step keys must be unique bounded identifiers.');
       keys.add(key);
       const title = boundedText(raw.title, 512, `autonomous steps[${index}].title`);
+      const parentKey = raw.parentKey === undefined ? undefined : boundedText(raw.parentKey, 128, `autonomous steps[${index}].parentKey`);
+      const dependsOn = raw.dependsOn === undefined ? undefined : boundedTextArray(raw.dependsOn, 20, 128, `autonomous steps[${index}].dependsOn`);
+      const resourceScope = raw.resourceScope === undefined ? undefined : boundedTextArray(raw.resourceScope, 100, 4096, `autonomous steps[${index}].resourceScope`);
       const observe = normalizeAutonomousAction(raw.observe, `autonomous steps[${index}].observe`, true);
       const action = normalizeAutonomousAction(raw.action, `autonomous steps[${index}].action`, false);
       const verifyRaw = raw.verify && typeof raw.verify === 'object' && !Array.isArray(raw.verify) ? raw.verify as Record<string, unknown> : undefined;
       if (!verifyRaw) throw new OperatorError('TASK_GOAL_INVALID', `autonomous steps[${index}].verify is invalid.`);
       const verify = { ...normalizeAutonomousAction(verifyRaw, `autonomous steps[${index}].verify`, true), assertions: normalizeTaskStateAssertions(verifyRaw.assertions, `autonomous steps[${index}].verify.assertions`) };
-      return { key, title, observe, action, verify };
+      return { key, title, ...(parentKey ? { parentKey } : {}), ...(dependsOn ? { dependsOn } : {}), ...(resourceScope ? { resourceScope } : {}), observe, action, verify };
     });
+    const stepKeys = new Set(goal.steps.map((step) => step.key));
+    for (const step of goal.steps) {
+      if (step.parentKey !== undefined && (!stepKeys.has(step.parentKey) || step.parentKey === step.key)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${step.key} has an invalid parentKey.`);
+      if (step.dependsOn?.some((dependency) => !stepKeys.has(dependency) || dependency === step.key)) throw new OperatorError('TASK_GOAL_INVALID', `Autonomous step ${step.key} has an invalid dependency.`);
+    }
   } else if (goal.kind === 'app-operation') {
     goal.selector = normalizeUiaTaskSelector(goal.selector, 'app selector');
     if (goal.verifySelector !== undefined) goal.verifySelector = normalizeUiaTaskSelector(goal.verifySelector, 'app verifySelector');

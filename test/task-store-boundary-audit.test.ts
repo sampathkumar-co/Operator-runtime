@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { TaskStore } from '../src/core/task-store.ts';
 import { createTask, type TaskCapsule } from '../src/core/task.ts';
+import { createDurableTaskPlan } from '../src/core/task-plan.ts';
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -180,6 +181,25 @@ test('TaskStore rejects malformed durable execution records and impossible timin
   (execution.records[0] as any).finishedAt = now;
   await writePersisted(state, value.id, { ...value, execution });
   await expectCorrupt(() => new TaskStore(state).get(value.id), /cannot finish while STARTED/);
+});
+
+test('TaskStore rejects a corrupt persisted hierarchical plan before execution', async (t) => {
+  const state = await tempDir(t, 'operator-task-bad-plan-');
+  const value = task();
+  const action = { capability: 'file.info', input: { path: 'C:/bounded' } };
+  const plan = createDurableTaskPlan({
+    taskId: value.id, objective: value.userObjective, constraints: ['bounded'], finalSuccessConditions: value.successConditions,
+    steps: [{ key: 'one', title: 'one', observe: action, action, verify: { ...action, assertions: [{ path: 'exists', operator: 'equals', value: true }] } }],
+    now: value.createdAt
+  });
+  plan.subgoals[0]!.id = 'forged-subgoal';
+  value.execution = {
+    schemaVersion: 1, plannerId: 'operator.autonomous-workflow.v1', goalKind: 'autonomous-workflow',
+    plannerState: { phase: 'start', durablePlan: plan }, maxSteps: 10, maxAttemptsPerStep: 2,
+    timeoutMs: 1000, stepCount: 0, records: []
+  };
+  await writePersisted(state, value.id, value);
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /durable task plan/);
 });
 
 test('TaskStore keeps observation schema v1 readable while validating normalized schema v2', async (t) => {

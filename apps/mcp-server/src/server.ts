@@ -360,6 +360,9 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       steps: z.array(z.object({
         key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
         title: z.string().min(1).max(512),
+        parentKey: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/).optional(),
+        dependsOn: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/)).max(20).optional(),
+        resourceScope: z.array(z.string().min(1).max(4096)).max(100).optional(),
         observe: autonomousReadAction,
         action: autonomousAction,
         verify: autonomousVerifyAction

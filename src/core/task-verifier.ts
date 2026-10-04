@@ -447,6 +447,13 @@ function builtinPlannerStateIsTerminal(task: TaskCapsule): boolean {
     const goal = state.goal;
     if (!goal || typeof goal !== 'object' || Array.isArray(goal)) return false;
     const steps = (goal as Record<string, unknown>).steps;
+    const plan = state.durablePlan;
+    if (plan && typeof plan === 'object' && !Array.isArray(plan)) {
+      const subgoals = (plan as Record<string, unknown>).subgoals;
+      return Array.isArray(steps) && Array.isArray(subgoals) && subgoals.length >= steps.length
+        && subgoals.every((item) => item && typeof item === 'object' && ['VERIFIED', 'CANCELLED'].includes(String((item as Record<string, unknown>).status)))
+        && state.autonomousPhase === 'observe' && state.activeSubgoalId === undefined;
+    }
     const index = Number(state.workflowIndex ?? 0);
     return Array.isArray(steps) && Number.isSafeInteger(index) && index === steps.length && state.autonomousPhase === 'observe';
   }

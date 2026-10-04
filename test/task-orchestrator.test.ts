@@ -157,6 +157,11 @@ test('generic autonomous workflow observes, mutates through the kernel boundary,
     'autonomous:0:observe', 'autonomous:0:action', 'autonomous:0:verify'
   ]);
   assert.equal(completed.execution?.plannerState.workflowIndex, 1);
+  const durablePlan = completed.execution?.plannerState.durablePlan as any;
+  assert.equal(durablePlan.schemaVersion, 1);
+  assert.equal(durablePlan.subgoals[0].status, 'VERIFIED');
+  assert.equal(durablePlan.subgoals[0].attempts, 1);
+  assert.deepEqual(durablePlan.subgoals[0].requiredEvidence, ['fresh-machine-observation', 'canonical-verification']);
   assert.equal(await fs.readFile(target, 'utf8'), content);
   assert.ok(completed.evidence.some((item) => item.kind === 'autonomous_step_verified'));
 });
