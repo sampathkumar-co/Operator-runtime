@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 import { BrowserCdpProvider } from '../src/capabilities/browser-cdp.ts';
-import { performSemanticInteraction } from '../src/capabilities/browser-cdp-frames.ts';
+import { observedDropPointFunction, performSemanticInteraction } from '../src/capabilities/browser-cdp-frames.ts';
 
 type Listener = (event: any) => void;
 
@@ -810,4 +810,67 @@ test('drag_between revalidates two observed refs and uses a verified free point 
   assert.deepEqual(nativeEvents[1], { type: 'mousePressed', x: 30, y: 30, button: 'left', buttons: 1, clickCount: 1 });
   assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 225, y: 150, button: 'left', buttons: 0, clickCount: 1 });
   assert.ok(nativeEvents.length > 6);
+});
+
+test('observed drop point skips an occupied center and uses a bounded alternate point', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const occupied = {};
+  const destination: any = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 100, y: 200, width: 80, height: 40 }),
+    contains: (candidate: unknown) => candidate === destination,
+    ownerDocument: {
+      elementFromPoint: (x: number, y: number) => x === 140 && y === 220 ? occupied : destination
+    }
+  };
+  (globalThis as any)[registryKey] = { refs: new Map([['b-destination', destination]]) };
+  t.after(() => { delete (globalThis as any)[registryKey]; });
+
+  assert.deepEqual(observedDropPointFunction('b-destination'), { ok: true, xRatio: 0.25, yRatio: 0.25 });
+});
+
+test('drag_between fails closed before native input when every destination point is blocked', async () => {
+  const nativeEvents: any[] = [];
+  const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const destination = { tag: 'div', role: 'pointer', name: 'Drop zone', identity: '#destination', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 210, y: 120, width: 60, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedDropPointFunction')) return { result: { value: { ok: false, occluded: true, error: 'Observed drop target has no currently hit-testable point.' } } };
+        return { result: { value: { count: 1, matches: [expression.includes('b-destination') ? destination : source] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+
+  await assert.rejects(
+    performSemanticInteraction(session as any, { operation: 'drag_between', target: { ref: 'b-source' }, toTarget: { ref: 'b-destination' }, value: null }),
+    (error: any) => error?.code === 'BROWSER_TARGET_STALE' && error?.retryable === true
+  );
+  assert.deepEqual(nativeEvents, []);
+});
+
+test('drag_between keeps source actionability strict when the source is occluded', async () => {
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        assert.ok(!expression.includes("'drop'"));
+        return { result: { value: { count: 0, matches: [] } } };
+      }
+      assert.notEqual(method, 'Input.dispatchMouseEvent');
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+
+  await assert.rejects(
+    performSemanticInteraction(session as any, { operation: 'drag_between', target: { ref: 'b-source' }, toTarget: { ref: 'b-destination' }, value: null }),
+    (error: any) => error?.code === 'BROWSER_TARGET_STALE' && error?.retryable === true
+  );
 });
