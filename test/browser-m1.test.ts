@@ -829,6 +829,23 @@ test('observed drop point skips an occupied center and uses a bounded alternate 
   assert.deepEqual(observedDropPointFunction('b-destination'), { ok: true, xRatio: 0.25, yRatio: 0.25 });
 });
 
+test('observed drop point can use the painted edge of an otherwise transparent SVG region', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const svgRoot = {};
+  const destination: any = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 100, y: 200, width: 80, height: 40 }),
+    contains: (candidate: unknown) => candidate === destination,
+    ownerDocument: {
+      elementFromPoint: (x: number, y: number) => x === 100.5 && y === 220 ? destination : svgRoot
+    }
+  };
+  (globalThis as any)[registryKey] = { refs: new Map([['b-destination', destination]]) };
+  t.after(() => { delete (globalThis as any)[registryKey]; });
+
+  assert.deepEqual(observedDropPointFunction('b-destination'), { ok: true, xRatio: 0.00625, yRatio: 0.5 });
+});
+
 test('drag_between fails closed before native input when every destination point is blocked', async () => {
   const nativeEvents: any[] = [];
   const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };

@@ -493,7 +493,9 @@ export function observedDropPointFunction(ref: string) {
   const candidates = [
     [0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
     [0.5, 0.25], [0.5, 0.75], [0.25, 0.5], [0.75, 0.5],
-    [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]
+    [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9],
+    [Math.min(0.5, 0.5 / rect.width), 0.5], [Math.max(0.5, 1 - 0.5 / rect.width), 0.5],
+    [0.5, Math.min(0.5, 0.5 / rect.height)], [0.5, Math.max(0.5, 1 - 0.5 / rect.height)]
   ];
   for (const [xRatio, yRatio] of candidates) {
     const x = rect.x + rect.width * xRatio;
