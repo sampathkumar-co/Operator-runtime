@@ -6,6 +6,7 @@ import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContex
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
+import { inspectProcessInstance } from '../core/process-instance.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -778,18 +779,11 @@ async function runTasklistVerbose(signal?: AbortSignal, pidFilter?: number): Pro
 }
 
 async function queryProcessCreationTime(pid: number, signal?: AbortSignal): Promise<string | undefined> {
-  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-  const executable = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const command = `(Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = ${pid}').CreationDate.ToUniversalTime().ToString('O')`;
-  const output = await runProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], process.cwd(), 10_000, 64 * 1024, {}, signal);
-  if (output.exitCode !== 0) {
-    if (!processAlive(pid)) return undefined;
-    throw new OperatorError('PROCESS_INSTANCE_IDENTITY_UNAVAILABLE', 'Could not read the process creation timestamp.');
-  }
-  const creationTime = output.stdout.trim();
-  if (!creationTime) return undefined;
-  if (creationTime.length > 128 || Number.isNaN(Date.parse(creationTime))) throw new OperatorError('PROCESS_INSTANCE_IDENTITY_INVALID', 'Process creation timestamp was invalid.');
-  return creationTime;
+  if (signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Process inspection was cancelled.', { retryable: false });
+  const identity = await inspectProcessInstance(pid);
+  if (identity) return identity.started;
+  if (!processAlive(pid)) return undefined;
+  throw new OperatorError('PROCESS_INSTANCE_IDENTITY_UNAVAILABLE', 'Could not read the process creation timestamp.');
 }
 
 function parseCsvLine(line: string): string[] {
