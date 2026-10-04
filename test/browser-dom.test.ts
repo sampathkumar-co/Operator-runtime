@@ -681,6 +681,28 @@ test('focusable slider widgets expose their container name and use keyboard acti
   assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
 });
 
+test('legacy slider value readback stays associated with the nearest following output', (t) => {
+  const root = new FakeRoot();
+  const group = new FakeElement('div');
+  const firstTrack = new FakeElement('div'); firstTrack.setAttribute('class', 'ui-slider'); firstTrack.setAttribute('id', 'first-slider'); firstTrack.parentElement = group;
+  const firstOutput = new FakeElement('div', '2'); firstOutput.parentElement = group;
+  const secondTrack = new FakeElement('div'); secondTrack.setAttribute('class', 'ui-slider'); secondTrack.setAttribute('id', 'second-slider'); secondTrack.parentElement = group;
+  const secondOutput = new FakeElement('div', '5'); secondOutput.parentElement = group;
+  const firstHandle = new FakeElement('span'); firstHandle.setAttribute('class', 'ui-slider-handle'); firstHandle.setAttribute('tabindex', '0'); firstHandle.tabIndex = 0; firstHandle.parentElement = firstTrack;
+  const secondHandle = new FakeElement('span'); secondHandle.setAttribute('class', 'ui-slider-handle'); secondHandle.setAttribute('tabindex', '0'); secondHandle.tabIndex = 0; secondHandle.parentElement = secondTrack;
+  firstTrack.children = [firstHandle]; secondTrack.children = [secondHandle];
+  group.children = [firstTrack, firstOutput, secondTrack, secondOutput];
+  attach(root, group, firstTrack, firstHandle, firstOutput, secondTrack, secondHandle, secondOutput); installDocument(t, root);
+
+  const sliders = (semanticSnapshotFunction() as any).controls.filter((item: any) => item.role === 'slider');
+  assert.deepEqual(sliders.map((item: any) => [item.name, item.value]), [['first-slider', '2'], ['second-slider', '5']]);
+  const result = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'second-slider' }, value: 8 }) as any;
+  assert.equal(result.ok, true); assert.deepEqual(result.pendingKeys, Array(3).fill('ArrowRight'));
+  secondOutput.textContent = '8';
+  const verified = interactionFunction({ operation: 'verify_value', target: { role: 'slider', name: 'second-slider' }, value: 8 }) as any;
+  assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
+});
+
 
 test('Browser Observation V2 refs are ephemeral, relationship-aware, and heal only a unique semantic replacement', (t) => {
   const root = new FakeRoot();

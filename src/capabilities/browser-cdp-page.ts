@@ -664,12 +664,13 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const root = legacySliderRoot(element);
     const parent = root?.parentElement;
     const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
-    for (const sibling of Array.from(parent?.children ?? [])) {
-      if (sibling === root) continue;
-      const candidate = trim(sibling.textContent, 80);
-      if (numeric.test(candidate)) return candidate;
-    }
-    return '';
+    const siblings = Array.from(parent?.children ?? []);
+    const rootIndex = root ? siblings.indexOf(root) : -1;
+    return siblings
+      .map((sibling, index) => ({ index, candidate: sibling === root ? '' : trim(sibling.textContent, 80) }))
+      .filter(entry => numeric.test(entry.candidate))
+      .sort((left, right) => Math.abs(left.index - rootIndex) - Math.abs(right.index - rootIndex)
+        || Number(left.index < rootIndex) - Number(right.index < rootIndex))[0]?.candidate ?? '';
   };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
@@ -1149,12 +1150,13 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
   const displayedSliderValue = (element: Element) => {
     const root = legacySliderRoot(element);
     const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
-    for (const sibling of Array.from(root?.parentElement?.children ?? [])) {
-      if (sibling === root) continue;
-      const candidate = trim(sibling.textContent);
-      if (numeric.test(candidate)) return candidate;
-    }
-    return '';
+    const siblings = Array.from(root?.parentElement?.children ?? []);
+    const rootIndex = root ? siblings.indexOf(root) : -1;
+    return siblings
+      .map((sibling, index) => ({ index, candidate: sibling === root ? '' : trim(sibling.textContent) }))
+      .filter(entry => numeric.test(entry.candidate))
+      .sort((left, right) => Math.abs(left.index - rootIndex) - Math.abs(right.index - rootIndex)
+        || Number(left.index < rootIndex) - Number(right.index < rootIndex))[0]?.candidate ?? '';
   };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
