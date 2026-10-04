@@ -9,6 +9,7 @@ import { DurableSagaKernel } from '../src/core/durable-saga.ts';
 import { kernelVerificationDigest } from '../src/core/action-verification.ts';
 import { IntentRegistry, bindingForIntent } from '../src/core/intent-registry.ts';
 import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
+import { resolvePhysicalResourceKeysForAction } from '../src/core/resource-identity.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import { StudioWorkflowExecutor } from '../src/core/studio-executor.ts';
 import { TeachModeStore } from '../src/core/studio-teach.ts';
@@ -175,7 +176,7 @@ test('newest intent wins before provider dispatch', async (t) => {
     id: 'intent-stale-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(v1)
   }, permissions(['computer.inspect']));
@@ -193,7 +194,7 @@ test('approval-required stays deferred and same action id can dispatch after app
     id: 'danger-action',
     capability: 'file.replace',
     risk: 'destructive',
-    input: { key: 'danger', value: 1 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'danger', value: 1 },
     provenance: { kind: 'trusted_policy' }
   };
 
@@ -233,7 +234,7 @@ test('uncertain mutation is reconciled by provider and journal completes without
     id: 'uncertain-action',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 42, behavior: 'uncertain' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 42, behavior: 'uncertain' },
     provenance: { kind: 'trusted_policy' }
   };
   const result = await kernel.execute(action, permissions(['file.write']));
@@ -263,14 +264,14 @@ test('durable saga compensates completed mutations after later definite failure'
           id: 'saga-set-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
           provenance: { kind: 'trusted_policy' }
         },
         compensation: {
           id: 'saga-restore-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 0 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 0 },
           provenance: { kind: 'trusted_policy' }
         }
       },
@@ -280,7 +281,7 @@ test('durable saga compensates completed mutations after later definite failure'
           id: 'saga-fail-next',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'next', behavior: 'fail' },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'next', behavior: 'fail' },
           provenance: { kind: 'trusted_policy' }
         }
       }
@@ -311,7 +312,7 @@ test('durable saga restart recovers a completed mutation from journal without re
         id: 'saga-restart-set-x',
         capability: 'file.write',
         risk: 'write',
-        input: { key: 'x', value: 7 },
+        input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 7 },
         provenance: { kind: 'trusted_policy' }
       }
     }]
@@ -357,7 +358,7 @@ test('current cancel intent blocks forward execution before provider dispatch', 
     id: 'intent-cancel-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(cancelled)
   }, permissions(['computer.inspect']));
@@ -391,7 +392,7 @@ test('stale intent still permits reconciliation of an already-dispatched mutatio
     id: 'stale-reconcile-action',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 42, behavior: 'uncertain' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 42, behavior: 'uncertain' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(v1)
   };
@@ -399,7 +400,7 @@ test('stale intent still permits reconciliation of an already-dispatched mutatio
   const prior = await provider.execute(action);
   assert.equal(prior.ok, false);
   assert.equal(prior.error?.sideEffectState, 'uncertain');
-  await journal.prepare({ action, ownerKind: 'test', ownerId: 'reconcile', resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'test', ownerId: 'reconcile', resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
   await journal.observe(action.id, prior);
 
@@ -501,7 +502,7 @@ test('Studio run is cancelled before dispatch when a newer intent supersedes it'
     id: 'studio-demo-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' }
   };
   await teach.record(session.id, {
@@ -565,14 +566,14 @@ test('superseded saga intent stops new work but still allows compensation of pri
           id: 'intent-saga-set-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
           provenance: { kind: 'trusted_policy' }
         },
         compensation: {
           id: 'intent-saga-restore-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 0 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 0 },
           provenance: { kind: 'trusted_policy' }
         }
       },
@@ -582,7 +583,7 @@ test('superseded saga intent stops new work but still allows compensation of pri
           id: 'intent-saga-set-y',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'y', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'y', value: 1 },
           provenance: { kind: 'trusted_policy' }
         }
       }
@@ -634,7 +635,7 @@ test('completed mutation result replays from the central journal without provide
     id: 'journal-replay-mutation',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 91 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 91 },
     provenance: { kind: 'trusted_policy' }
   };
 
@@ -658,11 +659,11 @@ test('detached dispatched mutation reconciles to completed without provider repl
     id: 'journal-dispatched-reconcile',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 77 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 77 },
     provenance: { kind: 'trusted_policy' }
   };
 
-  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
   provider.values.set('x', 77);
 
@@ -681,11 +682,11 @@ test('reconciled not-applied mutation may dispatch exactly once after crash reco
     id: 'journal-not-applied-retry',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 13 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 13 },
     provenance: { kind: 'trusted_policy' }
   };
 
-  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
 
   const recovered = await kernel.execute(action, permissions(['file.write']));

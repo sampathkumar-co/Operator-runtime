@@ -15,7 +15,7 @@ import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts
 import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
-import { resourceKeysForAction } from './resource-identity.ts';
+import { resolvePhysicalResourceKeysForAction } from './resource-identity.ts';
 import type { IntentRegistry } from './intent-registry.ts';
 import type { ActionTransitionJournal } from './action-transition-journal.ts';
 import { validIntentBinding } from './intent-registry.ts';
@@ -569,7 +569,7 @@ export class TaskOrchestrator {
         if (this.#resourceLeases) {
           resourceLease = await this.#resourceLeases.acquire(
             task.id,
-            resourceKeysForAction(action),
+            await resolvePhysicalResourceKeysForAction(action),
             risk === 'read' ? 'shared' : 'exclusive'
           );
         }

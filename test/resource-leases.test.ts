@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
-import { resourceKeysForAction } from '../src/core/resource-identity.ts';
+import { CAPABILITY_RISK_RULES } from '../src/core/capability-policy.ts';
+import { RESOURCE_EXTRACTOR_CAPABILITIES, resolvePhysicalResourceKeysForAction, resourceKeysConflict, resourceKeysForAction, validateResourceExtractorCoverage } from '../src/core/resource-identity.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-resource-lease-'));
@@ -84,5 +85,64 @@ test('canonical resource identities are deterministic across scheduler layers', 
     input: { targetId: 'ABC' },
     provenance: { kind: 'runtime' }
   });
-  assert.deepEqual(browserKeys, ['browser:abc']);
+  assert.deepEqual(browserKeys, ['browser:session:default/target:abc']);
+});
+
+test('canonical resource extractor registry covers every policy capability and mutations never fall back to cap-global keys', () => {
+  validateResourceExtractorCoverage();
+  assert.deepEqual([...RESOURCE_EXTRACTOR_CAPABILITIES].sort(), Object.keys(CAPABILITY_RISK_RULES).sort());
+  const root = path.resolve(os.tmpdir(), 'operator-resource-coverage');
+  const inputFor = (capability: string): Record<string, unknown> => {
+    if (capability.startsWith('project.')) return { path: root, cwd: root };
+    if (capability === 'file.manage') return { operation: 'move', source: path.join(root, 'a'), destination: path.join(root, 'b') };
+    if (capability.startsWith('file.')) return { path: path.join(root, 'a') };
+    if (capability.startsWith('git.')) return { cwd: root };
+    if (capability.startsWith('docker.')) return { path: root };
+    if (capability.startsWith('postgres.')) return { path: root, profileId: 'main' };
+    if (capability === 'vscode.open') return { path: path.join(root, 'a') };
+    if (capability === 'terminal.execute') return { cwd: root };
+    if (capability === 'terminal.session') return { operation: 'start', cwd: root };
+    if (capability.startsWith('process.')) return { pid: 4242 };
+    if (capability.startsWith('browser.')) return { sessionId: 'session-a', targetId: 'tab-a' };
+    return {};
+  };
+
+  for (const [capability, rule] of Object.entries(CAPABILITY_RISK_RULES)) {
+    if (rule === 'read') continue;
+    const keys = resourceKeysForAction({
+      id: `coverage-${capability}`,
+      capability,
+      risk: 'write',
+      input: inputFor(capability),
+      provenance: { kind: 'runtime' }
+    });
+    assert.ok(keys.length > 0, capability);
+    assert.equal(keys.some((key) => key.startsWith('cap:')), false, capability);
+  }
+});
+
+test('physical resource identities conflict across repo and child-file capability families', async (t) => {
+  const state = await temp(t);
+  const root = path.join(state, 'project');
+  const child = path.join(root, 'nested', 'value.txt');
+  await fs.mkdir(path.dirname(child), { recursive: true });
+  await fs.writeFile(child, 'value');
+
+  const repoKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'repo-write', capability: 'git.write', risk: 'write',
+    input: { cwd: root }, provenance: { kind: 'runtime' }
+  });
+  const fileKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'file-write', capability: 'file.write', risk: 'write',
+    input: { path: child }, provenance: { kind: 'runtime' }
+  });
+  const repoPath = repoKeys.find((key) => key.startsWith('fs-path:'));
+  const filePath = fileKeys.find((key) => key.startsWith('fs-path:'));
+  assert.ok(repoPath && filePath);
+  assert.equal(resourceKeysConflict(repoPath!, filePath!), true);
+
+  const store = new ResourceLeaseStore(state);
+  const parent = await store.acquire('repo-owner', repoKeys, 'exclusive');
+  await assert.rejects(() => store.acquire('file-owner', fileKeys, 'exclusive'), (error: any) => error?.code === 'RESOURCE_BUSY');
+  await parent.release();
 });

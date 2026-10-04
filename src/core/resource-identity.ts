@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { CAPABILITY_RISK_RULES } from './capability-policy.ts';
+import { OperatorError } from './errors.ts';
 import type { ActionRequest } from './types.ts';
 
 function normalizedAbsolute(value: unknown): string | undefined {
@@ -13,44 +15,86 @@ function add(prefix: string, value: unknown, target: Set<string>): void {
   if (resolved) target.add(`${prefix}:${resolved}`);
 }
 
+export const RESOURCE_EXTRACTOR_CAPABILITIES = Object.freeze([
+  'computer.inspect',
+  'project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run',
+  'file.read', 'file.list', 'file.write', 'file.create', 'file.replace', 'file.info', 'file.search', 'file.manage',
+  'git.status', 'git.diff', 'git.rev-parse', 'git.checkpoint.inspect', 'git.checkpoint.create', 'git.checkpoint.restore', 'git.write',
+  'docker.inspect', 'docker.manage', 'compute.run', 'postgres.inspect', 'postgres.select',
+  'vscode.inspect', 'vscode.open', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage',
+  'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close',
+  'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.observe', 'perception.ground'
+] as const);
+const RESOURCE_EXTRACTOR_SET = new Set<string>(RESOURCE_EXTRACTOR_CAPABILITIES);
+
+export function validateResourceExtractorCoverage(): void {
+  const policyCapabilities = Object.keys(CAPABILITY_RISK_RULES).sort();
+  const extractorCapabilities = [...RESOURCE_EXTRACTOR_CAPABILITIES].sort();
+  if (policyCapabilities.join('\0') !== extractorCapabilities.join('\0')) {
+    const missing = policyCapabilities.filter((capability) => !RESOURCE_EXTRACTOR_SET.has(capability));
+    const extra = extractorCapabilities.filter((capability) => !(capability in CAPABILITY_RISK_RULES));
+    throw new Error(`Canonical resource extractor coverage mismatch; missing=[${missing.join(',')}], extra=[${extra.join(',')}]`);
+  }
+}
+validateResourceExtractorCoverage();
+
+function requiredSegment(value: unknown, fallback: string): string {
+  const raw = String(value ?? fallback).trim().toLowerCase();
+  return escapeSegment(raw || fallback);
+}
+
 /** Stable resource identities shared by Task, Team and future workflow schedulers. */
 export function resourceKeysForAction(action: ActionRequest): string[] {
+  if (!RESOURCE_EXTRACTOR_SET.has(action.capability)) {
+    throw new OperatorError('RESOURCE_EXTRACTOR_UNREGISTERED', `Capability ${action.capability} has no canonical resource extractor.`);
+  }
   const input = action.input;
   const keys = new Set<string>();
-  if (action.capability.startsWith('file.')) {
+
+  if (action.capability === 'computer.inspect') {
+    keys.add('computer:local');
+  } else if (action.capability.startsWith('file.')) {
     if (action.capability === 'file.manage') {
-      add('file', input.path, keys);
-      add('file', input.source, keys);
-      add('file', input.destination, keys);
-    } else {
-      add('file', input.path, keys);
-    }
+      add('file', input.path, keys); add('file', input.source, keys); add('file', input.destination, keys);
+    } else add('file', input.path, keys);
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
     add('repo', input.path ?? input.cwd, keys);
   } else if (action.capability.startsWith('docker.')) {
     add('docker', input.path, keys);
+  } else if (action.capability === 'compute.run') {
+    keys.add('compute:sandbox');
   } else if (action.capability.startsWith('postgres.')) {
     const root = normalizedAbsolute(input.path);
-    if (root) keys.add(`database:${root}:${String(input.profileId ?? 'profiles').toLowerCase()}`);
-  } else if (action.capability.startsWith('vscode.')) {
-    add('file', input.path, keys);
-    add('file', input.leftPath, keys);
-    add('file', input.rightPath, keys);
+    const profile = requiredSegment(input.profileId, 'profiles');
+    keys.add(root ? `database:${root}/profile:${profile}` : `database:profile:${profile}`);
+  } else if (action.capability === 'vscode.inspect') {
+    keys.add('vscode:installation');
+  } else if (action.capability === 'vscode.open') {
+    add('file', input.path, keys); add('file', input.leftPath, keys); add('file', input.rightPath, keys);
+    keys.add('desktop:windows/vscode');
   } else if (action.capability === 'terminal.execute') {
     add('workspace', input.cwd, keys);
   } else if (action.capability === 'terminal.session') {
     if (input.operation === 'start') add('workspace', input.cwd, keys);
-    else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
+    else if (typeof input.sessionId === 'string' && input.sessionId) keys.add(`process:session/${requiredSegment(input.sessionId, 'session')}`);
   } else if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
-    keys.add('process:windows');
+    const pid = Number(input.pid);
+    keys.add(Number.isSafeInteger(pid) && pid > 0 ? `process:windows/${pid}` : 'process:windows');
   } else if (action.capability.startsWith('browser.')) {
-    keys.add(`browser:${String(input.targetId ?? 'global').toLowerCase()}`);
+    const session = requiredSegment(input.sessionId, 'default');
+    const target = requiredSegment(input.targetId, 'global');
+    const frame = input.frameId === undefined ? '' : `/frame:${requiredSegment(input.frameId, 'global')}`;
+    keys.add(`browser:session:${session}/target:${target}${frame}`);
   } else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') {
     keys.add('desktop:windows');
-  } else {
-    keys.add(`cap:${action.capability.toLowerCase()}`);
+  } else if (action.capability === 'perception.observe' || action.capability === 'perception.ground') {
+    keys.add('perception:graph');
+  }
+
+  if (keys.size === 0) {
+    throw new OperatorError('RESOURCE_TARGET_REQUIRED', `Capability ${action.capability} did not resolve to a concrete resource identity.`);
   }
   return [...keys].sort();
 }
@@ -110,7 +154,7 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
 export function resourceKeysConflict(left: string, right: string): boolean {
   if (left === right) return true;
-  const hierarchicalPrefixes = ['fs-path:', 'browser:', 'database:', 'process:'];
+  const hierarchicalPrefixes = ['fs-path:', 'browser:', 'database:', 'process:', 'desktop:'];
   for (const prefix of hierarchicalPrefixes) {
     if (!left.startsWith(prefix) || !right.startsWith(prefix)) continue;
     const a = left.slice(prefix.length);
