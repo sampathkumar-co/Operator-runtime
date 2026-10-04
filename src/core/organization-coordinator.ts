@@ -28,6 +28,7 @@ export interface OrganizationWave {
   index: number;
   targetKeys: string[];
   state: 'PENDING' | 'RUNNING' | 'VERIFIED' | 'FAILED';
+  verificationDigest?: string;
   promotedAt?: string;
   promotionDigest?: string;
 }
@@ -241,6 +242,7 @@ export class OrganizationCoordinator {
         } else if (members.some((item) => item.state === 'BLOCKED')) {
           program.state = 'BLOCKED';
         } else if (members.every((item) => item.state === 'VERIFIED')) {
+          wave.verificationDigest = await this.#verifiedWaveDigest(program, wave);
           wave.state = 'VERIFIED';
           program.state = 'PAUSED';
         }
@@ -253,10 +255,18 @@ export class OrganizationCoordinator {
     const id = validUuid(idInput, 'programId');
     await this.recoverPendingCompensations();
     await this.#assertNoPendingCompensation(id);
-    const verificationDigest = shaDigest(verificationDigestInput, 'verificationDigest');
+    const expectedVerificationDigest = shaDigest(verificationDigestInput, 'verificationDigest');
     return await this.#mutate(id, async (program, transaction) => {
       const wave = program.waves[program.activeWave];
       if (!wave || wave.state !== 'VERIFIED') throw new OperatorError('ORGANIZATION_PROMOTION_DENIED', 'Current rollout wave is not independently verified.');
+      const verificationDigest = await this.#verifiedWaveDigest(program, wave);
+      if (wave.verificationDigest && wave.verificationDigest !== verificationDigest) {
+        throw new OperatorError('ORGANIZATION_VERIFICATION_DRIFT', 'Current rollout wave verification evidence changed after it was marked verified.');
+      }
+      if (expectedVerificationDigest !== verificationDigest) {
+        throw new OperatorError('ORGANIZATION_VERIFICATION_DIGEST_MISMATCH', 'Promotion digest does not match the current machine-derived wave verification proof.');
+      }
+      wave.verificationDigest = verificationDigest;
       wave.promotedAt = this.#clock().toISOString();
       wave.promotionDigest = verificationDigest;
       if (program.activeWave >= program.waves.length - 1) {
@@ -269,6 +279,41 @@ export class OrganizationCoordinator {
       await this.#startWave(program, program.activeWave, transaction);
       program.updatedAt = this.#clock().toISOString();
     });
+  }
+
+  async #verifiedWaveDigest(program: OrganizationProgram, wave: OrganizationWave): Promise<string> {
+    const proofs: Array<Record<string, unknown>> = [];
+    for (const targetKey of [...wave.targetKeys].sort()) {
+      const target = program.targets.find((candidate) => candidate.key === targetKey);
+      if (!target || target.state !== 'VERIFIED' || !target.missionId) {
+        throw new OperatorError('ORGANIZATION_VERIFICATION_MISSING', `Target ${targetKey} is missing a verified mission proof.`);
+      }
+      const mission = await this.#teams.inspect(target.missionId);
+      if (mission.state !== 'VERIFIED') {
+        throw new OperatorError('ORGANIZATION_VERIFICATION_MISSING', `Target ${targetKey} mission is not currently verified.`);
+      }
+      const verifiers = mission.workItems.filter((item) =>
+        item.role === 'verifier'
+        && item.state === 'COMPLETED'
+        && item.result?.verificationPassed === true
+        && typeof item.result.verificationDigest === 'string'
+        && /^[0-9a-f]{64}$/i.test(item.result.verificationDigest)
+      ).map((item) => ({
+        workItemId: item.id,
+        verificationDigest: item.result!.verificationDigest!.toLowerCase(),
+        worldObservationDigest: item.result?.worldObservationDigest ?? null
+      })).sort((left, right) => left.workItemId.localeCompare(right.workItemId));
+      if (verifiers.length === 0) {
+        throw new OperatorError('ORGANIZATION_VERIFICATION_MISSING', `Target ${targetKey} has no accepted verifier receipt.`);
+      }
+      proofs.push({ targetKey, missionId: mission.id, verifiers });
+    }
+    return crypto.createHash('sha256').update(JSON.stringify({
+      purpose: 'mecord-organization-wave-verification-v1',
+      programId: program.id,
+      waveIndex: wave.index,
+      proofs
+    })).digest('hex');
   }
 
   async pause(idInput: string): Promise<OrganizationProgram> {
@@ -520,8 +565,12 @@ function validateProgram(program: OrganizationProgram): void {
     boundedInteger(wave.index, 0, program.waves.length - 1, 'wave index');
     if (!Array.isArray(wave.targetKeys) || wave.targetKeys.length < 1 || wave.targetKeys.some((key) => !targetKeys.has(key))) throw corrupt('Wave targets are invalid.');
     if (!['PENDING', 'RUNNING', 'VERIFIED', 'FAILED'].includes(wave.state)) throw corrupt('Wave state is invalid.');
+    if (wave.verificationDigest !== undefined) shaDigest(wave.verificationDigest, 'verificationDigest');
     if (wave.promotedAt !== undefined) validIso(wave.promotedAt, 'promotedAt');
     if (wave.promotionDigest !== undefined) shaDigest(wave.promotionDigest, 'promotionDigest');
+    if (wave.promotionDigest !== undefined && wave.verificationDigest !== undefined && wave.promotionDigest !== wave.verificationDigest) {
+      throw corrupt('Wave promotion digest must be bound to the wave verification digest.');
+    }
   }
 }
 
