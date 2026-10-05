@@ -5,6 +5,8 @@ export * from './belief-binding.ts';
 export * from './plan-search.ts';
 export * from './execution-compiler.ts';
 export * from './plan-monitor.ts';
+export * from './choice-policy.ts';
+export * from './plan-revision.ts';
 export * from './infeasibility.ts';
 export * from './commit-protocol.ts';
 export * from './lineage.ts';
