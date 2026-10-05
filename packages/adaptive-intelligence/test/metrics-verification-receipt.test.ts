@@ -110,3 +110,24 @@ test('future-dated final receipt fails closed',()=>{
     finalVerificationReceipt:receipt('goal-1',{verifiedAt:'2026-10-05T00:00:01.000Z'})
   }],{now:new Date(T0)}),/future-dated/);
 });
+
+test('computed metrics bind their own run and canonical task cohort',()=>{
+  const metrics=computeIntelligenceMetrics([
+    {runId:RUN,taskId:'task-1',goalId:'goal-1',steps:[]},
+    {runId:RUN,taskId:'task-2',goalId:'goal-2',steps:[]}
+  ],{now:new Date(T0)});
+  assert.equal(metrics.evaluationRunId,RUN);
+  assert.match(metrics.taskCohortDigest??'',/^[0-9a-f]{64}$/);
+});
+
+test('computed metrics reject mixed evaluation runs and duplicate task identities',()=>{
+  assert.throws(()=>computeIntelligenceMetrics([
+    {runId:'run-a',taskId:'task-1',goalId:'goal-1',steps:[]},
+    {runId:'run-b',taskId:'task-2',goalId:'goal-2',steps:[]}
+  ],{now:new Date(T0)}),/multiple evaluation run ids/);
+
+  assert.throws(()=>computeIntelligenceMetrics([
+    {runId:RUN,taskId:'task-1',goalId:'goal-1',steps:[]},
+    {runId:RUN,taskId:'task-1',goalId:'goal-2',steps:[]}
+  ],{now:new Date(T0)}),/must be unique/);
+});
