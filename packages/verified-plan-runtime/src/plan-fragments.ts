@@ -34,20 +34,30 @@ export interface ExtractFragmentInput {
 
 export function extractPlanFragment(input:ExtractFragmentInput):PlanFragmentCandidate{
   if((input.benchmarkIdentifiers??[]).length) throw new Error('benchmark identifiers are forbidden in reusable plan fragments.');
-  const sourceRunIds=unique(input.sourceRunIds.map((v)=>bounded(v,256,'sourceRunId')));
+  const sourceRunIds=uniqueSorted(input.sourceRunIds.map((v)=>bounded(v,256,'sourceRunId')));
   if(sourceRunIds.length<2) throw new Error('reusable plan fragment requires at least two independent source runs.');
-  const verificationDigests=unique(input.verificationDigests.map((v)=>sha256(v,'verificationDigest')));
+  const verificationDigests=uniqueSorted(input.verificationDigests.map((v)=>sha256(v,'verificationDigest')));
   if(verificationDigests.length<2) throw new Error('reusable plan fragment requires independent verification evidence.');
 
-  const selectedIds=unique(input.nodeIds.map((v)=>bounded(v,256,'nodeId')));
+  if(!Array.isArray(input.nodeIds)) throw new Error('plan fragment nodeIds are required.');
+  const selectedIds=input.nodeIds.map((v)=>bounded(v,256,'nodeId'));
   if(!selectedIds.length) throw new Error('plan fragment requires at least one node.');
+  if(new Set(selectedIds).size!==selectedIds.length) throw new Error('plan fragment nodeIds must be unique and ordered.');
+
   const nodeById=new Map(input.graph.nodes.map((n)=>[n.id,n]));
   const stateById=new Map(input.states.map((s)=>[s.nodeId,s]));
-  const selected=selectedIds.map((id)=>{
+  const selectedIndex=new Map(selectedIds.map((id,index)=>[id,index]));
+  const selected=selectedIds.map((id,index)=>{
     const node=nodeById.get(id);
     if(!node) throw new Error('fragment references unknown plan node: '+id);
     if(!['OBSERVE','ACTION','VERIFY'].includes(node.kind)) throw new Error('fragment may contain only executable/verification nodes.');
     if(stateById.get(id)?.status!=='SUCCEEDED') throw new Error('fragment may learn only from succeeded plan nodes.');
+    for(const dependencyId of node.dependsOn){
+      const dependencyIndex=selectedIndex.get(dependencyId);
+      if(dependencyIndex!==undefined&&dependencyIndex>=index){
+        throw new Error('plan fragment nodeIds must preserve dependency execution order.');
+      }
+    }
     return node;
   });
 
@@ -73,6 +83,6 @@ function alias(factKey:string,aliases:Record<string,string>):string{
   if(mapped===factKey) throw new Error('fact alias must abstract the source fact rather than copy it.');
   return bounded(mapped,256,'factAlias');
 }
-function unique(v:string[]):string[]{return [...new Set(v)].sort();}
+function uniqueSorted(v:string[]):string[]{return [...new Set(v)].sort();}
 function bounded(v:unknown,m:number,l:string):string{if(typeof v!=='string'||!v||v.length>m)throw new Error(l+' is invalid.');return v;}
 function sha256(v:unknown,l:string):string{if(typeof v!=='string'||!/^[0-9a-fA-F]{64}$/.test(v))throw new Error(l+' must be SHA-256.');return v.toLowerCase();}
