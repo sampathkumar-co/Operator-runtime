@@ -169,3 +169,19 @@ test('shadow outcome run and goal identity must match both trace and receipt',()
     outcome(control.decisionDigest,'failure')
   ],{now:new Date(T0)}),/receipt goal id does not match/);
 });
+
+test('shadow verification receipt cannot be replayed across tasks',()=>{
+  const {log,shadow,control}=pair({decisionPointId:'point-1'});
+  assert.throws(()=>compareShadowToControl(log.snapshot(),[
+    outcome(shadow.decisionDigest,'success',{taskId:'other-task'}),
+    outcome(control.decisionDigest,'failure')
+  ],{now:new Date(T0)}),/receipt task id does not match/);
+});
+
+test('shadow verification receipt cannot be replayed across decisions',()=>{
+  const {log,shadow,control}=pair({decisionPointId:'point-1'});
+  assert.throws(()=>compareShadowToControl(log.snapshot(),[
+    outcome(shadow.decisionDigest,'success',{decisionDigest:control.decisionDigest}),
+    outcome(control.decisionDigest,'failure')
+  ],{now:new Date(T0)}),/receipt digest binding does not match/);
+});
