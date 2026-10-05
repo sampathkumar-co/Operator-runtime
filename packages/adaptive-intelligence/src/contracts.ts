@@ -62,6 +62,15 @@ export interface VerificationReceiptRef {
   authoritySnapshotDigest: string;
 }
 
+/**
+ * Verification receipt reference used for reusable learning promotion.
+ * The source run binding prevents a receipt from being detached from the
+ * trajectory that produced the candidate skill.
+ */
+export interface LearningVerificationReceiptRef extends VerificationReceiptRef {
+  sourceRunId: string;
+}
+
 export interface StateFact {
   key: string;
   valueDigest: string;
