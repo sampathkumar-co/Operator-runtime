@@ -272,9 +272,11 @@ function step(index:number,effect:string,failed:boolean):TrajectoryStep{
   };
 }
 
-function finalMetricReceipt(goalId:string){
+function finalMetricReceipt(goalId:string,taskId='task',runId='run-1'){
   return{
     digest:C,
+    runId,
+    taskId,
     goalId,
     verifierId:'verification-kernel',
     verifiedAt:T0,
@@ -284,6 +286,7 @@ function finalMetricReceipt(goalId:string){
 
 test('same action family on different expected effects is not counted as repeated equivalent failure',()=>{
   const result=computeIntelligenceMetrics([{
+    runId:'run-1',
     taskId:'task',
     goalId:'goal-task',
     steps:[step(0,'left.changed',true),step(1,'right.changed',true)]
@@ -293,6 +296,7 @@ test('same action family on different expected effects is not counted as repeate
 
 test('eventual success after any failure is recovery success, not first-strategy success',()=>{
   const result=computeIntelligenceMetrics([{
+    runId:'run-1',
     taskId:'task',
     goalId:'goal-task',
     steps:[step(0,'phase.one',true),step(1,'phase.two',true),step(2,'goal.done',false)],
