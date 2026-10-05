@@ -28,6 +28,17 @@ export function validatePlanGraph(goal: CompiledGoal, graph: PlanGraph): PlanGra
       if (dep === node.id) throw new Error('node cannot depend on itself.');
     }
   }
+  const choiceGroups=new Map<string,PlanNode[]>();
+  for(const node of nodes){
+    if(!node.choiceGroup) continue;
+    const current=choiceGroups.get(node.choiceGroup)??[];
+    current.push(node); choiceGroups.set(node.choiceGroup,current);
+  }
+  for(const [group,alternatives] of choiceGroups){
+    if(alternatives.length<2) throw new Error('choice group must contain at least two alternatives: '+group);
+    const parentKeys=new Set(alternatives.map((n)=>n.parentId??'__root__'));
+    if(parentKeys.size!==1) throw new Error('choice alternatives must share the same hierarchical parent: '+group);
+  }
   assertAcyclic(nodes);
   return {
     planId: bounded(graph.planId, 256, 'plan.planId'),
