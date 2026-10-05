@@ -21,3 +21,5 @@ export * from './versioned-state.ts';
 export * from './hypothesis-pruning.ts';
 export * from './shadow-comparison.ts';
 export * from './promotion-ledger.ts';
+export * from './trajectory-integrity.ts';
+export * from './shadow-adoption-gate.ts';
