@@ -176,10 +176,21 @@ test('goal facts do not become GOAL_ACHIEVED without independent verification', 
     progressSignals: ['saved']
   });
   const goal: GoalDescriptor = { id: 'g1', kind: 'synthetic', objective: 'save', successFactKeys: ['goal.saved'] };
-  const unverified = assessProgress({ goal, transition, beliefs, independentVerification: false });
+  const unverified = assessProgress({ goal, transition, beliefs });
   assert.equal(unverified.level, 'SUBGOAL_PROGRESS');
   assert.equal(unverified.verificationRequired, true);
-  const verified = assessProgress({ goal, transition, beliefs, independentVerification: true });
+  const verified = assessProgress({
+    goal,
+    transition,
+    beliefs,
+    verificationReceipt: {
+      digest: E,
+      goalId: 'g1',
+      verifierId: 'synthetic-verification-kernel',
+      verifiedAt: T0,
+      authoritySnapshotDigest: D
+    }
+  });
   assert.equal(verified.level, 'GOAL_ACHIEVED');
 });
 
@@ -237,7 +248,13 @@ test('adaptive kernel composes causal truth, failure reasoning and verified prog
     after: snapshot('after', [fact('goal.saved', A)], 'v2'),
     relevantFactKeys: ['goal.saved'],
     progressSignals: ['saved'],
-    independentVerification: true
+    verificationReceipt: {
+      digest: E,
+      goalId: 'goal-1',
+      verifierId: 'synthetic-verification-kernel',
+      verifiedAt: T0,
+      authoritySnapshotDigest: D
+    }
   });
   assert.equal(result.progress.level, 'GOAL_ACHIEVED');
   assert.equal(result.failure, undefined);
