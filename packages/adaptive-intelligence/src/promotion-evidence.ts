@@ -135,7 +135,8 @@ function assertComparableEvaluationContext(
     'benchmarkId',
     'benchmarkDigest',
     'seed',
-    'authorityPolicyDigest'
+    'authorityPolicyDigest',
+    'procedureSnapshotDigest'
   ];
   for(const field of fields){
     if((candidate[field]??null)!==(baseline[field]??null)){
