@@ -25,18 +25,34 @@ export function compileGoal(input: GoalDraft): CompiledGoal {
     ids.add(item.id);
   }
 
-  const mustByFact = new Map<string, string | undefined>();
-  const mustNotByFact = new Map<string, string | undefined>();
+  const mustByFact = new Map<string, Set<string | undefined>>();
+  const mustNotByFact = new Map<string, Set<string | undefined>>();
   for (const constraint of constraints) {
-    if (constraint.strength === 'MUST') mustByFact.set(constraint.factKey, constraint.expectedValueDigest);
-    if (constraint.strength === 'MUST_NOT') mustNotByFact.set(constraint.factKey, constraint.expectedValueDigest);
-  }
-  for (const [factKey, mustValue] of mustByFact) {
-    if (!mustNotByFact.has(factKey)) continue;
-    const deniedValue = mustNotByFact.get(factKey);
-    if (mustValue === undefined || deniedValue === undefined || mustValue === deniedValue) {
-      throw new Error('contradictory hard constraints for fact: ' + factKey);
+    if (constraint.strength === 'MUST') {
+      const values=mustByFact.get(constraint.factKey)??new Set<string|undefined>();
+      values.add(constraint.expectedValueDigest);
+      mustByFact.set(constraint.factKey,values);
     }
+    if (constraint.strength === 'MUST_NOT') {
+      const values=mustNotByFact.get(constraint.factKey)??new Set<string|undefined>();
+      values.add(constraint.expectedValueDigest);
+      mustNotByFact.set(constraint.factKey,values);
+    }
+  }
+  for(const [factKey,values] of mustByFact){
+    const concrete=[...values].filter((value):value is string=>value!==undefined);
+    if(new Set(concrete).size>1) throw new Error('conflicting MUST values for fact: '+factKey);
+  }
+  for (const [factKey, mustValues] of mustByFact) {
+    const deniedValues=mustNotByFact.get(factKey);
+    if (!deniedValues) continue;
+    const mustAny=[...mustValues];
+    const denyAny=[...deniedValues];
+    const contradiction=
+      mustAny.includes(undefined) ||
+      denyAny.includes(undefined) ||
+      mustAny.some((value)=>value!==undefined&&denyAny.includes(value));
+    if (contradiction) throw new Error('contradictory hard constraints for fact: ' + factKey);
   }
   for(const constraint of constraints){
     if(constraint.strength==='MUST_NOT'&&success.includes(constraint.factKey)&&constraint.expectedValueDigest===undefined){
