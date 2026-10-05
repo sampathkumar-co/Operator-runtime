@@ -156,6 +156,9 @@ function normalizeOperator(input:PlanningOperator):PlanningOperator{
     reversible:Boolean(input.reversible)
   };
 }
+function changesAbstractState(facts:Set<string>,op:PlanningOperator):boolean{
+  return op.adds.some((f)=>!facts.has(f))||op.removes.some((f)=>facts.has(f));
+}
 function stateSignature(facts:Set<string>):string{return [...facts].sort().join('\u001f');}
 function unique(v:string[]):string[]{return [...new Set(v)].sort();}
 function bounded(v:unknown,m:number,l:string):string{if(typeof v!=='string'||!v||v.length>m)throw new Error(l+' is invalid.');return v;}
