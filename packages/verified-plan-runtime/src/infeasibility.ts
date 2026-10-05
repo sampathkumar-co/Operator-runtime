@@ -9,6 +9,7 @@ export interface InfeasibilityInput {
   contradictoryConstraintIds?:string[];
   requiredUnobservableFacts?:string[];
   remainingCostBudget?:number;
+  searchExhausted?:boolean;
 }
 
 export function assessInfeasibility(input:InfeasibilityInput):InfeasibilityAssessment{
@@ -25,17 +26,21 @@ export function assessInfeasibility(input:InfeasibilityInput):InfeasibilityAsses
     return !s||!['SUCCEEDED','SKIPPED'].includes(s.status);
   });
   const actionable=unfinished.filter((n)=>n.kind==='ACTION'||n.kind==='OBSERVE'||n.kind==='VERIFY');
+  const searchExhausted=input.searchExhausted===true;
+
   const missingCapabilityNodes=actionable.filter((n)=>n.allowedCapabilities.length>0&&!n.allowedCapabilities.some((c)=>available.has(c)));
   if(actionable.length>0&&missingCapabilityNodes.length===actionable.length){
     evidence.push(...missingCapabilityNodes.map((n)=>'missing-capability-node:'+n.id));
-    return result('CAPABILITY_MISSING',0.98,true,evidence,'Every remaining executable path requires unavailable capabilities.');
+    if(searchExhausted) return result('CAPABILITY_MISSING',0.98,true,evidence,'Every searched executable path requires unavailable capabilities.');
+    return result('INSUFFICIENT_EVIDENCE',0.55,false,evidence,'Current paths need unavailable capabilities, but alternative-plan search is not exhausted.');
   }
 
   const denied=new Set(input.authorityDeniedNodeIds??[]);
   const remainingActionNodes=actionable.filter((n)=>!['SUCCEEDED','SKIPPED'].includes(input.states.find((s)=>s.nodeId===n.id)?.status??'PENDING'));
   if(remainingActionNodes.length>0&&remainingActionNodes.every((n)=>denied.has(n.id))){
     evidence.push(...remainingActionNodes.map((n)=>'authority-denied-node:'+n.id));
-    return result('AUTHORITY_DENIED',1,true,evidence,'Authority denies every remaining executable path.');
+    if(searchExhausted) return result('AUTHORITY_DENIED',1,true,evidence,'Authority denies every searched executable path.');
+    return result('INSUFFICIENT_EVIDENCE',0.6,false,evidence,'Known paths are authority-denied, but alternative-plan search is not exhausted.');
   }
 
   const unobservable=[...new Set(input.requiredUnobservableFacts??[])];
@@ -43,7 +48,8 @@ export function assessInfeasibility(input:InfeasibilityInput):InfeasibilityAsses
   const blockingUnobservable=unobservable.filter((f)=>requiredFacts.has(f));
   if(blockingUnobservable.length){
     evidence.push(...blockingUnobservable.map((f)=>'unobservable:'+f));
-    return result('REQUIRED_STATE_UNOBSERVABLE',0.95,true,evidence,'Required state cannot be observed with current capabilities.');
+    if(searchExhausted) return result('REQUIRED_STATE_UNOBSERVABLE',0.95,true,evidence,'Required state cannot be observed on any searched path.');
+    return result('INSUFFICIENT_EVIDENCE',0.55,false,evidence,'Known paths require unobservable state, but alternative-plan search is not exhausted.');
   }
 
   if(input.remainingCostBudget!==undefined){
@@ -51,7 +57,8 @@ export function assessInfeasibility(input:InfeasibilityInput):InfeasibilityAsses
     const cheapest=actionable.length?Math.min(...actionable.map((n)=>n.expectedCost)):0;
     if(actionable.length&&cheapest>input.remainingCostBudget){
       evidence.push('remaining-budget:'+input.remainingCostBudget,'cheapest-action:'+cheapest);
-      return result('BUDGET_EXHAUSTED',1,true,evidence,'No remaining executable node fits the hard cost budget.');
+      if(searchExhausted) return result('BUDGET_EXHAUSTED',1,true,evidence,'No searched executable path fits the hard cost budget.');
+      return result('INSUFFICIENT_EVIDENCE',0.55,false,evidence,'Known paths exceed budget, but alternative-plan search is not exhausted.');
     }
   }
 
@@ -62,7 +69,8 @@ export function assessInfeasibility(input:InfeasibilityInput):InfeasibilityAsses
   });
   if(failedDependencies.length&&nonTerminalRoots.length===0){
     evidence.push(...failedDependencies.map((s)=>'failed-dependency:'+s.nodeId));
-    return result('DEPENDENCY_IMPOSSIBLE',0.95,true,evidence,'All root plan paths are invalidated by failed dependencies.');
+    if(searchExhausted) return result('DEPENDENCY_IMPOSSIBLE',0.95,true,evidence,'All searched root plan paths are invalidated by failed dependencies.');
+    return result('INSUFFICIENT_EVIDENCE',0.55,false,evidence,'Current root paths failed, but replanning search is not exhausted.');
   }
 
   if(unfinished.length===0) return result('NONE',1,false,[],'Plan has no unresolved work.');
