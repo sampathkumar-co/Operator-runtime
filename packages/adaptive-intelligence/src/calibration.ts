@@ -18,6 +18,74 @@ export interface CalibrationReport {
   buckets: CalibrationBucket[];
 }
 
+export function validateCalibrationReport(input:CalibrationReport):CalibrationReport {
+  if(!input||typeof input!=='object') throw new Error('calibration report is required.');
+  const samples=integer(input.samples,0,100_000_000,'calibration.samples');
+  const brierScore=unit(input.brierScore,'calibration.brierScore');
+  const expectedCalibrationError=unit(input.expectedCalibrationError,'calibration.expectedCalibrationError');
+  const meanPrediction=unit(input.meanPrediction,'calibration.meanPrediction');
+  const empiricalSuccess=unit(input.empiricalSuccess,'calibration.empiricalSuccess');
+  if(!Array.isArray(input.buckets)||input.buckets.length>100) throw new Error('calibration.buckets is invalid.');
+
+  const buckets=input.buckets.map((bucket,index)=>normalizeBucket(bucket,index));
+  if(samples===0){
+    if(buckets.length!==0) throw new Error('Zero-sample calibration report cannot contain buckets.');
+    if(brierScore!==0||expectedCalibrationError!==0||meanPrediction!==0||empiricalSuccess!==0){
+      throw new Error('Zero-sample calibration metrics must all be zero.');
+    }
+    return {samples,brierScore,expectedCalibrationError,meanPrediction,empiricalSuccess,buckets:[]};
+  }
+  if(buckets.length===0) throw new Error('Non-empty calibration report requires calibration buckets.');
+
+  let totalCount=0;
+  let weightedPrediction=0;
+  let weightedSuccess=0;
+  let weightedEce=0;
+  let priorUpper=-1;
+  for(const bucket of buckets){
+    if(bucket.lower<priorUpper-1e-9) throw new Error('Calibration bucket intervals must be ordered and non-overlapping.');
+    priorUpper=bucket.upper;
+    totalCount+=bucket.count;
+    weightedPrediction+=bucket.meanPrediction*bucket.count;
+    weightedSuccess+=bucket.empiricalSuccess*bucket.count;
+    weightedEce+=bucket.absoluteGap*bucket.count;
+  }
+  if(totalCount!==samples) throw new Error('Calibration bucket counts must equal report sample count.');
+
+  assertApprox(weightedPrediction/samples,meanPrediction,'Calibration weighted meanPrediction mismatch');
+  assertApprox(weightedSuccess/samples,empiricalSuccess,'Calibration weighted empiricalSuccess mismatch');
+  assertApprox(weightedEce/samples,expectedCalibrationError,'Calibration expectedCalibrationError mismatch');
+
+  return {
+    samples,
+    brierScore,
+    expectedCalibrationError,
+    meanPrediction,
+    empiricalSuccess,
+    buckets
+  };
+}
+
+function normalizeBucket(input:CalibrationBucket,index:number):CalibrationBucket{
+  if(!input||typeof input!=='object') throw new Error('calibration bucket '+index+' is invalid.');
+  const lower=unit(input.lower,'calibration.bucket.lower');
+  const upper=unit(input.upper,'calibration.bucket.upper');
+  if(upper<=lower) throw new Error('Calibration bucket upper bound must exceed lower bound.');
+  const count=integer(input.count,1,100_000_000,'calibration.bucket.count');
+  const meanPrediction=unit(input.meanPrediction,'calibration.bucket.meanPrediction');
+  const empiricalSuccess=unit(input.empiricalSuccess,'calibration.bucket.empiricalSuccess');
+  const absoluteGap=unit(input.absoluteGap,'calibration.bucket.absoluteGap');
+  if(meanPrediction<lower-1e-6||meanPrediction>upper+1e-6){
+    throw new Error('Calibration bucket mean prediction lies outside its interval.');
+  }
+  assertApprox(Math.abs(meanPrediction-empiricalSuccess),absoluteGap,'Calibration bucket absoluteGap mismatch');
+  return {lower,upper,count,meanPrediction,empiricalSuccess,absoluteGap};
+}
+
+function assertApprox(actual:number,expected:number,label:string):void{
+  if(Math.abs(actual-expected)>5e-6) throw new Error(label+'.');
+}
+
 export class CalibrationTracker {
   #samples: CalibrationSample[] = [];
   #maxSamples: number;
