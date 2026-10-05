@@ -109,12 +109,14 @@ function canonical(input:EvaluationFreezeInput):string{
   });
 }
 function revision(input:unknown):string{
-  const value=String(input??'');
+  if(typeof input!=='string') throw new Error('sourceRevision must be a string.');
+  const value=input;
   if(!/^[0-9a-f]{7,64}$/i.test(value)) throw new Error('sourceRevision is invalid.');
   return value.toLowerCase();
 }
 function sha256(input:unknown,label:string):string{
-  const value=String(input??'').toLowerCase();
+  if(typeof input!=='string') throw new Error(label+' must be a string.');
+  const value=input.toLowerCase();
   if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
   return value;
 }
