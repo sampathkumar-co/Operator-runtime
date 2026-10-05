@@ -68,9 +68,33 @@ test('shadow/control comparison measures divergence and verified outcome delta',
     alternatives:['keyboard'],reason:'current production choice',evidence:[],authoritySnapshotDigest:A,inputStateDigest:B
   });
   const report=compareShadowToControl(log.recent(10),[
-    {taskId:'t1',decisionDigest:shadow.decisionDigest,verifiedSuccess:true,progressScore:1,cost:1},
-    {taskId:'t1',decisionDigest:control.decisionDigest,verifiedSuccess:false,progressScore:0,cost:2}
-  ]);
+    {
+      taskId:'t1',
+      decisionDigest:shadow.decisionDigest,
+      verificationReceipt:{
+        digest:C,
+        verifierId:'evaluation-verifier',
+        verifiedAt:T0,
+        authoritySnapshotDigest:A,
+        outcome:'success'
+      },
+      progressScore:1,
+      cost:1
+    },
+    {
+      taskId:'t1',
+      decisionDigest:control.decisionDigest,
+      verificationReceipt:{
+        digest:D,
+        verifierId:'evaluation-verifier',
+        verifiedAt:T0,
+        authoritySnapshotDigest:A,
+        outcome:'failure'
+      },
+      progressScore:0,
+      cost:2
+    }
+  ],{now:new Date(T0)});
   assert.equal(report.pairedDecisions,1);
   assert.equal(report.divergenceRate,1);
   assert.equal(report.shadowWinRate,1);
