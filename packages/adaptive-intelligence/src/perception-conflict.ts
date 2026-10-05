@@ -71,7 +71,7 @@ export function detectPerceptionConflicts(claimsInput: PerceptionFactClaim[]): P
 function deduplicateCorrelated(claims: PerceptionFactClaim[]): PerceptionFactClaim[] {
   const seen = new Map<string, PerceptionFactClaim>();
   for (const claim of claims) {
-    const key = claim.correlationKey ?? claim.channel + ':' + claim.evidence.digest;
+    const key = claim.correlationKey ?? claim.evidence.independenceKey ?? claim.channel + ':' + claim.evidence.digest;
     const current = seen.get(key);
     if (!current || claim.confidence > current.confidence) seen.set(key, claim);
   }
