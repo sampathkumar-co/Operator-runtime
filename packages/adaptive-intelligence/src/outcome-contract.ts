@@ -47,6 +47,7 @@ export function assessOutcomeContract(
   const contract = normalizeContract(contractInput);
   const byFact = new Map(beliefs.map((belief) => [belief.factKey, belief]));
   const now = options.now ?? new Date();
+  if (!Number.isFinite(now.getTime())) throw new Error('Outcome contract evaluation time is invalid.');
   const checks: OutcomeContractCheck[] = [];
 
   for (const requirement of contract.required) {
@@ -88,28 +89,37 @@ function checkRequirement(
 ): OutcomeContractCheck {
   if (!belief) return fail(kind, requirement.factKey, 'No belief exists for required fact.', []);
   const accepted = new Set(requirement.acceptedStatuses ?? ['KNOWN','SUPPORTED']);
+  const all = allEvidence(belief);
+  const proof = supportingProofEvidence(belief);
+
   if (!accepted.has(belief.status)) {
-    return fail(kind, requirement.factKey, 'Epistemic status ' + belief.status + ' is not accepted.', allEvidence(belief));
+    return fail(kind, requirement.factKey, 'Epistemic status ' + belief.status + ' is not accepted.', all);
   }
   const minConfidence = requirement.minConfidence ?? 0.7;
   if (belief.confidence < minConfidence) {
-    return fail(kind, requirement.factKey, 'Confidence is below contract threshold.', allEvidence(belief));
+    return fail(kind, requirement.factKey, 'Confidence is below contract threshold.', all);
   }
   if (requirement.expectedValueDigest && belief.selectedValueDigest !== requirement.expectedValueDigest) {
-    return fail(kind, requirement.factKey, 'Resolved value digest does not match the contract.', allEvidence(belief));
+    return fail(kind, requirement.factKey, 'Resolved value digest does not match the contract.', all);
+  }
+  if (proof.length === 0) {
+    return fail(kind, requirement.factKey, 'No positive supporting evidence is available for this fact.', all);
   }
 
-  const evidence = allEvidence(belief);
   if (requirement.maxEvidenceAgeMs !== undefined) {
-    const fresh = evidence.filter((item) => now.getTime() - Date.parse(item.observedAt) <= requirement.maxEvidenceAgeMs!);
+    const fresh = proof.filter((item) => {
+      const observed = Date.parse(item.observedAt);
+      const age = now.getTime() - observed;
+      return age >= 0 && age <= requirement.maxEvidenceAgeMs!;
+    });
     if (fresh.length === 0) {
-      return fail(kind, requirement.factKey, 'No evidence is fresh enough for the contract.', evidence);
+      return fail(kind, requirement.factKey, 'No positive supporting evidence is fresh enough for the contract.', proof);
     }
   }
   if (requirement.minIndependentSources !== undefined) {
-    const sources = new Set(evidence.map((item) => item.source));
-    if (sources.size < requirement.minIndependentSources) {
-      return fail(kind, requirement.factKey, 'Independent evidence source count is below the contract threshold.', evidence);
+    const independent = new Set(proof.map(evidenceIndependenceKey));
+    if (independent.size < requirement.minIndependentSources) {
+      return fail(kind, requirement.factKey, 'Independent supporting evidence count is below the contract threshold.', proof);
     }
   }
 
@@ -117,8 +127,8 @@ function checkRequirement(
     kind,
     factKey: requirement.factKey,
     ok: true,
-    reason: 'Fact satisfies status, confidence, value, freshness, and independence requirements.',
-    evidenceDigests: evidence.map((item) => item.digest).sort()
+    reason: 'Fact satisfies status, confidence, value, freshness, and independent supporting-evidence requirements.',
+    evidenceDigests: proof.map((item) => item.digest).sort()
   };
 }
 
@@ -130,10 +140,27 @@ function normalizeContract(input: OutcomeContract): OutcomeContract {
   if (input.forbidden && (!Array.isArray(input.forbidden) || input.forbidden.length > 1000)) {
     throw new Error('outcome contract forbidden facts are invalid.');
   }
+
+  const required = input.required.map(normalizeRequirement);
+  const forbidden = (input.forbidden ?? []).map(normalizeRequirement);
+  const requiredKeys = new Set<string>();
+  for (const requirement of required) {
+    const key=requirementIdentity(requirement);
+    if(requiredKeys.has(key)) throw new Error('outcome contract contains duplicate required facts.');
+    requiredKeys.add(key);
+  }
+  const forbiddenKeys = new Set<string>();
+  for (const requirement of forbidden) {
+    const key=requirementIdentity(requirement);
+    if(forbiddenKeys.has(key)) throw new Error('outcome contract contains duplicate forbidden facts.');
+    if(requiredKeys.has(key)) throw new Error('outcome contract requires and forbids the same fact/value.');
+    forbiddenKeys.add(key);
+  }
+
   return {
     id: bounded(input.id, 256, 'contract.id'),
-    required: input.required.map(normalizeRequirement),
-    ...(input.forbidden ? { forbidden: input.forbidden.map(normalizeRequirement) } : {})
+    required,
+    ...(forbidden.length ? { forbidden } : {})
   };
 }
 
@@ -154,14 +181,26 @@ function normalizeRequirement(input: OutcomeFactRequirement): OutcomeFactRequire
   };
 }
 
+function requirementIdentity(requirement:OutcomeFactRequirement):string{
+  return requirement.factKey+'|'+(requirement.expectedValueDigest??'*');
+}
+function supportingProofEvidence(belief: BeliefResolution): EvidenceRef[] {
+  return dedupeEvidence(belief.supportingEvidence);
+}
 function allEvidence(belief: BeliefResolution): EvidenceRef[] {
-  return [...new Map(
-    [...belief.supportingEvidence, ...belief.contradictingEvidence, ...belief.staleEvidence]
-      .map((item) => [item.digest, item])
-  ).values()];
+  return dedupeEvidence([...belief.supportingEvidence, ...belief.contradictingEvidence, ...belief.staleEvidence]);
+}
+function dedupeEvidence(items:EvidenceRef[]):EvidenceRef[]{
+  return [...new Map(items.map((item)=>[
+    [item.digest,item.source,item.channel??'',item.scope??'',item.independenceKey??''].join('|'),
+    item
+  ])).values()];
+}
+function evidenceIndependenceKey(item:EvidenceRef):string{
+  return item.independenceKey ?? [item.source,item.channel??'',item.scope??''].join('|');
 }
 function fail(kind: 'required' | 'forbidden', factKey: string, reason: string, evidence: EvidenceRef[]): OutcomeContractCheck {
-  return { kind, factKey, ok: false, reason, evidenceDigests: evidence.map((item) => item.digest).sort() };
+  return { kind, factKey, ok: false, reason, evidenceDigests: [...new Set(evidence.map((item) => item.digest))].sort() };
 }
 function bounded(input: unknown, max: number, label: string): string {
   const value=String(input??'');
