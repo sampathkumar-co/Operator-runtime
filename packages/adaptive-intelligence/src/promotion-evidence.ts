@@ -6,6 +6,10 @@ import {
 } from './evaluation-freeze.ts';
 import type { IntelligenceMetrics } from './intelligence-metrics.ts';
 import {
+  verifyTaskCohortManifest,
+  type TaskCohortManifest
+} from './evaluation-cohort.ts';
+import {
   assessPolicyPromotion,
   type PolicyPromotionAssessment,
   type PolicyPromotionCriteria
@@ -35,6 +39,7 @@ export interface BoundShadowEvidence {
 }
 
 export interface PolicyPromotionEvidenceBundle {
+  taskCohort:TaskCohortManifest;
   candidateManifest:EvaluationFreezeManifest;
   baselineManifest:EvaluationFreezeManifest;
   candidateMetrics:BoundAggregate<IntelligenceMetrics>;
@@ -57,11 +62,15 @@ export function validatePolicyPromotionEvidenceBundle(
   input:PolicyPromotionEvidenceBundle
 ):ValidatedPolicyPromotionEvidenceBundle{
   if(!input||typeof input!=='object') throw new Error('policy promotion evidence bundle is required.');
+  const taskCohort=verifiedTaskCohort(input.taskCohort);
   const candidateManifest=verifiedManifest(input.candidateManifest,'candidateManifest');
   const baselineManifest=verifiedManifest(input.baselineManifest,'baselineManifest');
   assertComparableEvaluationContext(candidateManifest,baselineManifest);
 
   const shadow=normalizeShadowBinding(input.shadow,candidateManifest,baselineManifest);
+  if(shadow.taskCohortDigest!==taskCohort.cohortDigest){
+    throw new Error('Shadow evidence task cohort does not match the canonical task cohort manifest.');
+  }
   const candidateMetrics=normalizeAggregate(
     input.candidateMetrics,
     candidateManifest,
@@ -87,7 +96,15 @@ export function validatePolicyPromotionEvidenceBundle(
     validateCalibrationReport
   );
 
+  if(candidateMetrics.value.taskCount!==taskCohort.taskCount){
+    throw new Error('Candidate metrics task count does not match the canonical task cohort.');
+  }
+  if(baselineMetrics.value.taskCount!==taskCohort.taskCount){
+    throw new Error('Baseline metrics task count does not match the canonical task cohort.');
+  }
+
   const normalized:PolicyPromotionEvidenceBundle={
+    taskCohort,
     candidateManifest,
     baselineManifest,
     candidateMetrics,
@@ -116,6 +133,11 @@ export function assessBoundPolicyPromotion(
     candidateManifestDigest:bundle.candidateManifest.manifestDigest,
     baselineManifestDigest:bundle.baselineManifest.manifestDigest
   };
+}
+
+function verifiedTaskCohort(input:TaskCohortManifest):TaskCohortManifest{
+  if(!verifyTaskCohortManifest(input)) throw new Error('taskCohort failed cohort-manifest verification.');
+  return structuredClone(input);
 }
 
 function verifiedManifest(
