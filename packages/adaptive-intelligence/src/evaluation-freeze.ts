@@ -122,7 +122,9 @@ function canonical(input:EvaluationFreezeInput):string{
 function revision(input:unknown):string{
   if(typeof input!=='string') throw new Error('sourceRevision must be a string.');
   const value=input;
-  if(!/^[0-9a-f]{7,64}$/i.test(value)) throw new Error('sourceRevision is invalid.');
+  if(!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)){
+    throw new Error('sourceRevision must be a full immutable Git commit SHA (40 or 64 hex characters).');
+  }
   return value.toLowerCase();
 }
 function sha256(input:unknown,label:string):string{
