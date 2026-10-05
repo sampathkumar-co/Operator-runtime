@@ -37,6 +37,55 @@ export interface ShadowComparisonReport {
   unmatchedControl:number;
 }
 
+export function validateShadowComparisonReport(report:ShadowComparisonReport):ShadowComparisonReport{
+  if(!report||typeof report!=='object') throw new Error('shadow comparison report is required.');
+  const normalized:ShadowComparisonReport={
+    pairedDecisions:integer(report.pairedDecisions,0,1_000_000_000,'pairedDecisions'),
+    pairedOutcomeDecisions:integer(report.pairedOutcomeDecisions,0,1_000_000_000,'pairedOutcomeDecisions'),
+    outcomeCoverage:unit(report.outcomeCoverage,'outcomeCoverage'),
+    progressCoverage:unit(report.progressCoverage,'progressCoverage'),
+    costCoverage:unit(report.costCoverage,'costCoverage'),
+    agreementRate:unit(report.agreementRate,'agreementRate'),
+    divergenceRate:unit(report.divergenceRate,'divergenceRate'),
+    shadowWinRate:unit(report.shadowWinRate,'shadowWinRate'),
+    controlWinRate:unit(report.controlWinRate,'controlWinRate'),
+    tiedOutcomeRate:unit(report.tiedOutcomeRate,'tiedOutcomeRate'),
+    meanShadowProgressDelta:finite(report.meanShadowProgressDelta,'meanShadowProgressDelta'),
+    meanShadowCostDelta:finite(report.meanShadowCostDelta,'meanShadowCostDelta'),
+    unmatchedShadow:integer(report.unmatchedShadow,0,1_000_000_000,'unmatchedShadow'),
+    unmatchedControl:integer(report.unmatchedControl,0,1_000_000_000,'unmatchedControl')
+  };
+  if(normalized.pairedOutcomeDecisions>normalized.pairedDecisions){
+    throw new Error('pairedOutcomeDecisions cannot exceed pairedDecisions.');
+  }
+  assertApprox(normalized.outcomeCoverage,ratio(normalized.pairedOutcomeDecisions,normalized.pairedDecisions),'outcomeCoverage/count mismatch');
+  if(normalized.progressCoverage>normalized.outcomeCoverage+1e-6){
+    throw new Error('progressCoverage cannot exceed outcomeCoverage.');
+  }
+  if(normalized.costCoverage>normalized.outcomeCoverage+1e-6){
+    throw new Error('costCoverage cannot exceed outcomeCoverage.');
+  }
+  if(normalized.pairedDecisions===0){
+    if(normalized.agreementRate!==0||normalized.divergenceRate!==0) throw new Error('Agreement/divergence rates must be zero without paired decisions.');
+  }else{
+    assertApprox(normalized.agreementRate+normalized.divergenceRate,1,'agreement/divergence rates must sum to 1');
+  }
+  if(normalized.pairedOutcomeDecisions===0){
+    if(normalized.shadowWinRate!==0||normalized.controlWinRate!==0||normalized.tiedOutcomeRate!==0){
+      throw new Error('Outcome rates must be zero without paired outcome decisions.');
+    }
+  }else{
+    assertApprox(normalized.shadowWinRate+normalized.controlWinRate+normalized.tiedOutcomeRate,1,'outcome rates must sum to 1');
+  }
+  if(normalized.progressCoverage===0&&normalized.meanShadowProgressDelta!==0){
+    throw new Error('meanShadowProgressDelta must be zero when progressCoverage is zero.');
+  }
+  if(normalized.costCoverage===0&&normalized.meanShadowCostDelta!==0){
+    throw new Error('meanShadowCostDelta must be zero when costCoverage is zero.');
+  }
+  return normalized;
+}
+
 export function compareShadowToControl(
   tracesInput:DecisionTraceRecord[],
   outcomesInput:DecisionOutcome[],
@@ -207,6 +256,24 @@ function validIso(input:unknown,label:string):string{
   const parsed=Date.parse(value);
   if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
   return value;
+}
+function integer(input:unknown,min:number,max:number,label:string):number{
+  const value=Number(input);
+  if(!Number.isSafeInteger(value)||value<min||value>max) throw new Error(label+' is invalid.');
+  return value;
+}
+function unit(input:unknown,label:string):number{
+  const value=Number(input);
+  if(!Number.isFinite(value)||value<0||value>1) throw new Error(label+' must be between 0 and 1.');
+  return value;
+}
+function finite(input:unknown,label:string):number{
+  const value=Number(input);
+  if(!Number.isFinite(value)) throw new Error(label+' is invalid.');
+  return value;
+}
+function assertApprox(actual:number,expected:number,label:string):void{
+  if(Math.abs(actual-expected)>1e-6) throw new Error(label+'.');
 }
 function ratio(n:number,d:number):number{return d===0?0:round(n/d);}
 function round(value:number):number{return Math.round(value*1_000_000)/1_000_000;}
