@@ -26,6 +26,7 @@ import { selectRecovery } from './counterfactual-recovery.ts';
 import { compressTrajectory } from './trajectory-compressor.ts';
 import { LearningFirewall, type LearningPromotionInput } from './learning-firewall.ts';
 import { CalibrationTracker } from './calibration.ts';
+import { validateStoredTrajectoryAdvisory } from './trajectory-state-validator.ts';
 import {
   decodeVersionedState,
   encodeVersionedState,
@@ -315,6 +316,7 @@ function validateTrajectoryAgainstCausal(
   for (const step of steps) {
     if (!step || typeof step !== 'object') throw new Error('kernel trajectory step is invalid.');
     const index = integer(step.index, 0, Number.MAX_SAFE_INTEGER, 'trajectory.index');
+    validateStoredTrajectoryAdvisory(step);
     if (priorIndex !== undefined && index !== priorIndex + 1) {
       throw new Error('kernel trajectory indices must be strictly contiguous.');
     }
