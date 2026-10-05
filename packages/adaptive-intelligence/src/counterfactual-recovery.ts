@@ -20,12 +20,18 @@ export function selectRecovery(input: RecoverySelectionInput): RecoveryDecision 
 
   if (primary === 'AUTHORITY_DENIED' || primary === 'BUDGET_EXHAUSTED') {
     const failSafe = options.find((item) => item.kind === 'FAIL_SAFE');
-    if (failSafe) return decision(failSafe, options, 'Authority/budget failure cannot be repaired by adaptive execution.');
+    if (!failSafe) {
+      throw new Error('Fail-safe recovery is mandatory for authority or budget failures.');
+    }
+    return decision(failSafe, options, 'Authority/budget failure cannot be repaired by adaptive execution.');
   }
 
   if (primary === 'SIDE_EFFECT_UNCERTAIN') {
     const reconcile = options.find((item) => item.kind === 'RECONCILE');
-    if (reconcile) return decision(reconcile, options, 'Uncertain mutation side effects require reconciliation before any replay or alternate mutation.');
+    if (!reconcile) {
+      throw new Error('Reconciliation recovery is mandatory when mutation side effects are uncertain.');
+    }
+    return decision(reconcile, options, 'Uncertain mutation side effects require reconciliation before any replay or alternate mutation.');
   }
 
   const budget = input.remainingCostBudget === undefined
