@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { StateSnapshotManager, currentSnapshotCatalogDigest, type SnapshotAuthenticator } from '../src/core/state-snapshot.ts';
+import { StateSnapshotManager, currentSnapshotCatalogDigest, recoverPendingSnapshotRestores, type SnapshotAuthenticator } from '../src/core/state-snapshot.ts';
 import { runOfflineStateSnapshot } from '../apps/local-agent/src/state-maintenance.ts';
 import { acquireLocalAgentStateInstanceLock } from '../apps/local-agent/src/state-instance-lock.ts';
 
@@ -229,4 +229,75 @@ test('cross-release restore requires and applies an exact catalog migration cont
   await fs.writeFile(path.join(state, 'world-model.json'), '{"release":"N+1"}');
   await upgrader.restore({ epoch: 'release-n', withQuiescence: quiescent });
   assert.equal(await fs.readFile(path.join(state, 'world-model.json'), 'utf8'), '{"release":"N"}');
+});
+
+
+test('restore rejects snapshot bytes changed after verify but before quiescent staging', async (t) => {
+  const state = await temp(t, 'operator-restore-toctou-state-');
+  const snapshots = await temp(t, 'operator-restore-toctou-output-');
+  await fs.writeFile(path.join(state, 'provider-learning.json'), 'ORIGINAL-SNAPSHOT');
+  const manager = new StateSnapshotManager(state, snapshots, { authenticator: testAuthenticator() });
+  const manifest = await manager.create({ epoch: 'toctou', withQuiescence: quiescent });
+  await fs.writeFile(path.join(state, 'provider-learning.json'), 'LIVE-STATE');
+
+  const providerFile = manifest.stores.find((store) => store.id === 'provider-learning')!.files[0]!.path;
+  const snapshotFile = path.join(snapshots, manifest.epoch, 'data', providerFile);
+  await assert.rejects(
+    manager.restore({
+      epoch: manifest.epoch,
+      withQuiescence: async (operation) => {
+        await fs.writeFile(snapshotFile, 'TAMPERED-SNAPSHOT');
+        return await operation();
+      }
+    }),
+    (error: any) => error?.code === 'SNAPSHOT_FILE_TAMPERED'
+  );
+  assert.equal(await fs.readFile(path.join(state, 'provider-learning.json'), 'utf8'), 'LIVE-STATE');
+});
+
+test('startup recovery rolls back a hard-crashed multi-store restore to one coherent prior generation', async (t) => {
+  const state = await temp(t, 'operator-restore-crash-state-');
+  const snapshots = await temp(t, 'operator-restore-crash-output-');
+  const secret = 'snapshot-crash-recovery-test-secret';
+  const keyId = 'snapshot-crash-recovery-key';
+  const authenticator: SnapshotAuthenticator = {
+    keyId,
+    sign: async (payload) => crypto.createHmac('sha256', secret).update(payload).digest('base64url'),
+    verify: async (payload, signature) => crypto.createHmac('sha256', secret).update(payload).digest('base64url') === signature
+  };
+
+  await fs.writeFile(path.join(state, 'provider-learning.json'), '{"generation":"snapshot"}');
+  await fs.writeFile(path.join(state, 'world-model.json'), '{"generation":"snapshot"}');
+  const manager = new StateSnapshotManager(state, snapshots, { authenticator });
+  await manager.create({ epoch: 'hard-crash', withQuiescence: quiescent });
+
+  await fs.writeFile(path.join(state, 'provider-learning.json'), '{"generation":"live"}');
+  await fs.writeFile(path.join(state, 'world-model.json'), '{"generation":"live"}');
+
+  const script = [
+    "import crypto from 'node:crypto'",
+    "import { StateSnapshotManager } from './src/core/state-snapshot.ts'",
+    "const [state,snapshots,secret,keyId]=process.argv.slice(1)",
+    "const authenticator={keyId,sign:async(payload)=>crypto.createHmac('sha256',secret).update(payload).digest('base64url'),verify:async(payload,signature)=>crypto.createHmac('sha256',secret).update(payload).digest('base64url')===signature}",
+    "const manager=new StateSnapshotManager(state,snapshots,{authenticator})",
+    "await manager.restore({epoch:'hard-crash',withQuiescence:async(operation)=>await operation(),onStoreRestored:(count)=>{if(count===1)process.exit(91)}})"
+  ].join(';');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      ['--experimental-strip-types', '--input-type=module', '-e', script, state, snapshots, secret, keyId],
+      { cwd: process.cwd() },
+      (error) => {
+        if (error && (error as NodeJS.ErrnoException & { code?: number }).code === 91) return resolve();
+        reject(error ?? new Error('restore child unexpectedly completed'));
+      }
+    );
+  });
+
+  const recovery = await recoverPendingSnapshotRestores(state);
+  assert.equal(recovery.rolledBack, 1);
+  assert.equal(await fs.readFile(path.join(state, 'provider-learning.json'), 'utf8'), '{"generation":"live"}');
+  assert.equal(await fs.readFile(path.join(state, 'world-model.json'), 'utf8'), '{"generation":"live"}');
+  assert.equal((await recoverPendingSnapshotRestores(state)).rolledBack, 0);
 });

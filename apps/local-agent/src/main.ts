@@ -39,6 +39,7 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
+import { recoverPendingSnapshotRestores } from '../../../src/core/state-snapshot.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
 import { AgentKernel } from '../../../src/core/agent-kernel.ts';
 import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
@@ -78,6 +79,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const stateInstanceLock = await acquireLocalAgentStateInstanceLock(stateDir);
+await recoverPendingSnapshotRestores(stateDir);
 const remoteLauncherIpc = process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function';
 let launcherShutdownRequested = false;
 let launcherShutdownReason = 'launcher-disconnected';

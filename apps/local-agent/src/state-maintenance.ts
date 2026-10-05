@@ -3,7 +3,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { StateSnapshotManager, type SnapshotAuthenticator, type SnapshotManifest } from '../../../src/core/state-snapshot.ts';
+import { StateSnapshotManager, recoverPendingSnapshotRestores, type SnapshotAuthenticator, type SnapshotManifest } from '../../../src/core/state-snapshot.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
 
 async function snapshotAuthenticator(stateDir: string): Promise<SnapshotAuthenticator> {
@@ -41,6 +41,7 @@ export async function runOfflineStateSnapshot(input: {
 
   const lock = await acquireLocalAgentStateInstanceLock(stateDir);
   try {
+    await recoverPendingSnapshotRestores(stateDir);
     const exclusivelyQuiescent = async <T>(operation: () => Promise<T>): Promise<T> => await operation();
     if (input.operation === 'create') {
       return await manager.create({
