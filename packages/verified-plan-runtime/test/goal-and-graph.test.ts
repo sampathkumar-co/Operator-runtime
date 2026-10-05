@@ -88,3 +88,13 @@ test('plan graph rejects contradictory preconditions for one fact',()=>{
   ];
   assert.throws(()=>validatePlanGraph(goal(),g),/conflicting preconditions/);
 });
+
+test('readyNodeIds rejects duplicate state and belief identities',()=>{
+  const p=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(p);
+  assert.throws(()=>readyNodeIds(p,[...states,structuredClone(states[0]!)],[]),/plan node states must be unique/);
+  assert.throws(()=>readyNodeIds(p,states,[
+    belief('state.observed'),
+    belief('state.observed')
+  ]),/belief facts must be unique/);
+});
