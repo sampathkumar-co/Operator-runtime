@@ -11,6 +11,53 @@ export class CausalGraph {
     this.#clock = options.clock ?? (() => new Date());
   }
 
+  static fromState(
+    transitionsInput: CausalTransition[],
+    options: { maxTransitions?: number; clock?: () => Date } = {}
+  ): CausalGraph {
+    if (!Array.isArray(transitionsInput) || transitionsInput.length > 100_000) throw new Error('causal graph snapshot is invalid.');
+    const graph = new CausalGraph(options);
+    if (transitionsInput.length > graph.#maxTransitions) throw new Error('Causal graph snapshot exceeds configured capacity.');
+
+    const ids = new Set<string>();
+    for (const raw of transitionsInput) {
+      if (!raw || typeof raw !== 'object') throw new Error('Stored causal transition is invalid.');
+      const id = uuid(raw.id, 'transition.id');
+      if (ids.has(id)) throw new Error('Causal graph snapshot contains duplicate transition ids.');
+      ids.add(id);
+
+      const before = normalizeSnapshot(raw.before);
+      const after = normalizeSnapshot(raw.after);
+      const action = normalizeAction(raw.action);
+      const outcome = normalizeOutcome(raw.outcome);
+      const progressSignals = normalizeProgressSignals(raw.delta?.progressSignals ?? []);
+      const delta = deriveDelta(before, after, action.expectedEffects ?? [], progressSignals);
+      const storedDelta = normalizeStoredDelta(raw.delta);
+      if (!sameDelta(delta, storedDelta)) throw new Error('Stored causal transition delta does not match state evidence.');
+      const causalConfidence = causalConfidenceFor(action, outcome, delta, before, after);
+      const storedConfidence = unit(raw.causalConfidence, 'transition.causalConfidence');
+      if (Math.abs(causalConfidence - storedConfidence) > 1e-9) {
+        throw new Error('Stored causal confidence does not match deterministic transition evidence.');
+      }
+
+      graph.#transitions.push({
+        id,
+        before,
+        action,
+        outcome,
+        after,
+        delta,
+        causalConfidence: storedConfidence,
+        recordedAt: validIso(raw.recordedAt, 'transition.recordedAt')
+      });
+    }
+    return graph;
+  }
+
+  exportState(): CausalTransition[] {
+    return structuredClone(this.#transitions);
+  }
+
   record(input: {
     before: StateSnapshot;
     action: ActionDescriptor;
@@ -102,7 +149,7 @@ export function deriveDelta(
     expectedEffectsSatisfied: [...new Set(expectedEffectsSatisfied)].sort(),
     expectedEffectsMissing: [...new Set(expectedEffectsMissing)].sort(),
     unrelatedEffects: unrelatedEffects.sort(),
-    progressSignals: [...new Set(progressSignals.map((item) => boundedText(item, 512, 'progressSignal')))].sort()
+    progressSignals: normalizeProgressSignals(progressSignals)
   };
 }
 
