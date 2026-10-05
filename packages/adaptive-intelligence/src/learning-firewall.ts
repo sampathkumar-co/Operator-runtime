@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { LearningMode, LearningReceipt, SkillDraft } from './contracts.ts';
 import { validateSkillDraft } from './skill-schema.ts';
 
@@ -12,6 +13,21 @@ export interface LearningPromotionInput {
 
 export class LearningFirewall {
   #seenReceipts = new Set<string>();
+
+  static fromSnapshot(digestsInput: string[]): LearningFirewall {
+    if (!Array.isArray(digestsInput) || digestsInput.length > 1_000_000) throw new Error('learning firewall snapshot is invalid.');
+    const firewall = new LearningFirewall();
+    for (const digestInput of digestsInput) {
+      const digest = sha256(digestInput, 'learningReceiptDigest');
+      if (firewall.#seenReceipts.has(digest)) throw new Error('learning firewall snapshot contains duplicate replay digests.');
+      firewall.#seenReceipts.add(digest);
+    }
+    return firewall;
+  }
+
+  snapshot(): string[] {
+    return [...this.#seenReceipts].sort();
+  }
 
   evaluate(input: LearningPromotionInput): LearningReceipt {
     const skill = validateSkillDraft(input.skill);
@@ -44,7 +60,9 @@ export class LearningFirewall {
       return receipt(skill, false, 'Benchmark/evaluation identifier contamination detected: ' + contamination.join(', '), policyVersion);
     }
 
-    const key = skill.fingerprint + ':' + policyVersion + ':' + skill.verificationDigests.join(',');
+    const key = crypto.createHash('sha256').update(
+      skill.fingerprint + ':' + policyVersion + ':' + [...skill.verificationDigests].sort().join(',')
+    ).digest('hex');
     if (this.#seenReceipts.has(key)) {
       return receipt(skill, false, 'Equivalent verified promotion has already been emitted for this policy version.', policyVersion);
     }
@@ -89,3 +107,8 @@ function bounded(input: unknown, max: number, label: string): string {
   return value;
 }
 function unique(values: string[]): string[] { return [...new Set(values)].sort(); }
+function sha256(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(label + ' must be SHA-256.');
+  return value;
+}
