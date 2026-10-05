@@ -13,3 +13,7 @@ export * from './calibration.ts';
 export * from './perception-conflict.ts';
 export * from './observation-policy.ts';
 export * from './adaptive-intelligence-kernel.ts';
+export * from './hypothesis-graph.ts';
+export * from './evaluation-freeze.ts';
+export * from './intelligence-metrics.ts';
+export * from './decision-trace.ts';
