@@ -29,6 +29,19 @@ export function selectChoiceBranch(
   if(siblings.some((n)=>stateById.get(n.id)?.status==='RUNNING')) {
     throw new Error('cannot switch choice while another alternative is running.');
   }
+  if(siblings.some((n)=>{
+    const state=stateById.get(n.id);
+    return state?.status==='BLOCKED' && Boolean(state.lastExecutionDigest);
+  })){
+    throw new Error('cannot switch choice while another alternative is awaiting verification.');
+  }
+  if(siblings.some((n)=>{
+    const state=stateById.get(n.id);
+    return state?.status==='FAILED' &&
+      state.lastReason==='mutation-side-effects-uncertain-reconciliation-required';
+  })){
+    throw new Error('cannot switch choice while another alternative has uncertain side effects.');
+  }
 
   const selectedClosure=new Set(dependentClosure(graph,[selectedNodeId]));
   const skipped=new Set<string>();
