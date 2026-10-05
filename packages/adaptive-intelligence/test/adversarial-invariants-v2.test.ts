@@ -273,7 +273,7 @@ test('same action family on different expected effects is not counted as repeate
 test('eventual success after any failure is recovery success, not first-strategy success',()=>{
   const result=computeIntelligenceMetrics([{
     taskId:'task',
-    steps:[step(0,'phase.one',false),step(1,'phase.two',false),step(2,'goal.done',false)],
+    steps:[step(0,'phase.one',true),step(1,'phase.two',true),step(2,'goal.done',false)],
     finalVerifiedSuccess:true
   }]);
   assert.equal(result.firstStrategySuccessRate,0);
