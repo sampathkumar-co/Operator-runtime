@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
-import type { ActionDescriptor, ActionOutcome, CausalTransition, StateDelta, StateFact, StateSnapshot } from './contracts.ts';
+import type { ActionDescriptor, ActionOutcome, CausalTransition, EvidenceRef, StateDelta, StateFact, StateSnapshot } from './contracts.ts';
 
 export class CausalGraph {
   #transitions: CausalTransition[] = [];
   #maxTransitions: number;
   #clock: () => Date;
+  #evidenceByDigest = new Map<string,EvidenceRef>();
+  #evidenceRefCount = new Map<string,number>();
 
   constructor(options: { maxTransitions?: number; clock?: () => Date } = {}) {
     this.#maxTransitions = boundedInteger(options.maxTransitions ?? 10_000, 1, 100_000, 'maxTransitions');
@@ -20,6 +22,7 @@ export class CausalGraph {
     if (transitionsInput.length > graph.#maxTransitions) throw new Error('Causal graph snapshot exceeds configured capacity.');
 
     const ids = new Set<string>();
+    let priorRecordedAt: string | undefined;
     for (const raw of transitionsInput) {
       if (!raw || typeof raw !== 'object') throw new Error('Stored causal transition is invalid.');
       const id = uuid(raw.id, 'transition.id');
@@ -30,6 +33,9 @@ export class CausalGraph {
       const after = normalizeSnapshot(raw.after);
       const action = normalizeAction(raw.action);
       const outcome = normalizeOutcome(raw.outcome);
+      if (Date.parse(after.observedAt) < Date.parse(before.observedAt)) {
+        throw new Error('Stored causal transition after snapshot cannot predate before snapshot.');
+      }
       const progressSignals = normalizeProgressSignals(raw.delta?.progressSignals ?? []);
       const delta = deriveDelta(before, after, action.expectedEffects ?? [], progressSignals);
       const storedDelta = normalizeStoredDelta(raw.delta);
@@ -40,7 +46,14 @@ export class CausalGraph {
         throw new Error('Stored causal confidence does not match deterministic transition evidence.');
       }
 
-      graph.#transitions.push({
+      const recordedAt = validIso(raw.recordedAt, 'transition.recordedAt');
+      if (Date.parse(recordedAt) < Date.parse(after.observedAt)) {
+        throw new Error('Stored causal transition recordedAt cannot predate its after snapshot.');
+      }
+      if (priorRecordedAt && Date.parse(recordedAt) < Date.parse(priorRecordedAt)) {
+        throw new Error('Stored causal transition recordedAt values must be monotonic.');
+      }
+      const transition:CausalTransition = {
         id,
         before,
         action,
@@ -48,8 +61,11 @@ export class CausalGraph {
         after,
         delta,
         causalConfidence: storedConfidence,
-        recordedAt: validIso(raw.recordedAt, 'transition.recordedAt')
-      });
+        recordedAt
+      };
+      graph.#registerTransitionEvidence(transition);
+      graph.#transitions.push(transition);
+      priorRecordedAt = recordedAt;
     }
     return graph;
   }
@@ -74,6 +90,16 @@ export class CausalGraph {
     }
     const delta = deriveDelta(before, after, action.expectedEffects ?? [], input.progressSignals ?? []);
     const causalConfidence = causalConfidenceFor(action, outcome, delta, before, after);
+    const recordedAtDate=this.#clock();
+    if(!Number.isFinite(recordedAtDate.getTime())) throw new Error('causal graph clock returned an invalid date.');
+    const recordedAt=recordedAtDate.toISOString();
+    if(Date.parse(recordedAt)<Date.parse(after.observedAt)){
+      throw new Error('Causal transition recordedAt cannot predate its after snapshot.');
+    }
+    const prior=this.#transitions[this.#transitions.length-1];
+    if(prior&&Date.parse(recordedAt)<Date.parse(prior.recordedAt)){
+      throw new Error('Causal transition recordedAt values must be monotonic.');
+    }
     const transition: CausalTransition = {
       id: crypto.randomUUID(),
       before,
@@ -82,11 +108,13 @@ export class CausalGraph {
       after,
       delta,
       causalConfidence,
-      recordedAt: this.#clock().toISOString()
+      recordedAt
     };
+    this.#registerTransitionEvidence(transition);
     this.#transitions.push(transition);
     if (this.#transitions.length > this.#maxTransitions) {
-      this.#transitions.splice(0, this.#transitions.length - this.#maxTransitions);
+      const removed=this.#transitions.splice(0, this.#transitions.length - this.#maxTransitions);
+      for(const item of removed) this.#unregisterTransitionEvidence(item);
     }
     return structuredClone(transition);
   }
@@ -115,6 +143,57 @@ export class CausalGraph {
       .filter((item) => !item.outcome.ok || item.delta.expectedEffectsMissing.some((effect) => expected.size === 0 || expected.has(effect)))
       .length;
   }
+
+  #registerTransitionEvidence(transition:CausalTransition):void{
+    const evidence=uniqueTransitionEvidence(transition);
+    for(const item of evidence){
+      const prior=this.#evidenceByDigest.get(item.digest);
+      if(prior&&!sameEvidence(prior,item)){
+        throw new Error('Causal evidence digest metadata changed across retained transitions.');
+      }
+    }
+    for(const item of evidence){
+      this.#evidenceByDigest.set(item.digest,item);
+      this.#evidenceRefCount.set(item.digest,(this.#evidenceRefCount.get(item.digest)??0)+1);
+    }
+  }
+
+  #unregisterTransitionEvidence(transition:CausalTransition):void{
+    for(const item of uniqueTransitionEvidence(transition)){
+      const next=(this.#evidenceRefCount.get(item.digest)??0)-1;
+      if(next<=0){
+        this.#evidenceRefCount.delete(item.digest);
+        this.#evidenceByDigest.delete(item.digest);
+      }else{
+        this.#evidenceRefCount.set(item.digest,next);
+      }
+    }
+  }
+}
+
+function uniqueTransitionEvidence(transition:CausalTransition):EvidenceRef[]{
+  const byDigest=new Map<string,EvidenceRef>();
+  const all=[
+    ...transition.before.facts.flatMap((fact)=>fact.evidence),
+    ...transition.outcome.evidence,
+    ...transition.after.facts.flatMap((fact)=>fact.evidence)
+  ];
+  for(const item of all){
+    const prior=byDigest.get(item.digest);
+    if(prior&&!sameEvidence(prior,item)){
+      throw new Error('Conflicting causal evidence metadata for the same digest is rejected.');
+    }
+    byDigest.set(item.digest,item);
+  }
+  return [...byDigest.values()];
+}
+function sameEvidence(a:EvidenceRef,b:EvidenceRef):boolean{
+  return a.digest===b.digest
+    && a.source===b.source
+    && a.observedAt===b.observedAt
+    && (a.channel??'')===(b.channel??'')
+    && (a.scope??'')===(b.scope??'')
+    && (a.independenceKey??'')===(b.independenceKey??'');
 }
 
 export function deriveDelta(
