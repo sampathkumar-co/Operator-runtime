@@ -38,6 +38,10 @@ export function validatePlanGraph(goal: CompiledGoal, graph: PlanGraph): PlanGra
     if(alternatives.length<2) throw new Error('choice group must contain at least two alternatives: '+group);
     const parentKeys=new Set(alternatives.map((n)=>n.parentId??'__root__'));
     if(parentKeys.size!==1) throw new Error('choice alternatives must share the same hierarchical parent: '+group);
+    const ids=new Set(alternatives.map((n)=>n.id));
+    if(alternatives.some((n)=>n.dependsOn.some((dep)=>ids.has(dep)))){
+      throw new Error('choice alternatives cannot depend on one another: '+group);
+    }
   }
   assertAcyclic(nodes);
   return {
@@ -52,7 +56,7 @@ export function validatePlanGraph(goal: CompiledGoal, graph: PlanGraph): PlanGra
 export function initializeNodeStates(graph: PlanGraph, now = new Date().toISOString()): PlanNodeState[] {
   return graph.nodes.map((node) => ({
     nodeId: node.id,
-    status: node.dependsOn.length === 0 ? 'READY' : 'PENDING',
+    status: node.dependsOn.length === 0 && node.preconditions.length === 0 ? 'READY' : 'PENDING',
     attempts: 0,
     lastUpdatedAt: now
   }));
@@ -68,6 +72,10 @@ export function readyNodeIds(
   return graph.nodes.filter((node) => {
     const state = byState.get(node.id);
     if (!state || !['PENDING','READY','BLOCKED'].includes(state.status)) return false;
+    // BLOCKED after a concrete execution that requires independent verification is a
+    // verification wait, not a fresh execution opportunity. Belief refreshes must not
+    // reopen the mutation and risk duplicate side effects.
+    if (state.status === 'BLOCKED' && state.lastExecutionDigest && node.verificationFactKeys.length > 0) return false;
     if (!node.dependsOn.every((id) => byState.get(id)?.status === 'SUCCEEDED')) return false;
     return node.preconditions.every((p) => {
       const belief = beliefByFact.get(p.factKey);
@@ -101,6 +109,10 @@ function normalizeNode(input:PlanNode):PlanNode{
   if(!input||typeof input!=='object') throw new Error('plan node is required.');
   const kinds=new Set(['GOAL','SUBGOAL','OBSERVE','ACTION','VERIFY','DECISION']);
   if(!kinds.has(input.kind)) throw new Error('plan node kind is invalid.');
+  if(!Array.isArray(input.dependsOn)||!Array.isArray(input.preconditions)||!Array.isArray(input.expectedEffects)||
+     !Array.isArray(input.verificationFactKeys)||!Array.isArray(input.allowedCapabilities)){
+    throw new Error('plan node list fields are invalid.');
+  }
   return {
     id: bounded(input.id,256,'node.id'),
     kind: input.kind,
