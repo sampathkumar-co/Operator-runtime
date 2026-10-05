@@ -90,17 +90,20 @@ function check(name:string,actual:number,threshold:number,operator:'>='|'<='){
   return{name,actual:round(actual),threshold,operator,ok:operator==='>='?actual>=threshold:actual<=threshold};
 }
 function integer(input:unknown,min:number,max:number,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isSafeInteger(value)||value<min||value>max) throw new Error(label+' is invalid.');
   return value;
 }
 function unit(input:unknown,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isFinite(value)||value<0||value>1) throw new Error(label+' must be between 0 and 1.');
   return value;
 }
 function number(input:unknown,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isFinite(value)) throw new Error(label+' is invalid.');
   return value;
 }
