@@ -98,3 +98,15 @@ test('plan revision cannot occur while an execution awaits verification',()=>{
   const next=graph(); next.version=2;
   assert.throws(()=>revisePlan(goal(),previous,states,next),/awaiting verification/);
 });
+
+test('revision proof binds source and destination plan digests',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous);
+  const next=graph(); next.version=2; next.nodes.find(n=>n.id==='verify')!.expectedCost=7;
+  const revision=revisePlan(goal(),previous,states,next,'2026-10-05T10:02:00.000Z');
+  assert.equal(revision.proof.fromVersion,1);
+  assert.equal(revision.proof.toVersion,2);
+  assert.match(revision.proof.fromPlanDigest,/^[0-9a-f]{64}$/);
+  assert.match(revision.proof.toPlanDigest,/^[0-9a-f]{64}$/);
+  assert.notEqual(revision.proof.fromPlanDigest,revision.proof.toPlanDigest);
+});
