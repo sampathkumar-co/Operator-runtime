@@ -19,9 +19,7 @@ export class EpistemicStateEngine {
 
   observe(input: BeliefObservation): BeliefResolution {
     const observation = normalizeObservation(input, this.#clock());
-    if (SECRET_KEY.test(observation.factKey)) {
-      throw new Error('Secret-bearing epistemic fact keys are rejected.');
-    }
+    if (SECRET_KEY.test(observation.factKey)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
     const existing = this.#claims.get(observation.factKey) ?? [];
     const duplicate = existing.find((item) =>
       item.valueDigest === observation.valueDigest
@@ -58,9 +56,7 @@ export class EpistemicStateEngine {
     if (live.length === 0) {
       const status: EpistemicStatus = this.#unobservable.has(factKey)
         ? 'UNOBSERVABLE'
-        : stale.length > 0
-          ? 'STALE'
-          : 'UNKNOWN';
+        : stale.length > 0 ? 'STALE' : 'UNKNOWN';
       return {
         factKey,
         status,
@@ -75,18 +71,22 @@ export class EpistemicStateEngine {
 
     const supports = live.filter((item) => item.polarity === 'supports');
     const contradicts = live.filter((item) => item.polarity === 'contradicts');
-    const grouped = new Map<string, number>();
+    const grouped = new Map<string, number[]>();
     for (const item of supports) {
       const freshness = freshnessWeight(item.evidence.observedAt, now.getTime());
-      grouped.set(item.valueDigest, (grouped.get(item.valueDigest) ?? 0) + item.confidence * freshness);
+      const values = grouped.get(item.valueDigest) ?? [];
+      values.push(item.confidence * freshness);
+      grouped.set(item.valueDigest, values);
     }
     const alternatives = [...grouped.entries()]
-      .map(([valueDigest, raw]) => ({ valueDigest, confidence: clamp01(1 - Math.exp(-raw)) }))
+      .map(([valueDigest, values]) => ({ valueDigest, confidence: combineConfidence(values) }))
       .sort((a, b) => b.confidence - a.confidence || a.valueDigest.localeCompare(b.valueDigest));
 
     const top = alternatives[0];
     const second = alternatives[1];
-    const contradiction = combineConfidence(contradicts.map((item) => item.confidence * freshnessWeight(item.evidence.observedAt, now.getTime())));
+    const contradiction = combineConfidence(contradicts.map((item) =>
+      item.confidence * freshnessWeight(item.evidence.observedAt, now.getTime())
+    ));
     const support = top?.confidence ?? 0;
 
     let status: EpistemicStatus;
@@ -103,7 +103,9 @@ export class EpistemicStateEngine {
       status,
       confidence: status === 'DISPROVEN' ? contradiction : support,
       ...(top ? { selectedValueDigest: top.valueDigest } : {}),
-      supportingEvidence: uniqueEvidence(supports.filter((item) => !top || item.valueDigest === top.valueDigest).map((item) => item.evidence)),
+      supportingEvidence: uniqueEvidence(
+        supports.filter((item) => !top || item.valueDigest === top.valueDigest).map((item) => item.evidence)
+      ),
       contradictingEvidence: uniqueEvidence(contradicts.map((item) => item.evidence)),
       staleEvidence: uniqueEvidence(stale.map((item) => item.evidence)),
       alternatives,
