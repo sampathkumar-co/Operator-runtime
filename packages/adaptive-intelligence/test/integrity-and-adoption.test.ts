@@ -49,6 +49,10 @@ test('trajectory integrity chain detects reorder and record-link tampering',()=>
 test('shadow adoption fails closed until evidence thresholds are satisfied',()=>{
   const blocked=assessShadowAdoption({
     pairedDecisions:20,
+    pairedOutcomeDecisions:20,
+    outcomeCoverage:1,
+    progressCoverage:1,
+    costCoverage:1,
     agreementRate:0.5,
     divergenceRate:0.5,
     shadowWinRate:0.2,
@@ -71,6 +75,10 @@ test('shadow adoption fails closed until evidence thresholds are satisfied',()=>
 
   const eligible=assessShadowAdoption({
     pairedDecisions:500,
+    pairedOutcomeDecisions:500,
+    outcomeCoverage:1,
+    progressCoverage:1,
+    costCoverage:1,
     agreementRate:0.6,
     divergenceRate:0.4,
     shadowWinRate:0.2,
@@ -95,6 +103,10 @@ test('shadow adoption fails closed until evidence thresholds are satisfied',()=>
 test('shadow adoption blocks false-progress or loop regression even if shadow wins more often',()=>{
   const result=assessShadowAdoption({
     pairedDecisions:500,
+    pairedOutcomeDecisions:500,
+    outcomeCoverage:1,
+    progressCoverage:1,
+    costCoverage:1,
     agreementRate:0.4,
     divergenceRate:0.6,
     shadowWinRate:0.3,
@@ -115,4 +127,61 @@ test('shadow adoption blocks false-progress or loop regression even if shadow wi
   assert.equal(result.eligible,false);
   assert.ok(result.blockers.includes('false-goal-progress-rate'));
   assert.ok(result.blockers.includes('repeated-equivalent-failure-rate'));
+});
+
+
+test('shadow adoption blocks sparse verified coverage even when observed outcomes look excellent',()=>{
+  const result=assessShadowAdoption({
+    pairedDecisions:500,
+    pairedOutcomeDecisions:50,
+    outcomeCoverage:0.1,
+    progressCoverage:0.1,
+    costCoverage:0.1,
+    agreementRate:0.4,
+    divergenceRate:0.6,
+    shadowWinRate:0.8,
+    controlWinRate:0.02,
+    tiedOutcomeRate:0.18,
+    meanShadowProgressDelta:0.5,
+    meanShadowCostDelta:-0.5,
+    unmatchedShadow:0,
+    unmatchedControl:0
+  },{
+    taskCount:500,
+    firstStrategySuccessRate:0.9,
+    recoverySuccessRate:0.9,
+    falseGoalProgressRate:0,
+    repeatedEquivalentFailureRate:0,
+    averageStepsPerTask:2
+  });
+  assert.equal(result.eligible,false);
+  assert.ok(result.blockers.includes('outcome-coverage'));
+  assert.ok(result.blockers.includes('progress-coverage'));
+  assert.ok(result.blockers.includes('cost-coverage'));
+});
+
+test('shadow adoption rejects statistically inconsistent comparison reports instead of trusting them',()=>{
+  assert.throws(()=>assessShadowAdoption({
+    pairedDecisions:100,
+    pairedOutcomeDecisions:100,
+    outcomeCoverage:0.2,
+    progressCoverage:0.2,
+    costCoverage:0.2,
+    agreementRate:0.6,
+    divergenceRate:0.4,
+    shadowWinRate:0.2,
+    controlWinRate:0.1,
+    tiedOutcomeRate:0.7,
+    meanShadowProgressDelta:0.1,
+    meanShadowCostDelta:0,
+    unmatchedShadow:0,
+    unmatchedControl:0
+  },{
+    taskCount:100,
+    firstStrategySuccessRate:0.8,
+    recoverySuccessRate:0.8,
+    falseGoalProgressRate:0,
+    repeatedEquivalentFailureRate:0,
+    averageStepsPerTask:2
+  }),/outcomeCoverage\/count mismatch/);
 });
