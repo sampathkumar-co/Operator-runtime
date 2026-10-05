@@ -20,7 +20,7 @@ const TASK_IDS=Array.from({length:200},(_,index)=>'task-'+String(index).padStart
 
 function manifest(policyVersion:string,policyDigest:string,adaptiveDigest:string):EvaluationFreezeManifest{
   return createEvaluationFreezeManifest({
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:policyVersion,
     intelligencePolicyDigest:policyDigest,
     adaptiveStateDigest:adaptiveDigest,
@@ -191,7 +191,7 @@ test('tampered evaluation freeze manifest is rejected before promotion statistic
 test('candidate and baseline must share fair evaluation context',()=>{
   const input=bundle();
   input.baselineManifest=createEvaluationFreezeManifest({
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:'baseline-v1',
     intelligencePolicyDigest:B,
     adaptiveStateDigest:C,
@@ -225,7 +225,7 @@ test('forged calibration cannot enter a bound promotion bundle',()=>{
 test('policy comparison cannot hide a different procedure-memory snapshot',()=>{
   const input=bundle();
   input.baselineManifest=createEvaluationFreezeManifest({
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:'baseline-v1',
     intelligencePolicyDigest:B,
     adaptiveStateDigest:C,
