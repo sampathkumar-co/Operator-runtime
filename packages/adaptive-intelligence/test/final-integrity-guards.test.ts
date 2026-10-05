@@ -142,3 +142,30 @@ test('shadow progress evidence is bounded to a unit score',()=>{
     outcome(control.decisionDigest,D,'failure',0)
   ],{now:new Date(T0)}),/between 0 and 1/);
 });
+
+
+test('evaluation revision rejects numeric coercion',()=>{
+  assert.throws(()=>createEvaluationFreezeManifest({
+    ...freezeBase(),
+    sourceRevision:1234567 as any
+  },{clock:()=>new Date(T0)}),/sourceRevision must be a string/);
+});
+
+test('shadow metric fields reject numeric strings',()=>{
+  const {log,shadow,control}=traces();
+  assert.throws(()=>compareShadowToControl(log.snapshot(),[
+    {
+      ...outcome(shadow.decisionDigest,C,'success',1),
+      progressScore:'1' as any
+    },
+    outcome(control.decisionDigest,D,'failure',0)
+  ],{now:new Date(T0)}),/progressScore must be a number/);
+
+  assert.throws(()=>compareShadowToControl(log.snapshot(),[
+    {
+      ...outcome(shadow.decisionDigest,C,'success',1),
+      cost:'1' as any
+    },
+    outcome(control.decisionDigest,D,'failure',0)
+  ],{now:new Date(T0)}),/cost must be a number/);
+});
