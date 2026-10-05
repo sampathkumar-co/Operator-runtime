@@ -108,8 +108,7 @@ test('adaptive kernel trajectory retention is hard bounded',()=>{
       action:{id:'a'+i,family:'observe',capability:'ui.observe',risk:'read'},
       outcome:{ok:true,sideEffectState:'none',executionPhase:'effect_observed',evidence:[]},
       after:{id:'c'+i,observedAt:T0,scopeKey:'scene',facts:[]},
-      relevantFactKeys:['goal.done'],
-      independentVerification:false
+      relevantFactKeys:['goal.done']
     });
   }
   assert.equal(kernel.trajectory().length,50);
