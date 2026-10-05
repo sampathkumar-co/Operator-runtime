@@ -69,3 +69,22 @@ test('goal compiler rejects hard constraints that contradict terminal goal facts
     constraints:[{id:'force',strength:'MUST',factKey:'danger',description:'must danger'}]
   }),/contradicts forbidden goal fact/);
 });
+
+test('goal compiler rejects conflicting MUST values for the same fact',()=>{
+  assert.throws(()=>compileGoal({
+    id:'g',kind:'x',objective:'x',successFactKeys:['done'],
+    constraints:[
+      {id:'a',strength:'MUST',factKey:'target',expectedValueDigest:D,description:'A'},
+      {id:'b',strength:'MUST',factKey:'target',expectedValueDigest:'b'.repeat(64),description:'B'}
+    ]
+  }),/conflicting MUST values/);
+});
+
+test('plan graph rejects contradictory preconditions for one fact',()=>{
+  const g=graph();
+  g.nodes.find(n=>n.id==='act')!.preconditions=[
+    {factKey:'state.observed',expectedValueDigest:D},
+    {factKey:'state.observed',expectedValueDigest:'b'.repeat(64)}
+  ];
+  assert.throws(()=>validatePlanGraph(goal(),g),/conflicting preconditions/);
+});
