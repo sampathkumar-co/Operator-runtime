@@ -16,7 +16,7 @@ const T2='2026-10-05T00:00:02.000Z';
 
 function freeze(){
   return createEvaluationFreezeManifest({
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:'p1',
     intelligencePolicyDigest:A,
     adaptiveStateDigest:B,
