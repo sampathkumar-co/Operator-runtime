@@ -45,3 +45,20 @@ test('observation nodes cannot compile to mutating execution',()=>{
     {id:'bad',modality:'API',capability:'browser.read',expectedSuccess:.9,expectedCost:1,uncertainty:.1,verificationStrength:.9,mutating:true,supportsRollback:true}
   ]),/no execution modality/);
 });
+
+test('execution compiler enforces hard node risk limit and unique candidate ids',()=>{
+  const node=graph().nodes[1]!;
+  assert.throws(()=>compileExecution(node,[
+    {id:'pw',modality:'PLAYWRIGHT',capability:'browser.write',expectedSuccess:.9,expectedCost:1,uncertainty:.1,verificationStrength:.9,mutating:true,supportsRollback:true}
+  ],{maximumRisk:.2}),/node risk exceeds hard maximumRisk/);
+
+  assert.throws(()=>compileExecution(node,[
+    {id:'dup',modality:'GUI',capability:'browser.write',expectedSuccess:.8,expectedCost:1,uncertainty:.2,verificationStrength:.6,mutating:true,supportsRollback:true},
+    {id:'dup',modality:'PLAYWRIGHT',capability:'browser.write',expectedSuccess:.9,expectedCost:1,uncertainty:.1,verificationStrength:.9,mutating:true,supportsRollback:true}
+  ]),/execution candidate ids must be unique/);
+});
+
+test('branch search rejects duplicate candidate identities',()=>{
+  const branch={id:'dup',nodeIds:['a'],expectedSuccess:.8,expectedInformationGain:.2,expectedCost:1,risk:.1,uncertainty:.2,verificationStrength:.8,reversibleFraction:1};
+  assert.throws(()=>rankPlanBranches([branch,{...branch,nodeIds:['b']}]),/plan branch candidate ids must be unique/);
+});
