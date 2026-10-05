@@ -48,3 +48,24 @@ test('dependent closure invalidates only affected future cone',()=>{
   assert.deepEqual(dependentClosure(p,['act']),['act','verify']);
   assert.deepEqual(dependentClosure(p,['observe']),['act','observe','verify']);
 });
+
+test('root preconditions start pending until belief binding proves them',()=>{
+  const g=graph();
+  g.nodes[0]!.preconditions=[{factKey:'session.ready'}];
+  const p=validatePlanGraph(goal(),g);
+  const states=initializeNodeStates(p);
+  assert.equal(states.find(s=>s.nodeId==='observe')?.status,'PENDING');
+  assert.deepEqual(readyNodeIds(p,states,[]),[]);
+  assert.deepEqual(readyNodeIds(p,states,[belief('session.ready')]),['observe']);
+});
+
+test('goal compiler rejects hard constraints that contradict terminal goal facts',()=>{
+  assert.throws(()=>compileGoal({
+    id:'g',kind:'x',objective:'x',successFactKeys:['done'],
+    constraints:[{id:'deny',strength:'MUST_NOT',factKey:'done',description:'never done'}]
+  }),/contradicts required success fact/);
+  assert.throws(()=>compileGoal({
+    id:'g',kind:'x',objective:'x',successFactKeys:['done'],forbiddenFactKeys:['danger'],
+    constraints:[{id:'force',strength:'MUST',factKey:'danger',description:'must danger'}]
+  }),/contradicts forbidden goal fact/);
+});
