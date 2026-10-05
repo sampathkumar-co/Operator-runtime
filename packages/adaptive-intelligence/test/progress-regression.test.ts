@@ -63,7 +63,7 @@ test('pre-existing satisfied fact is not miscredited as new subgoal progress', (
     updatedAt: T0
   }];
   const goal: GoalDescriptor = { id: 'g', kind: 'save', objective: 'save', successFactKeys: ['goal.saved'] };
-  const result = assessProgress({ goal, transition, beliefs, independentVerification: false });
+  const result = assessProgress({ goal, transition, beliefs });
   assert.equal(result.level, 'STATE_CHANGED');
   assert.ok(!result.creditedSignals.some((item) => item.startsWith('goal-fact-transition:')));
 });
