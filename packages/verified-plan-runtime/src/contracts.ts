@@ -83,6 +83,8 @@ export interface PlanNodeState {
   status: PlanNodeStatus;
   attempts: number;
   lastReason?: string;
+  lastExecutionDigest?: string;
+  verificationReceiptDigest?: string;
   lastUpdatedAt: string;
 }
 
@@ -131,10 +133,24 @@ export interface RankedExecutionCandidate extends ExecutionCandidate {
   penalties: string[];
 }
 
+export interface AuthorizationReceiptRef {
+  digest: string;
+  goalId: string;
+  planId: string;
+  planVersion: number;
+  nodeId: string;
+  authoritySnapshotDigest: string;
+  authorizedAt: string;
+}
+
 export interface VerificationReceiptRef {
   digest: string;
   goalId: string;
+  planId: string;
+  planVersion: number;
   nodeId: string;
+  attempt: number;
+  executionDigest: string;
   verifierId: string;
   verifiedAt: string;
   authoritySnapshotDigest: string;
@@ -146,6 +162,7 @@ export interface ExecutionObservation {
   contradictedFactKeys: string[];
   executionOk: boolean;
   sideEffectState: 'none' | 'known' | 'uncertain';
+  evidenceDigests?: string[];
 }
 
 export interface PlanRepairDecision {
@@ -177,6 +194,7 @@ export interface PlanDecisionLineage {
   digest: string;
   planId: string;
   planVersion: number;
+  planDigest: string;
   goalId: string;
   nodeId: string;
   beliefDigest: string;
