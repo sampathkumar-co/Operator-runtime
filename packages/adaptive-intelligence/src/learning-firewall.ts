@@ -16,14 +16,16 @@ export class LearningFirewall {
   evaluate(input: LearningPromotionInput): LearningReceipt {
     const skill = validateSkillDraft(input.skill);
     const policyVersion = bounded(input.policyVersion, 256, 'policyVersion');
-    const blocked = unique([...(input.blockedIdentifiers ?? []), ...(skill.benchmarkIdentifiers ?? [])])
-      .filter(Boolean);
+    const blocked = unique(input.blockedIdentifiers ?? []).filter(Boolean);
 
     if (input.mode === 'EVALUATION_FROZEN') {
       return receipt(skill, false, 'Evaluation-frozen mode forbids policy/skill promotion.', policyVersion);
     }
     if (input.mode === 'SHADOW') {
       return receipt(skill, false, 'Shadow mode records recommendations but forbids promotion.', policyVersion);
+    }
+    if ((skill.benchmarkIdentifiers?.length ?? 0) > 0) {
+      return receipt(skill, false, 'Benchmark/evaluation lineage is declared on this skill and cannot be promoted as generic learning.', policyVersion);
     }
     if (!input.independentlyVerified) {
       return receipt(skill, false, 'Independent verification is required before reusable learning.', policyVersion);
