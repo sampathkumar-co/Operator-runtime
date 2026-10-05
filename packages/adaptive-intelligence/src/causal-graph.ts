@@ -22,6 +22,9 @@ export class CausalGraph {
     const after = normalizeSnapshot(input.after);
     const action = normalizeAction(input.action);
     const outcome = normalizeOutcome(input.outcome);
+    if (Date.parse(after.observedAt) < Date.parse(before.observedAt)) {
+      throw new Error('Causal transition after snapshot cannot predate before snapshot.');
+    }
     const delta = deriveDelta(before, after, action.expectedEffects ?? [], input.progressSignals ?? []);
     const causalConfidence = causalConfidenceFor(action, outcome, delta, before, after);
     const transition: CausalTransition = {
@@ -143,7 +146,7 @@ function normalizeFact(input: StateFact): StateFact {
     key: boundedText(input.key, 512, 'fact.key'),
     valueDigest: sha256(input.valueDigest, 'fact.valueDigest'),
     confidence: unit(input.confidence, 'fact.confidence'),
-    evidence: Array.isArray(input.evidence) ? structuredClone(input.evidence) : []
+    evidence: Array.isArray(input.evidence) ? normalizeEvidenceList(input.evidence) : []
   };
 }
 
@@ -163,6 +166,12 @@ function normalizeAction(input: ActionDescriptor): ActionDescriptor {
 
 function normalizeOutcome(input: ActionOutcome): ActionOutcome {
   if (!input || typeof input !== 'object' || typeof input.ok !== 'boolean') throw new Error('action outcome is invalid.');
+  if (input.sideEffectState !== undefined && !['none','known','uncertain'].includes(input.sideEffectState)) {
+    throw new Error('outcome.sideEffectState is invalid.');
+  }
+  if (input.executionPhase !== undefined && !['pre_dispatch','dispatching','effect_observed','unknown'].includes(input.executionPhase)) {
+    throw new Error('outcome.executionPhase is invalid.');
+  }
   return {
     ok: input.ok,
     ...(input.provider ? { provider: boundedText(input.provider, 256, 'outcome.provider') } : {}),
@@ -170,8 +179,30 @@ function normalizeOutcome(input: ActionOutcome): ActionOutcome {
     ...(input.errorCode ? { errorCode: boundedText(input.errorCode, 256, 'outcome.errorCode') } : {}),
     ...(input.sideEffectState ? { sideEffectState: input.sideEffectState } : {}),
     ...(input.executionPhase ? { executionPhase: input.executionPhase } : {}),
-    evidence: Array.isArray(input.evidence) ? structuredClone(input.evidence) : []
+    evidence: Array.isArray(input.evidence) ? normalizeEvidenceList(input.evidence) : []
   };
+}
+
+function normalizeEvidenceList(items: import('./contracts.ts').EvidenceRef[]): import('./contracts.ts').EvidenceRef[] {
+  const byDigest = new Map<string, import('./contracts.ts').EvidenceRef>();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') throw new Error('evidence item is invalid.');
+    const digest = sha256(item.digest, 'evidence.digest');
+    const normalized = {
+      digest,
+      source: boundedText(item.source, 256, 'evidence.source'),
+      observedAt: validIso(item.observedAt, 'evidence.observedAt'),
+      ...(item.channel ? { channel: boundedText(item.channel, 128, 'evidence.channel') } : {}),
+      ...(item.scope ? { scope: boundedText(item.scope, 512, 'evidence.scope') } : {}),
+      ...(item.independenceKey ? { independenceKey: boundedText(item.independenceKey, 512, 'evidence.independenceKey') } : {})
+    };
+    const prior = byDigest.get(digest);
+    if (prior && JSON.stringify(prior) !== JSON.stringify(normalized)) {
+      throw new Error('Conflicting evidence metadata for the same digest is rejected.');
+    }
+    byDigest.set(digest, normalized);
+  }
+  return [...byDigest.values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt)||a.digest.localeCompare(b.digest));
 }
 
 function boundedText(input: unknown, max: number, label: string): string {
