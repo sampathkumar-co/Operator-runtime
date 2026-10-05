@@ -75,3 +75,26 @@ test('choice groups require at least two alternatives with one hierarchical pare
   bad.nodes.find(n=>n.id==='act-alt')!.parentId=undefined;
   assert.throws(()=>validatePlanGraph(goal(),bad),/same hierarchical parent/);
 });
+
+test('choice cannot switch while sibling awaits verification or has uncertain side effects',()=>{
+  const p=validatePlanGraph(goal(),choiceGraph());
+  const waiting=initializeNodeStates(p);
+  waiting.find(s=>s.nodeId==='act-alt')!.status='BLOCKED';
+  waiting.find(s=>s.nodeId==='act-alt')!.lastExecutionDigest='a'.repeat(64);
+  assert.throws(()=>selectChoiceBranch(p,waiting,'write-path','act'),/awaiting verification/);
+
+  const uncertain=initializeNodeStates(p);
+  uncertain.find(s=>s.nodeId==='act-alt')!.status='FAILED';
+  uncertain.find(s=>s.nodeId==='act-alt')!.lastReason='mutation-side-effects-uncertain-reconciliation-required';
+  assert.throws(()=>selectChoiceBranch(p,uncertain,'write-path','act'),/uncertain side effects/);
+});
+
+test('plan revision cannot occur while an execution awaits verification',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous);
+  const act=states.find(s=>s.nodeId==='act')!;
+  act.status='BLOCKED';
+  act.lastExecutionDigest='a'.repeat(64);
+  const next=graph(); next.version=2;
+  assert.throws(()=>revisePlan(goal(),previous,states,next),/awaiting verification/);
+});
