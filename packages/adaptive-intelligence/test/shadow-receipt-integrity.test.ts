@@ -55,7 +55,9 @@ function outcome(
     verificationReceipt:{
       digest:result==='success'?C:D,
       runId:RUN,
+      taskId:'task-1',
       goalId:GOAL,
+      decisionDigest,
       verifierId:'evaluation-verifier',
       verifiedAt:T0,
       authoritySnapshotDigest:A,
