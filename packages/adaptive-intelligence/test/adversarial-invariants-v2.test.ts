@@ -75,13 +75,24 @@ function genericSkill(overrides:Partial<SkillDraft>={}):SkillDraft{
   };
 }
 
+function learningReceipt(digest=A,sourceRunId='run-1'){
+  return{
+    digest,
+    goalId:'goal-1',
+    verifierId:'verification-kernel',
+    verifiedAt:T0,
+    authoritySnapshotDigest:B,
+    sourceRunId
+  };
+}
+
 test('declared benchmark/evaluation lineage blocks generic skill promotion even if text is generic',()=>{
-  const firewall=new LearningFirewall();
+  const firewall=new LearningFirewall({clock:()=>new Date(T0)});
   const result=firewall.evaluate({
     skill:genericSkill({benchmarkIdentifiers:['held-out-evaluation-case']}),
     mode:'NORMAL',
     policyVersion:'p1',
-    independentlyVerified:true
+    verificationReceipts:[learningReceipt()]
   });
   assert.equal(result.promoted,false);
   assert.match(result.reason,/lineage is declared/);
