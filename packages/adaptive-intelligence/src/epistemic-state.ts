@@ -71,22 +71,19 @@ export class EpistemicStateEngine {
 
     const supports = live.filter((item) => item.polarity === 'supports');
     const contradicts = live.filter((item) => item.polarity === 'contradicts');
-    const grouped = new Map<string, number[]>();
+    const grouped = new Map<string, StoredObservation[]>();
     for (const item of supports) {
-      const freshness = freshnessWeight(item.evidence.observedAt, now.getTime());
       const values = grouped.get(item.valueDigest) ?? [];
-      values.push(item.confidence * freshness);
+      values.push(item);
       grouped.set(item.valueDigest, values);
     }
     const alternatives = [...grouped.entries()]
-      .map(([valueDigest, values]) => ({ valueDigest, confidence: combineConfidence(values) }))
+      .map(([valueDigest, values]) => ({ valueDigest, confidence: independentConfidence(values, now.getTime()) }))
       .sort((a, b) => b.confidence - a.confidence || a.valueDigest.localeCompare(b.valueDigest));
 
     const top = alternatives[0];
     const second = alternatives[1];
-    const contradiction = combineConfidence(contradicts.map((item) =>
-      item.confidence * freshnessWeight(item.evidence.observedAt, now.getTime())
-    ));
+    const contradiction = independentConfidence(contradicts, now.getTime());
     const support = top?.confidence ?? 0;
 
     let status: EpistemicStatus;
@@ -150,7 +147,8 @@ function normalizeEvidence(input: EvidenceRef): EvidenceRef {
     source: boundedText(input.source, 256, 'evidence.source'),
     observedAt: validIso(input.observedAt, 'evidence.observedAt'),
     ...(input.channel ? { channel: boundedText(input.channel, 128, 'evidence.channel') } : {}),
-    ...(input.scope ? { scope: boundedText(input.scope, 512, 'evidence.scope') } : {})
+    ...(input.scope ? { scope: boundedText(input.scope, 512, 'evidence.scope') } : {}),
+    ...(input.independenceKey ? { independenceKey: boundedText(input.independenceKey, 512, 'evidence.independenceKey') } : {})
   };
 }
 
@@ -158,6 +156,21 @@ function freshnessWeight(observedAt: string, now: number): number {
   const age = Math.max(0, now - Date.parse(observedAt));
   const halfLife = 5 * 60_000;
   return Math.max(0.2, Math.pow(0.5, age / halfLife));
+}
+
+function independentConfidence(items: StoredObservation[], now: number): number {
+  const strongestByIndependenceKey = new Map<string, number>();
+  for (const item of items) {
+    const key = evidenceIndependenceKey(item.evidence);
+    const weighted = item.confidence * freshnessWeight(item.evidence.observedAt, now);
+    strongestByIndependenceKey.set(key, Math.max(strongestByIndependenceKey.get(key) ?? 0, weighted));
+  }
+  return combineConfidence([...strongestByIndependenceKey.values()]);
+}
+
+function evidenceIndependenceKey(evidence: EvidenceRef): string {
+  return evidence.independenceKey
+    ?? [evidence.source, evidence.channel ?? '', evidence.scope ?? ''].join('|');
 }
 
 function combineConfidence(values: number[]): number {
