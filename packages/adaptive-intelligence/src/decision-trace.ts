@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { EvidenceRef } from './contracts.ts';
+import { canonicalJson } from './versioned-state.ts';
 
 export type DecisionMode='SHADOW'|'CONTROL';
 export type DecisionKind='OBSERVATION'|'STRATEGY'|'RECOVERY'|'PROGRESS'|'LEARNING';
@@ -84,9 +85,10 @@ export class DecisionTraceLog {
 }
 
 function computeDecisionDigest(input:DecisionTraceInput,id:string,createdAt:string):string{
-  return crypto.createHash('sha256').update(JSON.stringify({
+  const evidence=[...input.evidence].sort((a,b)=>a.digest.localeCompare(b.digest));
+  return crypto.createHash('sha256').update(canonicalJson({
     ...input,
-    evidence:[...input.evidence].map(e=>e.digest).sort(),
+    evidence,
     id,
     createdAt
   })).digest('hex');
@@ -107,10 +109,23 @@ function normalize(input:DecisionTraceInput):DecisionTraceInput{
     ...(input.selectedId?{selectedId:bounded(input.selectedId,512,'selectedId')}:{}),
     ...(input.alternatives?{alternatives:[...new Set(input.alternatives.map(v=>bounded(v,512,'alternativeId')))].sort()}:{}),
     reason:bounded(input.reason,4096,'reason'),
-    evidence:[...new Map((input.evidence??[]).map(e=>[sha256(e.digest,'evidence.digest'),normalizeEvidence(e)])).values()],
+    evidence:normalizeEvidenceList(input.evidence??[]),
     authoritySnapshotDigest:sha256(input.authoritySnapshotDigest,'authoritySnapshotDigest'),
     inputStateDigest:sha256(input.inputStateDigest,'inputStateDigest')
   };
+}
+function normalizeEvidenceList(items:EvidenceRef[]):EvidenceRef[]{
+  if(!Array.isArray(items)||items.length>10000) throw new Error('decision evidence is invalid.');
+  const byDigest=new Map<string,EvidenceRef>();
+  for(const raw of items){
+    const normalized=normalizeEvidence(raw);
+    const prior=byDigest.get(normalized.digest);
+    if(prior&&canonicalJson(prior)!==canonicalJson(normalized)){
+      throw new Error('Conflicting decision evidence metadata for the same digest is rejected.');
+    }
+    byDigest.set(normalized.digest,normalized);
+  }
+  return [...byDigest.values()].sort((a,b)=>a.digest.localeCompare(b.digest));
 }
 function normalizeEvidence(input:EvidenceRef):EvidenceRef{
   return{
