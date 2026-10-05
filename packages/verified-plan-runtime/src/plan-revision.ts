@@ -31,7 +31,7 @@ export function revisePlan(
     throw new Error('plan revision version must advance exactly by one.');
   }
   const previousById=new Map(previous.nodes.map((n)=>[n.id,n]));
-  const previousStateById=new Map(previousStates.map((s)=>[s.nodeId,s));
+  const previousStateById=new Map(previousStates.map((s)=>[s.nodeId,s]));
   const changed=next.nodes.filter((node)=>{
     const prior=previousById.get(node.id);
     return !prior||digestPlan(prior)!==digestPlan(node);
