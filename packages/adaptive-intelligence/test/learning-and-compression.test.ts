@@ -19,6 +19,16 @@ const B = 'b'.repeat(64);
 const T0 = '2026-10-05T00:00:00.000Z';
 
 function evidence(digest = A) { return { digest, source: 'test', observedAt: T0 }; }
+function verificationReceipt(digest = A, sourceRunId = 'synthetic-run-1') {
+  return {
+    digest,
+    goalId: 'goal-verified',
+    verifierId: 'verification-kernel',
+    verifiedAt: T0,
+    authoritySnapshotDigest: B,
+    sourceRunId
+  };
+}
 
 function skill(overrides: Partial<SkillDraft> = {}): SkillDraft {
   return {
@@ -42,12 +52,12 @@ function skill(overrides: Partial<SkillDraft> = {}): SkillDraft {
 }
 
 test('verified generic skill is promotable only in NORMAL mode', () => {
-  const firewall = new LearningFirewall();
+  const firewall = new LearningFirewall({ clock: () => new Date(T0) });
   const frozen = firewall.evaluate({
     skill: skill(),
     mode: 'EVALUATION_FROZEN',
     policyVersion: 'p1',
-    independentlyVerified: true
+    verificationReceipts: [verificationReceipt()]
   });
   assert.equal(frozen.promoted, false);
 
@@ -55,18 +65,18 @@ test('verified generic skill is promotable only in NORMAL mode', () => {
     skill: skill(),
     mode: 'NORMAL',
     policyVersion: 'p1',
-    independentlyVerified: true
+    verificationReceipts: [verificationReceipt()]
   });
   assert.equal(normal.promoted, true);
 });
 
 test('benchmark identifier contamination blocks learning promotion', () => {
-  const firewall = new LearningFirewall();
+  const firewall = new LearningFirewall({ clock: () => new Date(T0) });
   const result = firewall.evaluate({
     skill: skill({ title: 'Solve click-menu through dynamic hierarchy' }),
     mode: 'NORMAL',
     policyVersion: 'p1',
-    independentlyVerified: true,
+    verificationReceipts: [verificationReceipt()],
     blockedIdentifiers: ['click-menu']
   });
   assert.equal(result.promoted, false);
