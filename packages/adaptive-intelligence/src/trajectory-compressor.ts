@@ -114,12 +114,14 @@ function uniqueEvidence(items: EvidenceRef[]): EvidenceRef[] {
 }
 function unique(values: string[]): string[] { return [...new Set(values)].sort(); }
 function bounded(input: unknown, max: number, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   if (!value || value.length > max) throw new Error(label + ' is invalid.');
   return value;
 }
 function integer(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(label + ' is invalid.');
   return value;
 }
