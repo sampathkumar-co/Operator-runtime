@@ -25,6 +25,12 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
   const stateChanged = totalChanges(input.transition) > 0;
   const expectedProgress = input.transition.delta.expectedEffectsSatisfied.length > 0;
   const explicitProgress = input.transition.delta.progressSignals.length > 0;
+  const changed = new Set([
+    ...input.transition.delta.changedFactKeys,
+    ...input.transition.delta.addedFactKeys,
+    ...input.transition.delta.expectedEffectsSatisfied
+  ]);
+  const newlySupportedGoalFacts = satisfied.filter((key) => changed.has(key));
 
   if (input.transition.outcome.ok) creditedSignals.push('provider-action-ok');
   else rejectedSignals.push('provider-action-failed');
@@ -34,6 +40,9 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
 
   if (expectedProgress) creditedSignals.push('expected-effect-observed');
   if (explicitProgress) creditedSignals.push(...input.transition.delta.progressSignals.map((item) => 'progress:' + item));
+  if (newlySupportedGoalFacts.length > 0) {
+    creditedSignals.push(...newlySupportedGoalFacts.map((item) => 'goal-fact-transition:' + item));
+  }
   if (input.transition.delta.expectedEffectsMissing.length > 0) {
     rejectedSignals.push(...input.transition.delta.expectedEffectsMissing.map((item) => 'missing-effect:' + item));
   }
@@ -41,7 +50,7 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
   let level: ProgressLevel = 'NONE';
   if (input.transition.outcome.ok) level = 'ACTION_EXECUTED';
   if (stateChanged) level = 'STATE_CHANGED';
-  if (expectedProgress || explicitProgress || satisfied.length > 0) level = 'SUBGOAL_PROGRESS';
+  if (expectedProgress || explicitProgress || newlySupportedGoalFacts.length > 0) level = 'SUBGOAL_PROGRESS';
 
   const allGoalFacts = missing.length === 0 && goal.successFactKeys.length > 0;
   const noForbidden = forbidden.length === 0;
@@ -58,9 +67,10 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
   if (level === 'ACTION_EXECUTED') confidence = 0.35;
   if (level === 'STATE_CHANGED') confidence = 0.5;
   if (level === 'SUBGOAL_PROGRESS') {
-    const factConfidence = satisfied.length === 0
+    const progressFacts = newlySupportedGoalFacts.length > 0 ? newlySupportedGoalFacts : satisfied;
+    const factConfidence = progressFacts.length === 0
       ? 0.55
-      : satisfied.reduce((sum, key) => sum + (beliefByKey.get(key)?.confidence ?? 0), 0) / satisfied.length;
+      : progressFacts.reduce((sum, key) => sum + (beliefByKey.get(key)?.confidence ?? 0), 0) / progressFacts.length;
     confidence = Math.min(0.9, Math.max(0.55, factConfidence));
   }
   if (level === 'GOAL_ACHIEVED') {
