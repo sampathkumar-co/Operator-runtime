@@ -13,7 +13,7 @@ const A='a'.repeat(64),B='b'.repeat(64),C='c'.repeat(64),D='d'.repeat(64);
 
 function freeze(adaptiveStateDigest:string){
   return createEvaluationFreezeManifest({
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:'adaptive-v1',
     intelligencePolicyDigest:A,
     adaptiveStateDigest,
