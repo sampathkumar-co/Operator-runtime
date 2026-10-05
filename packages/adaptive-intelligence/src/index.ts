@@ -9,4 +9,6 @@ export * from './trajectory-compressor.ts';
 export * from './skill-schema.ts';
 export * from './learning-firewall.ts';
 export * from './calibration.ts';
+export * from './perception-conflict.ts';
+export * from './observation-policy.ts';
 export * from './adaptive-intelligence-kernel.ts';
