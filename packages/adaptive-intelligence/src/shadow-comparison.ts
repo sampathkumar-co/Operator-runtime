@@ -227,12 +227,16 @@ function normalizeOutcome(input:DecisionOutcome,now:Date):DecisionOutcome{
   if(Date.parse(receipt.verifiedAt)>now.getTime()) throw new Error('Decision outcome verification cannot be future-dated.');
   const normalized:DecisionOutcome={runId,taskId,goalId,decisionDigest,verificationReceipt:receipt};
   if(input.progressScore!==undefined){
-    const value=Number(input.progressScore);
+    if(typeof input.progressScore!=='number') throw new Error('progressScore must be a number.');
+    const value=input.progressScore;
     if(!Number.isFinite(value)||value<0||value>1) throw new Error('progressScore must be between 0 and 1.');
     normalized.progressScore=value;
   }
   if(input.cost!==undefined){
-    const value=Number(input.cost); if(!Number.isFinite(value)||value<0) throw new Error('cost is invalid.'); normalized.cost=value;
+    if(typeof input.cost!=='number') throw new Error('cost must be a number.');
+    const value=input.cost;
+    if(!Number.isFinite(value)||value<0) throw new Error('cost is invalid.');
+    normalized.cost=value;
   }
   return normalized;
 }
