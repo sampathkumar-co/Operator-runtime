@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type {
   ActionDescriptor,
   ActionOutcome,
@@ -28,6 +29,7 @@ import { CalibrationTracker } from './calibration.ts';
 import {
   decodeVersionedState,
   encodeVersionedState,
+  canonicalJson,
   type VersionedStateEnvelope
 } from './versioned-state.ts';
 
@@ -165,6 +167,10 @@ export class AdaptiveIntelligenceKernel {
 
   exportEnvelope(options: { clock?: () => Date } = {}): AdaptiveIntelligenceKernelEnvelope {
     return encodeVersionedState('adaptive-kernel', this.exportState(), options);
+  }
+
+  stateDigest(): string {
+    return crypto.createHash('sha256').update(canonicalJson(this.exportState())).digest('hex');
   }
 
   observeBelief(observation: BeliefObservation) {
