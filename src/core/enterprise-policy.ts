@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -85,6 +86,7 @@ export class EnterprisePolicyStore {
   async narrow(base: PermissionProfile, contextInput: EnterpriseAuthorizationContext): Promise<EnterprisePermissionDecision> {
     await this.#serial;
     const state = await this.#read();
+    const policyDigest = enterprisePolicyDigest(state);
     const context = normalizeContext(contextInput);
     const matches = state.bindings
       .filter((binding) => binding.enabled && binding.principalId === context.principalId)
@@ -127,13 +129,33 @@ export class EnterprisePolicyStore {
       maxRisk,
       allowExternalWrites: base.allowExternalWrites === true && RISK_ORDER[maxRisk] >= RISK_ORDER.external,
       allowSystemChanges: base.allowSystemChanges === true && RISK_ORDER[maxRisk] >= RISK_ORDER.system,
-      allowDestructive: base.allowDestructive === true && RISK_ORDER[maxRisk] >= RISK_ORDER.destructive
+      allowDestructive: base.allowDestructive === true && RISK_ORDER[maxRisk] >= RISK_ORDER.destructive,
+      enterprisePolicyDigest: policyDigest
     };
     return {
       roleIds: roles.map((role) => role.id).sort(),
       bindingIds: grants.map(({ binding }) => binding.id).sort(),
       permissions
     };
+  }
+
+  async currentDigest(): Promise<string> {
+    await this.#serial;
+    return enterprisePolicyDigest(await this.#read());
+  }
+
+  async assertCurrentDigest(expectedInput: string): Promise<void> {
+    const expected = String(expectedInput ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(expected)) {
+      throw new OperatorError('ENTERPRISE_POLICY_DIGEST_INVALID', 'Enterprise policy digest is invalid.');
+    }
+    const actual = await this.currentDigest();
+    if (actual !== expected) {
+      throw new OperatorError('ENTERPRISE_POLICY_STALE', 'Enterprise policy changed after authority was derived; permissions must be recomputed.', {
+        retryable: true,
+        details: { expectedDigest: expected, actualDigest: actual, sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+      });
+    }
   }
 
   async #read(): Promise<EnterprisePolicyState> {
@@ -287,4 +309,13 @@ function uniqueText(input: unknown, maxItems: number, maxLength: number, label: 
   const values = input.map((value, index) => bounded(value, maxLength, `${label}[${index}]`));
   if (new Set(values).size !== values.length) throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', `${label} contains duplicates.`);
   return values.sort();
+}
+
+function enterprisePolicyDigest(state: EnterprisePolicyState): string {
+  const canonical = {
+    version: state.version,
+    roles: [...state.roles].sort((a, b) => a.id.localeCompare(b.id)),
+    bindings: [...state.bindings].sort((a, b) => a.id.localeCompare(b.id))
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }

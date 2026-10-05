@@ -78,6 +78,8 @@ export interface PermissionProfile {
   allowExternalWrites?: boolean;
   allowSystemChanges?: boolean;
   allowDestructive?: boolean;
+  /** Canonical digest of the mutable enterprise policy used to derive this profile. */
+  enterprisePolicyDigest?: string;
 }
 
 export interface CapabilityScore {

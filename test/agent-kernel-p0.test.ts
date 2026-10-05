@@ -11,6 +11,8 @@ import { IntentRegistry, bindingForIntent } from '../src/core/intent-registry.ts
 import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
 import { resolvePhysicalResourceKeysForAction } from '../src/core/resource-identity.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
+import { OperatorError } from '../src/core/errors.ts';
+import { EnterprisePolicyStore } from '../src/core/enterprise-policy.ts';
 import { StudioWorkflowExecutor } from '../src/core/studio-executor.ts';
 import { TeachModeStore } from '../src/core/studio-teach.ts';
 import { TeamCoordinator } from '../src/core/team-coordinator.ts';
@@ -157,6 +159,102 @@ function kernelAt(stateDir: string, provider: CapabilityProvider): {
   });
   return { kernel, runtime, journal, intents };
 }
+
+test('shared AgentKernel pre-dispatch guard blocks every provider before journal dispatch', async (t) => {
+  const stateDir = await temp(t);
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal,
+    beforeProviderDispatch: async () => {
+      throw new OperatorError(
+        'EMERGENCY_STOPPED',
+        'Emergency stop engaged immediately before provider dispatch.',
+        { retryable: false, details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' } }
+      );
+    }
+  });
+  const action: ActionRequest = {
+    id: 'kernel-pre-dispatch-stop',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  const result = await kernel.execute(action, permissions(['file.write']));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EMERGENCY_STOPPED');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(provider.calls, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
+
+test('enterprise policy freshness is revalidated at the shared AgentKernel dispatch boundary', async (t) => {
+  const stateDir = await temp(t);
+  const root = path.join(stateDir, 'project');
+  await fs.mkdir(root, { recursive: true });
+  const enterprise = new EnterprisePolicyStore(stateDir);
+  const configure = async (caps: string[]) => await enterprise.configure({
+    roles: [{
+      id: 'developer',
+      capabilities: caps,
+      rootPrefixes: [root],
+      maxRisk: 'write',
+      environments: [],
+      projectPrefixes: [],
+      deviceGroups: []
+    }],
+    bindings: [{
+      id: 'developer-binding',
+      principalId: 'alice',
+      roleId: 'developer',
+      enabled: true
+    }]
+  });
+  await configure(['file.write']);
+
+  const decision = await enterprise.narrow(
+    permissions(['file.write'], { allowedRoots: [root], maxRisk: 'write' }),
+    { principalId: 'alice' }
+  );
+
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal,
+    beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
+      if (actionPermissions.enterprisePolicyDigest) {
+        await enterprise.assertCurrentDigest(actionPermissions.enterprisePolicyDigest);
+      }
+    }
+  });
+
+  await configure(['file.read']);
+  const action: ActionRequest = {
+    id: 'enterprise-stale-before-dispatch',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(root, 'a.txt'), key: 'x', value: 1 },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const result = await kernel.execute(action, decision.permissions);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'ENTERPRISE_POLICY_STALE');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(provider.calls, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
 
 test('newest intent wins before provider dispatch', async (t) => {
   const stateDir = await temp(t);

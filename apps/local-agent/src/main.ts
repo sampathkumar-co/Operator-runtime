@@ -107,7 +107,15 @@ const emergencyStop = new EmergencyStopStore(stateDir);
 const approvals = new ApprovalStore(stateDir);
 const actionExecutions = new LocalActionExecutionStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
-const audit = new AuditLog(stateDir);
+const deviceIdentity = new DeviceIdentityStore(stateDir);
+const localDeviceIdentity = await deviceIdentity.loadOrCreate();
+const audit = new AuditLog(stateDir, {
+  authenticator: {
+    keyId: localDeviceIdentity.fingerprint,
+    sign: async (payload) => await deviceIdentity.sign(payload),
+    verify: async (payload, signature) => await deviceIdentity.verify(payload, signature)
+  }
+});
 const tasks = new TaskStore(stateDir);
 const resourceLeases = new ResourceLeaseStore(stateDir);
 const actionJournal = new ActionTransitionJournal(stateDir);
@@ -117,7 +125,6 @@ const world = new WorldModelStore(stateDir);
 const perception = new PerceptionGraphStore(stateDir);
 const optimizer = new ExecutionOptimizerStore(stateDir);
 const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
-const deviceIdentity = new DeviceIdentityStore(stateDir);
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const semanticMigration = new SemanticCheckpointManager(stateDir, {
   identity: deviceIdentity,
@@ -173,6 +180,18 @@ const agentKernel = new AgentKernel({
   leases: resourceLeases,
   journal: actionJournal,
   intents: intentRegistry,
+  beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
+    if (actionPermissions.enterprisePolicyDigest) {
+      await enterprisePolicy.assertCurrentDigest(actionPermissions.enterprisePolicyDigest);
+    }
+    if ((await emergencyStop.status()).engaged) {
+      throw new OperatorError(
+        'EMERGENCY_STOPPED',
+        'Operator execution is disabled by the local emergency stop.',
+        { retryable: false, details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' } }
+      );
+    }
+  },
   observeResult: async (action, result) => {
     try {
       await publishPerceptionFromActionResult(perception, action, result);

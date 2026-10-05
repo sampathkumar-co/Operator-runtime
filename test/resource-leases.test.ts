@@ -47,6 +47,69 @@ test('lease ownership loss is detected before dispatch instead of becoming an un
   await assert.rejects(() => lease.assertOwned(), (error: any) => error?.code === 'RESOURCE_LEASE_LOST');
 });
 
+test('resource leases preserve a holder when process liveness is unknown', async (t) => {
+  const state = await temp(t);
+  const key = 'repo:/tmp/inspection-unknown';
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({
+    version: 1,
+    resources: [{
+      key,
+      holders: [{
+        leaseId: '22222222-2222-4222-8222-222222222222',
+        ownerId: 'live-but-uninspectable',
+        pid: 44001,
+        processInstance: { pid: 44001, started: 'known-instance' },
+        mode: 'exclusive',
+        acquiredAt: new Date().toISOString()
+      }]
+    }]
+  }));
+
+  const store = new ResourceLeaseStore(state, {
+    processInstance: { pid: 44002, started: 'new-owner' },
+    observeProcessInstance: async (pid) => pid === 44001
+      ? { status: 'unknown' }
+      : { status: 'live', identity: { pid, started: 'new-owner' } }
+  });
+
+  await assert.rejects(
+    () => store.acquire('replacement', [key], 'exclusive'),
+    (error: any) => error?.code === 'RESOURCE_BUSY'
+  );
+  const inspected = await store.inspect();
+  assert.equal(inspected.resources[0]?.holders[0]?.ownerId, 'live-but-uninspectable');
+});
+
+test('resource leases reap a holder only after confirmed process death', async (t) => {
+  const state = await temp(t);
+  const key = 'repo:/tmp/confirmed-dead';
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({
+    version: 1,
+    resources: [{
+      key,
+      holders: [{
+        leaseId: '33333333-3333-4333-8333-333333333333',
+        ownerId: 'dead-owner',
+        pid: 45001,
+        processInstance: { pid: 45001, started: 'dead-instance' },
+        mode: 'exclusive',
+        acquiredAt: new Date().toISOString()
+      }]
+    }]
+  }));
+
+  const store = new ResourceLeaseStore(state, {
+    processInstance: { pid: 45002, started: 'new-owner' },
+    observeProcessInstance: async (pid) => pid === 45001
+      ? { status: 'dead' }
+      : { status: 'live', identity: { pid, started: 'new-owner' } }
+  });
+
+  const replacement = await store.acquire('replacement', [key], 'exclusive');
+  await replacement.assertOwned();
+  await replacement.release();
+});
+
 test('resource leases reap a stale holder when its PID identifies a newer process instance', async (t) => {
   const state = await temp(t);
   const key = 'repo:/tmp/reused-pid';

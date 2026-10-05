@@ -207,3 +207,44 @@ test('stage16 role grants cannot widen an already narrower parent risk ceiling',
   assert.equal(decision.permissions.maxRisk, 'write');
   assert.equal(decision.permissions.allowDestructive, false);
 });
+
+
+test('enterprise policy decisions carry a canonical freshness digest and reject stale authority', async (t) => {
+  const root = path.resolve('/tmp/company/freshness');
+  const store = new EnterprisePolicyStore(await temp(t));
+  const configure = async (capabilities: string[]) => await store.configure({
+    roles: [{
+      id: 'developer',
+      capabilities,
+      rootPrefixes: [root],
+      maxRisk: 'write',
+      environments: [],
+      projectPrefixes: [],
+      deviceGroups: []
+    }],
+    bindings: [{
+      id: 'developer-binding',
+      principalId: 'alice',
+      roleId: 'developer',
+      enabled: true
+    }]
+  });
+
+  await configure(['file.read', 'file.write']);
+  const decision = await store.narrow({
+    allowedCapabilities: ['file.read', 'file.write'],
+    allowedRoots: [root],
+    maxRisk: 'write'
+  }, { principalId: 'alice' });
+
+  assert.match(String(decision.permissions.enterprisePolicyDigest), /^[0-9a-f]{64}$/);
+  await assert.doesNotReject(() => store.assertCurrentDigest(decision.permissions.enterprisePolicyDigest!));
+
+  await configure(['file.read']);
+  await assert.rejects(
+    () => store.assertCurrentDigest(decision.permissions.enterprisePolicyDigest!),
+    (error: any) => error?.code === 'ENTERPRISE_POLICY_STALE'
+      && error?.details?.executionPhase === 'pre_dispatch'
+      && error?.details?.sideEffectState === 'none'
+  );
+});

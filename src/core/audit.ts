@@ -69,11 +69,28 @@ export interface AuditEvent {
   hash?: string;
 }
 
-interface AuditHead {
+interface AuditHeadV1 {
   version: 1;
   count: number;
   headHash: string | null;
   updatedAt: string;
+}
+
+interface AuditHeadV2 {
+  version: 2;
+  count: number;
+  headHash: string | null;
+  updatedAt: string;
+  signerKeyId: string;
+  signature: string;
+}
+
+type AuditHead = AuditHeadV1 | AuditHeadV2;
+
+export interface AuditAuthenticator {
+  keyId: string;
+  sign(payload: Uint8Array): Promise<string>;
+  verify(payload: Uint8Array, signature: string): Promise<boolean>;
 }
 
 interface VerifiedAudit {
@@ -121,15 +138,17 @@ export class AuditLog {
   #headFile: string;
   #segmentDir: string;
   #maxSegmentBytes: number;
+  #authenticator?: AuditAuthenticator;
   #head: { count: number; headHash: string | null } | null = null;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { maxSegmentBytes?: number } = {}) {
+  constructor(stateDir: string, options: { maxSegmentBytes?: number; authenticator?: AuditAuthenticator } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'audit.ndjson');
     this.#headFile = path.join(root, 'audit-head.json');
     this.#segmentDir = path.join(root, 'audit-segments');
     this.#maxSegmentBytes = Math.min(Math.max(options.maxSegmentBytes ?? 240 * 1024 * 1024, MAX_AUDIT_EVENT_BYTES), MAX_AUDIT_BYTES);
+    this.#authenticator = options.authenticator ? normalizeAuditAuthenticator(options.authenticator) : undefined;
   }
 
   async append(event: AuditEvent): Promise<AuditEvent> {
@@ -316,14 +335,31 @@ export class AuditLog {
       if (verified.count > 0) await this.#writeHead({ count: verified.count, headHash: verified.headHash });
       return;
     }
-    if (anchor.version !== 1 || !Number.isSafeInteger(anchor.count) || anchor.count < 0 ||
+    if (!Number.isSafeInteger(anchor.count) || anchor.count < 0 ||
         (anchor.headHash !== null && (typeof anchor.headHash !== 'string' || !HASH_RE.test(anchor.headHash)))) {
       throw integrityError('Audit head metadata is invalid.');
     }
-    if (anchor.count === verified.count && anchor.headHash === verified.headHash) return;
+    if (anchor.version === 2) {
+      if (!this.#authenticator) {
+        throw integrityError('Signed audit head cannot be verified because device audit authentication is unavailable.');
+      }
+      if (!/^[A-Za-z0-9._:-]{8,256}$/.test(anchor.signerKeyId)
+        || !/^[A-Za-z0-9_-]{40,512}$/.test(anchor.signature)
+        || anchor.signerKeyId !== this.#authenticator.keyId
+        || !await this.#authenticator.verify(auditHeadSignaturePayload(anchor.count, anchor.headHash, anchor.signerKeyId), anchor.signature)) {
+        throw integrityError('Audit head signature is invalid.');
+      }
+    } else if (anchor.version !== 1) {
+      throw integrityError('Audit head metadata is invalid.');
+    }
 
-    // Recover only the narrow crash window where one fully chained line reached disk
-    // but its head-file update did not. Anything else fails closed.
+    if (anchor.count === verified.count && anchor.headHash === verified.headHash) {
+      if (anchor.version === 1 && this.#authenticator) {
+        await this.#writeHead({ count: verified.count, headHash: verified.headHash });
+      }
+      return;
+    }
+
     if (verified.count === anchor.count + 1) {
       const last = verified.events.at(-1)!;
       if (last.previousHash === anchor.headHash) {
@@ -335,15 +371,18 @@ export class AuditLog {
   }
 
   async #writeHead(head: { count: number; headHash: string | null }): Promise<void> {
-    const record: AuditHead = {
-      version: 1,
-      count: head.count,
-      headHash: head.headHash,
-      updatedAt: new Date().toISOString()
-    };
-    await writeDurableStateText(this.#headFile, `${JSON.stringify(record, null, 2)}\n`, AUDIT_HEAD_OPTIONS);
+    const updatedAt = new Date().toISOString();
+    let record: AuditHead;
+    if (this.#authenticator) {
+      const signerKeyId = this.#authenticator.keyId;
+      const signature = await this.#authenticator.sign(auditHeadSignaturePayload(head.count, head.headHash, signerKeyId));
+      if (!/^[A-Za-z0-9_-]{40,512}$/.test(signature)) throw integrityError('Audit authenticator returned an invalid signature.');
+      record = { version: 2, count: head.count, headHash: head.headHash, updatedAt, signerKeyId, signature };
+    } else {
+      record = { version: 1, count: head.count, headHash: head.headHash, updatedAt };
+    }
+    await writeDurableStateText(this.#headFile, JSON.stringify(record, null, 2) + '\n', AUDIT_HEAD_OPTIONS);
   }
-
   async #rotateIfNeeded(head: { count: number; headHash: string | null }, incomingBytes: number): Promise<void> {
     let size = 0;
     try { size = (await fs.lstat(this.#file)).size; }
@@ -427,4 +466,23 @@ function safeHashEqual(actual: string, expected: string): boolean {
 
 function integrityError(message: string): OperatorError {
   return new OperatorError('AUDIT_INTEGRITY_FAILED', message);
+}
+
+function auditHeadSignaturePayload(count: number, headHash: string | null, signerKeyId: string): Uint8Array {
+  return Buffer.from(JSON.stringify({
+    purpose: 'mecord-audit-head-v2',
+    count,
+    headHash,
+    signerKeyId
+  }), 'utf8');
+}
+
+function normalizeAuditAuthenticator(input: AuditAuthenticator): AuditAuthenticator {
+  if (!input || typeof input !== 'object'
+    || !/^[A-Za-z0-9._:-]{8,256}$/.test(String(input.keyId ?? ''))
+    || typeof input.sign !== 'function'
+    || typeof input.verify !== 'function') {
+    throw new OperatorError('AUDIT_AUTHENTICATOR_INVALID', 'Audit authenticator is missing or invalid.');
+  }
+  return input;
 }

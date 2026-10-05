@@ -28,6 +28,7 @@ export class AgentKernel {
   #journal: ActionTransitionJournal;
   #intents: IntentRegistry;
   #observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
+  #beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
 
   constructor(options: {
     stateDir: string;
@@ -36,12 +37,14 @@ export class AgentKernel {
     journal?: ActionTransitionJournal;
     intents?: IntentRegistry;
     observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
+    beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
   }) {
     this.#runtime = options.runtime;
     this.#leases = options.leases;
     this.#journal = options.journal ?? new ActionTransitionJournal(options.stateDir);
     this.#intents = options.intents ?? new IntentRegistry(options.stateDir);
     this.#observeResult = options.observeResult;
+    this.#beforeProviderDispatch = options.beforeProviderDispatch;
   }
 
   get journal(): ActionTransitionJournal { return this.#journal; }
@@ -175,6 +178,7 @@ export class AgentKernel {
       let result = await this.#runtime.execute(action, permissions, {
         ...context,
         onProviderDispatch: async (providerName) => {
+          await this.#beforeProviderDispatch?.(action, providerName, permissions);
           await context.onProviderDispatch?.(providerName);
           await this.#journal.markDispatched(action.id, providerName);
           dispatched = true;

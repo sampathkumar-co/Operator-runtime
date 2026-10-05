@@ -6,10 +6,11 @@ import { resourceKeysConflict } from './resource-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
   sameProcessInstance,
   type ProcessInstanceIdentity,
-  type ProcessInstanceInspector,
+  type ProcessInstanceObservation,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from './process-instance.ts';
 
@@ -54,14 +55,29 @@ const STATE_OPTIONS = {
 export class ResourceLeaseStore {
   #file: string;
   #lockFile: string;
-  #inspectProcessInstance: ProcessInstanceInspector;
+  #observeProcessInstance: ProcessInstanceObserver;
   #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+  constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated test-only compatibility hook; null is treated as unknown, never confirmed dead. */
+    inspectProcessInstance?: (pid: number) => Promise<ProcessInstanceIdentity | null>;
+    processInstance?: ProcessInstanceIdentity;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'resource-leases.json');
     this.#lockFile = path.join(root, 'resource-leases.lock');
-    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#observeProcessInstance = options.observeProcessInstance
+      ?? (options.inspectProcessInstance
+        ? async (pid) => {
+            try {
+              const identity = await options.inspectProcessInstance!(pid);
+              return identity ? { status: 'live', identity } : { status: 'unknown' };
+            } catch {
+              return { status: 'unknown' };
+            }
+          }
+        : observeProcessInstance);
     this.#processInstance = options.processInstance;
   }
 
@@ -74,7 +90,7 @@ export class ResourceLeaseStore {
     const leaseId = crypto.randomUUID();
     const processInstance = this.#processInstance ?? await currentProcessInstance();
     await this.#mutate(async (state) => {
-      await reapDeadHolders(state, this.#inspectProcessInstance);
+      await reapDeadHolders(state, this.#observeProcessInstance);
       for (const key of keys) {
         const conflictingEntries = state.resources.filter((item) => resourceKeysConflict(item.key, key));
         for (const entry of conflictingEntries) {
@@ -141,7 +157,7 @@ export class ResourceLeaseStore {
 
   async inspect(): Promise<LeaseState> {
     const state = await this.#read();
-    await reapDeadHolders(state, this.#inspectProcessInstance);
+    await reapDeadHolders(state, this.#observeProcessInstance);
     return structuredClone(state);
   }
 
@@ -194,8 +210,14 @@ export class ResourceLeaseStore {
         const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
         const storedIdentity = validProcessInstance(current.processInstance);
-        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
-        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
+        const observation: ProcessInstanceObservation = Number.isSafeInteger(pid) && pid > 0
+          ? await this.#observeProcessInstance(pid)
+          : { status: 'dead' };
+        const stale = observation.status === 'dead'
+          || (observation.status === 'live' && storedIdentity && observation.identity
+            ? !sameProcessInstance(storedIdentity, observation.identity)
+            : false);
+        if (Number.isSafeInteger(pid) && pid > 0 && stale) {
           await fs.rm(this.#lockFile, { force: true });
           continue;
         }
@@ -255,14 +277,22 @@ function validateState(input: unknown): LeaseState {
   return state;
 }
 
-async function reapDeadHolders(state: LeaseState, inspector: ProcessInstanceInspector): Promise<void> {
-  const identities = new Map<number, ProcessInstanceIdentity | null>();
+async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObserver): Promise<void> {
+  const observations = new Map<number, ProcessInstanceObservation>();
   for (const holder of state.resources.flatMap((entry) => entry.holders)) {
-    if (!identities.has(holder.pid)) identities.set(holder.pid, await inspector(holder.pid));
+    if (!observations.has(holder.pid)) {
+      let observation: ProcessInstanceObservation;
+      try { observation = await observer(holder.pid); }
+      catch { observation = { status: 'unknown' }; }
+      observations.set(holder.pid, observation);
+    }
   }
   for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
-    const live = identities.get(holder.pid) ?? null;
-    return holder.processInstance ? sameProcessInstance(holder.processInstance, live) : live !== null;
+    const observation = observations.get(holder.pid) ?? { status: 'unknown' };
+    if (observation.status === 'dead') return false;
+    if (observation.status === 'unknown') return true;
+    if (!holder.processInstance || !observation.identity) return true;
+    return sameProcessInstance(holder.processInstance, observation.identity);
   });
   state.resources = state.resources.filter((entry) => entry.holders.length > 0);
 }

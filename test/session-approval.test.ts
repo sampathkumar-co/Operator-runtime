@@ -81,3 +81,14 @@ test('session approval absolute lifetime remains bounded even with use', () => {
   now = new Date('2026-09-23T18:00:00.000Z');
   assert.equal(store.summary().active, false);
 });
+
+
+test('session approval cannot cross an enterprise policy freshness boundary', () => {
+  const store = new SessionApprovalStore({ clock: () => new Date('2026-09-23T10:00:00.000Z') });
+  const original = { ...permissions, enterprisePolicyDigest: 'a'.repeat(64) };
+  store.grant(record(), original);
+
+  assert.equal(store.permissionsFor(authorityA, original).allowDestructive, true);
+  const changed = { ...permissions, enterprisePolicyDigest: 'b'.repeat(64) };
+  assert.equal(store.permissionsFor(authorityA, changed).allowDestructive, false);
+});

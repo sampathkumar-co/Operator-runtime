@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -89,4 +90,52 @@ test('correlation metadata is still redacted when a secret-like field is supplie
   const raw = await fs.readFile(path.join(state, 'audit.ndjson'), 'utf8');
   assert.equal(raw.includes('must-not-survive'), false);
   assert.equal(raw.includes('also-secret'), false);
+});
+
+
+function auditAuthenticator() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  return {
+    keyId: crypto.createHash('sha256').update(publicPem).digest('base64url'),
+    sign: async (payload: Uint8Array) => crypto.sign(null, payload, privateKey).toString('base64url'),
+    verify: async (payload: Uint8Array, signature: string) =>
+      crypto.verify(null, payload, publicKey, Buffer.from(signature, 'base64url'))
+  };
+}
+
+test('authenticated audit upgrades a verified v1 head to a device-signed v2 anchor', async (t) => {
+  const state = await stateDir(t);
+  const unsigned = new AuditLog(state);
+  await unsigned.append({ capability: 'legacy', result: 'success', risk: 'read' });
+
+  const before = JSON.parse(await fs.readFile(path.join(state, 'audit-head.json'), 'utf8'));
+  assert.equal(before.version, 1);
+
+  const auth = auditAuthenticator();
+  const signed = new AuditLog(state, { authenticator: auth });
+  assert.equal((await signed.verifyIntegrity()).count, 1);
+
+  const after = JSON.parse(await fs.readFile(path.join(state, 'audit-head.json'), 'utf8'));
+  assert.equal(after.version, 2);
+  assert.equal(after.signerKeyId, auth.keyId);
+  assert.match(after.signature, /^[A-Za-z0-9_-]{40,512}$/);
+});
+
+test('authenticated audit rejects a tampered signed head even when its chain coordinates look plausible', async (t) => {
+  const state = await stateDir(t);
+  const auth = auditAuthenticator();
+  const audit = new AuditLog(state, { authenticator: auth });
+  await audit.append({ capability: 'signed', result: 'success', risk: 'read' });
+
+  const headPath = path.join(state, 'audit-head.json');
+  const head = JSON.parse(await fs.readFile(headPath, 'utf8'));
+  assert.equal(head.version, 2);
+  head.signature = 'A'.repeat(86);
+  await fs.writeFile(headPath, JSON.stringify(head, null, 2) + '\n');
+
+  await assert.rejects(
+    () => new AuditLog(state, { authenticator: auth }).verifyIntegrity(),
+    (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED' && /signature/i.test(error.message)
+  );
 });
