@@ -15,6 +15,7 @@ const A='a'.repeat(64),B='b'.repeat(64),C='c'.repeat(64),D='d'.repeat(64);
 const E='e'.repeat(64),F='f'.repeat(64);
 const T0='2026-10-05T00:00:00.000Z';
 const RUN='promotion-run-1';
+const COHORT='9'.repeat(64);
 
 function manifest(policyVersion:string,policyDigest:string,adaptiveDigest:string):EvaluationFreezeManifest{
   return createEvaluationFreezeManifest({
@@ -115,18 +116,21 @@ function bundle():PolicyPromotionEvidenceBundle{
       runId:RUN,
       evaluationManifestDigest:candidate.manifestDigest,
       policyVersion:candidate.intelligencePolicyVersion,
+      taskCohortDigest:COHORT,
       value:{...metrics(),firstStrategySuccessRate:0.82,recoverySuccessRate:0.78}
     },
     baselineMetrics:{
       runId:RUN,
       evaluationManifestDigest:baseline.manifestDigest,
       policyVersion:baseline.intelligencePolicyVersion,
+      taskCohortDigest:COHORT,
       value:metrics()
     },
     calibration:{
       runId:RUN,
       evaluationManifestDigest:candidate.manifestDigest,
       policyVersion:candidate.intelligencePolicyVersion,
+      taskCohortDigest:COHORT,
       value:calibration()
     },
     shadow:{
@@ -135,6 +139,7 @@ function bundle():PolicyPromotionEvidenceBundle{
       baselineManifestDigest:baseline.manifestDigest,
       candidatePolicyVersion:candidate.intelligencePolicyVersion,
       baselinePolicyVersion:baseline.intelligencePolicyVersion,
+      taskCohortDigest:COHORT,
       report:shadow()
     }
   };
@@ -238,5 +243,22 @@ test('policy comparison cannot hide a different procedure-memory snapshot',()=>{
   assert.throws(
     ()=>validatePolicyPromotionEvidenceBundle(input),
     /evaluation context mismatch: procedureSnapshotDigest/
+  );
+});
+
+
+test('candidate and baseline aggregates cannot use different task cohorts',()=>{
+  const input=bundle();
+  input.candidateMetrics.taskCohortDigest='8'.repeat(64);
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /candidateMetrics task cohort mismatch/
+  );
+
+  const other=bundle();
+  other.calibration.taskCohortDigest='7'.repeat(64);
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(other),
+    /calibration task cohort mismatch/
   );
 });
