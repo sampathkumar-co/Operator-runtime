@@ -75,3 +75,16 @@ test('belief rebinding is forbidden while an execution is running',()=>{
   runtime.startNode('observe');
   assert.throws(()=>runtime.bindBeliefs([]),/forbidden while an execution node is running/);
 });
+
+test('belief snapshots reject duplicate facts and invalid confidence',()=>{
+  const p=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(p);
+  assert.throws(()=>bindPlanToBeliefs(p,states,[
+    belief('state.observed'),
+    belief('state.observed')
+  ]),/belief facts must be unique/);
+
+  const bad=belief('state.observed');
+  bad.confidence=2;
+  assert.throws(()=>bindPlanToBeliefs(p,states,[bad]),/belief.confidence is invalid/);
+});
