@@ -67,8 +67,16 @@ export function readyNodeIds(
   states: PlanNodeState[],
   beliefs: BeliefView[]
 ): string[] {
-  const byState = new Map(states.map((s) => [s.nodeId, s]));
-  const beliefByFact = new Map(beliefs.map((b) => [b.factKey, b]));
+  const byState = new Map<string,PlanNodeState>();
+  for(const state of states){
+    if(byState.has(state.nodeId)) throw new Error('plan node states must be unique: '+state.nodeId);
+    byState.set(state.nodeId,state);
+  }
+  const beliefByFact = new Map<string,BeliefView>();
+  for(const belief of beliefs){
+    if(beliefByFact.has(belief.factKey)) throw new Error('belief facts must be unique: '+belief.factKey);
+    beliefByFact.set(belief.factKey,belief);
+  }
   return graph.nodes.filter((node) => {
     const state = byState.get(node.id);
     if (!state || !['PENDING','READY','BLOCKED'].includes(state.status)) return false;
