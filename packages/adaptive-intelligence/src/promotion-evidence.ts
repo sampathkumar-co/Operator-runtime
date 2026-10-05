@@ -87,6 +87,18 @@ export function validatePolicyPromotionEvidenceBundle(
     'baselineMetrics',
     normalizeMetrics
   );
+  if(candidateMetrics.value.evaluationRunId!==shadow.runId){
+    throw new Error('Candidate metrics internal run lineage does not match the evaluation run.');
+  }
+  if(baselineMetrics.value.evaluationRunId!==shadow.runId){
+    throw new Error('Baseline metrics internal run lineage does not match the evaluation run.');
+  }
+  if(candidateMetrics.value.taskCohortDigest!==taskCohort.cohortDigest){
+    throw new Error('Candidate metrics internal task cohort does not match the canonical task cohort.');
+  }
+  if(baselineMetrics.value.taskCohortDigest!==taskCohort.cohortDigest){
+    throw new Error('Baseline metrics internal task cohort does not match the canonical task cohort.');
+  }
   const calibration=normalizeAggregate(
     input.calibration,
     candidateManifest,
@@ -153,6 +165,7 @@ function assertComparableEvaluationContext(
   baseline:EvaluationFreezeManifest
 ):void{
   const fields:Array<keyof EvaluationFreezeManifest>=[
+    'sourceRevision',
     'modelProvider',
     'modelId',
     'modelConfigDigest',
@@ -188,6 +201,11 @@ function normalizeShadowBinding(
   if(baselineManifestDigest!==baseline.manifestDigest) throw new Error('Shadow baseline manifest binding mismatch.');
   if(candidatePolicyVersion!==candidate.intelligencePolicyVersion) throw new Error('Shadow candidate policy version mismatch.');
   if(baselinePolicyVersion!==baseline.intelligencePolicyVersion) throw new Error('Shadow baseline policy version mismatch.');
+  const report=validateShadowComparisonReport(input.report);
+  if(report.evaluationRunId!==runId) throw new Error('Shadow report internal run lineage mismatch.');
+  if(report.taskCohortDigest!==taskCohortDigest) throw new Error('Shadow report internal task cohort mismatch.');
+  if(report.shadowPolicyVersion!==candidatePolicyVersion) throw new Error('Shadow report candidate policy lineage mismatch.');
+  if(report.controlPolicyVersion!==baselinePolicyVersion) throw new Error('Shadow report baseline policy lineage mismatch.');
   return{
     runId,
     candidateManifestDigest,
@@ -195,7 +213,7 @@ function normalizeShadowBinding(
     candidatePolicyVersion,
     baselinePolicyVersion,
     taskCohortDigest,
-    report:validateShadowComparisonReport(input.report)
+    report
   };
 }
 
@@ -228,6 +246,8 @@ function normalizeAggregate<T>(
 function normalizeMetrics(input:IntelligenceMetrics):IntelligenceMetrics{
   if(!input||typeof input!=='object') throw new Error('bound intelligence metrics are required.');
   return{
+    evaluationRunId:bounded(input.evaluationRunId,512,'metrics.evaluationRunId'),
+    taskCohortDigest:sha256(input.taskCohortDigest,'metrics.taskCohortDigest'),
     taskCount:integer(input.taskCount,0,10_000_000,'metrics.taskCount'),
     firstStrategySuccessRate:unit(input.firstStrategySuccessRate,'metrics.firstStrategySuccessRate'),
     recoverySuccessRate:unit(input.recoverySuccessRate,'metrics.recoverySuccessRate'),
