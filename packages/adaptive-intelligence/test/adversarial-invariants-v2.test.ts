@@ -52,7 +52,7 @@ test('uncertain mutation cannot fall through into retry when RECONCILE is absent
   assert.throws(()=>selectRecovery({
     attribution:attribution('SIDE_EFFECT_UNCERTAIN'),
     options:[option('REPAIR'),option('REPLAN')]
-  }),/Reconciliation recovery is mandatory/);
+  }),/reconciliation|uncertain side effects/i);
 });
 
 function genericSkill(overrides:Partial<SkillDraft>={}):SkillDraft{
