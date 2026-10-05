@@ -90,8 +90,11 @@ test('high apparent shadow win rate cannot pass with sparse verified outcomes',(
     shadow:shadow({
       shadowWinRate:0.8,
       controlWinRate:0.05,
+      tiedOutcomeRate:0.15,
       pairedOutcomeDecisions:20,
-      outcomeCoverage:0.1
+      outcomeCoverage:0.1,
+      progressCoverage:0.08,
+      costCoverage:0.08
     }),
     candidateMetrics:metrics(),
     baselineMetrics:metrics(),
