@@ -11,7 +11,8 @@ import type {
   StateSnapshot,
   StrategyCandidate,
   StrategyEvaluation,
-  TrajectoryStep
+  TrajectoryStep,
+  VerificationReceiptRef
 } from './contracts.ts';
 import { EpistemicStateEngine } from './epistemic-state.ts';
 import { CausalGraph } from './causal-graph.ts';
@@ -31,7 +32,7 @@ export interface AnalyzeOutcomeInput {
   after: StateSnapshot;
   relevantFactKeys: string[];
   progressSignals?: string[];
-  independentVerification?: boolean;
+  verificationReceipt?: VerificationReceiptRef;
   attributionSignals?: Omit<FailureAttributionInput, 'transition' | 'beliefs'>;
   strategies?: StrategyCandidate[];
   recoveryOptions?: RecoveryOption[];
@@ -106,7 +107,7 @@ export class AdaptiveIntelligenceKernel {
       goal: input.goal,
       transition,
       beliefs,
-      independentVerification: input.independentVerification
+      verificationReceipt: input.verificationReceipt
     });
 
     const recentTransitions = this.causal.recent(30).reverse();
