@@ -89,6 +89,16 @@ export class CapabilityRouter {
     return [...this.#providers];
   }
 
+  async initializeAll(): Promise<void> {
+    for (const provider of this.#providers) await provider.initialize?.();
+  }
+
+  async emergencyStopAll(): Promise<void> {
+    const results = await Promise.allSettled(this.#providers.map(async (provider) => provider.emergencyStop?.()));
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
+  }
+
   async select(action: ActionRequest, learningContext = 'global'): Promise<CapabilityProvider> {
     const ranked = await this.rank(action, learningContext);
     if (!ranked[0]) {
@@ -99,6 +109,8 @@ export class CapabilityRouter {
 
   async closeAll(): Promise<void> {
     const providers = [...this.#providers].reverse();
-    await Promise.allSettled(providers.map(async (provider) => provider.close?.()));
+    const results = await Promise.allSettled(providers.map(async (provider) => provider.close?.()));
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
   }
 }

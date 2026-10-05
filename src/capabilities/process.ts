@@ -6,7 +6,8 @@ import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContex
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
-import { inspectProcessInstance } from '../core/process-instance.ts';
+import { inspectProcessInstance, observeProcessInstance, sameProcessInstance, type ProcessInstanceIdentity, type ProcessInstanceObserver } from '../core/process-instance.ts';
+import { TerminalSessionStore, terminalSessionIsActive, type DurableTerminalSession } from '../core/terminal-session-store.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -53,6 +54,7 @@ type ManagedSession = {
   cwd: string;
   child: ChildProcessWithoutNullStreams;
   pid: number;
+  processInstance: ProcessInstanceIdentity;
   startedAt: string;
   updatedAt: string;
   state: 'running' | 'exited' | 'terminated' | 'failed';
@@ -72,6 +74,12 @@ export class ProcessProvider implements CapabilityProvider {
   #requiredRisk?: ActionRisk;
   #environmentOverrides: Readonly<Record<string, string>>;
   #sessions = new Map<string, ManagedSession>();
+  #store?: TerminalSessionStore;
+  #observeProcess: ProcessInstanceObserver;
+  #beforeOwnershipCommit?: (details: { sessionId: string; pid: number }) => void | Promise<void>;
+  #initialized = false;
+  #closed = false;
+  #sessionSerial: Promise<void> = Promise.resolve();
 
   constructor(options: {
     allowedRoots: string[];
@@ -79,12 +87,18 @@ export class ProcessProvider implements CapabilityProvider {
     maxOutputBytes?: number;
     requiredRisk?: ActionRisk;
     environmentOverrides?: Readonly<Record<string, string>>;
+    stateDir?: string;
+    processObserver?: ProcessInstanceObserver;
+    beforeOwnershipCommit?: (details: { sessionId: string; pid: number }) => void | Promise<void>;
   }) {
     this.#scope = new PathScope(options.allowedRoots);
     this.#allowedExecutables = new Set(options.allowedExecutables.map((item) => item.trim().toLowerCase()).filter(Boolean));
     this.#maxOutputBytes = boundedInteger(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
     this.#requiredRisk = options.requiredRisk;
     this.#environmentOverrides = validateEnvironmentOverrides(options.environmentOverrides);
+    this.#store = options.stateDir ? new TerminalSessionStore(options.stateDir) : undefined;
+    this.#observeProcess = options.processObserver ?? observeProcessInstance;
+    this.#beforeOwnershipCommit = options.beforeOwnershipCommit;
   }
 
   supports(action: ActionRequest): boolean {
@@ -101,9 +115,70 @@ export class ProcessProvider implements CapabilityProvider {
 
   score(): CapabilityScore { return SCORE; }
 
+  async initialize(): Promise<void> {
+    await this.#withSessionLock(async () => this.#ensureInitialized());
+  }
+
+  async #ensureInitialized(): Promise<void> {
+    if (this.#initialized) return;
+    if (!this.#store) {
+      this.#initialized = true;
+      return;
+    }
+    const records = await this.#store.list();
+    for (const record of records.filter(terminalSessionIsActive)) await this.#recoverRecord(record);
+    this.#initialized = true;
+  }
+
+  async #recoverRecord(record: DurableTerminalSession): Promise<void> {
+    if (!this.#store) return;
+    if (!record.processInstance || record.pid === undefined) {
+      if (record.state !== 'recovery_required') {
+        await this.#store.transition(record.sessionId, 'recovery_required', { reason: 'Launch ownership was not fully registered before restart.' });
+      }
+      return;
+    }
+    const observation = await this.#observeProcess(record.pid);
+    if (observation.status === 'dead') {
+      await this.#store.transition(record.sessionId, 'exited', { reason: 'Original process was absent during startup recovery.' });
+      return;
+    }
+    if (observation.status === 'live' && observation.identity && !sameProcessInstance(record.processInstance, observation.identity)) {
+      await this.#store.transition(record.sessionId, 'stale_pid', { reason: 'PID now identifies a different process instance; replacement was not touched.' });
+      return;
+    }
+    if (observation.status !== 'live' || !observation.identity) {
+      if (record.state !== 'recovery_required') {
+        await this.#store.transition(record.sessionId, 'recovery_required', { reason: 'Exact process identity could not be determined; no termination was attempted.' });
+      }
+      return;
+    }
+    const outcome = await this.#terminateExact(record.processInstance);
+    if (outcome === 'terminated' || outcome === 'absent') {
+      await this.#store.transition(record.sessionId, 'recovered', { reason: 'Exact owned orphan was quiesced during startup recovery.' });
+      return;
+    }
+    if (outcome === 'stale') {
+      await this.#store.transition(record.sessionId, 'stale_pid', { reason: 'PID identity changed before orphan termination; replacement was not touched.' });
+      return;
+    }
+    await this.#store.transition(record.sessionId, 'recovery_required', { reason: 'Exact process identity could not be revalidated; no termination was attempted.' });
+  }
+
+  async #withSessionLock<T>(operation: () => Promise<T>): Promise<T> {
+    let output!: T;
+    const run = this.#sessionSerial.then(async () => { output = await operation(); });
+    this.#sessionSerial = run.then(() => undefined, () => undefined);
+    await run;
+    return output;
+  }
+
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
-    if (action.capability === 'terminal.session') return await this.#session(action, started, context);
+    if (action.capability === 'terminal.session') return await this.#withSessionLock(async () => {
+      await this.#ensureInitialized();
+      return await this.#session(action, started, context);
+    });
     if (action.capability === 'process.inspect') return await this.#inspectProcesses(action, started, context.signal);
     if (action.capability === 'process.manage') return await this.#manageProcess(action, started, context.signal);
     const executable = String(action.input.executable ?? '').trim();
@@ -195,13 +270,20 @@ export class ProcessProvider implements CapabilityProvider {
       try { sessionId = requiredSessionId(action.input.sessionId); }
       catch { return processReconciliation('uncertain', 'Managed-session termination reconciliation requires a valid sessionId.'); }
       const session = this.#sessions.get(sessionId);
-      if (!session) {
-        return processReconciliation('uncertain', 'Managed session is not present in this provider instance; restart history cannot be inferred.');
-      }
-      if (session.state === 'running') {
+      if (session?.state === 'running') {
         return processReconciliation('not_applied', 'Managed session is still running.');
       }
-      return processReconciled(action, this.name, 'Managed session is no longer running.', this.#sessionSummary(session));
+      if (session) return processReconciled(action, this.name, 'Managed session is no longer running.', this.#sessionSummary(session));
+      try {
+        await this.#ensureInitialized();
+        const durable = await this.#store?.get(sessionId);
+        if (!durable) return processReconciliation('uncertain', 'No durable ownership record exists for this managed session.');
+        if (durable.state === 'running' || durable.state === 'launching') return processReconciliation('not_applied', 'The exact managed process is still recorded active.');
+        if (durable.state === 'recovery_required') return processReconciliation('uncertain', 'Managed-session ownership requires explicit recovery because exact process identity is unavailable.');
+        return processReconciled(action, this.name, 'Durable ownership proves the original managed process is no longer active.', this.#durableSummary(durable));
+      } catch (error) {
+        return processReconciliation('uncertain', error instanceof Error ? error.message : 'Durable terminal-session reconciliation failed closed.');
+      }
     }
 
     return processReconciliation('uncertain', 'Process provider cannot prove the outcome of this mutation from current state.');
@@ -212,21 +294,35 @@ export class ProcessProvider implements CapabilityProvider {
     if (context.signal?.aborted) return failure(action, this.name, started, 'EXECUTION_ABORTED', 'Terminal session operation was cancelled before dispatch.');
     const operation = String(action.input.operation ?? '');
     if (operation === 'start') {
+      if (this.#closed) return failure(action, this.name, started, 'TERMINAL_SESSION_PROVIDER_CLOSED', 'Terminal session provider is shutting down.');
       if (this.#sessions.size >= MAX_SESSIONS) return failure(action, this.name, started, 'SESSION_LIMIT_REACHED', `At most ${MAX_SESSIONS} managed terminal sessions may exist.`);
       const executable = String(action.input.executable ?? '').trim();
       const args = Array.isArray(action.input.args) ? action.input.args.map(String) : [];
       const validation = this.#validateInvocation(executable, args);
       if (validation) return failure(action, this.name, started, validation.code, validation.message);
+      const sessionId = crypto.randomUUID();
+      let child: ChildProcessWithoutNullStreams | undefined;
+      let identity: ProcessInstanceIdentity | undefined;
+      let prepared = false;
       try {
+        if (this.#store) {
+          await this.#store.prepare({ sessionId, executable });
+          prepared = true;
+        }
         const cwd = await this.#scope.resolveExisting(String(action.input.cwd ?? ''));
         const env = safeChildEnvironment(process.env, this.#environmentOverrides);
         const trustedExecutable = resolveTrustedExecutable(executable, env);
-        const child = spawn(trustedExecutable, args, {
-          cwd, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env
+        child = spawn(trustedExecutable, args, {
+          cwd, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'], env
         }) as ChildProcessWithoutNullStreams;
         if (!child.pid) throw new OperatorError('PROCESS_START_FAILED', 'Process did not return a PID.');
+        identity = await waitForProcessIdentity(child.pid, this.#observeProcess);
+        if (!identity) throw new OperatorError('TERMINAL_SESSION_IDENTITY_UNAVAILABLE', 'Spawned process identity could not be established; start was rolled back.', { details: { sideEffectState: 'uncertain' } });
+        if (this.#store) await this.#store.bindProcess(sessionId, identity);
+        await this.#beforeOwnershipCommit?.({ sessionId, pid: child.pid });
+        if (this.#store) await this.#store.activate(sessionId, identity);
         const session: ManagedSession = {
-          id: crypto.randomUUID(), executable, args: [...args], cwd, child, pid: child.pid,
+          id: sessionId, executable, args: [...args], cwd, child, pid: child.pid, processInstance: identity,
           startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
           state: 'running', exitCode: null, signal: null, events: [], nextCursor: 1,
           droppedBeforeCursor: 0, bufferedBytes: 0
@@ -238,16 +334,21 @@ export class ProcessProvider implements CapabilityProvider {
         child.once('error', (error) => {
           session.state = 'failed'; session.updatedAt = new Date().toISOString();
           this.#appendSessionEvent(session, 'system', `process error: ${error.message}`);
+          void this.#store?.transition(session.id, 'failed', { reason: 'Owned child emitted a process error.' }).catch(() => undefined);
         });
         child.once('close', (code, signal) => {
           session.exitCode = code; session.signal = signal;
-          if (session.state === 'running') session.state = 'exited';
+          if (session.state === 'running') {
+            session.state = 'exited';
+            void this.#store?.transition(session.id, 'exited', { reason: 'Owned child exited.' }).catch(() => undefined);
+          }
           session.updatedAt = new Date().toISOString();
           this.#appendSessionEvent(session, 'system', `process exited code=${String(code)} signal=${String(signal ?? '')}`);
         });
         if (context.signal?.aborted) {
           await terminateProcessTree(child, session.pid);
           session.state = 'terminated';
+          await this.#store?.transition(session.id, 'terminated', { reason: 'Start was aborted after ownership commit and the exact child was quiesced.' });
           return failure(action, this.name, started, new OperatorError('EXECUTION_ABORTED', 'Terminal session start was cancelled after process creation; the owned process tree was quiesced.', { details: { sideEffectState: 'uncertain' } }));
         }
         return {
@@ -257,25 +358,66 @@ export class ProcessProvider implements CapabilityProvider {
           durationMs: Math.round(performance.now() - started)
         };
       } catch (error) {
+        if (child?.pid) {
+          let quiesced = false;
+          try {
+            if (identity) {
+              const outcome = await this.#terminateExact(identity, child);
+              quiesced = outcome === 'terminated' || outcome === 'absent' || outcome === 'stale';
+            } else {
+              await terminateProcessTree(child, child.pid);
+              quiesced = true;
+            }
+          } catch {}
+          if (prepared && this.#store) {
+            try {
+              await this.#store.transition(sessionId, quiesced ? 'failed' : 'recovery_required', {
+                ...(identity ? { identity } : {}),
+                reason: quiesced ? 'Session start failed and spawned process was quiesced.' : 'Session start failed after spawn; cleanup requires recovery.'
+              });
+            } catch {}
+          }
+        } else if (prepared) {
+          await this.#store?.transition(sessionId, 'failed', { reason: 'Session start failed before process creation.' }).catch(() => undefined);
+        }
         const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_START_FAILED', error instanceof Error ? error.message : String(error));
-        return failure(action, this.name, started, op);
+        return failure(action, this.name, started, new OperatorError(
+          child ? 'TERMINAL_SESSION_START_COMMIT_FAILED' : op.code,
+          op.message,
+          { retryable: false, details: { ...(op.details ?? {}), sideEffectState: child ? 'uncertain' : 'none' } }
+        ));
       }
     }
 
     if (operation === 'list') {
+      const durable = await this.#store?.list() ?? [];
+      const memoryIds = new Set(this.#sessions.keys());
+      const sessions = [
+        ...this.#sessions.values().map((session) => this.#sessionSummary(session)),
+        ...durable.filter((record) => !memoryIds.has(record.sessionId)).map((record) => this.#durableSummary(record))
+      ];
       return {
         ok: true, capability: action.capability, provider: this.name,
-        output: { sessions: [...this.#sessions.values()].map((session) => this.#sessionSummary(session)) },
-        evidence: [evidence('process_session', 'pass', 'Managed terminal sessions listed.', { count: this.#sessions.size })],
+        output: { sessions },
+        evidence: [evidence('process_session', 'pass', 'Managed terminal sessions listed.', { count: sessions.length })],
         durationMs: Math.round(performance.now() - started)
       };
     }
 
     const sessionId = requiredSessionId(action.input.sessionId);
     const session = this.#sessions.get(sessionId);
-    if (!session) return failure(action, this.name, started, 'SESSION_NOT_FOUND', 'Managed terminal session was not found.');
+    const durable = session ? undefined : await this.#store?.get(sessionId);
+    if (!session && !durable) return failure(action, this.name, started, 'SESSION_NOT_FOUND', 'Managed terminal session was not found.');
 
     if (operation === 'read') {
+      if (!session) {
+        return {
+          ok: true, capability: action.capability, provider: this.name,
+          output: { ...this.#durableSummary(durable!), events: [], cursor: 0, droppedBeforeCursor: 0, truncatedBefore: false },
+          evidence: [evidence('process_session_read', 'pass', 'Durable terminal-session tombstone read; stdio is not persisted or reattached.', { sessionId })],
+          durationMs: Math.round(performance.now() - started)
+        };
+      }
       const afterCursor = boundedInteger(action.input.afterCursor, 0, 0, Number.MAX_SAFE_INTEGER);
       const maxEvents = boundedInteger(action.input.maxEvents, 100, 1, 500);
       const maxBytes = boundedInteger(action.input.maxBytes, 64 * 1024, 1024, 128 * 1024);
@@ -302,6 +444,7 @@ export class ProcessProvider implements CapabilityProvider {
     }
 
     if (operation === 'write') {
+      if (!session) return failure(action, this.name, started, 'SESSION_NOT_RUNNING', 'Recovered terminal session has no reattachable stdin.');
       if (session.state !== 'running' || session.child.stdin.destroyed) return failure(action, this.name, started, 'SESSION_NOT_RUNNING', 'Managed terminal session is not accepting input.');
       const input = String(action.input.input ?? '');
       if (!input || input.includes('\0') || Buffer.byteLength(input, 'utf8') > MAX_SESSION_INPUT_BYTES) {
@@ -336,9 +479,22 @@ export class ProcessProvider implements CapabilityProvider {
     }
 
     if (operation === 'terminate') {
+      if (!session) {
+        if (durable!.state === 'recovery_required' || durable!.state === 'running' || durable!.state === 'launching') {
+          return failure(action, this.name, started, 'TERMINAL_SESSION_RECOVERY_BLOCKED', 'Exact terminal-session process ownership is unresolved; no PID-only termination was attempted.');
+        }
+        return {
+          ok: true, capability: action.capability, provider: this.name,
+          output: this.#durableSummary(durable!),
+          evidence: [evidence('process_session_terminate', 'pass', 'Durable ownership proves the original process is already inactive.', { sessionId })],
+          durationMs: Math.round(performance.now() - started)
+        };
+      }
       if (session.state === 'running') {
+        let outcome: 'terminated' | 'absent' | 'stale' | 'unknown';
         try {
-          await terminateProcessTree(session.child, session.pid, context.signal);
+          outcome = await this.#terminateExact(session.processInstance, session.child, context.signal);
+          if (outcome === 'unknown') throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Exact owned process identity could not be revalidated.', { details: { sideEffectState: 'uncertain' } });
         } catch (error) {
           const op = error instanceof OperatorError ? error : new OperatorError('PROCESS_TREE_TERMINATION_FAILED', error instanceof Error ? error.message : String(error));
           return {
@@ -348,8 +504,13 @@ export class ProcessProvider implements CapabilityProvider {
             durationMs: Math.round(performance.now() - started)
           };
         }
-        session.state = 'terminated';
+        session.state = outcome === 'stale' ? 'exited' : 'terminated';
         session.updatedAt = new Date().toISOString();
+        await this.#store?.transition(session.id, outcome === 'stale' ? 'stale_pid' : 'terminated', {
+          reason: outcome === 'stale'
+            ? 'PID identified a replacement process; original process is absent and replacement was not touched.'
+            : 'Explicit termination completed or original process identity was already absent.'
+        });
         this.#appendSessionEvent(session, 'system', 'termination requested');
       }
       return {
@@ -452,6 +613,40 @@ export class ProcessProvider implements CapabilityProvider {
     };
   }
 
+  #durableSummary(record: DurableTerminalSession): Record<string, unknown> {
+    return {
+      sessionId: record.sessionId,
+      ...(record.pid === undefined ? {} : { pid: record.pid }),
+      executable: record.executable,
+      state: record.state,
+      startedAt: record.startedAt,
+      updatedAt: record.updatedAt,
+      durable: true,
+      reattachable: false,
+      ...(record.terminalReason ? { terminalReason: record.terminalReason } : {})
+    };
+  }
+
+  async #terminateExact(
+    identity: ProcessInstanceIdentity,
+    child?: ChildProcess,
+    signal?: AbortSignal
+  ): Promise<'terminated' | 'absent' | 'stale' | 'unknown'> {
+    const first = await this.#observeProcess(identity.pid);
+    if (first.status === 'dead') return 'absent';
+    if (first.status !== 'live' || !first.identity) return 'unknown';
+    if (!sameProcessInstance(identity, first.identity)) return 'stale';
+    const immediatelyBefore = await this.#observeProcess(identity.pid);
+    if (immediatelyBefore.status === 'dead') return 'absent';
+    if (immediatelyBefore.status !== 'live' || !immediatelyBefore.identity) return 'unknown';
+    if (!sameProcessInstance(identity, immediatelyBefore.identity)) return 'stale';
+    await terminateProcessTree(child, identity.pid, signal);
+    const after = await this.#observeProcess(identity.pid);
+    if (after.status === 'dead') return 'terminated';
+    if (after.status === 'live' && after.identity && !sameProcessInstance(identity, after.identity)) return 'terminated';
+    throw new OperatorError('PROCESS_TERMINATE_POSTCONDITION_FAILED', 'Exact owned process instance remained after tree termination.', { details: { sideEffectState: 'uncertain' } });
+  }
+
   #pruneSessions(): void {
     const now = Date.now();
     for (const [id, session] of this.#sessions) {
@@ -460,12 +655,36 @@ export class ProcessProvider implements CapabilityProvider {
     }
   }
 
+  async emergencyStop(): Promise<void> {
+    await this.#withSessionLock(async () => this.#quiesceSessions('Emergency stop quiesced the exact owned process.'));
+  }
+
   async close(): Promise<void> {
-    await Promise.allSettled([...this.#sessions.values()].filter((session) => session.state === 'running').map(async (session) => {
-      await terminateProcessTree(session.child, session.pid);
-      session.state = 'terminated';
-    }));
-    this.#sessions.clear();
+    this.#closed = true;
+    await this.#withSessionLock(async () => {
+      await this.#quiesceSessions('Graceful provider shutdown quiesced the exact owned process.');
+      this.#sessions.clear();
+    });
+  }
+
+  async #quiesceSessions(reason: string): Promise<void> {
+    const failures: unknown[] = [];
+    for (const session of this.#sessions.values()) {
+      if (session.state !== 'running') continue;
+      try {
+        const outcome = await this.#terminateExact(session.processInstance, session.child);
+        if (outcome === 'unknown') throw new OperatorError('TERMINAL_SESSION_RECOVERY_BLOCKED', 'Exact owned process identity could not be revalidated.');
+        session.state = outcome === 'stale' ? 'exited' : 'terminated';
+        session.updatedAt = new Date().toISOString();
+        const durable = await this.#store?.get(session.id);
+        if (!durable || durable.state === 'running') {
+          await this.#store?.transition(session.id, outcome === 'stale' ? 'stale_pid' : 'terminated', { reason });
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) throw failures[0];
   }
 }
 
@@ -653,7 +872,17 @@ function requiredSessionId(value: unknown): string {
   return sessionId;
 }
 
-async function terminateProcessTree(child: ChildProcess, pid: number, signal?: AbortSignal): Promise<void> {
+async function waitForProcessIdentity(pid: number, observer: ProcessInstanceObserver): Promise<ProcessInstanceIdentity | undefined> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const observation = await observer(pid);
+    if (observation.status === 'live' && observation.identity) return observation.identity;
+    if (observation.status === 'dead') return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return undefined;
+}
+
+async function terminateProcessTree(child: ChildProcess | undefined, pid: number, signal?: AbortSignal): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Owned process PID is invalid.', { details: { sideEffectState: 'uncertain' } });
   if (process.platform === 'win32') {
     const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
@@ -667,10 +896,10 @@ async function terminateProcessTree(child: ChildProcess, pid: number, signal?: A
     await waitForPidExit(pid, signal);
     return;
   }
-  try { child.kill('SIGTERM'); } catch {}
+  try { process.kill(-pid, 'SIGTERM'); } catch { try { child?.kill('SIGTERM'); } catch {} }
   try { await waitForPidExit(pid, signal, 1_000); }
   catch {
-    try { child.kill('SIGKILL'); } catch {}
+    try { process.kill(-pid, 'SIGKILL'); } catch { try { child?.kill('SIGKILL'); } catch {} }
     await waitForPidExit(pid, signal);
   }
 }

@@ -63,6 +63,7 @@ export function createRuntime(config: {
     .register(new GitCheckpointProvider({ allowedRoots: config.allowedRoots }))
     .register(new GitWriteProvider({ allowedRoots: config.allowedRoots }))
     .register(new ProcessProvider({
+      stateDir: config.stateDir,
       allowedRoots: config.allowedRoots,
       allowedExecutables: config.terminalAllowedExecutables ?? [],
       requiredRisk: 'destructive'

@@ -65,6 +65,7 @@ export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
   'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'semantic-migrations',
   'relay-client', 'relay-session-credential', 'relay-deliveries', 'relay-results', 'relay-reservation-reconciliation', 'relay-outbox',
   'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
+  'terminal-sessions',
   'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
   'enterprise-policy', 'bootstrap', 'local-device-reset'
 ] as const);
@@ -93,7 +94,8 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
     ['relay-client', 'relay-client.json', 'derived'], ['relay-session-credential', 'relay-session-credential.json', 'encrypted'],
     ['relay-session-token', 'relay-session.token', 'plaintext-token'], ['device-sessions', 'device-sessions.json', 'encrypted'],
     ['approvals', 'approvals.json', 'derived'], ['action-executions', 'action-executions.json', 'derived'],
-    ['resource-leases', 'resource-leases.json', 'none'], ['emergency-stop', 'emergency-stop.json', 'none']
+    ['resource-leases', 'resource-leases.json', 'none'], ['emergency-stop', 'emergency-stop.json', 'none'],
+    ['terminal-sessions', 'terminal-sessions.json', 'none']
   ].map(([id, location, secretMaterial]) => entry({ id, owner: id, location, category: 'session-state', sensitivity: secretMaterial === 'plaintext-token' || secretMaterial === 'encrypted' ? 'secret' : 'sensitive', retention: 'active-session-or-policy', deletion: 'privacy-category', backup: secretMaterial === 'plaintext-token' ? 'exclude-secret' : 'include', restore: secretMaterial === 'plaintext-token' ? 'never' : 'optional', scope: 'device', secretMaterial: secretMaterial as PersistentDataEntry['secretMaterial'], participatesInDeletion: true, concurrency: id === 'resource-leases' ? 'PROCESS_LOCKED' : 'SINGLE_PROCESS_ONLY' })),
   ...[
     ['relay-deliveries', 'relay-deliveries.json'], ['relay-results', 'relay-results.json'],

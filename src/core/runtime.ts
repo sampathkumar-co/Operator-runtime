@@ -23,6 +23,14 @@ export class OperatorRuntime {
     return this;
   }
 
+  async initialize(): Promise<void> {
+    await this.router.initializeAll();
+  }
+
+  async emergencyStop(): Promise<void> {
+    await this.router.emergencyStopAll();
+  }
+
   async assertMutationReconciliationCoverage(): Promise<void> {
     await assertRegisteredMutationReconciliation(this.router.providers());
   }

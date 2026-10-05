@@ -179,6 +179,7 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+await runtime.initialize();
 const agentKernel = new AgentKernel({
   stateDir,
   runtime,
@@ -498,10 +499,13 @@ const agent = createLocalAgentServer({
   onEmergencyStop: async () => {
     emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
     stopRelay();
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
+      runtime.emergencyStop(),
       desiredStateReconciler.stop(),
       eventTicker.stop()
     ]);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
   },
   onEmergencyClear: async () => {
     emergencyExecutionGeneration = new AbortController();

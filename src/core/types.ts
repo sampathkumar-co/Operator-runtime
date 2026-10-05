@@ -132,5 +132,7 @@ export interface CapabilityProvider {
   resolveRisk?(action: ActionRequest): ActionRisk | Promise<ActionRisk>;
   execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult>;
   reconcile?(request: ProviderReconciliationRequest, context?: CapabilityExecutionContext): Promise<ProviderReconciliationResult>;
+  initialize?(): void | Promise<void>;
+  emergencyStop?(): void | Promise<void>;
   close?(): void | Promise<void>;
 }
