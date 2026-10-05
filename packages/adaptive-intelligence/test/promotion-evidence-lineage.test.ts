@@ -38,8 +38,10 @@ function manifest(policyVersion:string,policyDigest:string,adaptiveDigest:string
   },{clock:()=>new Date(T0)});
 }
 
-function metrics(){
+function metrics(taskCohortDigest:string){
   return{
+    evaluationRunId:RUN,
+    taskCohortDigest,
     taskCount:200,
     firstStrategySuccessRate:0.8,
     recoverySuccessRate:0.75,
@@ -67,8 +69,12 @@ function calibration(){
   };
 }
 
-function shadow(){
+function shadow(taskCohortDigest:string){
   return{
+    evaluationRunId:RUN,
+    taskCohortDigest,
+    shadowPolicyVersion:'candidate-v2',
+    controlPolicyVersion:'baseline-v1',
     pairedDecisions:200,
     pairedOutcomeDecisions:190,
     outcomeCoverage:0.95,
@@ -120,14 +126,14 @@ function bundle():PolicyPromotionEvidenceBundle{
       evaluationManifestDigest:candidate.manifestDigest,
       policyVersion:candidate.intelligencePolicyVersion,
       taskCohortDigest:taskCohort.cohortDigest,
-      value:{...metrics(),firstStrategySuccessRate:0.82,recoverySuccessRate:0.78}
+      value:{...metrics(taskCohort.cohortDigest),firstStrategySuccessRate:0.82,recoverySuccessRate:0.78}
     },
     baselineMetrics:{
       runId:RUN,
       evaluationManifestDigest:baseline.manifestDigest,
       policyVersion:baseline.intelligencePolicyVersion,
       taskCohortDigest:taskCohort.cohortDigest,
-      value:metrics()
+      value:metrics(taskCohort.cohortDigest)
     },
     calibration:{
       runId:RUN,
@@ -143,7 +149,7 @@ function bundle():PolicyPromotionEvidenceBundle{
       candidatePolicyVersion:candidate.intelligencePolicyVersion,
       baselinePolicyVersion:baseline.intelligencePolicyVersion,
       taskCohortDigest:taskCohort.cohortDigest,
-      report:shadow()
+      report:shadow(taskCohort.cohortDigest)
     }
   };
 }
@@ -289,5 +295,65 @@ test('candidate and baseline metric counts must cover the canonical cohort exact
   assert.throws(
     ()=>validatePolicyPromotionEvidenceBundle(other),
     /Baseline metrics task count does not match/
+  );
+});
+
+
+test('policy comparison cannot cross source revisions',()=>{
+  const input=bundle();
+  input.baselineManifest=createEvaluationFreezeManifest({
+    sourceRevision:'b'.repeat(40),
+    intelligencePolicyVersion:'baseline-v1',
+    intelligencePolicyDigest:B,
+    adaptiveStateDigest:C,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:B,
+    modelProvider:'provider',
+    modelId:'model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+  input.baselineMetrics.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  input.shadow.baselineManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /evaluation context mismatch: sourceRevision/
+  );
+});
+
+test('bound metrics cannot hide a different internal run or task cohort',()=>{
+  const wrongRun=bundle();
+  wrongRun.candidateMetrics.value={...wrongRun.candidateMetrics.value,evaluationRunId:'other-run'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongRun),
+    /internal run lineage/
+  );
+
+  const wrongCohort=bundle();
+  wrongCohort.baselineMetrics.value={...wrongCohort.baselineMetrics.value,taskCohortDigest:'9'.repeat(64)};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongCohort),
+    /internal task cohort/
+  );
+});
+
+test('shadow report cannot hide different internal evaluation lineage',()=>{
+  const wrongRun=bundle();
+  wrongRun.shadow.report={...wrongRun.shadow.report,evaluationRunId:'other-run'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongRun),
+    /Shadow report internal run lineage mismatch/
+  );
+
+  const wrongPolicy=bundle();
+  wrongPolicy.shadow.report={...wrongPolicy.shadow.report,shadowPolicyVersion:'other-policy'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongPolicy),
+    /candidate policy lineage mismatch/
   );
 });
