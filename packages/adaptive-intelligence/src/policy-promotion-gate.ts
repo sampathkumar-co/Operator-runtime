@@ -180,18 +180,21 @@ function normalizeCalibration(input:CalibrationReport):CalibrationReport{
   };
 }
 function nonnegative(input:unknown,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isFinite(value)||value<0) throw new Error(label+' must be nonnegative.');
   return value;
 }
 function boundedNumber(input:unknown,min:number,max:number,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isFinite(value)||value<min||value>max) throw new Error(label+' is invalid.');
   return value;
 }
 function unit(input:unknown,label:string):number{return boundedNumber(input,0,1,label);}
 function integer(input:unknown,min:number,max:number,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isSafeInteger(value)||value<min||value>max) throw new Error(label+' is invalid.');
   return value;
 }
