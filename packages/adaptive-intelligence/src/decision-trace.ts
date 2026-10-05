@@ -114,7 +114,8 @@ function normalizeEvidence(input:EvidenceRef):EvidenceRef{
     source:bounded(input.source,256,'evidence.source'),
     observedAt:validIso(input.observedAt,'evidence.observedAt'),
     ...(input.channel?{channel:bounded(input.channel,128,'evidence.channel')}:{}),
-    ...(input.scope?{scope:bounded(input.scope,512,'evidence.scope')}: {})
+    ...(input.scope?{scope:bounded(input.scope,512,'evidence.scope')}: {}),
+    ...(input.independenceKey?{independenceKey:bounded(input.independenceKey,512,'evidence.independenceKey')}: {})
   };
 }
 function bounded(input:unknown,max:number,label:string):string{
