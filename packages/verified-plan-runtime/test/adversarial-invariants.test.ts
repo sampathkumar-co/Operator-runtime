@@ -11,10 +11,21 @@ test('stale beliefs do not satisfy preconditions unless node explicitly opts in'
   assert.equal(out.readyNodeIds.includes('act'),false);
 });
 
+test('conflicted belief blocks execution but does not permanently invalidate the plan',()=>{
+  const p=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(p);
+  states[0]!.status='SUCCEEDED';
+  states[1]!.status='READY';
+  const out=bindPlanToBeliefs(p,states,[belief('state.observed','CONFLICTED',.99)]);
+  assert.deepEqual(out.invalidatedNodeIds,[]);
+  assert.equal(out.states.find(s=>s.nodeId==='act')?.status,'BLOCKED');
+});
+
 test('conflicted beliefs cannot authorize mutation commit',()=>{
   const node=graph().nodes[1]!;
   assert.throws(()=>authorizeCommit({
-    goalId:'goal-1',node,beliefs:[belief('state.observed','CONFLICTED',.99)]
+    goalId:'goal-1',planId:'plan-1',planVersion:1,node,attempt:1,
+    beliefs:[belief('state.observed','CONFLICTED',.99)]
   }),/unverified precondition/);
 });
 
@@ -29,7 +40,7 @@ test('uncertain side effects force failure/repair rather than mutation replay',(
   assert.match(result.state.lastReason??'',/uncertain/);
 });
 
-test('completed verification is impossible without node-bound external receipt',()=>{
+test('completed verification is impossible without an executed node awaiting verification',()=>{
   const runtime=new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),graph()));
   assert.throws(()=>runtime.markVerifiedComplete('verify',receipt('verify')),/not awaiting verification/);
 });
