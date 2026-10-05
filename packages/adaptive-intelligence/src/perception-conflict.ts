@@ -27,6 +27,7 @@ export interface PerceptionConflict {
 export function detectPerceptionConflicts(claimsInput: PerceptionFactClaim[]): PerceptionConflict[] {
   if (!Array.isArray(claimsInput) || claimsInput.length > 10_000) throw new Error('perception claims are invalid.');
   const claims = claimsInput.map(normalizeClaim);
+  assertGlobalEvidenceConsistency(claims);
   const byFact = new Map<string, PerceptionFactClaim[]>();
   for (const claim of claims) {
     const list = byFact.get(claim.factKey) ?? [];
@@ -66,6 +67,17 @@ export function detectPerceptionConflicts(claimsInput: PerceptionFactClaim[]): P
   }
 
   return conflicts.sort((a, b) => b.severity - a.severity || a.factKey.localeCompare(b.factKey));
+}
+
+function assertGlobalEvidenceConsistency(claims: PerceptionFactClaim[]): void {
+  const byDigest = new Map<string, EvidenceRef>();
+  for (const claim of claims) {
+    const current = byDigest.get(claim.evidence.digest);
+    if (current && JSON.stringify(current) !== JSON.stringify(claim.evidence)) {
+      throw new Error('Conflicting perception evidence metadata for the same digest is rejected.');
+    }
+    byDigest.set(claim.evidence.digest, claim.evidence);
+  }
 }
 
 function deduplicateCorrelated(claims: PerceptionFactClaim[]): PerceptionFactClaim[] {
