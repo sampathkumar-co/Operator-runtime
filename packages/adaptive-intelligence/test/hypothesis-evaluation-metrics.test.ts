@@ -49,21 +49,29 @@ test('evaluation freeze manifest changes when model or runner changes',()=>{
   const base={
     sourceRevision:'abcdef1',
     intelligencePolicyVersion:'p1',
-    procedureSnapshotDigest:A,
+    intelligencePolicyDigest:A,
+    adaptiveStateDigest:B,
+    authorityPolicyDigest:C,
+    procedureSnapshotDigest:D,
     modelProvider:'provider',
     modelId:'model-a',
-    modelConfigDigest:B,
+    modelConfigDigest:A,
     environmentId:'env',
-    environmentDigest:C,
-    runnerDigest:D,
+    environmentDigest:B,
+    runnerDigest:C,
     benchmarkId:'public-suite',
+    benchmarkDigest:D,
     seed:0
   };
   const one=createEvaluationFreezeManifest(base,{clock:()=>new Date(T0)});
   const two=createEvaluationFreezeManifest(base,{clock:()=>new Date(T0)});
   const three=createEvaluationFreezeManifest({...base,modelId:'model-b'},{clock:()=>new Date(T0)});
+  const changedPolicy=createEvaluationFreezeManifest({...base,intelligencePolicyDigest:B},{clock:()=>new Date(T0)});
+  const changedBenchmark=createEvaluationFreezeManifest({...base,benchmarkDigest:C},{clock:()=>new Date(T0)});
   assert.equal(sameEvaluationCandidate(one,two),true);
   assert.equal(sameEvaluationCandidate(one,three),false);
+  assert.equal(sameEvaluationCandidate(one,changedPolicy),false);
+  assert.equal(sameEvaluationCandidate(one,changedBenchmark),false);
 });
 
 function step(index:number,family:string,ok:boolean,progress:'NONE'|'SUBGOAL_PROGRESS'|'GOAL_ACHIEVED',failure=false):TrajectoryStep{
