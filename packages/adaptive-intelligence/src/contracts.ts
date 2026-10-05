@@ -50,6 +50,18 @@ export interface GoalDescriptor {
   forbiddenFactKeys?: string[];
 }
 
+/**
+ * Reference to an independently produced verification receipt.
+ * The adaptive layer may consume this reference but never mint it.
+ */
+export interface VerificationReceiptRef {
+  digest: string;
+  goalId: string;
+  verifierId: string;
+  verifiedAt: string;
+  authoritySnapshotDigest: string;
+}
+
 export interface StateFact {
   key: string;
   valueDigest: string;
