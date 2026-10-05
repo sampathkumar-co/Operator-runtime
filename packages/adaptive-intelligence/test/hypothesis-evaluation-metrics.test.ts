@@ -12,6 +12,15 @@ import type { TrajectoryStep } from '../src/index.ts';
 const A='a'.repeat(64),B='b'.repeat(64),C='c'.repeat(64),D='d'.repeat(64);
 const T0='2026-10-05T00:00:00.000Z';
 function ev(digest=A){return{digest,source:'test',observedAt:T0};}
+function finalReceipt(goalId:string){
+  return{
+    digest:A,
+    goalId,
+    verifierId:'verification-kernel',
+    verifiedAt:T0,
+    authoritySnapshotDigest:B
+  };
+}
 
 test('hierarchical hypotheses preserve scope and unresolved dependencies',()=>{
   const graph=new HypothesisGraph({clock:()=>new Date(T0)});
@@ -94,13 +103,13 @@ function step(index:number,family:string,ok:boolean,progress:'NONE'|'SUBGOAL_PRO
 
 test('intelligence metrics surface recovery and repeated-failure quality',()=>{
   const metrics=computeIntelligenceMetrics([
-    {taskId:'t1',steps:[step(0,'pointer',true,'GOAL_ACHIEVED')],finalVerifiedSuccess:true},
+    {taskId:'t1',goalId:'g1',steps:[step(0,'pointer',true,'GOAL_ACHIEVED')],finalVerificationReceipt:finalReceipt('g1')},
     {taskId:'t2',steps:[
       step(0,'pointer',false,'NONE',true),
       step(1,'pointer',false,'NONE',true),
       step(2,'keyboard',true,'GOAL_ACHIEVED')
-    ],finalVerifiedSuccess:true},
-    {taskId:'t3',steps:[step(0,'pointer',true,'GOAL_ACHIEVED')],finalVerifiedSuccess:false}
+    ],goalId:'g2',finalVerificationReceipt:finalReceipt('g2')},
+    {taskId:'t3',goalId:'g3',steps:[step(0,'pointer',true,'GOAL_ACHIEVED')]}
   ]);
   assert.equal(metrics.taskCount,3);
   assert.ok(metrics.recoverySuccessRate>0);
