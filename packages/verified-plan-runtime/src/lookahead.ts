@@ -76,6 +76,7 @@ export function searchCounterfactualPlans(
       for(const op of operators){
         if(expanded>=maxExpanded) break;
         if(!op.requires.every((f)=>current.facts.has(f))) continue;
+        if(!changesAbstractState(current.facts,op)) continue;
         const cost=current.cost+op.expectedCost;
         if(cost>budget) continue;
         const risk=1-(current.riskComplement*(1-op.risk));
