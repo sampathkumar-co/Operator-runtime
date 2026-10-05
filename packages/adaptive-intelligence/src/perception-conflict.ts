@@ -71,7 +71,9 @@ export function detectPerceptionConflicts(claimsInput: PerceptionFactClaim[]): P
 function deduplicateCorrelated(claims: PerceptionFactClaim[]): PerceptionFactClaim[] {
   const seen = new Map<string, PerceptionFactClaim>();
   for (const claim of claims) {
-    const key = claim.correlationKey ?? claim.evidence.independenceKey ?? claim.channel + ':' + claim.evidence.digest;
+    const key = claim.evidence.independenceKey
+      ?? claim.correlationKey
+      ?? claim.channel + ':' + claim.evidence.digest;
     const current = seen.get(key);
     if (!current || claim.confidence > current.confidence) seen.set(key, claim);
   }
@@ -88,15 +90,39 @@ function recommendationFor(channels: string[]): string {
 
 function normalizeClaim(input: PerceptionFactClaim): PerceptionFactClaim {
   if (!input || typeof input !== 'object') throw new Error('perception claim is required.');
+  const channel = bounded(input.channel, 128, 'channel');
+  const evidence = normalizeEvidence(input.evidence);
+  if (evidence.channel && evidence.channel !== channel) {
+    throw new Error('Perception claim channel must match evidence channel.');
+  }
+  const correlationKey = input.correlationKey
+    ? bounded(input.correlationKey, 512, 'correlationKey')
+    : undefined;
+  if (correlationKey && evidence.independenceKey && correlationKey !== evidence.independenceKey) {
+    throw new Error('Perception correlationKey conflicts with evidence independenceKey.');
+  }
   return {
     factKey: bounded(input.factKey, 512, 'factKey'),
     valueDigest: sha256(input.valueDigest, 'valueDigest'),
-    channel: bounded(input.channel, 128, 'channel'),
+    channel,
     confidence: unit(input.confidence, 'confidence'),
-    evidence: structuredClone(input.evidence),
-    ...(input.correlationKey ? { correlationKey: bounded(input.correlationKey, 512, 'correlationKey') } : {})
+    evidence,
+    ...(correlationKey ? { correlationKey } : {})
   };
 }
+
+function normalizeEvidence(input: EvidenceRef): EvidenceRef {
+  if (!input || typeof input !== 'object') throw new Error('perception evidence is required.');
+  return {
+    digest: sha256(input.digest, 'evidence.digest'),
+    source: bounded(input.source, 256, 'evidence.source'),
+    observedAt: validIso(input.observedAt, 'evidence.observedAt'),
+    ...(input.channel ? { channel: bounded(input.channel, 128, 'evidence.channel') } : {}),
+    ...(input.scope ? { scope: bounded(input.scope, 512, 'evidence.scope') } : {}),
+    ...(input.independenceKey ? { independenceKey: bounded(input.independenceKey, 512, 'evidence.independenceKey') } : {})
+  };
+}
+
 function channelWeight(channel: string): number {
   if (channel === 'dom' || channel === 'accessibility' || channel === 'uia') return 1;
   if (channel === 'application' || channel === 'runtime') return 0.95;
@@ -107,8 +133,15 @@ function combine(values: number[]): number {
   return clamp01(1 - values.reduce((remaining, value) => remaining * (1 - clamp01(value)), 1));
 }
 function uniqueEvidence(items: EvidenceRef[]): EvidenceRef[] {
-  return [...new Map(items.map((item) => [item.digest, item])).values()]
-    .sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+  const byDigest = new Map<string, EvidenceRef>();
+  for (const item of items) {
+    const current = byDigest.get(item.digest);
+    if (current && JSON.stringify(current) !== JSON.stringify(item)) {
+      throw new Error('Conflicting perception evidence metadata for the same digest is rejected.');
+    }
+    byDigest.set(item.digest, item);
+  }
+  return [...byDigest.values()].sort((a, b) => b.observedAt.localeCompare(a.observedAt) || a.digest.localeCompare(b.digest));
 }
 function bounded(input: unknown, max: number, label: string): string {
   const value = String(input ?? '');
@@ -118,6 +151,12 @@ function bounded(input: unknown, max: number, label: string): string {
 function sha256(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(label + ' must be SHA-256.');
+  return value;
+}
+function validIso(input: unknown, label: string): string {
+  const value = String(input ?? '');
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw new Error(label + ' must be ISO timestamp.');
   return value;
 }
 function unit(input: unknown, label: string): number {
