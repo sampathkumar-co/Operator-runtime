@@ -95,7 +95,7 @@ test('infeasibility requires evidence and distinguishes unresolved from impossib
   assert.equal(unresolved.terminal,false);
   assert.equal(unresolved.class,'INSUFFICIENT_EVIDENCE');
 
-  const impossible=assessInfeasibility({goal:goal(),graph:p,states:runtime.states(),availableCapabilities:[]});
+  const impossible=assessInfeasibility({goal:goal(),graph:p,states:runtime.states(),availableCapabilities:[],searchExhausted:true});
   assert.equal(impossible.terminal,true);
   assert.equal(impossible.class,'CAPABILITY_MISSING');
 });
