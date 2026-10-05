@@ -1,32 +1,26 @@
-import crypto from 'node:crypto';
-import type { LearningMode, LearningReceipt, SkillDraft } from './contracts.ts';
+import type {
+  LearningMode,
+  LearningReceipt,
+  LearningVerificationReceiptRef,
+  SkillDraft
+} from './contracts.ts';
 import { validateSkillDraft } from './skill-schema.ts';
 
 export interface LearningPromotionInput {
   skill: SkillDraft;
   mode: LearningMode;
   policyVersion: string;
-  independentlyVerified: boolean;
+  verificationReceipts: LearningVerificationReceiptRef[];
   allowedSourceRunIds?: string[];
   blockedIdentifiers?: string[];
 }
 
 export class LearningFirewall {
   #seenReceipts = new Set<string>();
+  #clock: () => Date;
 
-  static fromSnapshot(digestsInput: string[]): LearningFirewall {
-    if (!Array.isArray(digestsInput) || digestsInput.length > 1_000_000) throw new Error('learning firewall snapshot is invalid.');
-    const firewall = new LearningFirewall();
-    for (const digestInput of digestsInput) {
-      const digest = sha256(digestInput, 'learningReceiptDigest');
-      if (firewall.#seenReceipts.has(digest)) throw new Error('learning firewall snapshot contains duplicate replay digests.');
-      firewall.#seenReceipts.add(digest);
-    }
-    return firewall;
-  }
-
-  snapshot(): string[] {
-    return [...this.#seenReceipts].sort();
+  constructor(options:{clock?:()=>Date}={}) {
+    this.#clock = options.clock ?? (() => new Date());
   }
 
   evaluate(input: LearningPromotionInput): LearningReceipt {
@@ -43,11 +37,19 @@ export class LearningFirewall {
     if ((skill.benchmarkIdentifiers?.length ?? 0) > 0) {
       return receipt(skill, false, 'Benchmark/evaluation lineage is declared on this skill and cannot be promoted as generic learning.', policyVersion);
     }
-    if (!input.independentlyVerified) {
-      return receipt(skill, false, 'Independent verification is required before reusable learning.', policyVersion);
+
+    const verificationReceipts = normalizeVerificationReceipts(input.verificationReceipts, this.#clock());
+    if (verificationReceipts.length === 0) {
+      return receipt(skill, false, 'Authoritative verification receipt references are required before reusable learning.', policyVersion);
     }
-    if (skill.verificationDigests.length === 0) {
-      return receipt(skill, false, 'At least one independent verification digest is required.', policyVersion);
+
+    const receiptDigests = unique(verificationReceipts.map((item) => item.digest));
+    const receiptRuns = unique(verificationReceipts.map((item) => item.sourceRunId));
+    if (!sameSet(receiptDigests, skill.verificationDigests)) {
+      return receipt(skill, false, 'Verification receipt digests do not exactly match the skill verification proof set.', policyVersion);
+    }
+    if (!sameSet(receiptRuns, skill.sourceRunIds)) {
+      return receipt(skill, false, 'Verification receipt source runs do not exactly match the skill source-run set.', policyVersion);
     }
 
     const allowedRuns = input.allowedSourceRunIds?.length ? new Set(input.allowedSourceRunIds) : undefined;
@@ -60,15 +62,47 @@ export class LearningFirewall {
       return receipt(skill, false, 'Benchmark/evaluation identifier contamination detected: ' + contamination.join(', '), policyVersion);
     }
 
-    const key = crypto.createHash('sha256').update(
-      skill.fingerprint + ':' + policyVersion + ':' + [...skill.verificationDigests].sort().join(',')
-    ).digest('hex');
+    const receiptBinding = verificationReceipts
+      .map((item) => item.digest + ':' + item.sourceRunId + ':' + item.verifierId + ':' + item.authoritySnapshotDigest)
+      .sort()
+      .join(',');
+    const key = skill.fingerprint + ':' + policyVersion + ':' + receiptBinding;
     if (this.#seenReceipts.has(key)) {
       return receipt(skill, false, 'Equivalent verified promotion has already been emitted for this policy version.', policyVersion);
     }
     this.#seenReceipts.add(key);
     return receipt(skill, true, 'Verified generic skill is eligible for promotion.', policyVersion);
   }
+}
+
+function normalizeVerificationReceipts(
+  input: LearningVerificationReceiptRef[],
+  now: Date
+): LearningVerificationReceiptRef[] {
+  if (!Array.isArray(input) || input.length > 10_000) {
+    throw new Error('verificationReceipts is invalid.');
+  }
+  const seen = new Set<string>();
+  const normalized = input.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('learning verification receipt is invalid.');
+    const verifiedAt = validIso(item.verifiedAt, 'verificationReceipt.verifiedAt');
+    if (Date.parse(verifiedAt) > now.getTime()) {
+      throw new Error('Learning verification receipt cannot be future-dated.');
+    }
+    const receipt:LearningVerificationReceiptRef = {
+      digest:sha256(item.digest,'verificationReceipt.digest'),
+      goalId:bounded(item.goalId,256,'verificationReceipt.goalId'),
+      verifierId:bounded(item.verifierId,512,'verificationReceipt.verifierId'),
+      verifiedAt,
+      authoritySnapshotDigest:sha256(item.authoritySnapshotDigest,'verificationReceipt.authoritySnapshotDigest'),
+      sourceRunId:bounded(item.sourceRunId,512,'verificationReceipt.sourceRunId')
+    };
+    const identity = receipt.digest + ':' + receipt.sourceRunId;
+    if (seen.has(identity)) throw new Error('Duplicate learning verification receipt reference.');
+    seen.add(identity);
+    return receipt;
+  });
+  return normalized.sort((a,b)=>a.digest.localeCompare(b.digest)||a.sourceRunId.localeCompare(b.sourceRunId));
 }
 
 function contaminationMatches(skill: ReturnType<typeof validateSkillDraft>, blockedIdentifiers: string[]): string[] {
@@ -101,14 +135,25 @@ function receipt(
     sourceRunIds: [...skill.sourceRunIds]
   };
 }
+function sameSet(a:string[],b:string[]):boolean{
+  if(a.length!==b.length) return false;
+  const expected=new Set(b);
+  return a.every((item)=>expected.has(item));
+}
 function bounded(input: unknown, max: number, label: string): string {
   const value = String(input ?? '');
   if (!value || value.length > max) throw new Error(label + ' is invalid.');
   return value;
 }
-function unique(values: string[]): string[] { return [...new Set(values)].sort(); }
-function sha256(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(label + ' must be SHA-256.');
+function sha256(input:unknown,label:string):string{
+  const value=String(input??'').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
   return value;
 }
+function validIso(input:unknown,label:string):string{
+  const value=String(input??'');
+  const parsed=Date.parse(value);
+  if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
+  return value;
+}
+function unique(values: string[]): string[] { return [...new Set(values)].sort(); }
