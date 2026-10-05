@@ -77,3 +77,42 @@ test('accepted verification receipt survives deterministic rehydration',()=>{
   assert.equal(restored.states().find(s=>s.nodeId==='act')?.status,'SUCCEEDED');
   assert.equal(restored.verificationReceipts().length,1);
 });
+
+test('historical verification survives only through explicit preserving revision proofs',()=>{
+  const {runtime,execution}=runtimeThroughAct();
+  runtime.markVerifiedComplete('act',receipt('act',{executionDigest:execution.executionDigest}),'2026-10-05T10:00:05.000Z');
+
+  const next=graph();
+  next.version=2;
+  next.nodes.find(n=>n.id==='verify')!.expectedCost=9;
+  const revised=runtime.revise(next,'2026-10-05T10:01:00.000Z').runtime;
+
+  assert.equal(revised.graph.version,2);
+  assert.equal(revised.states().find(s=>s.nodeId==='act')?.status,'SUCCEEDED');
+  assert.equal(revised.verificationReceipts()[0]?.planVersion,1);
+  assert.equal(revised.revisionProofs().length,1);
+  assert.equal(VerifiedPlanRuntime.fromEnvelope(revised.exportEnvelope()).states().find(s=>s.nodeId==='act')?.status,'SUCCEEDED');
+});
+
+test('changing a verified node resets it and drops its historical receipt',()=>{
+  const {runtime,execution}=runtimeThroughAct();
+  runtime.markVerifiedComplete('act',receipt('act',{executionDigest:execution.executionDigest}),'2026-10-05T10:00:05.000Z');
+
+  const next=graph();
+  next.version=2;
+  next.nodes.find(n=>n.id==='act')!.expectedCost=99;
+  const revised=runtime.revise(next,'2026-10-05T10:01:00.000Z').runtime;
+
+  assert.equal(revised.states().find(s=>s.nodeId==='act')?.status,'PENDING');
+  assert.equal(revised.verificationReceipts().length,0);
+});
+
+test('tampered revision proof chain is rejected even when envelope digest is recomputed',()=>{
+  const {runtime,execution}=runtimeThroughAct();
+  runtime.markVerifiedComplete('act',receipt('act',{executionDigest:execution.executionDigest}),'2026-10-05T10:00:05.000Z');
+  const next=graph(); next.version=2; next.nodes.find(n=>n.id==='verify')!.expectedCost=9;
+  const revised=runtime.revise(next,'2026-10-05T10:01:00.000Z').runtime;
+  const state=revised.exportState();
+  state.revisionProofs[0]!.preservedNodeDigests=[];
+  assert.throws(()=>VerifiedPlanRuntime.fromState(state),/revision proof digest does not match content/);
+});
