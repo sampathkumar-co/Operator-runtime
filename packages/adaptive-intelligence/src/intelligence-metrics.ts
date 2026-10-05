@@ -10,15 +10,21 @@ export interface IntelligenceMetrics {
   averageStepsPerTask:number;
 }
 
+export interface TaskVerificationReceiptRef extends VerificationReceiptRef {
+  runId:string;
+  taskId:string;
+}
+
 export interface TaskTrajectoryRecord {
+  runId:string;
   taskId:string;
   goalId:string;
   steps:TrajectoryStep[];
-  finalVerificationReceipt?:VerificationReceiptRef;
+  finalVerificationReceipt?:TaskVerificationReceiptRef;
 }
 
 interface NormalizedTaskTrajectoryRecord extends TaskTrajectoryRecord {
-  finalVerificationReceipt?:VerificationReceiptRef;
+  finalVerificationReceipt?:TaskVerificationReceiptRef;
 }
 
 export function computeIntelligenceMetrics(
@@ -101,13 +107,15 @@ function failureFingerprint(step:TrajectoryStep):string{
 }
 function normalizeRecord(input:TaskTrajectoryRecord,now:Date):NormalizedTaskTrajectoryRecord{
   if(!input||typeof input!=='object') throw new Error('task trajectory record is required.');
+  const runId=bounded(input.runId,512,'runId');
   const taskId=bounded(input.taskId,512,'taskId');
   const goalId=bounded(input.goalId,256,'goalId');
   if(!Array.isArray(input.steps)||input.steps.length>100000) throw new Error('steps are invalid.');
   const finalVerificationReceipt=input.finalVerificationReceipt
-    ? normalizeVerificationReceipt(input.finalVerificationReceipt,goalId,now)
+    ? normalizeVerificationReceipt(input.finalVerificationReceipt,runId,taskId,goalId,now)
     : undefined;
   return {
+    runId,
     taskId,
     goalId,
     steps:structuredClone(input.steps),
@@ -115,20 +123,26 @@ function normalizeRecord(input:TaskTrajectoryRecord,now:Date):NormalizedTaskTraj
   };
 }
 function normalizeVerificationReceipt(
-  input:VerificationReceiptRef,
+  input:TaskVerificationReceiptRef,
+  runId:string,
+  taskId:string,
   goalId:string,
   now:Date
-):VerificationReceiptRef{
+):TaskVerificationReceiptRef{
   if(!input||typeof input!=='object') throw new Error('final verification receipt is invalid.');
   const verifiedAt=validIso(input.verifiedAt,'finalVerificationReceipt.verifiedAt');
   if(Date.parse(verifiedAt)>now.getTime()) throw new Error('Final verification receipt cannot be future-dated.');
-  const normalized:VerificationReceiptRef={
+  const normalized:TaskVerificationReceiptRef={
     digest:sha256(input.digest,'finalVerificationReceipt.digest'),
+    runId:bounded(input.runId,512,'finalVerificationReceipt.runId'),
+    taskId:bounded(input.taskId,512,'finalVerificationReceipt.taskId'),
     goalId:bounded(input.goalId,256,'finalVerificationReceipt.goalId'),
     verifierId:bounded(input.verifierId,512,'finalVerificationReceipt.verifierId'),
     verifiedAt,
     authoritySnapshotDigest:sha256(input.authoritySnapshotDigest,'finalVerificationReceipt.authoritySnapshotDigest')
   };
+  if(normalized.runId!==runId) throw new Error('Final verification receipt is bound to a different run.');
+  if(normalized.taskId!==taskId) throw new Error('Final verification receipt is bound to a different task.');
   if(normalized.goalId!==goalId) throw new Error('Final verification receipt is bound to a different goal.');
   return normalized;
 }
