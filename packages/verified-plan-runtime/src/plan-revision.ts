@@ -20,6 +20,9 @@ export function revisePlan(
   if(previousStates.some((s)=>s.status==='RUNNING')){
     throw new Error('plan revision is forbidden while an execution node is running.');
   }
+  if(previousStates.some((s)=>s.status==='BLOCKED'&&Boolean(s.lastExecutionDigest))){
+    throw new Error('plan revision is forbidden while an execution is awaiting verification.');
+  }
   const next=validatePlanGraph(goal,nextInput);
   if(next.planId!==previous.planId||next.goalId!==previous.goalId){
     throw new Error('plan revision must preserve plan and goal identity.');
@@ -28,7 +31,7 @@ export function revisePlan(
     throw new Error('plan revision version must advance exactly by one.');
   }
   const previousById=new Map(previous.nodes.map((n)=>[n.id,n]));
-  const previousStateById=new Map(previousStates.map((s)=>[s.nodeId,s]));
+  const previousStateById=new Map(previousStates.map((s)=>[s.nodeId,s));
   const changed=next.nodes.filter((node)=>{
     const prior=previousById.get(node.id);
     return !prior||digestPlan(prior)!==digestPlan(node);
