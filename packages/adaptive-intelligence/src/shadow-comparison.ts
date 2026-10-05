@@ -3,7 +3,9 @@ import type { DecisionTraceRecord } from './decision-trace.ts';
 export interface DecisionOutcomeVerificationReceiptRef {
   digest:string;
   runId:string;
+  taskId:string;
   goalId:string;
+  decisionDigest:string;
   verifierId:string;
   verifiedAt:string;
   authoritySnapshotDigest:string;
@@ -196,7 +198,9 @@ function validateOutcomeBinding(outcome:DecisionOutcome,trace:DecisionTraceRecor
   if(outcome.goalId!==trace.goalId) throw new Error('Decision outcome goal id does not match its trace.');
   if(outcome.decisionDigest!==trace.decisionDigest) throw new Error('Decision outcome digest does not match its trace.');
   if(outcome.verificationReceipt.runId!==trace.runId) throw new Error('Decision verification receipt run id does not match its trace.');
+  if(outcome.verificationReceipt.taskId!==trace.taskId) throw new Error('Decision verification receipt task id does not match its trace.');
   if(outcome.verificationReceipt.goalId!==trace.goalId) throw new Error('Decision verification receipt goal id does not match its trace.');
+  if(outcome.verificationReceipt.decisionDigest!==trace.decisionDigest) throw new Error('Decision verification receipt digest binding does not match its trace.');
   if(outcome.verificationReceipt.authoritySnapshotDigest!==trace.authoritySnapshotDigest){
     throw new Error('Decision outcome authority snapshot does not match its trace.');
   }
@@ -218,7 +222,9 @@ function normalizeOutcome(input:DecisionOutcome,now:Date):DecisionOutcome{
   const receipt:DecisionOutcomeVerificationReceiptRef={
     digest:sha256(input.verificationReceipt.digest,'verificationReceipt.digest'),
     runId:bounded(input.verificationReceipt.runId,512,'verificationReceipt.runId'),
+    taskId:bounded(input.verificationReceipt.taskId,512,'verificationReceipt.taskId'),
     goalId:bounded(input.verificationReceipt.goalId,256,'verificationReceipt.goalId'),
+    decisionDigest:sha256(input.verificationReceipt.decisionDigest,'verificationReceipt.decisionDigest'),
     verifierId:bounded(input.verificationReceipt.verifierId,512,'verificationReceipt.verifierId'),
     verifiedAt:validIso(input.verificationReceipt.verifiedAt,'verificationReceipt.verifiedAt'),
     authoritySnapshotDigest:sha256(input.verificationReceipt.authoritySnapshotDigest,'verificationReceipt.authoritySnapshotDigest'),
