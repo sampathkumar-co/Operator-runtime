@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
 export const ADAPTIVE_STATE_SCHEMA = 'mecord.adaptive-intelligence';
-export const ADAPTIVE_STATE_VERSION = 1;
+export const ADAPTIVE_STATE_VERSION = 2;
 
 export interface VersionedStateEnvelope<T> {
   schema: typeof ADAPTIVE_STATE_SCHEMA;
@@ -10,6 +10,7 @@ export interface VersionedStateEnvelope<T> {
   createdAt: string;
   payload: T;
   payloadDigest: string;
+  envelopeDigest: string;
 }
 
 export interface DecodeStateOptions<T> {
@@ -24,14 +25,19 @@ export function encodeVersionedState<T>(
   options: { clock?: () => Date } = {}
 ): VersionedStateEnvelope<T> {
   const kind = bounded(kindInput, 256, 'kind');
-  const canonical = canonicalJson(payload);
-  return {
+  const createdAt = (options.clock ?? (() => new Date()))().toISOString();
+  const payloadDigest = crypto.createHash('sha256').update(canonicalJson(payload)).digest('hex');
+  const metadata = {
     schema: ADAPTIVE_STATE_SCHEMA,
     version: ADAPTIVE_STATE_VERSION,
     kind,
-    createdAt: (options.clock ?? (() => new Date()))().toISOString(),
+    createdAt,
+    payloadDigest
+  };
+  return {
+    ...metadata,
     payload: structuredClone(payload),
-    payloadDigest: crypto.createHash('sha256').update(canonical).digest('hex')
+    envelopeDigest: crypto.createHash('sha256').update(canonicalJson(metadata)).digest('hex')
   };
 }
 
@@ -46,20 +52,41 @@ export function decodeVersionedState<T>(
   if (!Number.isSafeInteger(version)) throw new Error('Adaptive state version is invalid.');
   const accepted = options.acceptedVersions ?? [ADAPTIVE_STATE_VERSION];
   if (!accepted.includes(version)) throw new Error('Unsupported adaptive state version: ' + version + '.');
+  if (version !== ADAPTIVE_STATE_VERSION) {
+    throw new Error('Legacy adaptive state requires an explicit migration before decode.');
+  }
+
   const kind = bounded(raw.kind, 256, 'kind');
   if (kind !== options.kind) throw new Error('Adaptive state kind mismatch.');
   const createdAt = validIso(raw.createdAt, 'createdAt');
+  const payloadDigest = sha256(raw.payloadDigest, 'payloadDigest');
+  const envelopeDigest = sha256(raw.envelopeDigest, 'envelopeDigest');
+
+  const actualEnvelopeDigest = crypto.createHash('sha256').update(canonicalJson({
+    schema: ADAPTIVE_STATE_SCHEMA,
+    version,
+    kind,
+    createdAt,
+    payloadDigest
+  })).digest('hex');
+  if (!timingSafeHexEqual(actualEnvelopeDigest, envelopeDigest)) {
+    throw new Error('Adaptive state envelope metadata digest mismatch.');
+  }
+
   const payload = options.validate(raw.payload);
-  const digest = sha256(raw.payloadDigest, 'payloadDigest');
-  const actual = crypto.createHash('sha256').update(canonicalJson(payload)).digest('hex');
-  if (!timingSafeHexEqual(actual, digest)) throw new Error('Adaptive state payload digest mismatch.');
+  const actualPayloadDigest = crypto.createHash('sha256').update(canonicalJson(payload)).digest('hex');
+  if (!timingSafeHexEqual(actualPayloadDigest, payloadDigest)) {
+    throw new Error('Adaptive state payload digest mismatch.');
+  }
+
   return {
     schema: ADAPTIVE_STATE_SCHEMA,
     version,
     kind,
     createdAt,
     payload,
-    payloadDigest: digest
+    payloadDigest,
+    envelopeDigest
   };
 }
 
@@ -71,7 +98,6 @@ function sortValue(input: unknown, active: WeakSet<object>): unknown {
   if (input === null || typeof input === 'string' || typeof input === 'boolean') return input;
   if (typeof input === 'number') {
     if (!Number.isFinite(input)) throw new Error('Non-finite numbers cannot be serialized.');
-    // JSON stringifies -0 as 0; normalize explicitly so digest semantics are clear.
     return Object.is(input, -0) ? 0 : input;
   }
   if (typeof input === 'bigint' || typeof input === 'function' || typeof input === 'symbol' || input === undefined) {
