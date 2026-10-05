@@ -67,12 +67,14 @@ function validateStep(input: SkillStep, index: number): SkillStep {
   };
 }
 function bounded(input: unknown, max: number, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   if (!value || value.length > max) throw new Error(label + ' is invalid.');
   return value;
 }
 function sha256(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(label + ' must be SHA-256.');
   return value;
 }
