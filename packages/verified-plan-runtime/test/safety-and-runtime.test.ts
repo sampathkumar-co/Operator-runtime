@@ -4,19 +4,25 @@ import {
   VerifiedPlanRuntime, assessInfeasibility, authorizeCommit, createDecisionLineage,
   digestBeliefs, validatePlanGraph
 } from '../src/index.ts';
-import { belief, D, E, goal, graph, receipt } from './fixtures.ts';
+import { authorityReceipt, belief, E, goal, graph, receipt } from './fixtures.ts';
 
-test('irreversible actions require authority receipt and explicit verification facts',()=>{
+test('irreversible actions require fresh authority receipt and explicit verification facts',()=>{
   const node={...graph().nodes[1]!,reversible:false};
-  assert.throws(()=>authorizeCommit({goalId:'goal-1',node,beliefs:[belief('state.observed')],now:'2026-10-05T10:00:00.000Z'}),/authorization receipt/);
+  assert.throws(()=>authorizeCommit({
+    goalId:'goal-1',planId:'plan-1',planVersion:1,node,attempt:1,
+    beliefs:[belief('state.observed')],now:'2026-10-05T10:01:00.000Z'
+  }),/authorization receipt/);
   const permit=authorizeCommit({
-    goalId:'goal-1',node,beliefs:[belief('state.observed')],authorizationReceipt:receipt('act'),now:'2026-10-05T10:00:00.000Z'
+    goalId:'goal-1',planId:'plan-1',planVersion:1,node,attempt:1,
+    beliefs:[belief('state.observed')],authorizationReceipt:authorityReceipt(),
+    currentAuthoritySnapshotDigest:E,now:'2026-10-05T10:01:00.000Z'
   });
   assert.match(permit.digest,/^[0-9a-f]{64}$/);
   assert.equal(permit.nodeId,'act');
+  assert.equal(permit.attempt,1);
 });
 
-test('receipt replay across nodes is rejected',()=>{
+test('receipt replay across nodes is rejected and exact execution is accepted',()=>{
   const runtime=new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),graph()));
   runtime.startNode('observe','2026-10-05T10:00:00.000Z');
   runtime.recordExecution('observe',{
@@ -25,12 +31,18 @@ test('receipt replay across nodes is rejected',()=>{
   },'2026-10-05T10:00:01.000Z');
   runtime.bindBeliefs([belief('state.observed')],'2026-10-05T10:00:02.000Z');
   runtime.startNode('act','2026-10-05T10:00:03.000Z');
-  runtime.recordExecution('act',{
+  const execution=runtime.recordExecution('act',{
     changedFactKeys:['change.applied'],supportedFactKeys:['change.applied'],contradictedFactKeys:[],
     executionOk:true,sideEffectState:'known'
   },'2026-10-05T10:00:04.000Z');
-  assert.throws(()=>runtime.markVerifiedComplete('act',receipt('verify')),/different goal\/node lineage/);
-  assert.equal(runtime.markVerifiedComplete('act',receipt('act'),'2026-10-05T10:00:05.000Z').status,'SUCCEEDED');
+  assert.throws(
+    ()=>runtime.markVerifiedComplete('act',receipt('verify',{executionDigest:execution.executionDigest})),
+    /different plan\/node\/attempt\/execution lineage/
+  );
+  assert.equal(
+    runtime.markVerifiedComplete('act',receipt('act',{executionDigest:execution.executionDigest}),'2026-10-05T10:00:05.000Z').status,
+    'SUCCEEDED'
+  );
 });
 
 test('runtime repairs locally and preserves prior succeeded work',()=>{
@@ -58,19 +70,22 @@ test('runtime state rehydrates deterministically',()=>{
   assert.equal(restored.stateDigest(),before);
 });
 
-test('decision lineage binds plan version, node and belief digest',()=>{
+test('decision lineage binds immutable plan content, node and belief digest',()=>{
+  const runtime=new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),graph()));
   const beliefs=[belief('state.observed')];
   const line=createDecisionLineage({
-    planId:'plan-1',planVersion:1,goalId:'goal-1',nodeId:'observe',
+    planId:'plan-1',planVersion:1,planDigest:runtime.planDigest,goalId:'goal-1',nodeId:'observe',
     beliefDigest:digestBeliefs(beliefs),decisionKind:'EXECUTION',decisionId:'pw',
     createdAt:'2026-10-05T10:00:00.000Z'
   });
   const changed=createDecisionLineage({
-    planId:'plan-1',planVersion:1,goalId:'goal-1',nodeId:'act',
+    planId:'plan-1',planVersion:1,planDigest:runtime.planDigest,goalId:'goal-1',nodeId:'act',
     beliefDigest:digestBeliefs(beliefs),decisionKind:'EXECUTION',decisionId:'pw',
     createdAt:'2026-10-05T10:00:00.000Z'
   });
   assert.notEqual(line.digest,changed.digest);
+  runtime.appendDecision(line);
+  assert.equal(runtime.decisions().length,1);
 });
 
 test('infeasibility requires evidence and distinguishes unresolved from impossible',()=>{
