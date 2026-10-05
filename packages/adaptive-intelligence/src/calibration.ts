@@ -26,6 +26,14 @@ export class CalibrationTracker {
     this.#maxSamples = integer(options.maxSamples ?? 50_000, 1, 1_000_000, 'maxSamples');
   }
 
+  static fromSnapshot(samplesInput: CalibrationSample[], options: { maxSamples?: number } = {}): CalibrationTracker {
+    if (!Array.isArray(samplesInput) || samplesInput.length > 1_000_000) throw new Error('calibration snapshot is invalid.');
+    const tracker = new CalibrationTracker(options);
+    if (samplesInput.length > tracker.#maxSamples) throw new Error('Calibration snapshot exceeds configured capacity.');
+    for (const sample of samplesInput) tracker.record(sample);
+    return tracker;
+  }
+
   record(sample: CalibrationSample): void {
     const normalized: CalibrationSample = {
       prediction: unit(sample.prediction, 'prediction'),
@@ -34,6 +42,10 @@ export class CalibrationTracker {
     };
     this.#samples.push(normalized);
     if (this.#samples.length > this.#maxSamples) this.#samples.splice(0, this.#samples.length - this.#maxSamples);
+  }
+
+  snapshot(): CalibrationSample[] {
+    return structuredClone(this.#samples);
   }
 
   report(bucketCountInput = 10): CalibrationReport {
