@@ -122,7 +122,9 @@ test('decision trace binds shadow recommendation to authority and state digests'
   const record=log.append({
     mode:'SHADOW',
     kind:'RECOVERY',
+    runId:'run-1',
     taskId:'t1',
+    goalId:'goal-1',
     policyVersion:'p1',
     selectedId:'reobserve',
     alternatives:['retry'],
