@@ -12,6 +12,7 @@ export function rankPlanBranches(candidates:PlanBranchCandidate[],options:PlanSe
   if((budget!==Number.POSITIVE_INFINITY)&&(!Number.isFinite(budget)||budget<0)) throw new Error('remainingCostBudget is invalid.');
   if(!Number.isFinite(maxRisk)||maxRisk<0||maxRisk>1) throw new Error('maximumRisk is invalid.');
   const normalized=candidates.map(normalize);
+  if(new Set(normalized.map((candidate)=>candidate.id)).size!==normalized.length) throw new Error('plan branch candidate ids must be unique.');
   const eligible=normalized.filter((c)=>c.expectedCost<=budget&&c.risk<=maxRisk);
   if(!eligible.length) throw new Error('no plan branch satisfies hard budget/risk constraints.');
   return eligible.map((c)=>{
