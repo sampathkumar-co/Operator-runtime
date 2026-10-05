@@ -1,4 +1,5 @@
 import type { DecisionTraceRecord } from './decision-trace.ts';
+import { createTaskCohortManifest } from './evaluation-cohort.ts';
 
 export interface DecisionOutcomeVerificationReceiptRef {
   digest:string;
@@ -23,6 +24,12 @@ export interface DecisionOutcome {
 }
 
 export interface ShadowComparisonReport {
+  /** Present on reports derived directly from decision traces. */
+  evaluationRunId?:string;
+  /** Canonical cohort digest for task ids that actually produced paired decisions. */
+  taskCohortDigest?:string;
+  shadowPolicyVersion?:string;
+  controlPolicyVersion?:string;
   pairedDecisions:number;
   pairedOutcomeDecisions:number;
   outcomeCoverage:number;
@@ -42,6 +49,10 @@ export interface ShadowComparisonReport {
 export function validateShadowComparisonReport(report:ShadowComparisonReport):ShadowComparisonReport{
   if(!report||typeof report!=='object') throw new Error('shadow comparison report is required.');
   const normalized:ShadowComparisonReport={
+    ...(report.evaluationRunId!==undefined?{evaluationRunId:bounded(report.evaluationRunId,512,'evaluationRunId')}:{ }),
+    ...(report.taskCohortDigest!==undefined?{taskCohortDigest:sha256(report.taskCohortDigest,'taskCohortDigest')}:{ }),
+    ...(report.shadowPolicyVersion!==undefined?{shadowPolicyVersion:bounded(report.shadowPolicyVersion,256,'shadowPolicyVersion')}:{ }),
+    ...(report.controlPolicyVersion!==undefined?{controlPolicyVersion:bounded(report.controlPolicyVersion,256,'controlPolicyVersion')}:{ }),
     pairedDecisions:integer(report.pairedDecisions,0,1_000_000_000,'pairedDecisions'),
     pairedOutcomeDecisions:integer(report.pairedOutcomeDecisions,0,1_000_000_000,'pairedOutcomeDecisions'),
     outcomeCoverage:unit(report.outcomeCoverage,'outcomeCoverage'),
@@ -102,6 +113,9 @@ export function compareShadowToControl(
   assertSingleRunCohort(traces);
   assertSinglePolicyCohort(traces.filter((trace)=>trace.mode==='SHADOW'),'shadow');
   assertSinglePolicyCohort(traces.filter((trace)=>trace.mode==='CONTROL'),'control');
+  const evaluationRunId=singleValue(traces.map(trace=>trace.runId));
+  const shadowPolicyVersion=singleValue(traces.filter(trace=>trace.mode==='SHADOW').map(trace=>trace.policyVersion));
+  const controlPolicyVersion=singleValue(traces.filter(trace=>trace.mode==='CONTROL').map(trace=>trace.policyVersion));
 
   const outcomes=new Map<string,DecisionOutcome>();
   for(const raw of outcomesInput){
@@ -115,6 +129,7 @@ export function compareShadowToControl(
   let paired=0,outcomePairs=0,agreements=0,shadowWins=0,controlWins=0,ties=0;
   let progressDelta=0,costDelta=0,progressPairs=0,costPairs=0;
   const matchedShadow=new Set<string>(),matchedControl=new Set<string>();
+  const pairedTaskIds=new Set<string>();
 
   for(const [key,shadowList] of shadow){
     const controlList=control.get(key);
@@ -126,6 +141,7 @@ export function compareShadowToControl(
     for(let i=0;i<count;i+=1){
       const s=shadowList[i]!,c=controlList[i]!;
       paired+=1;
+      pairedTaskIds.add(s.taskId);
       matchedShadow.add(s.decisionDigest);
       matchedControl.add(c.decisionDigest);
       if((s.selectedId??'')===(c.selectedId??'')) agreements+=1;
@@ -149,7 +165,15 @@ export function compareShadowToControl(
     }
   }
 
+  const taskCohortDigest=pairedTaskIds.size>0
+    ? createTaskCohortManifest([...pairedTaskIds]).cohortDigest
+    : undefined;
+
   return {
+    ...(evaluationRunId?{evaluationRunId}:{}),
+    ...(taskCohortDigest?{taskCohortDigest}:{}),
+    ...(shadowPolicyVersion?{shadowPolicyVersion}:{}),
+    ...(controlPolicyVersion?{controlPolicyVersion}:{}),
     pairedDecisions:paired,
     pairedOutcomeDecisions:outcomePairs,
     outcomeCoverage:ratio(outcomePairs,paired),
@@ -180,6 +204,11 @@ function group(traces:DecisionTraceRecord[]):Map<string,DecisionTraceRecord[]>{
     map.set(key,list);
   }
   return map;
+}
+
+function singleValue(values:string[]):string|undefined{
+  if(values.length===0) return undefined;
+  return values[0];
 }
 
 function assertSingleRunCohort(traces:DecisionTraceRecord[]):void{
