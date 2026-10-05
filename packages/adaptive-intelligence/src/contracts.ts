@@ -13,6 +13,11 @@ export interface EvidenceRef {
   observedAt: string;
   channel?: string;
   scope?: string;
+  /**
+   * Explicit correlation/independence bucket for confidence aggregation.
+   * Evidence sharing the same key must not multiply confidence.
+   */
+  independenceKey?: string;
 }
 
 export interface BeliefObservation {
