@@ -1,7 +1,12 @@
 import type { TrajectoryStep, VerificationReceiptRef } from './contracts.ts';
 import { strategyFingerprint } from './strategy-engine.ts';
+import { createTaskCohortManifest } from './evaluation-cohort.ts';
 
 export interface IntelligenceMetrics {
+  /** Present on metrics derived directly from task trajectories. */
+  evaluationRunId?:string;
+  /** Canonical digest of the exact unique task identities used for the aggregate. */
+  taskCohortDigest?:string;
   taskCount:number;
   firstStrategySuccessRate:number;
   recoverySuccessRate:number;
@@ -42,6 +47,11 @@ export function computeIntelligenceMetrics(
     repeatedEquivalentFailureRate:0,
     averageStepsPerTask:0
   };
+
+  const runIds=new Set(records.map(record=>record.runId));
+  if(runIds.size!==1) throw new Error('Intelligence metrics cannot combine multiple evaluation run ids.');
+  const taskCohort=createTaskCohortManifest(records.map(record=>record.taskId));
+  const evaluationRunId=records[0]!.runId;
 
   let cleanFirstStrategySuccesses=0;
   let recoveryOpportunities=0;
@@ -86,6 +96,8 @@ export function computeIntelligenceMetrics(
   }
 
   return {
+    evaluationRunId,
+    taskCohortDigest:taskCohort.cohortDigest,
     taskCount:records.length,
     firstStrategySuccessRate:round(cleanFirstStrategySuccesses/records.length),
     recoverySuccessRate:round(recoverySuccesses/Math.max(1,recoveryOpportunities)),
