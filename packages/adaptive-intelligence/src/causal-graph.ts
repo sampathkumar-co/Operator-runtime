@@ -252,6 +252,37 @@ function normalizeEvidenceList(items: import('./contracts.ts').EvidenceRef[]): i
   return [...byDigest.values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt)||a.digest.localeCompare(b.digest));
 }
 
+function normalizeStoredDelta(input: StateDelta): StateDelta {
+  if (!input || typeof input !== 'object') throw new Error('transition.delta is invalid.');
+  return {
+    changedFactKeys: normalizeKeys(input.changedFactKeys, 'changedFactKeys'),
+    addedFactKeys: normalizeKeys(input.addedFactKeys, 'addedFactKeys'),
+    removedFactKeys: normalizeKeys(input.removedFactKeys, 'removedFactKeys'),
+    expectedEffectsSatisfied: normalizeKeys(input.expectedEffectsSatisfied, 'expectedEffectsSatisfied'),
+    expectedEffectsMissing: normalizeKeys(input.expectedEffectsMissing, 'expectedEffectsMissing'),
+    unrelatedEffects: normalizeKeys(input.unrelatedEffects, 'unrelatedEffects'),
+    progressSignals: normalizeProgressSignals(input.progressSignals)
+  };
+}
+function normalizeKeys(input: string[], label: string): string[] {
+  if (!Array.isArray(input) || input.length > 100_000) throw new Error(label + ' is invalid.');
+  return [...new Set(input.map((item) => boundedText(item, 512, label)))].sort();
+}
+function normalizeProgressSignals(input: string[]): string[] {
+  if (!Array.isArray(input) || input.length > 10_000) throw new Error('progressSignals is invalid.');
+  return [...new Set(input.map((item) => boundedText(item, 512, 'progressSignal')))].sort();
+}
+function sameDelta(a: StateDelta, b: StateDelta): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+function uuid(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+    throw new Error(label + ' must be a UUID.');
+  }
+  return value;
+}
+
 function boundedText(input: unknown, max: number, label: string): string {
   const value = String(input ?? '');
   if (!value || value.length > max) throw new Error(label + ' is invalid.');
