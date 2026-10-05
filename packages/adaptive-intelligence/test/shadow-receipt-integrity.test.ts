@@ -185,3 +185,15 @@ test('shadow verification receipt cannot be replayed across decisions',()=>{
     outcome(control.decisionDigest,'failure')
   ],{now:new Date(T0)}),/receipt digest binding does not match/);
 });
+
+test('derived shadow report exposes run, policy and paired-task cohort lineage',()=>{
+  const {log,shadow,control}=pair({decisionPointId:'point-1'});
+  const report=compareShadowToControl(log.snapshot(),[
+    outcome(shadow.decisionDigest,'success'),
+    outcome(control.decisionDigest,'failure')
+  ],{now:new Date(T0)});
+  assert.equal(report.evaluationRunId,RUN);
+  assert.equal(report.shadowPolicyVersion,'candidate-v2');
+  assert.equal(report.controlPolicyVersion,'baseline-v1');
+  assert.match(report.taskCohortDigest??'',/^[0-9a-f]{64}$/);
+});
