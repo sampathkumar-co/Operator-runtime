@@ -189,38 +189,45 @@ function normalizeEvidenceList(items:EvidenceRef[]):EvidenceRef[]{
   })).values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt));
 }
 function scope(input:unknown):HypothesisScope{
-  const value=String(input);
+  if(typeof input!=='string') throw new Error('hypothesis.scope must be a string.');
+  const value=input;
   if(!['target','action','subgoal','task','environment'].includes(value)) throw new Error('hypothesis.scope is invalid.');
   return value as HypothesisScope;
 }
 function hypothesisState(input:unknown):HypothesisState{
-  const value=String(input);
+  if(typeof input!=='string') throw new Error('hypothesis.state must be a string.');
+  const value=input;
   if(!['ACTIVE','SUPPORTED','DISPROVEN','RESOLVED','BLOCKED'].includes(value)) throw new Error('hypothesis.state is invalid.');
   return value as HypothesisState;
 }
 function bounded(input:unknown,max:number,label:string):string{
-  const value=String(input??'');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   if(!value||value.length>max) throw new Error(label+' is invalid.');
   return value;
 }
 function integer(input:unknown,min:number,max:number,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isSafeInteger(value)||value<min||value>max) throw new Error(label+' is invalid.');
   return value;
 }
 function unit(input:unknown,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isFinite(value)||value<0||value>1) throw new Error(label+' must be between 0 and 1.');
   return value;
 }
 function unique(values:string[]):string[]{return [...new Set(values.map(v=>bounded(v,256,'hypothesis.dependency')))];}
 function sha256(input:unknown,label:string):string{
-  const value=String(input??'').toLowerCase();
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input.toLowerCase();
   if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
   return value;
 }
 function validIso(input:unknown,label:string):string{
-  const value=String(input??'');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   const parsed=Date.parse(value);
   if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
   return value;
