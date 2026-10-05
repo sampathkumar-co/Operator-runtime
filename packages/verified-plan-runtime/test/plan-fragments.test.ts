@@ -65,3 +65,20 @@ test('fragment cannot learn unverified failure or unmapped source facts',()=>{
     factAliases:{},sourceRunIds:['r1','r2'],verificationDigests:[D,E]
   }),/generalized through a fact alias/);
 });
+
+test('fragment preserves caller execution order and rejects dependency inversion',()=>{
+  const {p,states}=eligible();
+  const fragment=extractPlanFragment({
+    graph:p,states,nodeIds:['observe','act'],objectiveKind:'x',scopeClass:'x',
+    factAliases:aliases,sourceRunIds:['r1','r2'],verificationDigests:[D,E]
+  });
+  assert.deepEqual(fragment.steps.map(step=>step.kind),['OBSERVE','ACTION']);
+  assert.throws(()=>extractPlanFragment({
+    graph:p,states,nodeIds:['act','observe'],objectiveKind:'x',scopeClass:'x',
+    factAliases:aliases,sourceRunIds:['r1','r2'],verificationDigests:[D,E]
+  }),/preserve dependency execution order/);
+  assert.throws(()=>extractPlanFragment({
+    graph:p,states,nodeIds:['observe','observe'],objectiveKind:'x',scopeClass:'x',
+    factAliases:aliases,sourceRunIds:['r1','r2'],verificationDigests:[D,E]
+  }),/must be unique and ordered/);
+});
