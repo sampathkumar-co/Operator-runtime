@@ -19,6 +19,26 @@ export type ProcessInstanceObservation =
   | { status: 'unknown' };
 export type ProcessInstanceObserver = (pid: number) => Promise<ProcessInstanceObservation>;
 
+export function observerFromLegacyInspector(inspector: ProcessInstanceInspector): ProcessInstanceObserver {
+  return async (pid) => {
+    try {
+      const identity = await inspector(pid);
+      return identity ? { status: 'live', identity } : { status: 'unknown' };
+    } catch {
+      return { status: 'unknown' };
+    }
+  };
+}
+
+export function processInstanceDefinitelyStale(
+  storedIdentity: ProcessInstanceIdentity | undefined,
+  observation: ProcessInstanceObservation
+): boolean {
+  if (observation.status === 'dead') return true;
+  if (observation.status !== 'live' || !storedIdentity || !observation.identity) return false;
+  return !sameProcessInstance(storedIdentity, observation.identity);
+}
+
 let currentIdentity: Promise<ProcessInstanceIdentity> | undefined;
 
 export async function inspectProcessInstance(pid: number): Promise<ProcessInstanceIdentity | null> {

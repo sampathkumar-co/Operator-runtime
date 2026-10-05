@@ -4,10 +4,13 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
+  observerFromLegacyInspector,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceInspector,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from '../../../src/core/process-instance.ts';
 
@@ -28,6 +31,8 @@ export async function acquireRelayStateInstanceLock(
     token?: string;
     clock?: () => Date;
     processInstance?: ProcessInstanceIdentity;
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated Legacy identity-only seam. A null result is UNKNOWN, never confirmed dead. */
     inspectProcessInstance?: ProcessInstanceInspector;
   } = {}
 ): Promise<RelayStateInstanceLock> {
@@ -36,7 +41,8 @@ export async function acquireRelayStateInstanceLock(
   const pid = options.pid ?? process.pid;
   const token = options.token ?? crypto.randomUUID();
   const clock = options.clock ?? (() => new Date());
-  const inspector = options.inspectProcessInstance ?? inspectProcessInstance;
+  const observer = options.observeProcessInstance
+    ?? (options.inspectProcessInstance ? observerFromLegacyInspector(options.inspectProcessInstance) : observeProcessInstance);
   const identity = options.processInstance ?? (pid === process.pid
     ? await currentProcessInstance()
     : { pid, started: `injected:${pid}` });
@@ -77,10 +83,11 @@ export async function acquireRelayStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      if (sameProcessInstance(existing.processInstance, await inspector(existing.pid))) {
+      const stale = processInstanceDefinitelyStale(existing.processInstance, await observer(existing.pid));
+      if (!stale) {
         throw new OperatorError(
           'RELAY_ALREADY_RUNNING',
-          `Another Mecord relay is already using this state directory (pid ${existing.pid}). Stop it before starting a new relay.`,
+          `Another Mecord relay may still be using this state directory (pid ${existing.pid}). Ownership is retained unless process death or identity replacement is positively proven.`,
           { details: { pid: existing.pid, stateDir: root } }
         );
       }

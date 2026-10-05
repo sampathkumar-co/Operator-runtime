@@ -10,10 +10,13 @@ import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
+  observerFromLegacyInspector,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceInspector,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from './process-instance.ts';
 
@@ -60,14 +63,20 @@ export interface TaskExecutionLease {
 export class TaskStore {
   #dir: string;
   #leaseDir: string;
-  #inspectProcessInstance: ProcessInstanceInspector;
+  #observeProcessInstance: ProcessInstanceObserver;
   #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+  constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated Legacy identity-only seam. A null result is UNKNOWN, never confirmed dead. */
+    inspectProcessInstance?: ProcessInstanceInspector;
+    processInstance?: ProcessInstanceIdentity;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'tasks');
     this.#leaseDir = path.join(root, 'task-leases');
-    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#observeProcessInstance = options.observeProcessInstance
+      ?? (options.inspectProcessInstance ? observerFromLegacyInspector(options.inspectProcessInstance) : observeProcessInstance);
     this.#processInstance = options.processInstance;
   }
 
@@ -162,10 +171,10 @@ export class TaskStore {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
       }
-      const liveIdentity = await this.#inspectProcessInstance(existing.pid);
-      if (existing.version === 1 ? liveIdentity !== null : sameProcessInstance(existing.processInstance, liveIdentity)) {
-        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned by an active executor.`, {
-          details: { acquiredAt: existing.acquiredAt }
+      const observation = await this.#observeProcessInstance(existing.pid);
+      if (!processInstanceDefinitelyStale(existing.version === 2 ? existing.processInstance : undefined, observation)) {
+        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned or process ownership cannot be safely disproven.`, {
+          details: { acquiredAt: existing.acquiredAt, liveness: observation.status }
         });
       }
       const stale = `${leasePath}.${crypto.randomUUID()}.stale`;

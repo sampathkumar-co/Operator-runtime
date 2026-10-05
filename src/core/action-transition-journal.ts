@@ -224,6 +224,15 @@ export class ActionTransitionJournal {
     return state.entries.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map((item) => structuredClone(item));
   }
 
+  async unresolvedMutations(): Promise<ActionJournalEntry[]> {
+    await this.#serial;
+    const state = await this.#read();
+    return state.entries
+      .filter((entry) => entry.risk !== 'read' && (entry.state === 'DISPATCHED' || entry.state === 'UNCERTAIN'))
+      .sort((a, b) => a.actionId.localeCompare(b.actionId))
+      .map((entry) => structuredClone(entry));
+  }
+
   async #transition(
     actionIdInput: string,
     next: ActionJournalState,

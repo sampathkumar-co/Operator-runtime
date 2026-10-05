@@ -476,3 +476,30 @@ test('TaskStore recent listing sorts by updatedAt before applying the page limit
   assert.equal(recent[0]?.id, lexicallyLast.id);
   assert.ok(recent.some((item) => item.id === lexicallyLast.id));
 });
+
+
+test('TaskStore never steals an execution lease when owner liveness is unknown', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-unknown-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  const leasePath = path.join(leases, `${value.id}.json`);
+  await fs.writeFile(leasePath, JSON.stringify({
+    version: 2,
+    taskId: value.id,
+    ownerId: crypto.randomUUID(),
+    pid: 42101,
+    processInstance: { pid: 42101, started: 'existing-instance' },
+    acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const store = new TaskStore(state, {
+    processInstance: { pid: 42102, started: 'new-owner' },
+    observeProcessInstance: async () => ({ status: 'unknown' })
+  });
+  await assert.rejects(
+    () => store.acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_ALREADY_RUNNING' && error?.details?.liveness === 'unknown'
+  );
+  assert.equal(JSON.parse(await fs.readFile(leasePath, 'utf8')).pid, 42101);
+});

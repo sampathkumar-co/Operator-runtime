@@ -75,3 +75,49 @@ test('local-agent state lock reclaims a reused PID whose process creation identi
   assert.equal(stored.processInstance.started, 'new-owner');
   await lock.release();
 });
+
+
+test('local-agent state lock retains ownership when process liveness is unknown', async (t) => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-instance-lock-unknown-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const lockPath = path.join(state, 'local-agent.lock');
+  await fs.writeFile(lockPath, JSON.stringify({
+    version: 2,
+    pid: 41101,
+    processInstance: { pid: 41101, started: 'existing-instance' },
+    token: 'u'.repeat(32),
+    createdAt: '2026-10-05T00:00:00.000Z'
+  }));
+
+  await assert.rejects(
+    acquireLocalAgentStateInstanceLock(state, {
+      pid: 41102,
+      processInstance: { pid: 41102, started: 'new-instance' },
+      token: 'v'.repeat(32),
+      observeProcessInstance: async () => ({ status: 'unknown' })
+    }),
+    (error: any) => error?.code === 'LOCAL_AGENT_ALREADY_RUNNING'
+  );
+  assert.equal(JSON.parse(await fs.readFile(lockPath, 'utf8')).pid, 41101);
+});
+
+test('local-agent legacy null inspector is treated as unknown, not dead', async (t) => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-instance-lock-legacy-unknown-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  await fs.writeFile(path.join(state, 'local-agent.lock'), JSON.stringify({
+    version: 2,
+    pid: 41103,
+    processInstance: { pid: 41103, started: 'existing-instance' },
+    token: 'w'.repeat(32),
+    createdAt: '2026-10-05T00:00:00.000Z'
+  }));
+  await assert.rejects(
+    acquireLocalAgentStateInstanceLock(state, {
+      pid: 41104,
+      processInstance: { pid: 41104, started: 'new-instance' },
+      token: 'x'.repeat(32),
+      inspectProcessInstance: async () => null
+    }),
+    (error: any) => error?.code === 'LOCAL_AGENT_ALREADY_RUNNING'
+  );
+});

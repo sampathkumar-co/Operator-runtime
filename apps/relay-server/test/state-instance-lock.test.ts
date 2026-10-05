@@ -45,3 +45,28 @@ test('relay state lock reclaims a dead or PID-reused owner', async (t) => {
   assert.equal(record.pid, 52002);
   await lock.release();
 });
+
+
+test('relay state lock retains ownership when process liveness is unknown', async (t) => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-relay-lock-unknown-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const lockPath = path.join(state, 'relay-server.lock');
+  await fs.writeFile(lockPath, JSON.stringify({
+    version: 1,
+    pid: 52101,
+    processInstance: { pid: 52101, started: 'existing-instance' },
+    token: 'e'.repeat(32),
+    createdAt: '2026-10-05T00:00:00.000Z'
+  }));
+
+  await assert.rejects(
+    acquireRelayStateInstanceLock(state, {
+      pid: 52102,
+      processInstance: { pid: 52102, started: 'new-instance' },
+      token: 'f'.repeat(32),
+      observeProcessInstance: async () => ({ status: 'unknown' })
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'RELAY_ALREADY_RUNNING'
+  );
+  assert.equal(JSON.parse(await fs.readFile(lockPath, 'utf8')).pid, 52101);
+});

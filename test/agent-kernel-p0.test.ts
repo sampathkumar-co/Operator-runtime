@@ -794,3 +794,134 @@ test('reconciled not-applied mutation may dispatch exactly once after crash reco
   assert.equal(provider.values.get('x'), 13);
   assert.equal((await journal.inspect(action.id)).state, 'COMPLETED');
 });
+
+
+test('uncertain mutation quarantines the physical resource across action IDs until reconciliation', async (t) => {
+  const stateDir = await temp(t);
+  const target = path.join(stateDir, 'shared.txt');
+  let calls = 0;
+  let reconcileStatus: 'uncertain' | 'not_applied' = 'uncertain';
+  let uncertainExecution = true;
+  const provider: CapabilityProvider = {
+    name: 'test.quarantine',
+    supports: (action) => action.capability === 'file.write',
+    score: () => SCORE,
+    resolveRisk: () => 'write',
+    async execute(action) {
+      calls += 1;
+      if (!uncertainExecution) return success(action, 'test.quarantine', { applied: true });
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'test.quarantine',
+        evidence: [{ kind: 'transport', status: 'fail', message: 'Outcome lost after dispatch.', timestamp: new Date().toISOString() }],
+        error: {
+          code: 'TRANSPORT_LOST',
+          message: 'Outcome lost after dispatch.',
+          retryable: false,
+          sideEffectState: 'uncertain',
+          executionPhase: 'dispatched'
+        },
+        durationMs: 0
+      };
+    },
+    async reconcile() {
+      if (reconcileStatus === 'not_applied') {
+        return {
+          status: 'not_applied',
+          evidence: [{ kind: 'reconciliation', status: 'pass', message: 'Mutation was not applied.', timestamp: new Date().toISOString() }]
+        };
+      }
+      return {
+        status: 'uncertain',
+        evidence: [{ kind: 'reconciliation', status: 'info', message: 'Mutation outcome remains unknown.', timestamp: new Date().toISOString() }]
+      };
+    }
+  };
+
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const leases = new ResourceLeaseStore(stateDir);
+  const kernel = new AgentKernel({ stateDir, runtime, leases, journal });
+  const allow = permissions(['file.write'], { allowedRoots: [stateDir] });
+  const actionA: ActionRequest = {
+    id: 'quarantine-action-a',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: target, value: 'A' },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const actionB: ActionRequest = {
+    ...actionA,
+    id: 'quarantine-action-b',
+    input: { path: target, value: 'B' }
+  };
+
+  const first = await kernel.execute(actionA, allow);
+  assert.equal(first.ok, false);
+  assert.equal(first.error?.sideEffectState, 'uncertain');
+  assert.equal((await journal.inspect(actionA.id)).state, 'UNCERTAIN');
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), true);
+
+  await assert.rejects(
+    () => kernel.execute(actionB, allow),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === actionA.id
+  );
+  assert.equal(calls, 1);
+
+  reconcileStatus = 'not_applied';
+  const reconciled = await kernel.reconcile(actionA, provider.name, first);
+  assert.equal(reconciled.status, 'not_applied');
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), false);
+
+  uncertainExecution = false;
+  const second = await kernel.execute(actionB, allow);
+  assert.equal(second.ok, true);
+  assert.equal(calls, 2);
+});
+
+test('legacy unresolved journal mutations reconstruct resource quarantine before a new dispatch', async (t) => {
+  const stateDir = await temp(t);
+  const target = path.join(stateDir, 'legacy-shared.txt');
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const leases = new ResourceLeaseStore(stateDir);
+  const kernel = new AgentKernel({ stateDir, runtime, leases, journal });
+  const actionA: ActionRequest = {
+    id: 'legacy-uncertain-a',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: target, key: 'legacy', value: 'A' },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const keys = await resolvePhysicalResourceKeysForAction(actionA);
+  await journal.prepare({ action: actionA, ownerKind: 'test', ownerId: 'legacy-owner', resourceKeys: keys });
+  await journal.markDispatched(actionA.id, provider.name);
+  await journal.observe(actionA.id, {
+    ok: false,
+    capability: actionA.capability,
+    provider: provider.name,
+    evidence: [{ kind: 'legacy', status: 'fail', message: 'Legacy uncertain result.', timestamp: new Date().toISOString() }],
+    error: {
+      code: 'LEGACY_UNCERTAIN',
+      message: 'Legacy uncertain result.',
+      retryable: false,
+      sideEffectState: 'uncertain',
+      executionPhase: 'dispatched'
+    },
+    durationMs: 0
+  });
+
+  const actionB: ActionRequest = {
+    ...actionA,
+    id: 'legacy-uncertain-b',
+    input: { path: target, key: 'legacy', value: 'B' }
+  };
+  await assert.rejects(
+    () => kernel.execute(actionB, permissions(['file.write'], { allowedRoots: [stateDir] })),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === actionA.id
+  );
+  assert.equal(provider.calls, 0);
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), true);
+});

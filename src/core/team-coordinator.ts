@@ -15,10 +15,13 @@ import type { AgentKernel } from './agent-kernel.ts';
 import { executeCanonicalVerification } from './canonical-verification.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
+  observerFromLegacyInspector,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceInspector,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from './process-instance.ts';
 
@@ -180,6 +183,8 @@ export class TeamCoordinator {
   #permissions?: PermissionProfile;
 
   constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated Legacy identity-only seam. A null result is UNKNOWN, never confirmed dead. */
     inspectProcessInstance?: ProcessInstanceInspector;
     processInstance?: ProcessInstanceIdentity;
     requireKernelVerification?: boolean;
@@ -189,6 +194,7 @@ export class TeamCoordinator {
     permissions?: PermissionProfile;
   } = {}) {
     this.#store = new TeamStore(stateDir, {
+      observeProcessInstance: options.observeProcessInstance,
       inspectProcessInstance: options.inspectProcessInstance,
       processInstance: options.processInstance
     });
@@ -960,14 +966,19 @@ export class TeamCoordinator {
 class TeamStore {
   #dir: string;
   #lockDir: string;
-  #inspectProcessInstance: ProcessInstanceInspector;
+  #observeProcessInstance: ProcessInstanceObserver;
   #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+  constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    inspectProcessInstance?: ProcessInstanceInspector;
+    processInstance?: ProcessInstanceIdentity;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'team-missions');
     this.#lockDir = path.join(root, 'team-mission-locks');
-    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#observeProcessInstance = options.observeProcessInstance
+      ?? (options.inspectProcessInstance ? observerFromLegacyInspector(options.inspectProcessInstance) : observeProcessInstance);
     this.#processInstance = options.processInstance;
   }
 
@@ -1057,8 +1068,10 @@ class TeamStore {
         const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
         const storedIdentity = validProcessInstance(current.processInstance);
-        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
-        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
+        const observation = Number.isSafeInteger(pid) && pid > 0
+          ? await this.#observeProcessInstance(pid)
+          : { status: 'dead' as const };
+        if (Number.isSafeInteger(pid) && pid > 0 && processInstanceDefinitelyStale(storedIdentity ?? undefined, observation)) {
           await fs.rm(file, { force: true });
           continue;
         }

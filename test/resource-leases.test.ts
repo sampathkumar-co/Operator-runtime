@@ -217,3 +217,38 @@ test('physical resource identities conflict across repo and child-file capabilit
   await assert.rejects(() => store.acquire('file-owner', fileKeys, 'exclusive'), (error: any) => error?.code === 'RESOURCE_BUSY');
   await parent.release();
 });
+
+
+test('durable resource quarantine blocks conflicting mutations but permits reads and owning-action reconciliation', async (t) => {
+  const state = await temp(t);
+  const store = new ResourceLeaseStore(state);
+  const parent = 'fs-path:C:/project';
+  const child = 'fs-path:C:/project/data/file.txt';
+  await store.quarantine('action-a', [parent]);
+
+  await assert.rejects(
+    () => store.acquire('writer-b', [child], 'exclusive', { mutationActionId: 'action-b' }),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === 'action-a'
+  );
+
+  const reader = await store.acquire('reader', [child], 'shared');
+  await reader.release();
+
+  const reconciler = await store.acquire('reconcile-a', [child], 'exclusive', { mutationActionId: 'action-a' });
+  await reconciler.release();
+
+  assert.equal((await store.inspect()).quarantines.length, 1);
+  await store.clearQuarantine('action-a');
+  const writer = await store.acquire('writer-b', [child], 'exclusive', { mutationActionId: 'action-b' });
+  await writer.release();
+});
+
+test('resource lease v1 state migrates without inventing quarantines', async (t) => {
+  const state = await temp(t);
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({ version: 1, resources: [] }));
+  const store = new ResourceLeaseStore(state);
+  await store.quarantine('migration-action', ['repo:/tmp/migration']);
+  const snapshot = await store.inspect();
+  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.quarantines[0]?.actionId, 'migration-action');
+});
