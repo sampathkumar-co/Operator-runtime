@@ -26,3 +26,4 @@ export * from './shadow-adoption-gate.ts';
 export * from './policy-promotion-gate.ts';
 export * from './trajectory-state-validator.ts';
 export * from './promotion-evidence.ts';
+export * from './evaluation-cohort.ts';
