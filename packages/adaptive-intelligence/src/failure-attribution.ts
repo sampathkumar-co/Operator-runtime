@@ -185,7 +185,8 @@ function uniqueEvidence(items: EvidenceRef[]): EvidenceRef[] {
     .sort((a, b) => b.observedAt.localeCompare(a.observedAt));
 }
 function unit(input: unknown, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error(label + ' must be between 0 and 1.');
   return value;
 }
