@@ -17,3 +17,7 @@ export * from './hypothesis-graph.ts';
 export * from './evaluation-freeze.ts';
 export * from './intelligence-metrics.ts';
 export * from './decision-trace.ts';
+export * from './versioned-state.ts';
+export * from './hypothesis-pruning.ts';
+export * from './shadow-comparison.ts';
+export * from './promotion-ledger.ts';
