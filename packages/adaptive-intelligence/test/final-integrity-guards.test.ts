@@ -171,3 +171,10 @@ test('shadow metric fields reject numeric strings',()=>{
     outcome(control.decisionDigest,D,'failure',0)
   ],{now:new Date(T0)}),/cost must be a number/);
 });
+
+test('evaluation revision rejects abbreviated commit ids',()=>{
+  assert.throws(()=>createEvaluationFreezeManifest({
+    ...freezeBase(),
+    sourceRevision:'abcdef1'
+  },{clock:()=>new Date(T0)}),/full immutable Git commit SHA/);
+});
