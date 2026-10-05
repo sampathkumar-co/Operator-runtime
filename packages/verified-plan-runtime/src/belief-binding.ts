@@ -21,7 +21,10 @@ export function bindPlanToBeliefs(
     for (const p of node.preconditions) {
       const b=beliefByFact.get(p.factKey);
       if (!b) continue;
-      if (b.status==='DISPROVEN' || b.status==='CONFLICTED') {
+      // Conflict/staleness/unknown state is uncertainty, not proof that the plan is false.
+      // Those states block execution and invite re-observation. Only disproven or a
+      // confidently observed incompatible value permanently invalidates this plan cone.
+      if (b.status==='DISPROVEN') {
         hardInvalidRoots.push(node.id); break;
       }
       if (p.expectedValueDigest && b.selectedValueDigest && b.selectedValueDigest!==p.expectedValueDigest && ['KNOWN','SUPPORTED'].includes(b.status)) {
