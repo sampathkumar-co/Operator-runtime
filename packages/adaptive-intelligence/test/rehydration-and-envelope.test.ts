@@ -83,7 +83,9 @@ function decisionInput(){
   return{
     mode:'SHADOW' as const,
     kind:'STRATEGY' as const,
+    runId:'run-1',
     taskId:'task-1',
+    goalId:'goal-1',
     policyVersion:'policy-1',
     decisionPointId:'step-7',
     selectedId:'keyboard',
