@@ -141,14 +141,6 @@ export class AdaptiveIntelligenceKernel {
       this.#trajectory.splice(0, this.#trajectory.length - this.#maxTrajectorySteps);
     }
 
-    if (strategy) {
-      this.calibration.record({
-        prediction: strategy.selected.expectedSuccess,
-        outcome: progress.level === 'GOAL_ACHIEVED' || progress.level === 'SUBGOAL_PROGRESS' ? 1 : 0,
-        bucket: 'strategy'
-      });
-    }
-
     return {
       transition,
       beliefs,
