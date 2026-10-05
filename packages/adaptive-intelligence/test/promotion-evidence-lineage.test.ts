@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   assessBoundPolicyPromotion,
   createEvaluationFreezeManifest,
+  createTaskCohortManifest,
   validatePolicyPromotionEvidenceBundle
 } from '../src/index.ts';
 import type {
@@ -15,7 +16,7 @@ const A='a'.repeat(64),B='b'.repeat(64),C='c'.repeat(64),D='d'.repeat(64);
 const E='e'.repeat(64),F='f'.repeat(64);
 const T0='2026-10-05T00:00:00.000Z';
 const RUN='promotion-run-1';
-const COHORT='9'.repeat(64);
+const TASK_IDS=Array.from({length:200},(_,index)=>'task-'+String(index).padStart(3,'0'));
 
 function manifest(policyVersion:string,policyDigest:string,adaptiveDigest:string):EvaluationFreezeManifest{
   return createEvaluationFreezeManifest({
@@ -107,30 +108,32 @@ function criteria():PolicyPromotionCriteria{
 }
 
 function bundle():PolicyPromotionEvidenceBundle{
+  const taskCohort=createTaskCohortManifest(TASK_IDS);
   const candidate=manifest('candidate-v2',A,B);
   const baseline=manifest('baseline-v1',B,C);
   return{
+    taskCohort,
     candidateManifest:candidate,
     baselineManifest:baseline,
     candidateMetrics:{
       runId:RUN,
       evaluationManifestDigest:candidate.manifestDigest,
       policyVersion:candidate.intelligencePolicyVersion,
-      taskCohortDigest:COHORT,
+      taskCohortDigest:taskCohort.cohortDigest,
       value:{...metrics(),firstStrategySuccessRate:0.82,recoverySuccessRate:0.78}
     },
     baselineMetrics:{
       runId:RUN,
       evaluationManifestDigest:baseline.manifestDigest,
       policyVersion:baseline.intelligencePolicyVersion,
-      taskCohortDigest:COHORT,
+      taskCohortDigest:taskCohort.cohortDigest,
       value:metrics()
     },
     calibration:{
       runId:RUN,
       evaluationManifestDigest:candidate.manifestDigest,
       policyVersion:candidate.intelligencePolicyVersion,
-      taskCohortDigest:COHORT,
+      taskCohortDigest:taskCohort.cohortDigest,
       value:calibration()
     },
     shadow:{
@@ -139,7 +142,7 @@ function bundle():PolicyPromotionEvidenceBundle{
       baselineManifestDigest:baseline.manifestDigest,
       candidatePolicyVersion:candidate.intelligencePolicyVersion,
       baselinePolicyVersion:baseline.intelligencePolicyVersion,
-      taskCohortDigest:COHORT,
+      taskCohortDigest:taskCohort.cohortDigest,
       report:shadow()
     }
   };
@@ -260,5 +263,31 @@ test('candidate and baseline aggregates cannot use different task cohorts',()=>{
   assert.throws(
     ()=>validatePolicyPromotionEvidenceBundle(other),
     /calibration task cohort mismatch/
+  );
+});
+
+
+test('promotion evidence rejects a tampered task cohort manifest',()=>{
+  const input=bundle();
+  input.taskCohort={...input.taskCohort,taskIds:[...input.taskCohort.taskIds].reverse()};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /failed cohort-manifest verification/
+  );
+});
+
+test('candidate and baseline metric counts must cover the canonical cohort exactly',()=>{
+  const input=bundle();
+  input.candidateMetrics.value={...input.candidateMetrics.value,taskCount:199};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /Candidate metrics task count does not match/
+  );
+
+  const other=bundle();
+  other.baselineMetrics.value={...other.baselineMetrics.value,taskCount:201};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(other),
+    /Baseline metrics task count does not match/
   );
 });
