@@ -3,18 +3,22 @@ import type {
   CausalTransition,
   GoalDescriptor,
   ProgressAssessment,
-  ProgressLevel
+  ProgressLevel,
+  VerificationReceiptRef
 } from './contracts.ts';
 
 export interface ProgressInput {
   goal: GoalDescriptor;
   transition: CausalTransition;
   beliefs: BeliefResolution[];
-  independentVerification?: boolean;
+  verificationReceipt?: VerificationReceiptRef;
 }
 
 export function assessProgress(input: ProgressInput): ProgressAssessment {
   const goal = normalizeGoal(input.goal);
+  const verificationReceipt = input.verificationReceipt
+    ? normalizeVerificationReceipt(input.verificationReceipt, goal.id)
+    : undefined;
   const beliefByKey = new Map(input.beliefs.map((item) => [item.factKey, item]));
   const satisfied = goal.successFactKeys.filter((key) => isSupported(beliefByKey.get(key)));
   const missing = goal.successFactKeys.filter((key) => !satisfied.includes(key));
@@ -54,12 +58,11 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
 
   const allGoalFacts = missing.length === 0 && goal.successFactKeys.length > 0;
   const noForbidden = forbidden.length === 0;
-  const independentlyVerified = input.independentVerification === true;
-  if (allGoalFacts && noForbidden && independentlyVerified) {
+  if (allGoalFacts && noForbidden && verificationReceipt) {
     level = 'GOAL_ACHIEVED';
     creditedSignals.push('independent-goal-verification');
-  } else if (allGoalFacts && !independentlyVerified) {
-    rejectedSignals.push('goal-facts-present-but-independent-verification-missing');
+  } else if (allGoalFacts && !verificationReceipt) {
+    rejectedSignals.push('goal-facts-present-but-independent-verification-receipt-missing');
   }
   if (!noForbidden) rejectedSignals.push('forbidden-goal-fact-observed');
 
@@ -91,6 +94,18 @@ export function assessProgress(input: ProgressInput): ProgressAssessment {
   };
 }
 
+function normalizeVerificationReceipt(input:VerificationReceiptRef,goalId:string):VerificationReceiptRef{
+  if(!input||typeof input!=='object') throw new Error('verification receipt reference is invalid.');
+  const normalized:VerificationReceiptRef={
+    digest:sha256(input.digest,'verificationReceipt.digest'),
+    goalId:bounded(input.goalId,256,'verificationReceipt.goalId'),
+    verifierId:bounded(input.verifierId,512,'verificationReceipt.verifierId'),
+    verifiedAt:validIso(input.verifiedAt,'verificationReceipt.verifiedAt'),
+    authoritySnapshotDigest:sha256(input.authoritySnapshotDigest,'verificationReceipt.authoritySnapshotDigest')
+  };
+  if(normalized.goalId!==goalId) throw new Error('Verification receipt is bound to a different goal.');
+  return normalized;
+}
 function isSupported(belief: BeliefResolution | undefined): boolean {
   return Boolean(belief && (belief.status === 'KNOWN' || belief.status === 'SUPPORTED') && belief.confidence >= 0.55);
 }
@@ -113,6 +128,17 @@ function normalizeGoal(input: GoalDescriptor): GoalDescriptor {
 function bounded(input: unknown, max: number, label: string): string {
   const value = String(input ?? '');
   if (!value || value.length > max) throw new Error(label + ' is invalid.');
+  return value;
+}
+function sha256(input:unknown,label:string):string{
+  const value=String(input??'').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
+  return value;
+}
+function validIso(input:unknown,label:string):string{
+  const value=String(input??'');
+  const parsed=Date.parse(value);
+  if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
   return value;
 }
 function unique(values: string[]): string[] { return [...new Set(values)].sort(); }
