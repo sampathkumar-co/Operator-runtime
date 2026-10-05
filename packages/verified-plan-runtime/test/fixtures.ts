@@ -1,4 +1,6 @@
-import type { BeliefView, CompiledGoal, PlanGraph, VerificationReceiptRef } from '../src/index.ts';
+import type {
+  AuthorizationReceiptRef, BeliefView, CompiledGoal, PlanGraph, VerificationReceiptRef
+} from '../src/index.ts';
 
 export const D='a'.repeat(64);
 export const E='b'.repeat(64);
@@ -38,9 +40,21 @@ export function belief(factKey:string,status:BeliefView['status']='KNOWN',confid
   return {factKey,status,confidence,selectedValueDigest:D,evidenceDigests:[E]};
 }
 
-export function receipt(nodeId:string,goalId='goal-1'):VerificationReceiptRef{
+export function receipt(
+  nodeId:string,
+  options:Partial<Pick<VerificationReceiptRef,'goalId'|'planId'|'planVersion'|'attempt'|'executionDigest'>>={}
+):VerificationReceiptRef{
   return {
-    digest:D,goalId,nodeId,verifierId:'verification-kernel',
+    digest:D,goalId:options.goalId??'goal-1',planId:options.planId??'plan-1',
+    planVersion:options.planVersion??1,nodeId,attempt:options.attempt??1,
+    executionDigest:options.executionDigest??D,verifierId:'verification-kernel',
     verifiedAt:'2026-10-05T10:00:00.000Z',authoritySnapshotDigest:E
+  };
+}
+
+export function authorityReceipt(nodeId='act'):AuthorizationReceiptRef{
+  return {
+    digest:D,goalId:'goal-1',planId:'plan-1',planVersion:1,nodeId,
+    authoritySnapshotDigest:E,authorizedAt:'2026-10-05T10:00:00.000Z'
   };
 }
