@@ -8,13 +8,13 @@ Adaptive Intelligence Core. It adds the missing future-state layer:
 - structured goal and hard/soft constraint compilation;
 - hierarchical dependency plan graphs with cycle checks;
 - belief-bound preconditions and automatic invalidation;
-- risk/cost/uncertainty/verification-aware branch ranking;
+- risk/cost/uncertainty/verification-aware branch ranking;\n- bounded counterfactual lookahead over generic planning operators with beam/search budgets;
 - execution modality compilation across GUI, DOM, accessibility, UIA, Playwright,
   application capabilities, API, MCP, and observation;
 - local plan repair that preserves already-succeeded work;
 - evidence-backed infeasibility detection instead of endless retries;
 - irreversible-action preflight gates and node-bound verification receipt checks;
-- deterministic plan/decision lineage and restart-safe state.
+- deterministic plan/decision lineage and restart-safe state;\n- reusable plan-fragment extraction that requires multi-run evidence, verification digests, fact abstraction, and rejects benchmark identifiers.
 
 ## Non-goals
 
