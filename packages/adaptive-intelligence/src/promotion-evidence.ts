@@ -20,6 +20,7 @@ export interface BoundAggregate<T> {
   runId:string;
   evaluationManifestDigest:string;
   policyVersion:string;
+  taskCohortDigest:string;
   value:T;
 }
 
@@ -29,6 +30,7 @@ export interface BoundShadowEvidence {
   baselineManifestDigest:string;
   candidatePolicyVersion:string;
   baselinePolicyVersion:string;
+  taskCohortDigest:string;
   report:ShadowComparisonReport;
 }
 
@@ -64,6 +66,7 @@ export function validatePolicyPromotionEvidenceBundle(
     input.candidateMetrics,
     candidateManifest,
     shadow.runId,
+    shadow.taskCohortDigest,
     'candidateMetrics',
     normalizeMetrics
   );
@@ -71,6 +74,7 @@ export function validatePolicyPromotionEvidenceBundle(
     input.baselineMetrics,
     baselineManifest,
     shadow.runId,
+    shadow.taskCohortDigest,
     'baselineMetrics',
     normalizeMetrics
   );
@@ -78,6 +82,7 @@ export function validatePolicyPromotionEvidenceBundle(
     input.calibration,
     candidateManifest,
     shadow.runId,
+    shadow.taskCohortDigest,
     'calibration',
     validateCalibrationReport
   );
@@ -156,6 +161,7 @@ function normalizeShadowBinding(
   const baselineManifestDigest=sha256(input.baselineManifestDigest,'shadow.baselineManifestDigest');
   const candidatePolicyVersion=bounded(input.candidatePolicyVersion,256,'shadow.candidatePolicyVersion');
   const baselinePolicyVersion=bounded(input.baselinePolicyVersion,256,'shadow.baselinePolicyVersion');
+  const taskCohortDigest=sha256(input.taskCohortDigest,'shadow.taskCohortDigest');
   if(candidateManifestDigest!==candidate.manifestDigest) throw new Error('Shadow candidate manifest binding mismatch.');
   if(baselineManifestDigest!==baseline.manifestDigest) throw new Error('Shadow baseline manifest binding mismatch.');
   if(candidatePolicyVersion!==candidate.intelligencePolicyVersion) throw new Error('Shadow candidate policy version mismatch.');
@@ -166,6 +172,7 @@ function normalizeShadowBinding(
     baselineManifestDigest,
     candidatePolicyVersion,
     baselinePolicyVersion,
+    taskCohortDigest,
     report:validateShadowComparisonReport(input.report)
   };
 }
@@ -174,6 +181,7 @@ function normalizeAggregate<T>(
   input:BoundAggregate<T>,
   manifest:EvaluationFreezeManifest,
   expectedRunId:string,
+  expectedTaskCohortDigest:string,
   label:string,
   validate:(value:T)=>T
 ):BoundAggregate<T>{
@@ -181,13 +189,16 @@ function normalizeAggregate<T>(
   const runId=bounded(input.runId,512,label+'.runId');
   const evaluationManifestDigest=sha256(input.evaluationManifestDigest,label+'.evaluationManifestDigest');
   const policyVersion=bounded(input.policyVersion,256,label+'.policyVersion');
+  const taskCohortDigest=sha256(input.taskCohortDigest,label+'.taskCohortDigest');
   if(runId!==expectedRunId) throw new Error(label+' is bound to a different evaluation run.');
   if(evaluationManifestDigest!==manifest.manifestDigest) throw new Error(label+' manifest binding mismatch.');
   if(policyVersion!==manifest.intelligencePolicyVersion) throw new Error(label+' policy version mismatch.');
+  if(taskCohortDigest!==expectedTaskCohortDigest) throw new Error(label+' task cohort mismatch.');
   return{
     runId,
     evaluationManifestDigest,
     policyVersion,
+    taskCohortDigest,
     value:validate(input.value)
   };
 }
