@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { CalibrationReport } from './calibration.ts';
+import { validateCalibrationReport, type CalibrationReport } from './calibration.ts';
 import type { IntelligenceMetrics } from './intelligence-metrics.ts';
 import { validateShadowComparisonReport, type ShadowComparisonReport } from './shadow-comparison.ts';
 import { canonicalJson } from './versioned-state.ts';
@@ -58,7 +58,7 @@ export function assessPolicyPromotion(
   const shadow=validateShadowComparisonReport(evidence.shadow);
   const candidateMetrics=normalizeMetrics(evidence.candidateMetrics,'candidateMetrics');
   const baselineMetrics=normalizeMetrics(evidence.baselineMetrics,'baselineMetrics');
-  const calibration=normalizeCalibration(evidence.calibration);
+  const calibration=validateCalibrationReport(evidence.calibration);
   const checks:PromotionGateCheck[]=[
     check('paired-decisions',shadow.pairedDecisions>=criteria.minPairedDecisions,shadow.pairedDecisions,'>= '+criteria.minPairedDecisions),
     check('candidate-task-sample',candidateMetrics.taskCount>=criteria.minCandidateTasks,candidateMetrics.taskCount,'>= '+criteria.minCandidateTasks),
@@ -166,17 +166,6 @@ function normalizeMetrics(input:IntelligenceMetrics,label:string):IntelligenceMe
     falseGoalProgressRate:unit(input.falseGoalProgressRate,label+'.falseGoalProgressRate'),
     repeatedEquivalentFailureRate:unit(input.repeatedEquivalentFailureRate,label+'.repeatedEquivalentFailureRate'),
     averageStepsPerTask:nonnegative(input.averageStepsPerTask,label+'.averageStepsPerTask')
-  };
-}
-function normalizeCalibration(input:CalibrationReport):CalibrationReport{
-  if(!input||typeof input!=='object') throw new Error('calibration report is required.');
-  return{
-    samples:integer(input.samples,0,100_000_000,'calibration.samples'),
-    brierScore:unit(input.brierScore,'calibration.brierScore'),
-    expectedCalibrationError:unit(input.expectedCalibrationError,'calibration.expectedCalibrationError'),
-    meanPrediction:unit(input.meanPrediction,'calibration.meanPrediction'),
-    empiricalSuccess:unit(input.empiricalSuccess,'calibration.empiricalSuccess'),
-    buckets:Array.isArray(input.buckets)?structuredClone(input.buckets):(()=>{throw new Error('calibration.buckets is invalid.');})()
   };
 }
 function nonnegative(input:unknown,label:string):number{
