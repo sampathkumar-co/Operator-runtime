@@ -10,9 +10,10 @@ export interface BeliefBindingResult {
 export function bindPlanToBeliefs(
   graph: PlanGraph,
   statesInput: PlanNodeState[],
-  beliefs: BeliefView[],
+  beliefsInput: BeliefView[],
   now = new Date().toISOString()
 ): BeliefBindingResult {
+  const beliefs=normalizeBeliefs(beliefsInput);
   const beliefByFact = new Map(beliefs.map((b) => [b.factKey, b]));
   const hardInvalidRoots:string[]=[];
   for (const node of graph.nodes) {
@@ -22,9 +23,6 @@ export function bindPlanToBeliefs(
     for (const p of node.preconditions) {
       const b=beliefByFact.get(p.factKey);
       if (!b) continue;
-      // Conflict/staleness/unknown state is uncertainty, not proof that the plan is false.
-      // Those states block execution and invite re-observation. Only disproven or a
-      // confidently observed incompatible value permanently invalidates this plan cone.
       if (b.status==='DISPROVEN') {
         hardInvalidRoots.push(node.id); break;
       }
@@ -56,4 +54,29 @@ export function bindPlanToBeliefs(
   });
   return {states:refreshed,invalidatedNodeIds:invalidated,readyNodeIds:ready};
 }
+
+function normalizeBeliefs(input:BeliefView[]):BeliefView[]{
+  if(!Array.isArray(input)||input.length>10_000) throw new Error('belief list is invalid.');
+  const statuses=new Set(['KNOWN','SUPPORTED','CONFLICTED','STALE','UNKNOWN','UNOBSERVABLE','DISPROVEN']);
+  const seen=new Set<string>();
+  return input.map((belief)=>{
+    if(!belief||typeof belief!=='object') throw new Error('belief is invalid.');
+    const factKey=bounded(belief.factKey,512,'belief.factKey');
+    if(seen.has(factKey)) throw new Error('belief facts must be unique: '+factKey);
+    seen.add(factKey);
+    if(!statuses.has(belief.status)) throw new Error('belief.status is invalid.');
+    if(typeof belief.confidence!=='number'||!Number.isFinite(belief.confidence)||belief.confidence<0||belief.confidence>1){
+      throw new Error('belief.confidence is invalid.');
+    }
+    const evidence=belief.evidenceDigests;
+    if(!Array.isArray(evidence)||evidence.length>1000) throw new Error('belief.evidenceDigests is invalid.');
+    return {
+      factKey,status:belief.status,confidence:belief.confidence,
+      ...(belief.selectedValueDigest?{selectedValueDigest:sha256(belief.selectedValueDigest,'belief.selectedValueDigest')}:{ }),
+      evidenceDigests:[...new Set(evidence.map((value)=>sha256(value,'belief.evidenceDigest')))].sort()
+    };
+  });
+}
 function unique(v:string[]):string[]{return [...new Set(v)].sort();}
+function bounded(v:unknown,m:number,l:string):string{if(typeof v!=='string'||!v||v.length>m)throw new Error(l+' is invalid.');return v;}
+function sha256(v:unknown,l:string):string{if(typeof v!=='string'||!/^[0-9a-fA-F]{64}$/.test(v))throw new Error(l+' must be SHA-256.');return v.toLowerCase();}
