@@ -192,10 +192,11 @@ function normalizeStoredObservation(input: EpistemicStoredObservation, now: Date
   if (!input || typeof input !== 'object') throw new Error('Stored epistemic observation is required.');
   const insertedAt = validIso(input.insertedAt, 'insertedAt');
   if (Date.parse(insertedAt) > now.getTime()) throw new Error('Stored epistemic observation cannot be future-inserted.');
-  const normalized = normalizeObservation(input, new Date(insertedAt));
-  if (Date.parse(normalized.evidence.observedAt) > Date.parse(insertedAt)) {
+  const evidenceObservedAt = validIso(input.evidence?.observedAt, 'evidence.observedAt');
+  if (Date.parse(evidenceObservedAt) > Date.parse(insertedAt)) {
     throw new Error('Stored epistemic evidence cannot postdate its insertion.');
   }
+  const normalized = normalizeObservation(input, new Date(insertedAt));
   return {
     ...normalized,
     insertedAt
