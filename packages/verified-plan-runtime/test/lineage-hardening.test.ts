@@ -116,3 +116,22 @@ test('tampered revision proof chain is rejected even when envelope digest is rec
   state.revisionProofs[0]!.preservedNodeDigests=[];
   assert.throws(()=>VerifiedPlanRuntime.fromState(state),/revision proof digest does not match content/);
 });
+
+test('verification receipt digest cannot alias distinct node lineages',()=>{
+  const {runtime,execution}=runtimeThroughAct();
+  runtime.markVerifiedComplete('act',receipt('act',{executionDigest:execution.executionDigest}),'2026-10-05T10:00:05.000Z');
+  runtime.bindBeliefs([
+    belief('state.observed'),
+    belief('change.applied')
+  ],'2026-10-05T10:00:06.000Z');
+  runtime.startNode('verify','2026-10-05T10:00:07.000Z');
+  const verifyExecution=runtime.recordExecution('verify',{
+    changedFactKeys:['goal.done'],supportedFactKeys:['goal.done'],contradictedFactKeys:[],
+    executionOk:true,sideEffectState:'none'
+  },'2026-10-05T10:00:08.000Z');
+  assert.throws(()=>runtime.markVerifiedComplete(
+    'verify',
+    receipt('verify',{executionDigest:verifyExecution.executionDigest}),
+    '2026-10-05T10:00:09.000Z'
+  ),/digest collision across distinct lineages/);
+});
