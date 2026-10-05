@@ -123,28 +123,33 @@ function normalizeEvidence(input:EvidenceRef):EvidenceRef{
   };
 }
 function bounded(input:unknown,max:number,label:string):string{
-  const value=String(input??'');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   if(!value||value.length>max) throw new Error(label+' is invalid.');
   return value;
 }
 function sha256(input:unknown,label:string):string{
-  const value=String(input??'').toLowerCase();
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input.toLowerCase();
   if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
   return value;
 }
 function uuid(input:unknown,label:string):string{
-  const value=String(input??'').toLowerCase();
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input.toLowerCase();
   if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new Error(label+' must be a UUID.');
   return value;
 }
 function validIso(input:unknown,label:string):string{
-  const value=String(input??'');
+  if (typeof input !== 'string') throw new Error(label + ' must be a string.');
+  const value = input;
   const parsed=Date.parse(value);
   if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
   return value;
 }
 function integer(input:unknown,min:number,max:number,label:string):number{
-  const value=Number(input);
+  if (typeof input !== 'number') throw new Error(label + ' must be a number.');
+  const value = input;
   if(!Number.isSafeInteger(value)||value<min||value>max) throw new Error(label+' is invalid.');
   return value;
 }
