@@ -28,6 +28,33 @@ export class HypothesisGraph {
     this.#maxNodes = integer(options.maxNodes ?? 5000, 1, 100000, 'maxNodes');
   }
 
+  static fromSnapshot(
+    nodesInput: HypothesisNode[],
+    options: { clock?: () => Date; maxNodes?: number } = {}
+  ): HypothesisGraph {
+    if (!Array.isArray(nodesInput) || nodesInput.length > 100_000) throw new Error('hypothesis snapshot is invalid.');
+    const graph = new HypothesisGraph(options);
+    if (nodesInput.length > graph.#maxNodes) throw new Error('Hypothesis snapshot exceeds graph capacity.');
+
+    const normalized = nodesInput.map(normalizeStoredNode);
+    const ids = new Set<string>();
+    for (const node of normalized) {
+      if (ids.has(node.id)) throw new Error('Hypothesis snapshot contains duplicate ids.');
+      ids.add(node.id);
+    }
+    for (const node of normalized) {
+      if (node.parentId && !ids.has(node.parentId)) throw new Error('Hypothesis snapshot contains dangling parent: ' + node.parentId);
+      for (const dependency of node.dependsOn ?? []) {
+        if (!ids.has(dependency)) throw new Error('Hypothesis snapshot contains dangling dependency: ' + dependency);
+        if (dependency === node.id) throw new Error('Hypothesis cannot depend on itself.');
+      }
+    }
+
+    for (const node of normalized) graph.#nodes.set(node.id, node);
+    graph.#assertAcyclic();
+    return graph;
+  }
+
   add(input: Omit<HypothesisNode,'createdAt'|'updatedAt'|'state'|'evidence'|'contradictingEvidence'> & {
     state?: HypothesisState;
     evidence?: EvidenceRef[];
@@ -47,16 +74,21 @@ export class HypothesisGraph {
       class:bounded(input.class,256,'hypothesis.class'),
       statement:bounded(input.statement,4096,'hypothesis.statement'),
       confidence:unit(input.confidence,'hypothesis.confidence'),
-      state:input.state??'ACTIVE',
+      state:hypothesisState(input.state??'ACTIVE'),
       ...(input.parentId?{parentId:bounded(input.parentId,256,'hypothesis.parentId')}:{}),
       ...(dependsOn.length?{dependsOn}:{}),
-      evidence:dedupeEvidence(input.evidence??[]),
-      contradictingEvidence:dedupeEvidence(input.contradictingEvidence??[]),
+      evidence:normalizeEvidenceList(input.evidence??[]),
+      contradictingEvidence:normalizeEvidenceList(input.contradictingEvidence??[]),
       createdAt:now,
       updatedAt:now
     };
     this.#nodes.set(id,node);
-    this.#assertAcyclic();
+    try {
+      this.#assertAcyclic();
+    } catch (error) {
+      this.#nodes.delete(id);
+      throw error;
+    }
     return structuredClone(node);
   }
 
@@ -72,9 +104,9 @@ export class HypothesisGraph {
     const next:HypothesisNode={
       ...current,
       ...(input.confidence!==undefined?{confidence:unit(input.confidence,'hypothesis.confidence')}:{}),
-      ...(input.state?{state:input.state}:{}),
-      evidence:dedupeEvidence([...current.evidence,...(input.support??[])]),
-      contradictingEvidence:dedupeEvidence([...current.contradictingEvidence,...(input.contradict??[])]),
+      ...(input.state?{state:hypothesisState(input.state)}:{}),
+      evidence:normalizeEvidenceList([...current.evidence,...(input.support??[])]),
+      contradictingEvidence:normalizeEvidenceList([...current.contradictingEvidence,...(input.contradict??[])]),
       updatedAt:this.#clock().toISOString()
     };
     this.#nodes.set(id,next);
@@ -94,7 +126,8 @@ export class HypothesisGraph {
     const node=this.#nodes.get(id);
     if(!node) throw new Error('Hypothesis does not exist.');
     return (node.dependsOn??[])
-      .map(dep=>this.#nodes.get(dep)!)
+      .map(dep=>this.#nodes.get(dep))
+      .filter((dep): dep is HypothesisNode => Boolean(dep))
       .filter(dep=>dep.state!=='RESOLVED'&&dep.state!=='DISPROVEN')
       .map(dep=>structuredClone(dep));
   }
@@ -111,6 +144,7 @@ export class HypothesisGraph {
       if(visited.has(id)) return;
       visiting.add(id);
       const node=this.#nodes.get(id);
+      if (node?.parentId) visit(node.parentId);
       for(const dep of node?.dependsOn??[]) visit(dep);
       visiting.delete(id);
       visited.add(id);
@@ -119,10 +153,50 @@ export class HypothesisGraph {
   }
 }
 
+function normalizeStoredNode(input: HypothesisNode): HypothesisNode {
+  if (!input || typeof input !== 'object') throw new Error('Stored hypothesis node is invalid.');
+  const createdAt=validIso(input.createdAt,'hypothesis.createdAt');
+  const updatedAt=validIso(input.updatedAt,'hypothesis.updatedAt');
+  if(Date.parse(updatedAt)<Date.parse(createdAt)) throw new Error('Hypothesis updatedAt cannot precede createdAt.');
+  const dependsOn=unique(input.dependsOn??[]);
+  return {
+    id:bounded(input.id,256,'hypothesis.id'),
+    scope:scope(input.scope),
+    class:bounded(input.class,256,'hypothesis.class'),
+    statement:bounded(input.statement,4096,'hypothesis.statement'),
+    confidence:unit(input.confidence,'hypothesis.confidence'),
+    state:hypothesisState(input.state),
+    ...(input.parentId?{parentId:bounded(input.parentId,256,'hypothesis.parentId')}:{}),
+    ...(dependsOn.length?{dependsOn}:{}),
+    evidence:normalizeEvidenceList(input.evidence??[]),
+    contradictingEvidence:normalizeEvidenceList(input.contradictingEvidence??[]),
+    createdAt,
+    updatedAt
+  };
+}
+function normalizeEvidenceList(items:EvidenceRef[]):EvidenceRef[]{
+  return [...new Map(items.map(item=>{
+    const digest=sha256(item.digest,'evidence.digest');
+    const normalized:EvidenceRef={
+      digest,
+      source:bounded(item.source,256,'evidence.source'),
+      observedAt:validIso(item.observedAt,'evidence.observedAt'),
+      ...(item.channel?{channel:bounded(item.channel,128,'evidence.channel')}:{}),
+      ...(item.scope?{scope:bounded(item.scope,512,'evidence.scope')}:{}),
+      ...(('independenceKey' in item && (item as any).independenceKey)?{independenceKey:bounded((item as any).independenceKey,512,'evidence.independenceKey')}: {})
+    };
+    return [digest,normalized] as const;
+  })).values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt));
+}
 function scope(input:unknown):HypothesisScope{
   const value=String(input);
   if(!['target','action','subgoal','task','environment'].includes(value)) throw new Error('hypothesis.scope is invalid.');
   return value as HypothesisScope;
+}
+function hypothesisState(input:unknown):HypothesisState{
+  const value=String(input);
+  if(!['ACTIVE','SUPPORTED','DISPROVEN','RESOLVED','BLOCKED'].includes(value)) throw new Error('hypothesis.state is invalid.');
+  return value as HypothesisState;
 }
 function bounded(input:unknown,max:number,label:string):string{
   const value=String(input??'');
@@ -140,6 +214,14 @@ function unit(input:unknown,label:string):number{
   return value;
 }
 function unique(values:string[]):string[]{return [...new Set(values.map(v=>bounded(v,256,'hypothesis.dependency')))];}
-function dedupeEvidence(items:EvidenceRef[]):EvidenceRef[]{
-  return [...new Map(items.map(item=>[item.digest,item])).values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt));
+function sha256(input:unknown,label:string):string{
+  const value=String(input??'').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
+  return value;
+}
+function validIso(input:unknown,label:string):string{
+  const value=String(input??'');
+  const parsed=Date.parse(value);
+  if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
+  return value;
 }
