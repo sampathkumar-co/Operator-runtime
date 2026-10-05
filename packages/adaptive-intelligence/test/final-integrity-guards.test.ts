@@ -14,7 +14,7 @@ const T0='2026-10-05T00:00:00.000Z';
 
 function freezeBase(){
   return{
-    sourceRevision:'abcdef1',
+    sourceRevision:'a'.repeat(40),
     intelligencePolicyVersion:'p1',
     intelligencePolicyDigest:A,
     adaptiveStateDigest:B,
