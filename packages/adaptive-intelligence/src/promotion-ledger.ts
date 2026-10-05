@@ -12,6 +12,7 @@ export interface PromotionClaim {
 export interface PromotionLedgerEntry extends PromotionClaim {
   claimDigest:string;
   recordedAt:string;
+  entryDigest:string;
 }
 
 export class PromotionLedger {
@@ -76,6 +77,9 @@ export class PromotionLedger {
     const digest=sha256(entryInput.claimDigest,'claimDigest');
     const actual=claimDigest(claim);
     if(!timingSafeHexEqual(actual,digest)) throw new Error('Promotion ledger claim digest mismatch.');
+    const entryDigest=sha256(entryInput.entryDigest,'entryDigest');
+    const expectedEntryDigest=promotionEntryDigest(digest,recordedAt);
+    if(!timingSafeHexEqual(expectedEntryDigest,entryDigest)) throw new Error('Promotion ledger entry digest mismatch.');
     this.#acceptClaim(claim,digest,recordedAt);
   }
 
@@ -114,7 +118,12 @@ export class PromotionLedger {
     this.#skillFingerprint.set(claim.skillId,claim.skillFingerprint);
     this.#fingerprintSkill.set(claim.skillFingerprint,claim.skillId);
     this.#claimDigests.add(digest);
-    this.#entries.push({...claim,claimDigest:digest,recordedAt});
+    this.#entries.push({
+      ...claim,
+      claimDigest:digest,
+      recordedAt,
+      entryDigest:promotionEntryDigest(digest,recordedAt)
+    });
   }
 }
 
@@ -127,6 +136,12 @@ function normalizeClaim(input:PromotionClaim):PromotionClaim{
     verificationDigests:unique((input.verificationDigests??[]).map(v=>sha256(v,'verificationDigest')))
   };
   return claim;
+}
+function promotionEntryDigest(claimDigestValue:string,recordedAt:string):string{
+  return crypto.createHash('sha256').update(JSON.stringify({
+    claimDigest:claimDigestValue,
+    recordedAt
+  })).digest('hex');
 }
 function claimDigest(claim:PromotionClaim):string{
   return crypto.createHash('sha256').update(JSON.stringify({
