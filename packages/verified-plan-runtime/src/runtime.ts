@@ -84,6 +84,9 @@ export class VerifiedPlanRuntime {
   }
 
   bindBeliefs(beliefs:BeliefView[],now?:string){
+    if(this.#states.some((state)=>state.status==='RUNNING')){
+      throw new Error('belief rebinding is forbidden while an execution node is running.');
+    }
     const result=bindPlanToBeliefs(this.graph,this.#states,beliefs,now);
     this.#states=result.states;
     return structuredClone(result);
