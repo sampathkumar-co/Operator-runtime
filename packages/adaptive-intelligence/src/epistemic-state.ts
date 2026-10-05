@@ -2,12 +2,12 @@ import type { BeliefObservation, BeliefResolution, EpistemicStatus, EvidenceRef 
 
 const SECRET_KEY = /(pass(word)?|secret|token|authorization|cookie|credential|private.?key|api.?key)/i;
 
-export interface EpistemicEpistemicStoredObservation extends BeliefObservation {
+export interface EpistemicStoredObservation extends BeliefObservation {
   insertedAt: string;
 }
 
 export interface EpistemicStateSnapshot {
-  claims: EpistemicEpistemicStoredObservation[];
+  claims: EpistemicStoredObservation[];
   unobservable: string[];
 }
 
