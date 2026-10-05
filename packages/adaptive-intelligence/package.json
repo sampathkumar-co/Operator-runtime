@@ -1,0 +1,14 @@
+{
+  "name": "@mecord/adaptive-intelligence",
+  "version": "0.0.0-development",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "check": "node --experimental-strip-types -e \"import('./src/index.ts')\"",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "qualify": "npm run check && npm test"
+  }
+}
