@@ -85,6 +85,7 @@ export interface PlanNodeState {
   lastReason?: string;
   lastExecutionDigest?: string;
   verificationReceiptDigest?: string;
+  verifiedNodeDigest?: string;
   lastUpdatedAt: string;
 }
 
