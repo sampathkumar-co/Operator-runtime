@@ -62,14 +62,34 @@ function metrics(overrides:Partial<IntelligenceMetrics>={}):IntelligenceMetrics{
 }
 
 function calibration(overrides:Partial<CalibrationReport>={}):CalibrationReport{
+  const samples=overrides.samples??200;
+  if(samples===0){
+    return{
+      samples:0,
+      brierScore:0,
+      expectedCalibrationError:0,
+      meanPrediction:0,
+      empiricalSuccess:0,
+      buckets:[]
+    };
+  }
+  const empiricalSuccess=overrides.empiricalSuccess??0.69;
+  const expectedCalibrationError=overrides.expectedCalibrationError??0.04;
+  const meanPrediction=overrides.meanPrediction??Math.min(1,empiricalSuccess+expectedCalibrationError);
   return{
-    samples:200,
-    brierScore:0.08,
-    expectedCalibrationError:0.04,
-    meanPrediction:0.7,
-    empiricalSuccess:0.69,
-    buckets:[],
-    ...overrides
+    samples,
+    brierScore:overrides.brierScore??0.08,
+    expectedCalibrationError,
+    meanPrediction,
+    empiricalSuccess,
+    buckets:overrides.buckets??[{
+      lower:0,
+      upper:1,
+      count:samples,
+      meanPrediction,
+      empiricalSuccess,
+      absoluteGap:Math.abs(meanPrediction-empiricalSuccess)
+    }]
   };
 }
 
@@ -137,4 +157,28 @@ test('candidate is blocked on meaningful first-strategy or recovery regression',
   assert.equal(result.eligible,false);
   assert.ok(result.reasons.some(reason=>reason.startsWith('first-strategy-regression failed')));
   assert.ok(result.reasons.some(reason=>reason.startsWith('recovery-regression failed')));
+});
+
+
+test('promotion gate rejects forged calibration bucket totals and ECE',()=>{
+  const valid=calibration();
+  assert.throws(()=>assessPolicyPromotion({
+    shadow:shadow(),
+    candidateMetrics:metrics(),
+    baselineMetrics:metrics(),
+    calibration:{
+      ...valid,
+      buckets:[{...valid.buckets[0]!,count:199}]
+    }
+  },criteria()),/bucket counts must equal report sample count/);
+
+  assert.throws(()=>assessPolicyPromotion({
+    shadow:shadow(),
+    candidateMetrics:metrics(),
+    baselineMetrics:metrics(),
+    calibration:{
+      ...valid,
+      expectedCalibrationError:0.001
+    }
+  },criteria()),/expectedCalibrationError mismatch/);
 });
