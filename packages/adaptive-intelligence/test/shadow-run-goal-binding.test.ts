@@ -42,7 +42,9 @@ function outcome(
     verificationReceipt:{
       digest:result==='success'?C:D,
       runId:trace.runId,
+      taskId:trace.taskId,
       goalId:trace.goalId,
+      decisionDigest:trace.decisionDigest,
       verifierId:'evaluation-verifier',
       verifiedAt:T0,
       authoritySnapshotDigest:trace.authoritySnapshotDigest,
@@ -95,7 +97,9 @@ test('verification receipt run and goal bindings cannot be reused across another
       verificationReceipt:{
         digest:C,
         runId:'run-1',
+        taskId:shadow.taskId,
         goalId:'other-goal',
+        decisionDigest:shadow.decisionDigest,
         verifierId:'evaluation-verifier',
         verifiedAt:T0,
         authoritySnapshotDigest:A,
