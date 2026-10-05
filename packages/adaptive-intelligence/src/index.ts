@@ -23,3 +23,4 @@ export * from './shadow-comparison.ts';
 export * from './promotion-ledger.ts';
 export * from './trajectory-integrity.ts';
 export * from './shadow-adoption-gate.ts';
+export * from './policy-promotion-gate.ts';
