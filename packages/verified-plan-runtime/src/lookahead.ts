@@ -52,6 +52,7 @@ export function searchCounterfactualPlans(
   if(!Array.isArray(initial.facts)) throw new Error('initial facts are required.');
   if(!Array.isArray(operatorsInput)||operatorsInput.length<1||operatorsInput.length>1000) throw new Error('planning operators must contain 1-1000 entries.');
   const operators=operatorsInput.map(normalizeOperator);
+  if(new Set(operators.map((operator)=>operator.id)).size!==operators.length) throw new Error('planning operator ids must be unique.');
   const maxDepth=integer(options.maxDepth??6,1,20,'maxDepth');
   const beamWidth=integer(options.beamWidth??20,1,200,'beamWidth');
   const maxExpanded=integer(options.maximumExpandedStates??5000,1,100_000,'maximumExpandedStates');
@@ -109,7 +110,8 @@ export function searchCounterfactualPlans(
     frontier=next.sort((a,b)=>scoreFrontier(b,goal)-scoreFrontier(a,goal)||a.cost-b.cost||a.operatorIds.join('|').localeCompare(b.operatorIds.join('|'))).slice(0,beamWidth);
   }
 
-  const source=completed.length?completed:frontier;
+  const completedPareto=completed.filter((item)=>(paretoByState.get(stateSignature(item.facts))??[]).includes(item));
+  const source=completedPareto.length?completedPareto:frontier;
   return source.map((item,index)=>toPlan(item,goal,index)).sort((a,b)=>{
     if(a.goalSatisfied!==b.goalSatisfied) return a.goalSatisfied?-1:1;
     return branchUtility(b.candidate)-branchUtility(a.candidate)||a.candidate.expectedCost-b.candidate.expectedCost||a.candidate.id.localeCompare(b.candidate.id);
@@ -172,11 +174,14 @@ function branchUtility(c:PlanBranchCandidate):number{
 function normalizeOperator(input:PlanningOperator):PlanningOperator{
   if(!input||typeof input!=='object') throw new Error('planning operator is required.');
   if(!Array.isArray(input.requires)||!Array.isArray(input.adds)||!Array.isArray(input.removes)) throw new Error('planning operator fact lists are invalid.');
+  const requires=unique(input.requires.map((v)=>bounded(v,512,'operator.requires')));
+  const adds=unique(input.adds.map((v)=>bounded(v,512,'operator.adds')));
+  const removes=unique(input.removes.map((v)=>bounded(v,512,'operator.removes')));
+  const overlap=adds.filter((fact)=>removes.includes(fact));
+  if(overlap.length) throw new Error('planning operator cannot add and remove the same fact: '+overlap.join(', '));
   return {
     id:bounded(input.id,256,'operator.id'),
-    requires:unique(input.requires.map((v)=>bounded(v,512,'operator.requires'))),
-    adds:unique(input.adds.map((v)=>bounded(v,512,'operator.adds'))),
-    removes:unique(input.removes.map((v)=>bounded(v,512,'operator.removes'))),
+    requires,adds,removes,
     expectedSuccess:unit(input.expectedSuccess,'operator.expectedSuccess'),
     expectedInformationGain:unit(input.expectedInformationGain,'operator.expectedInformationGain'),
     expectedCost:finite(input.expectedCost,0,1e12,'operator.expectedCost'),
