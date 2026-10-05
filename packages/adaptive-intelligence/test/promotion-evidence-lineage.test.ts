@@ -212,3 +212,31 @@ test('forged calibration cannot enter a bound promotion bundle',()=>{
   };
   assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/expectedCalibrationError mismatch/);
 });
+
+
+test('policy comparison cannot hide a different procedure-memory snapshot',()=>{
+  const input=bundle();
+  input.baselineManifest=createEvaluationFreezeManifest({
+    sourceRevision:'abcdef1',
+    intelligencePolicyVersion:'baseline-v1',
+    intelligencePolicyDigest:B,
+    adaptiveStateDigest:C,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:E,
+    modelProvider:'provider',
+    modelId:'model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+  input.baselineMetrics.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  input.shadow.baselineManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /evaluation context mismatch: procedureSnapshotDigest/
+  );
+});
