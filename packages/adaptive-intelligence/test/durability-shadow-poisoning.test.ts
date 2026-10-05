@@ -60,19 +60,23 @@ test('hypothesis pruning expires old resolved/disproven state and respects globa
 test('shadow/control comparison measures divergence and verified outcome delta',()=>{
   const log=new DecisionTraceLog({clock:()=>new Date(T0)});
   const shadow=log.append({
-    mode:'SHADOW',kind:'STRATEGY',taskId:'t1',policyVersion:'p1',selectedId:'keyboard',
+    mode:'SHADOW',kind:'STRATEGY',runId:'run-1',taskId:'t1',goalId:'goal-1',policyVersion:'p1',selectedId:'keyboard',
     alternatives:['pointer'],reason:'avoid repeated failure',evidence:[],authoritySnapshotDigest:A,inputStateDigest:B
   });
   const control=log.append({
-    mode:'CONTROL',kind:'STRATEGY',taskId:'t1',policyVersion:'p1',selectedId:'pointer',
+    mode:'CONTROL',kind:'STRATEGY',runId:'run-1',taskId:'t1',goalId:'goal-1',policyVersion:'p1',selectedId:'pointer',
     alternatives:['keyboard'],reason:'current production choice',evidence:[],authoritySnapshotDigest:A,inputStateDigest:B
   });
   const report=compareShadowToControl(log.recent(10),[
     {
+      runId:'run-1',
       taskId:'t1',
+      goalId:'goal-1',
       decisionDigest:shadow.decisionDigest,
       verificationReceipt:{
         digest:C,
+        runId:'run-1',
+        goalId:'goal-1',
         verifierId:'evaluation-verifier',
         verifiedAt:T0,
         authoritySnapshotDigest:A,
@@ -82,10 +86,14 @@ test('shadow/control comparison measures divergence and verified outcome delta',
       cost:1
     },
     {
+      runId:'run-1',
       taskId:'t1',
+      goalId:'goal-1',
       decisionDigest:control.decisionDigest,
       verificationReceipt:{
         digest:D,
+        runId:'run-1',
+        goalId:'goal-1',
         verifierId:'evaluation-verifier',
         verifiedAt:T0,
         authoritySnapshotDigest:A,
