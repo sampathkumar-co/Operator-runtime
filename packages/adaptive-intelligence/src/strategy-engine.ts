@@ -25,16 +25,25 @@ export function selectStrategy(input: StrategySelectionInput): StrategySelection
     ? Number.POSITIVE_INFINITY
     : boundedNumber(input.remainingCostBudget, 0, Number.MAX_SAFE_INTEGER, 'remainingCostBudget');
 
-  const ranked = input.candidates.map((candidate) => {
-    const c = normalizeCandidate(candidate);
+  const normalizedCandidates = input.candidates.map(normalizeCandidate);
+  const eligibleCandidates = remainingBudget === Number.POSITIVE_INFINITY
+    ? normalizedCandidates
+    : normalizedCandidates.filter((candidate) => candidate.expectedCost <= remainingBudget);
+  if (eligibleCandidates.length === 0) {
+    throw new Error('No strategy candidate fits the remaining cost budget.');
+  }
+
+  const ranked = eligibleCandidates.map((c) => {
     const equivalentFailures = Math.max(
       c.repeatedEquivalentFailures ?? 0,
       recentEquivalentFailures(c, recent)
     );
     const penalties: string[] = [];
-    const costScale = remainingBudget === Number.POSITIVE_INFINITY || remainingBudget === 0
+    const costScale = remainingBudget === Number.POSITIVE_INFINITY
       ? Math.min(1, c.expectedCost / 100)
-      : Math.min(2, c.expectedCost / Math.max(1, remainingBudget));
+      : remainingBudget === 0
+        ? 0
+        : Math.min(2, c.expectedCost / remainingBudget);
     const repetitionPenalty = Math.min(0.45, equivalentFailures * 0.14);
     const uncertaintyPenalty = c.uncertainty * 0.22;
     const costPenalty = costScale * 0.12;
@@ -92,20 +101,25 @@ export function strategyFingerprint(candidate: Pick<StrategyCandidate, 'family' 
 }
 
 function recentEquivalentFailures(candidate: StrategyCandidate, transitions: CausalTransition[]): number {
-  const fingerprint = strategyFingerprint(candidate);
+  const fingerprint = equivalenceFingerprint(candidate);
   let failures = 0;
   for (const transition of transitions.slice(-30)) {
-    const other = strategyFingerprint({
+    const other = equivalenceFingerprint({
       family: transition.action.family,
-      requiresFacts: [],
       expectedEffects: transition.action.expectedEffects ?? []
     });
-    const sameFamily = transition.action.family === candidate.family;
-    const sameFingerprint = other === fingerprint;
     const failed = !transition.outcome.ok || transition.delta.expectedEffectsMissing.length > 0;
-    if (failed && (sameFamily || sameFingerprint)) failures += 1;
+    if (failed && other === fingerprint) failures += 1;
   }
   return failures;
+}
+
+function equivalenceFingerprint(candidate: Pick<StrategyCandidate, 'family' | 'expectedEffects'>): string {
+  return strategyFingerprint({
+    family: candidate.family,
+    requiresFacts: [],
+    expectedEffects: candidate.expectedEffects ?? []
+  });
 }
 
 function failurePenalty(candidate: StrategyCandidate, attribution?: FailureAttribution): number {
