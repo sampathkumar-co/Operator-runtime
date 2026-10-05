@@ -25,3 +25,4 @@ export * from './trajectory-integrity.ts';
 export * from './shadow-adoption-gate.ts';
 export * from './policy-promotion-gate.ts';
 export * from './trajectory-state-validator.ts';
+export * from './promotion-evidence.ts';
