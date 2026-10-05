@@ -162,7 +162,11 @@ export class VerifiedPlanRuntime {
       goalId:this.goal.id,planId:this.graph.planId,planVersion:this.graph.version,nodeId,
       attempt:state.attempts,executionDigest:state.lastExecutionDigest
     });
-    if(!this.#receipts.some((r)=>r.digest===normalized.digest)) this.#receipts.push(structuredClone(normalized));
+    const existingReceipt=this.#receipts.find((r)=>r.digest===normalized.digest);
+    if(existingReceipt&&canonical(existingReceipt)!==canonical(normalized)){
+      throw new Error('verification receipt digest collision across distinct lineages.');
+    }
+    if(!existingReceipt) this.#receipts.push(structuredClone(normalized));
     const next={
       ...state,status:'SUCCEEDED' as const,verificationReceiptDigest:normalized.digest,
       verifiedNodeDigest:digestPlan(node),
@@ -281,8 +285,8 @@ export class VerifiedPlanRuntime {
         if(!state.verifiedNodeDigest||state.verifiedNodeDigest!==digestPlan(node)){
           throw new Error('verified node is missing exact node-content lineage.');
         }
-        if(!this.#receipts.some((r)=>r.digest===state.verificationReceiptDigest)){
-          throw new Error('verified node references a missing persisted receipt.');
+        if(!this.#receipts.some((r)=>r.digest===state.verificationReceiptDigest&&r.nodeId===node.id)){
+          throw new Error('verified node references a missing or mismatched persisted receipt.');
         }
       }
     }
