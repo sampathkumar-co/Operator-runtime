@@ -63,3 +63,16 @@ test('lookahead keeps Pareto-valid alternatives that reach the same state',()=>{
   assert.equal(plans.some(p=>p.goalSatisfied),true);
   assert.deepEqual(plans.find(p=>p.goalSatisfied)?.candidate.nodeIds,['cheap-ready','finish']);
 });
+
+test('lookahead rejects ambiguous operator identities and contradictory effects',()=>{
+  const duplicate=[
+    {id:'same',requires:['start'],adds:['a'],removes:[],expectedSuccess:.9,expectedInformationGain:.1,expectedCost:1,risk:.1,verificationStrength:.5,reversible:true},
+    {id:'same',requires:['a'],adds:['done'],removes:[],expectedSuccess:.9,expectedInformationGain:.1,expectedCost:1,risk:.1,verificationStrength:.5,reversible:true}
+  ];
+  assert.throws(()=>searchCounterfactualPlans({facts:['start']},duplicate,['done']),/operator ids must be unique/);
+
+  const contradictory=[
+    {id:'bad',requires:['start'],adds:['x'],removes:['x'],expectedSuccess:.9,expectedInformationGain:.1,expectedCost:1,risk:.1,verificationStrength:.5,reversible:true}
+  ];
+  assert.throws(()=>searchCounterfactualPlans({facts:['start']},contradictory,['done']),/cannot add and remove the same fact/);
+});
