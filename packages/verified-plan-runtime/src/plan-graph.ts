@@ -120,12 +120,7 @@ function normalizeNode(input:PlanNode):PlanNode{
     ...(input.parentId?{parentId:bounded(input.parentId,256,'node.parentId')}:{ }),
     dependsOn: unique(input.dependsOn.map((v)=>bounded(v,256,'node.dependsOn'))),
     ...(input.choiceGroup?{choiceGroup:bounded(input.choiceGroup,256,'node.choiceGroup')}:{ }),
-    preconditions: input.preconditions.map((p)=>({
-      factKey:bounded(p.factKey,512,'precondition.factKey'),
-      ...(p.expectedValueDigest?{expectedValueDigest:sha256(p.expectedValueDigest,'precondition.expectedValueDigest')}:{ }),
-      ...(p.minimumConfidence!==undefined?{minimumConfidence:unit(p.minimumConfidence,'precondition.minimumConfidence')}:{ }),
-      ...(p.allowStale!==undefined?{allowStale:Boolean(p.allowStale)}:{ })
-    })),
+    preconditions: normalizePreconditions(input.preconditions),
     expectedEffects: unique(input.expectedEffects.map((v)=>bounded(v,512,'node.expectedEffect'))),
     verificationFactKeys: unique(input.verificationFactKeys.map((v)=>bounded(v,512,'node.verificationFactKey'))),
     allowedCapabilities: unique(input.allowedCapabilities.map((v)=>bounded(v,512,'node.allowedCapability'))),
@@ -134,6 +129,25 @@ function normalizeNode(input:PlanNode):PlanNode{
     reversible:Boolean(input.reversible),
     maxAttempts: integer(input.maxAttempts,1,100,'node.maxAttempts')
   };
+}
+function normalizePreconditions(input:PlanNode['preconditions']):PlanNode['preconditions']{
+  const normalized=input.map((p)=>({
+    factKey:bounded(p.factKey,512,'precondition.factKey'),
+    ...(p.expectedValueDigest?{expectedValueDigest:sha256(p.expectedValueDigest,'precondition.expectedValueDigest')}:{ }),
+    ...(p.minimumConfidence!==undefined?{minimumConfidence:unit(p.minimumConfidence,'precondition.minimumConfidence')}:{ }),
+    ...(p.allowStale!==undefined?{allowStale:Boolean(p.allowStale)}:{ })
+  }));
+  const byFact=new Map<string,Set<string|undefined>>();
+  for(const p of normalized){
+    const values=byFact.get(p.factKey)??new Set<string|undefined>();
+    values.add(p.expectedValueDigest);
+    byFact.set(p.factKey,values);
+  }
+  for(const [factKey,values] of byFact){
+    const concrete=[...values].filter((value):value is string=>value!==undefined);
+    if(new Set(concrete).size>1) throw new Error('conflicting preconditions for fact: '+factKey);
+  }
+  return normalized;
 }
 function assertAcyclic(nodes:PlanNode[]):void{
   const byId=new Map(nodes.map((n)=>[n.id,n]));
