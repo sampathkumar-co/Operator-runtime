@@ -35,9 +35,13 @@ export class EpistemicStateEngine {
     }
 
     const engine = new EpistemicStateEngine(options);
+    const now = engine.#clock();
+    if (!Number.isFinite(now.getTime())) throw new Error('epistemic clock returned an invalid date.');
     const seen = new Set<string>();
+    const evidenceByDigest = new Map<string, EvidenceRef>();
     for (const raw of snapshotInput.claims) {
-      const observation = normalizeStoredObservation(raw);
+      const observation = normalizeStoredObservation(raw, now);
+      assertEvidenceDigestConsistency(evidenceByDigest, observation.evidence);
       if (SECRET_KEY.test(observation.factKey)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
       const identity = [
         observation.factKey,
@@ -60,8 +64,7 @@ export class EpistemicStateEngine {
     }
 
     for (const keyInput of snapshotInput.unobservable) {
-      const key = boundedKey(keyInput, 'factKey');
-      if (SECRET_KEY.test(key)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
+      const key = safeFactKey(keyInput);
       engine.#unobservable.add(key);
     }
     return engine;
@@ -78,9 +81,16 @@ export class EpistemicStateEngine {
   }
 
   observe(input: BeliefObservation): BeliefResolution {
-    const observation = normalizeObservation(input, this.#clock());
+    const now = this.#clock();
+    if (!Number.isFinite(now.getTime())) throw new Error('epistemic clock returned an invalid date.');
+    const observation = normalizeObservation(input, now);
     if (SECRET_KEY.test(observation.factKey)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
     const existing = this.#claims.get(observation.factKey) ?? [];
+    for (const item of existing) {
+      if (item.evidence.digest === observation.evidence.digest && !sameEvidence(item.evidence, observation.evidence)) {
+        throw new Error('Conflicting epistemic evidence metadata for the same digest is rejected.');
+      }
+    }
     const duplicate = existing.find((item) =>
       item.valueDigest === observation.valueDigest
       && item.polarity === observation.polarity
@@ -97,13 +107,13 @@ export class EpistemicStateEngine {
   }
 
   markUnobservable(factKeyInput: string): BeliefResolution {
-    const factKey = boundedKey(factKeyInput, 'factKey');
+    const factKey = safeFactKey(factKeyInput);
     this.#unobservable.add(factKey);
     return this.resolve(factKey);
   }
 
   clearUnobservable(factKeyInput: string): void {
-    this.#unobservable.delete(boundedKey(factKeyInput, 'factKey'));
+    this.#unobservable.delete(safeFactKey(factKeyInput));
   }
 
   resolve(factKeyInput: string): BeliefResolution {
@@ -178,12 +188,17 @@ export class EpistemicStateEngine {
   }
 }
 
-function normalizeStoredObservation(input: EpistemicStoredObservation): EpistemicStoredObservation {
+function normalizeStoredObservation(input: EpistemicStoredObservation, now: Date): EpistemicStoredObservation {
   if (!input || typeof input !== 'object') throw new Error('Stored epistemic observation is required.');
-  const normalized = normalizeObservation(input, new Date(validIso(input.insertedAt, 'insertedAt')));
+  const insertedAt = validIso(input.insertedAt, 'insertedAt');
+  if (Date.parse(insertedAt) > now.getTime()) throw new Error('Stored epistemic observation cannot be future-inserted.');
+  const normalized = normalizeObservation(input, new Date(insertedAt));
+  if (Date.parse(normalized.evidence.observedAt) > Date.parse(insertedAt)) {
+    throw new Error('Stored epistemic evidence cannot postdate its insertion.');
+  }
   return {
     ...normalized,
-    insertedAt: validIso(input.insertedAt, 'insertedAt')
+    insertedAt
   };
 }
 
@@ -194,6 +209,9 @@ function normalizeObservation(input: BeliefObservation, now: Date): EpistemicSto
   const confidence = unit(input.confidence, 'confidence');
   if (input.polarity !== 'supports' && input.polarity !== 'contradicts') throw new Error('polarity is invalid.');
   const evidence = normalizeEvidence(input.evidence);
+  if (Date.parse(evidence.observedAt) > now.getTime()) {
+    throw new Error('Epistemic evidence cannot be future-dated.');
+  }
   if (input.expiresAt !== undefined && Date.parse(input.expiresAt) <= Date.parse(evidence.observedAt)) {
     throw new Error('expiresAt must follow evidence.observedAt.');
   }
@@ -247,8 +265,35 @@ function combineConfidence(values: number[]): number {
 }
 
 function uniqueEvidence(items: EvidenceRef[]): EvidenceRef[] {
-  return [...new Map(items.map((item) => [item.digest, item])).values()]
-    .sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+  const byDigest = new Map<string, EvidenceRef>();
+  for (const item of items) {
+    assertEvidenceDigestConsistency(byDigest, item);
+  }
+  return [...byDigest.values()]
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt) || a.digest.localeCompare(b.digest));
+}
+
+function assertEvidenceDigestConsistency(byDigest: Map<string, EvidenceRef>, evidence: EvidenceRef): void {
+  const current = byDigest.get(evidence.digest);
+  if (current && !sameEvidence(current, evidence)) {
+    throw new Error('Conflicting epistemic evidence metadata for the same digest is rejected.');
+  }
+  byDigest.set(evidence.digest, evidence);
+}
+
+function sameEvidence(a: EvidenceRef, b: EvidenceRef): boolean {
+  return a.digest === b.digest
+    && a.source === b.source
+    && a.observedAt === b.observedAt
+    && (a.channel ?? '') === (b.channel ?? '')
+    && (a.scope ?? '') === (b.scope ?? '')
+    && (a.independenceKey ?? '') === (b.independenceKey ?? '');
+}
+
+function safeFactKey(input: unknown): string {
+  const key = boundedKey(input, 'factKey');
+  if (SECRET_KEY.test(key)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
+  return key;
 }
 
 function boundedKey(input: unknown, label: string): string {
