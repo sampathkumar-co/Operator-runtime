@@ -106,6 +106,9 @@ const permissions = {
   allowDestructive: false
 };
 const emergencyStop = new EmergencyStopStore(stateDir);
+const startupEmergencyStatus = await emergencyStop.status();
+let emergencyExecutionGeneration = new AbortController();
+if (startupEmergencyStatus.engaged) emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
 const approvals = new ApprovalStore(stateDir);
 const actionExecutions = new LocalActionExecutionStore(stateDir);
 const sessionApprovals = new SessionApprovalStore();
@@ -182,6 +185,7 @@ const agentKernel = new AgentKernel({
   leases: resourceLeases,
   journal: actionJournal,
   intents: intentRegistry,
+  globalAbortSignal: () => emergencyExecutionGeneration.signal,
   beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
     if (actionPermissions.enterprisePolicyDigest) {
       await enterprisePolicy.assertCurrentDigest(actionPermissions.enterprisePolicyDigest);
@@ -219,9 +223,14 @@ const teams = new TeamCoordinator(stateDir, {
   permissions
 });
 const organizations = new OrganizationCoordinator(stateDir, teams);
-const organizationRecovery = await organizations.recoverPendingCompensations();
-if (organizationRecovery.pending > 0) {
-  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+let organizationRecovery = { recovered: 0, pending: 0 };
+if (!startupEmergencyStatus.engaged) {
+  organizationRecovery = await organizations.recoverPendingCompensations();
+  if (organizationRecovery.pending > 0) {
+    console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+  }
+} else {
+  console.warn('[operator] persisted emergency stop is engaged; organization compensation recovery is deferred until explicit recovery.');
 }
 const teachMode = new TeachModeStore(stateDir, {
   journal: actionJournal,
@@ -239,7 +248,10 @@ const studioExecutor = new StudioWorkflowExecutor(stateDir, {
   agentKernel,
   intentRegistry
 });
-const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
+let recoveredStudioRuns = startupEmergencyStatus.engaged ? 0 : await studioExecutor.recoverInterrupted();
+if (startupEmergencyStatus.engaged) {
+  console.warn('[operator] persisted emergency stop is engaged; interrupted Studio recovery is deferred until explicit recovery.');
+}
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
 const operations = new DigitalOperationsLayer(stateDir, {
   procedures,
@@ -483,8 +495,23 @@ const agent = createLocalAgentServer({
   deviceRegistry,
   privacy,
   deviceReset: resetLocalDevice,
-  onEmergencyStop: () => stopRelay(),
-  onEmergencyClear: () => {
+  onEmergencyStop: async () => {
+    emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
+    stopRelay();
+    await Promise.allSettled([
+      desiredStateReconciler.stop(),
+      eventTicker.stop()
+    ]);
+  },
+  onEmergencyClear: async () => {
+    emergencyExecutionGeneration = new AbortController();
+    organizationRecovery = await organizations.recoverPendingCompensations();
+    if (organizationRecovery.pending > 0) {
+      console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+    }
+    recoveredStudioRuns += await studioExecutor.recoverInterrupted();
+    desiredStateReconciler.start();
+    eventTicker.start();
     try { startRelay(); }
     catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
   },
@@ -547,15 +574,18 @@ console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 console.error(`[operator] studio workflow recovery: ${recoveredStudioRuns} interrupted run(s) reconciled`);
 console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
 console.error(`[operator] durable event ticker: every ${eventTickIntervalMs}ms`);
-desiredStateReconciler.start();
-eventTicker.start();
+if (!startupEmergencyStatus.engaged) {
+  desiredStateReconciler.start();
+  eventTicker.start();
+} else {
+  console.error('[operator] persisted emergency stop is engaged; desired-state and durable-event orchestration remain frozen.');
+}
 if (relayUrl) {
   const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
 }
 
-const emergencyStatus = await emergencyStop.status();
-if (relayUrl && emergencyStatus.engaged) {
+if (relayUrl && startupEmergencyStatus.engaged) {
   if (relayRequired) {
     await failRequiredRelay(new OperatorError(
       'RELAY_REQUIRED_EMERGENCY_STOP',

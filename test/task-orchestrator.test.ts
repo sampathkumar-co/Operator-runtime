@@ -1451,3 +1451,32 @@ test('task planner boundary exposes remaining budget and permits one typed repai
   assert.match(rejected?.decisionDigest ?? '', /^[0-9a-f]{64}$/);
   assert.doesNotMatch(JSON.stringify(restarted.execution?.rejectedDecisions), /never-persist-this-planner-secret/);
 });
+
+
+test('emergency stop aborts every active task controller and persists cancellation truth', async (t) => {
+  const root = await tempDir(t, 'operator-task-emergency-stop-');
+  const state = await tempDir(t, 'operator-task-emergency-stop-state-');
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']),
+    planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Stop active work immediately.',
+    authorizedScope: [root],
+    successConditions: ['provider stops'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.deepEqual(orchestrator.emergencyStopActive(), [task.id]);
+
+  const cancelled = await running;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
+  assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
+});

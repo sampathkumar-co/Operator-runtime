@@ -940,6 +940,16 @@ export class TaskOrchestrator {
   async cancel(taskId: string): Promise<TaskCapsule> {
     return await this.#requestControl(taskId, 'CANCELLED');
   }
+
+  emergencyStopActive(): string[] {
+    const taskIds = [...this.#active.keys()].sort();
+    for (const taskId of taskIds) {
+      this.#controlRequests.set(taskId, 'CANCELLED');
+      this.#controllers.get(taskId)?.abort('EMERGENCY_STOPPED');
+    }
+    return taskIds;
+  }
+
   async resume(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) await active;

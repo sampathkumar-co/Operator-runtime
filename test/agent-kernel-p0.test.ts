@@ -925,3 +925,57 @@ test('legacy unresolved journal mutations reconstruct resource quarantine before
   assert.equal(provider.calls, 0);
   assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), true);
 });
+
+
+test('AgentKernel global abort generation interrupts already-dispatched provider work', async (t) => {
+  const stateDir = await temp(t);
+  let started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const provider: CapabilityProvider = {
+    name: 'test.global-abort',
+    supports: (action) => action.capability === 'computer.inspect',
+    score: () => SCORE,
+    resolveRisk: () => 'read',
+    async execute(action, context) {
+      started();
+      if (!context?.signal?.aborted) {
+        await new Promise<void>((resolve) => context?.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      }
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'test.global-abort',
+        evidence: [{ kind: 'abort', status: 'fail', message: 'Global execution generation was aborted.', timestamp: new Date().toISOString() }],
+        error: {
+          code: 'EXECUTION_ABORTED',
+          message: 'Global execution generation was aborted.',
+          retryable: false,
+          sideEffectState: 'none',
+          executionPhase: 'dispatched'
+        },
+        durationMs: 0
+      };
+    }
+  };
+  const generation = new AbortController();
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime: new OperatorRuntime().register(provider),
+    leases: new ResourceLeaseStore(stateDir),
+    globalAbortSignal: () => generation.signal
+  });
+  const action: ActionRequest = {
+    id: 'kernel-global-abort',
+    capability: 'computer.inspect',
+    risk: 'read',
+    input: {},
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  const executing = kernel.execute(action, permissions(['computer.inspect']));
+  await startedPromise;
+  generation.abort('EMERGENCY_STOPPED');
+  const result = await executing;
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
+});

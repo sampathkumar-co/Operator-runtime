@@ -29,6 +29,7 @@ export class AgentKernel {
   #intents: IntentRegistry;
   #observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
   #beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
+  #globalAbortSignal?: () => AbortSignal | undefined;
 
   constructor(options: {
     stateDir: string;
@@ -38,6 +39,7 @@ export class AgentKernel {
     intents?: IntentRegistry;
     observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
     beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
+    globalAbortSignal?: () => AbortSignal | undefined;
   }) {
     this.#runtime = options.runtime;
     this.#leases = options.leases;
@@ -45,6 +47,7 @@ export class AgentKernel {
     this.#intents = options.intents ?? new IntentRegistry(options.stateDir);
     this.#observeResult = options.observeResult;
     this.#beforeProviderDispatch = options.beforeProviderDispatch;
+    this.#globalAbortSignal = options.globalAbortSignal;
   }
 
   get journal(): ActionTransitionJournal { return this.#journal; }
@@ -57,6 +60,7 @@ export class AgentKernel {
   ): Promise<ActionResult> {
     const ownerKind = bounded(context.ownerKind ?? inferOwnerKind(action), 128);
     const ownerId = bounded(context.ownerId ?? action.taskId ?? action.id, 512);
+    const executionSignal = combineAbortSignals(context.signal, this.#globalAbortSignal?.());
     const initialIntentFailure = await this.#intentFailure(action, context.recoveryMode);
     if (initialIntentFailure) return initialIntentFailure;
 
@@ -183,11 +187,12 @@ export class AgentKernel {
     try {
       const preDispatchIntentFailure = await this.#intentFailure(action, context.recoveryMode);
       if (preDispatchIntentFailure) return preDispatchIntentFailure;
-      if (context.signal?.aborted) return abortedBeforeDispatch(action);
+      if (executionSignal?.aborted) return abortedBeforeDispatch(action);
 
       let dispatched = false;
       let result = await this.#runtime.execute(action, permissions, {
         ...context,
+        ...(executionSignal ? { signal: executionSignal } : {}),
         onProviderDispatch: async (providerName) => {
           await this.#beforeProviderDispatch?.(action, providerName, permissions);
           if (action.risk !== 'read') {
@@ -207,7 +212,10 @@ export class AgentKernel {
 
       if (!result.ok && action.risk !== 'read' && result.error?.sideEffectState === 'uncertain'
         && result.provider !== 'policy' && result.provider !== 'router') {
-        const reconciliation = await this.#runtime.reconcile(action, result.provider, result, context);
+        const reconciliation = await this.#runtime.reconcile(action, result.provider, result, {
+          ...context,
+          ...(executionSignal ? { signal: executionSignal } : {})
+        });
         journalEntry = await this.#journal.reconcile(action.id, reconciliation);
         retainQuarantine = journalEntry.state === 'UNCERTAIN';
         result = reconciledResult(action, result, reconciliation);
@@ -319,6 +327,7 @@ export class AgentKernel {
     priorResult?: ActionResult,
     context: CapabilityExecutionContext = {}
   ): Promise<ProviderReconciliationResult> {
+    const reconciliationSignal = combineAbortSignals(context.signal, this.#globalAbortSignal?.());
     const resourceKeys = await resolvePhysicalResourceKeysForAction(action);
     const existing = await this.#journal.inspect(action.id);
     if (existing.actionDigest !== actionHash(action)
@@ -342,7 +351,10 @@ export class AgentKernel {
     );
     let retainQuarantine = true;
     try {
-      const outcome = await this.#runtime.reconcile(action, providerName, priorResult, context);
+      const outcome = await this.#runtime.reconcile(action, providerName, priorResult, {
+        ...context,
+        ...(reconciliationSignal ? { signal: reconciliationSignal } : {})
+      });
       const journalEntry = existing.state === 'COMPLETED'
         ? existing
         : await this.#journal.reconcile(action.id, outcome);
@@ -471,6 +483,12 @@ function abortedBeforeDispatch(action: ActionRequest): ActionResult {
     },
     durationMs: 0
   };
+}
+
+function combineAbortSignals(first?: AbortSignal, second?: AbortSignal): AbortSignal | undefined {
+  if (!first) return second;
+  if (!second || first === second) return first;
+  return AbortSignal.any([first, second]);
 }
 
 function inferOwnerKind(action: ActionRequest): string {

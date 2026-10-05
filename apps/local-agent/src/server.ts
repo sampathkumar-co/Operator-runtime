@@ -254,13 +254,17 @@ export function createLocalAgentServer(options: {
   };
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
+  let emergencyExecutionGeneration = new AbortController();
 
   const abortTeamActions = (predicate: (entry: { missionId: string; workItemId: string; workerId: string }) => boolean) => {
+    const aborted: Array<{ missionId: string; workItemId: string; workerId: string }> = [];
     for (const [key, entry] of activeTeamActions) {
       if (!predicate(entry)) continue;
-      entry.controller.abort();
+      aborted.push({ missionId: entry.missionId, workItemId: entry.workItemId, workerId: entry.workerId });
+      entry.controller.abort('EMERGENCY_STOPPED');
       activeTeamActions.delete(key);
     }
+    return aborted;
   };
 
   const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision): number => {
@@ -312,12 +316,28 @@ export function createLocalAgentServer(options: {
     approvalWaiters.clear();
   };
 
+  const abortEmergencyExecutions = () => {
+    if (!emergencyExecutionGeneration.signal.aborted) {
+      emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
+    }
+    const teamActions = abortTeamActions(() => true);
+    const taskIds = options.taskOrchestrator?.emergencyStopActive() ?? [];
+    clearApprovalWaiters();
+    return { teamActions, taskIds };
+  };
+
+  const resetEmergencyExecutionGeneration = () => {
+    emergencyExecutionGeneration = new AbortController();
+  };
+
   const executeActionWithCurrentApproval = async (
     action: ActionRequest,
     approvalAuthority: ApprovalAuthorityContext | undefined,
     signal?: AbortSignal,
     basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
+    const emergencySignal = emergencyExecutionGeneration.signal;
+    const executionSignal = signal ? AbortSignal.any([signal, emergencySignal]) : emergencySignal;
     let approvalLeaseId: string | null = null;
     if (options.approvals) {
       try {
@@ -348,8 +368,8 @@ export function createLocalAgentServer(options: {
     let result: ActionResult;
     try {
       result = options.agentKernel
-        ? await options.agentKernel.execute(action, permissions, { signal })
-        : await options.runtime.execute(action, permissions, { signal });
+        ? await options.agentKernel.execute(action, permissions, { signal: executionSignal })
+        : await options.runtime.execute(action, permissions, { signal: executionSignal });
     } catch (error) {
       if (approvalLeaseId) {
         await options.approvals!.settle(action, approvalLeaseId, 'consume', approvalAuthority);
@@ -1135,6 +1155,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (operation === 'execute' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Studio execution is frozen by the local emergency stop.' } });
+            return;
+          }
           const body = await readJson(req) as Record<string, unknown>;
           const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
           const maxSteps = body.maxSteps === undefined ? 1 : Number(body.maxSteps);
@@ -1223,6 +1247,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (action === 'reconcile' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Desired-state reconciliation is frozen by the local emergency stop.' } });
+            return;
+          }
           send(res, 200, { ok: true, contract: await options.desiredState.reconcile(id) });
           return;
         }
@@ -1232,6 +1260,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (action === 'resume' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Desired-state resume is frozen by the local emergency stop.' } });
+            return;
+          }
           send(res, 200, { ok: true, contract: await options.desiredState.resume(id) });
           return;
         }
@@ -1368,6 +1400,10 @@ export function createLocalAgentServer(options: {
       try {
         const body = await readJson(req) as Record<string, unknown>;
         if (body.device !== undefined) throw new Error('Device advertisements are relay-authority data and cannot be supplied through the local agent operation API.');
+        if (body.run === true && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Digital operation execution is frozen by the local emergency stop.' } });
+          return;
+        }
         const operation = await options.operations.submit(body as unknown as DigitalOperationSubmit);
         send(res, body.run === true ? 200 : 202, { ok: true, operation });
       } catch (error) {
@@ -1389,6 +1425,11 @@ export function createLocalAgentServer(options: {
         const id = operationRoute[1]!;
         const op = operationRoute[2]!;
         const body = await readJson(req) as Record<string, unknown>;
+        if ((op === 'start' || op === 'refresh' || op === 'promote')
+          && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Digital operation advancement is frozen by the local emergency stop.' } });
+          return;
+        }
         const operation = op === 'start' ? await options.operations.start(id)
           : op === 'refresh' ? await options.operations.refresh(id)
           : op === 'pause' ? await options.operations.pause(id)
@@ -1442,6 +1483,11 @@ export function createLocalAgentServer(options: {
         const id = teamRoute[1]!;
         const operation = teamRoute[2]!;
         const body = await readJson(req) as Record<string, unknown>;
+        if ((operation === 'start' || operation === 'resume' || operation === 'claim')
+          && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Team orchestration is frozen by the local emergency stop.' } });
+          return;
+        }
         if (operation === 'claim') {
           const result = await options.teams.claim(id, { workerId: String(body.workerId ?? '') });
           send(res, 200, { ok: true, mission: result.mission, ...(result.workItem ? { workItem: result.workItem } : {}) });
@@ -2087,13 +2133,22 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { reason?: unknown };
         const reason = body.reason === undefined ? undefined : String(body.reason);
         const state = await options.emergencyStop.engage(reason);
+        const aborted = abortEmergencyExecutions();
         options.sessionApprovals?.clear();
+        if (options.teams && aborted.teamActions.length > 0) {
+          const missionIds = [...new Set(aborted.teamActions.map((entry) => entry.missionId))].sort();
+          await Promise.allSettled(missionIds.map((missionId) => options.teams!.pause(missionId)));
+        }
         await options.onEmergencyStop?.();
         await options.audit?.append({
           capability: 'agent.emergency-stop',
           result: 'success',
           risk: 'destructive',
-          details: { operation: 'engage' }
+          details: {
+            operation: 'engage',
+            abortedTaskCount: aborted.taskIds.length,
+            abortedTeamActionCount: aborted.teamActions.length
+          }
         });
         send(res, 200, { ok: true, state });
       } catch (error) {
@@ -2113,10 +2168,14 @@ export function createLocalAgentServer(options: {
         return;
       }
       const state = await options.emergencyStop.clear();
+      resetEmergencyExecutionGeneration();
       try {
         await options.onEmergencyClear?.();
       } catch (error) {
-        await options.emergencyStop.engage('relay recovery callback failed');
+        await options.emergencyStop.engage('emergency recovery callback failed');
+        abortEmergencyExecutions();
+        options.sessionApprovals?.clear();
+        await options.onEmergencyStop?.();
         send(res, 503, { ok: false, error: { code: 'EMERGENCY_CLEAR_FAILED', message: error instanceof Error ? error.message : String(error) } });
         return;
       }
