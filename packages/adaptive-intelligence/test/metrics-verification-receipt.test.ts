@@ -5,6 +5,8 @@ import type { TrajectoryStep } from '../src/index.ts';
 
 const A='a'.repeat(64),B='b'.repeat(64);
 const T0='2026-10-05T00:00:00.000Z';
+const RUN='run-1';
+const TASK='task-1';
 
 function successStep():TrajectoryStep{
   return{
@@ -31,19 +33,25 @@ function successStep():TrajectoryStep{
     }
   };
 }
-function receipt(goalId:string,verifiedAt=T0){
+function receipt(
+  goalId:string,
+  overrides:Partial<{runId:string;taskId:string;verifiedAt:string}>={}
+){
   return{
     digest:A,
+    runId:overrides.runId??RUN,
+    taskId:overrides.taskId??TASK,
     goalId,
     verifierId:'verification-kernel',
-    verifiedAt,
+    verifiedAt:overrides.verifiedAt??T0,
     authoritySnapshotDigest:B
   };
 }
 
 test('goal-achieved step without final receipt is counted as false goal progress',()=>{
   const metrics=computeIntelligenceMetrics([{
-    taskId:'task-1',
+    runId:RUN,
+    taskId:TASK,
     goalId:'goal-1',
     steps:[successStep()]
   }],{now:new Date(T0)});
@@ -51,9 +59,10 @@ test('goal-achieved step without final receipt is counted as false goal progress
   assert.equal(metrics.falseGoalProgressRate,1);
 });
 
-test('goal-bound final receipt grounds first strategy success',()=>{
+test('run-task-goal-bound final receipt grounds first strategy success',()=>{
   const metrics=computeIntelligenceMetrics([{
-    taskId:'task-1',
+    runId:RUN,
+    taskId:TASK,
     goalId:'goal-1',
     steps:[successStep()],
     finalVerificationReceipt:receipt('goal-1')
@@ -64,18 +73,40 @@ test('goal-bound final receipt grounds first strategy success',()=>{
 
 test('final receipt bound to a different goal fails closed',()=>{
   assert.throws(()=>computeIntelligenceMetrics([{
-    taskId:'task-1',
+    runId:RUN,
+    taskId:TASK,
     goalId:'goal-1',
     steps:[successStep()],
     finalVerificationReceipt:receipt('other-goal')
   }],{now:new Date(T0)}),/different goal/);
 });
 
-test('future-dated final receipt fails closed',()=>{
+test('final receipt cannot be replayed across tasks',()=>{
   assert.throws(()=>computeIntelligenceMetrics([{
-    taskId:'task-1',
+    runId:RUN,
+    taskId:TASK,
     goalId:'goal-1',
     steps:[successStep()],
-    finalVerificationReceipt:receipt('goal-1','2026-10-05T00:00:01.000Z')
+    finalVerificationReceipt:receipt('goal-1',{taskId:'other-task'})
+  }],{now:new Date(T0)}),/different task/);
+});
+
+test('final receipt cannot be replayed across evaluation runs',()=>{
+  assert.throws(()=>computeIntelligenceMetrics([{
+    runId:RUN,
+    taskId:TASK,
+    goalId:'goal-1',
+    steps:[successStep()],
+    finalVerificationReceipt:receipt('goal-1',{runId:'other-run'})
+  }],{now:new Date(T0)}),/different run/);
+});
+
+test('future-dated final receipt fails closed',()=>{
+  assert.throws(()=>computeIntelligenceMetrics([{
+    runId:RUN,
+    taskId:TASK,
+    goalId:'goal-1',
+    steps:[successStep()],
+    finalVerificationReceipt:receipt('goal-1',{verifiedAt:'2026-10-05T00:00:01.000Z'})
   }],{now:new Date(T0)}),/future-dated/);
 });
