@@ -1,4 +1,4 @@
-import type { TrajectoryStep } from './contracts.ts';
+import type { TrajectoryStep, VerificationReceiptRef } from './contracts.ts';
 import { strategyFingerprint } from './strategy-engine.ts';
 
 export interface IntelligenceMetrics {
@@ -12,13 +12,22 @@ export interface IntelligenceMetrics {
 
 export interface TaskTrajectoryRecord {
   taskId:string;
+  goalId:string;
   steps:TrajectoryStep[];
-  finalVerifiedSuccess:boolean;
+  finalVerificationReceipt?:VerificationReceiptRef;
 }
 
-export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):IntelligenceMetrics{
+interface NormalizedTaskTrajectoryRecord extends TaskTrajectoryRecord {
+  finalVerificationReceipt?:VerificationReceiptRef;
+}
+
+export function computeIntelligenceMetrics(
+  recordsInput:TaskTrajectoryRecord[],
+  options:{now?:Date}={}
+):IntelligenceMetrics{
   if(!Array.isArray(recordsInput)||recordsInput.length>100000) throw new Error('records are invalid.');
-  const records=recordsInput.map(normalizeRecord);
+  const now=options.now??new Date();
+  const records=recordsInput.map(record=>normalizeRecord(record,now));
   if(records.length===0) return {
     taskCount:0,
     firstStrategySuccessRate:0,
@@ -38,6 +47,7 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
   let totalSteps=0;
 
   for(const record of records){
+    const finalVerifiedSuccess=Boolean(record.finalVerificationReceipt);
     totalSteps+=record.steps.length;
     let hadFailure=false;
     const failedStrategies=new Map<string,number>();
@@ -54,18 +64,18 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
       }
       if(step.progress.level==='GOAL_ACHIEVED'){
         claimedGoalProgress+=1;
-        if(!record.finalVerifiedSuccess) falseGoalProgress+=1;
+        if(!finalVerifiedSuccess) falseGoalProgress+=1;
       }
     }
 
     // "First strategy success" is intentionally conservative: the task
     // reached independently verified success without any failure/recovery
     // event in its trajectory. A merely promising first action does not count.
-    if(record.finalVerifiedSuccess && !hadFailure) cleanFirstStrategySuccesses+=1;
+    if(finalVerifiedSuccess && !hadFailure) cleanFirstStrategySuccesses+=1;
 
     if(hadFailure){
       recoveryOpportunities+=1;
-      if(record.finalVerifiedSuccess) recoverySuccesses+=1;
+      if(finalVerifiedSuccess) recoverySuccesses+=1;
     }
   }
 
@@ -89,11 +99,53 @@ function failureFingerprint(step:TrajectoryStep):string{
     expectedEffects:step.action.expectedEffects??[]
   });
 }
-function normalizeRecord(input:TaskTrajectoryRecord):TaskTrajectoryRecord{
+function normalizeRecord(input:TaskTrajectoryRecord,now:Date):NormalizedTaskTrajectoryRecord{
   if(!input||typeof input!=='object') throw new Error('task trajectory record is required.');
-  const taskId=String(input.taskId??'');
-  if(!taskId||taskId.length>512) throw new Error('taskId is invalid.');
+  const taskId=bounded(input.taskId,512,'taskId');
+  const goalId=bounded(input.goalId,256,'goalId');
   if(!Array.isArray(input.steps)||input.steps.length>100000) throw new Error('steps are invalid.');
-  return {taskId,steps:structuredClone(input.steps),finalVerifiedSuccess:Boolean(input.finalVerifiedSuccess)};
+  const finalVerificationReceipt=input.finalVerificationReceipt
+    ? normalizeVerificationReceipt(input.finalVerificationReceipt,goalId,now)
+    : undefined;
+  return {
+    taskId,
+    goalId,
+    steps:structuredClone(input.steps),
+    ...(finalVerificationReceipt?{finalVerificationReceipt}:{})
+  };
+}
+function normalizeVerificationReceipt(
+  input:VerificationReceiptRef,
+  goalId:string,
+  now:Date
+):VerificationReceiptRef{
+  if(!input||typeof input!=='object') throw new Error('final verification receipt is invalid.');
+  const verifiedAt=validIso(input.verifiedAt,'finalVerificationReceipt.verifiedAt');
+  if(Date.parse(verifiedAt)>now.getTime()) throw new Error('Final verification receipt cannot be future-dated.');
+  const normalized:VerificationReceiptRef={
+    digest:sha256(input.digest,'finalVerificationReceipt.digest'),
+    goalId:bounded(input.goalId,256,'finalVerificationReceipt.goalId'),
+    verifierId:bounded(input.verifierId,512,'finalVerificationReceipt.verifierId'),
+    verifiedAt,
+    authoritySnapshotDigest:sha256(input.authoritySnapshotDigest,'finalVerificationReceipt.authoritySnapshotDigest')
+  };
+  if(normalized.goalId!==goalId) throw new Error('Final verification receipt is bound to a different goal.');
+  return normalized;
+}
+function bounded(input:unknown,max:number,label:string):string{
+  const value=String(input??'');
+  if(!value||value.length>max) throw new Error(label+' is invalid.');
+  return value;
+}
+function sha256(input:unknown,label:string):string{
+  const value=String(input??'').toLowerCase();
+  if(!/^[0-9a-f]{64}$/.test(value)) throw new Error(label+' must be SHA-256.');
+  return value;
+}
+function validIso(input:unknown,label:string):string{
+  const value=String(input??'');
+  const parsed=Date.parse(value);
+  if(!Number.isFinite(parsed)||new Date(parsed).toISOString()!==value) throw new Error(label+' must be ISO timestamp.');
+  return value;
 }
 function round(value:number):number{return Math.round(value*1_000_000)/1_000_000;}
