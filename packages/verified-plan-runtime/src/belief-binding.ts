@@ -17,7 +17,8 @@ export function bindPlanToBeliefs(
   const hardInvalidRoots:string[]=[];
   for (const node of graph.nodes) {
     const state=statesInput.find((s)=>s.nodeId===node.id);
-    if (!state || ['SUCCEEDED','SKIPPED'].includes(state.status)) continue;
+    if (!state || ['SUCCEEDED','SKIPPED','RUNNING'].includes(state.status)) continue;
+    if (state.status==='BLOCKED' && state.lastExecutionDigest) continue;
     for (const p of node.preconditions) {
       const b=beliefByFact.get(p.factKey);
       if (!b) continue;
@@ -34,7 +35,10 @@ export function bindPlanToBeliefs(
   }
   const invalidated = dependentClosure(graph, unique(hardInvalidRoots));
   const states=statesInput.map((state)=>{
-    if (invalidated.includes(state.nodeId) && state.status!=='SUCCEEDED') {
+    const unsettledExecution=
+      state.status==='RUNNING' ||
+      (state.status==='BLOCKED' && Boolean(state.lastExecutionDigest));
+    if (invalidated.includes(state.nodeId) && state.status!=='SUCCEEDED' && !unsettledExecution) {
       return {...state,status:'INVALIDATED' as const,lastReason:'belief-precondition-invalidated',lastUpdatedAt:now};
     }
     return {...state};
