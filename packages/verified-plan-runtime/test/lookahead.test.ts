@@ -39,3 +39,27 @@ test('lookahead deduplicates state loops rather than consuming the entire expans
   assert.equal(plans[0]?.goalSatisfied,true);
   assert.deepEqual(plans[0]?.candidate.nodeIds,['finish']);
 });
+
+test('lookahead keeps Pareto-valid alternatives that reach the same state',()=>{
+  const expensive={
+    id:'expensive-ready',requires:['start'],adds:['ready'],removes:['start'],
+    expectedSuccess:.99,expectedInformationGain:.95,expectedCost:4,risk:.01,
+    verificationStrength:1,reversible:true
+  };
+  const cheap={
+    id:'cheap-ready',requires:['start'],adds:['ready'],removes:['start'],
+    expectedSuccess:.7,expectedInformationGain:.1,expectedCost:1,risk:.01,
+    verificationStrength:.4,reversible:true
+  };
+  const finish={
+    id:'finish',requires:['ready'],adds:['done'],removes:[],
+    expectedSuccess:.95,expectedInformationGain:.1,expectedCost:2,risk:.01,
+    verificationStrength:.9,reversible:true
+  };
+  const plans=searchCounterfactualPlans(
+    {facts:['start']},[expensive,cheap,finish],['done'],[],
+    {maxDepth:3,beamWidth:10,remainingCostBudget:4,maximumRisk:.2}
+  );
+  assert.equal(plans.some(p=>p.goalSatisfied),true);
+  assert.deepEqual(plans.find(p=>p.goalSatisfied)?.candidate.nodeIds,['cheap-ready','finish']);
+});
