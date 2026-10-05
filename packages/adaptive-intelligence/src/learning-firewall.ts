@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type {
   LearningMode,
   LearningReceipt,
@@ -21,6 +22,26 @@ export class LearningFirewall {
 
   constructor(options:{clock?:()=>Date}={}) {
     this.#clock = options.clock ?? (() => new Date());
+  }
+
+  static fromState(
+    replayDigestsInput:string[],
+    options:{clock?:()=>Date}={}
+  ):LearningFirewall{
+    if(!Array.isArray(replayDigestsInput)||replayDigestsInput.length>1_000_000) {
+      throw new Error('learning firewall state is invalid.');
+    }
+    const firewall=new LearningFirewall(options);
+    for(const raw of replayDigestsInput){
+      const digest=sha256(raw,'learningReplayDigest');
+      if(firewall.#seenReceipts.has(digest)) throw new Error('learning firewall state contains duplicate replay digests.');
+      firewall.#seenReceipts.add(digest);
+    }
+    return firewall;
+  }
+
+  exportState():string[]{
+    return [...this.#seenReceipts].sort();
   }
 
   evaluate(input: LearningPromotionInput): LearningReceipt {
@@ -66,7 +87,9 @@ export class LearningFirewall {
       .map((item) => item.digest + ':' + item.sourceRunId + ':' + item.verifierId + ':' + item.authoritySnapshotDigest)
       .sort()
       .join(',');
-    const key = skill.fingerprint + ':' + policyVersion + ':' + receiptBinding;
+    const key = crypto.createHash('sha256').update(
+      skill.fingerprint + ':' + policyVersion + ':' + receiptBinding
+    ).digest('hex');
     if (this.#seenReceipts.has(key)) {
       return receipt(skill, false, 'Equivalent verified promotion has already been emitted for this policy version.', policyVersion);
     }
