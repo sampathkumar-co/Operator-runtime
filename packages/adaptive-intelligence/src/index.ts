@@ -3,6 +3,7 @@ export * from './epistemic-state.ts';
 export * from './causal-graph.ts';
 export * from './failure-attribution.ts';
 export * from './progress-engine.ts';
+export * from './outcome-contract.ts';
 export * from './strategy-engine.ts';
 export * from './counterfactual-recovery.ts';
 export * from './trajectory-compressor.ts';
