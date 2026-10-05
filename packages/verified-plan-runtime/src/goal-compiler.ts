@@ -38,6 +38,14 @@ export function compileGoal(input: GoalDraft): CompiledGoal {
       throw new Error('contradictory hard constraints for fact: ' + factKey);
     }
   }
+  for(const constraint of constraints){
+    if(constraint.strength==='MUST_NOT'&&success.includes(constraint.factKey)&&constraint.expectedValueDigest===undefined){
+      throw new Error('hard MUST_NOT constraint contradicts required success fact: '+constraint.factKey);
+    }
+    if(constraint.strength==='MUST'&&forbidden.includes(constraint.factKey)&&constraint.expectedValueDigest===undefined){
+      throw new Error('hard MUST constraint contradicts forbidden goal fact: '+constraint.factKey);
+    }
+  }
 
   return {
     id: bounded(input.id, 256, 'goal.id'),
