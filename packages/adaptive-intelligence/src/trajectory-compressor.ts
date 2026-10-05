@@ -7,6 +7,7 @@ import type {
   ProgressLevel,
   TrajectoryStep
 } from './contracts.ts';
+import { strategyFingerprint } from './strategy-engine.ts';
 
 export interface TrajectoryCompressionInput {
   goal: GoalDescriptor;
@@ -33,7 +34,7 @@ export function compressTrajectory(input: TrajectoryCompressionInput): Compresse
 
   const failedAssumptions = new Set<string>();
   const hypothesisScores = new Map<string, { hypothesis: FailureHypothesis; score: number }>();
-  const strategyFailures = new Map<string, number>();
+  const strategyFailures = new Map<string, { family: string; count: number }>();
   const recentStrategies: string[] = [];
   const evidence: EvidenceRef[] = [];
 
@@ -41,6 +42,7 @@ export function compressTrajectory(input: TrajectoryCompressionInput): Compresse
     const strategy = step.action.strategyId ?? step.action.family;
     recentStrategies.push(strategy);
     evidence.push(...step.outcome.evidence);
+    const stepFailed = Boolean(step.failure) || !step.outcome.ok || step.delta.expectedEffectsMissing.length > 0;
     if (step.failure) {
       const hypotheses = [step.failure.primary, ...step.failure.alternatives];
       for (const hypothesis of hypotheses) {
@@ -51,8 +53,20 @@ export function compressTrajectory(input: TrajectoryCompressionInput): Compresse
         }
         evidence.push(...hypothesis.evidence);
       }
-      strategyFailures.set(step.action.family, (strategyFailures.get(step.action.family) ?? 0) + 1);
       for (const reason of step.failure.primary.reasons) failedAssumptions.add(reason);
+    }
+    if (stepFailed) {
+      const family = step.action.strategyId ? 'strategy:' + step.action.strategyId : step.action.family;
+      const fingerprint = strategyFingerprint({
+        family,
+        requiresFacts: [],
+        expectedEffects: step.action.expectedEffects ?? []
+      });
+      const current = strategyFailures.get(fingerprint);
+      strategyFailures.set(fingerprint, {
+        family: step.action.family,
+        count: (current?.count ?? 0) + 1
+      });
     }
   }
 
@@ -68,12 +82,16 @@ export function compressTrajectory(input: TrajectoryCompressionInput): Compresse
     .slice(0, maxHypotheses)
     .map((item) => item.hypothesis);
 
-  const repeatedFailureFamilies = [...strategyFailures.entries()]
-    .filter(([, count]) => count >= 2)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([family]) => family);
+  const repeatedFailureFamilies = [...new Set(
+    [...strategyFailures.values()]
+      .filter((item) => item.count >= 2)
+      .sort((a, b) => b.count - a.count || a.family.localeCompare(b.family))
+      .map((item) => item.family)
+  )];
 
-  const progressLevel = highestProgress(input.steps.map((step) => step.progress.level));
+  const progressLevel = input.steps.length > 0
+    ? input.steps[input.steps.length - 1]!.progress.level
+    : 'NONE';
   const criticalEvidence = uniqueEvidence(evidence).slice(0, maxEvidence);
 
   return {
@@ -90,16 +108,6 @@ export function compressTrajectory(input: TrajectoryCompressionInput): Compresse
   };
 }
 
-function highestProgress(levels: ProgressLevel[]): ProgressLevel {
-  const rank: Record<ProgressLevel, number> = {
-    NONE: 0,
-    ACTION_EXECUTED: 1,
-    STATE_CHANGED: 2,
-    SUBGOAL_PROGRESS: 3,
-    GOAL_ACHIEVED: 4
-  };
-  return levels.reduce<ProgressLevel>((best, level) => rank[level] > rank[best] ? level : best, 'NONE');
-}
 function uniqueEvidence(items: EvidenceRef[]): EvidenceRef[] {
   return [...new Map(items.map((item) => [item.digest, item])).values()]
     .sort((a, b) => b.observedAt.localeCompare(a.observedAt));
