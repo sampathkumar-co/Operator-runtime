@@ -105,6 +105,8 @@ function channelPriority(channel: string): number {
 
 function normalizeCandidate(input: ObservationCandidate): ObservationCandidate {
   if (!input || typeof input !== 'object') throw new Error('observation candidate is required.');
+  if (typeof input.targetLocal !== 'boolean') throw new Error('observation.targetLocal must be boolean.');
+  if (input.mutating !== undefined && typeof input.mutating !== 'boolean') throw new Error('observation.mutating must be boolean when provided.');
   return {
     id: bounded(input.id, 256, 'observation.id'),
     channel: bounded(input.channel, 128, 'observation.channel'),
@@ -112,8 +114,8 @@ function normalizeCandidate(input: ObservationCandidate): ObservationCandidate {
     resolvesFacts: [...new Set(input.resolvesFacts.map((item) => bounded(item, 512, 'observation.resolvesFact')))].sort(),
     expectedInformationGain: unit(input.expectedInformationGain, 'observation.expectedInformationGain'),
     expectedCost: boundedNumber(input.expectedCost, 0, 1_000_000_000, 'observation.expectedCost'),
-    targetLocal: Boolean(input.targetLocal),
-    ...(input.mutating !== undefined ? { mutating: Boolean(input.mutating) } : {})
+    targetLocal: input.targetLocal,
+    ...(input.mutating !== undefined ? { mutating: input.mutating } : {})
   };
 }
 function bounded(input: unknown, max: number, label: string): string {
