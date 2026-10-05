@@ -183,7 +183,7 @@ function normalizeEvidenceList(items:EvidenceRef[]):EvidenceRef[]{
       observedAt:validIso(item.observedAt,'evidence.observedAt'),
       ...(item.channel?{channel:bounded(item.channel,128,'evidence.channel')}:{}),
       ...(item.scope?{scope:bounded(item.scope,512,'evidence.scope')}:{}),
-      ...(('independenceKey' in item && (item as any).independenceKey)?{independenceKey:bounded((item as any).independenceKey,512,'evidence.independenceKey')}: {})
+      ...(item.independenceKey?{independenceKey:bounded(item.independenceKey,512,'evidence.independenceKey')}: {})
     };
     return [digest,normalized] as const;
   })).values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt));
