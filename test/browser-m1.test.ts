@@ -633,7 +633,7 @@ test('target-local subtree change counts as browser progress', async (t) => {
   });
 });
 
-test('browser no-progress detection groups parameter-varied drag attempts against unchanged state', async (t) => {
+test('drag verification fails on the first dispatched attempt when source and objective state remain unchanged', async (t) => {
   const original = globalThis.WebSocket;
   Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
   t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
@@ -645,15 +645,10 @@ test('browser no-progress detection groups parameter-varied drag attempts agains
       provenance: { kind: 'runtime' }
     });
     const first = await drag('drag-family-1', 80);
-    assert.equal(first.ok, true, first.error?.message);
-    assert.equal((first.output as any).stateDelta.progress, false);
-    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
-
-    const second = await drag('drag-family-2', 240);
-    assert.equal(second.ok, false);
-    assert.equal(second.error?.code, 'BROWSER_NO_PROGRESS');
-    assert.deepEqual((second.error?.details as any)?.actionFamily, { family: 'drag-displacement' });
-    assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
+    assert.equal(first.ok, false);
+    assert.equal(first.error?.code, 'BROWSER_NO_PROGRESS');
+    assert.equal(first.error?.executionPhase, 'effect_observed');
+    assert.equal(first.error?.sideEffectState, 'none');
   });
 });
 

@@ -294,9 +294,50 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       mix('|'); mix(child.getAttribute('aria-expanded') || '');
       mix('|'); mix(child.getAttribute('aria-selected') || '');
       mix('|'); mix(child.getAttribute('aria-checked') || '');
+      mix('|'); mix(child.getAttribute('aria-pressed') || '');
+      mix('|'); mix(child.getAttribute('aria-current') || '');
+      mix('|'); mix(child.getAttribute('aria-valuenow') || '');
+      mix('|'); mix(child.getAttribute('aria-valuetext') || '');
+      const childValue = child.tagName === 'INPUT' && trim(child.getAttribute('type')).toLowerCase() === 'password'
+        ? ''
+        : (child as HTMLInputElement).value;
+      mix('|'); mix(trim(childValue || child.textContent).slice(0, 240));
+      const style = child.ownerDocument?.defaultView?.getComputedStyle?.(child);
+      mix('|'); mix(`${style?.color ?? ''};${style?.backgroundColor ?? ''};${style?.fill ?? ''};${style?.stroke ?? ''}`);
       if (queue.length < 96) queue.push(...Array.from(child.children ?? []).slice(0, 96 - queue.length));
     }
     return { descendantCount: count, digest: hash.toString(16).padStart(8, '0') };
+  };
+  const associatedStateOf = (element: Element) => {
+    const regions: Element[] = [];
+    const add = (candidate: Element | null | undefined) => {
+      if (!candidate || ['BODY', 'HTML'].includes(candidate.tagName) || regions.includes(candidate) || regions.length >= 6) return;
+      regions.push(candidate);
+    };
+    const root = element.getRootNode() as Document | ShadowRoot;
+    for (const attribute of ['aria-controls', 'aria-owns', 'aria-describedby']) {
+      for (const id of trim(element.getAttribute(attribute)).split(/\s+/).filter(Boolean).slice(0, 8)) add((root as Document).getElementById?.(id));
+    }
+    let current = element.parentElement;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      if (['form','group','region','status','alert','log','feed','list','listbox','grid','tree','menu','dialog'].includes(role)
+        || ['FORM','SECTION','ARTICLE','LI','TD'].includes(current.tagName)) { add(current); break; }
+      if (depth === 0 && current.children.length <= 64) add(current);
+    }
+    return regions.map((region) => ({
+      identity: identityOf(region), role: roleOf(region), name: nameOf(region),
+      text: trim((region as HTMLElement).innerText ?? region.textContent).slice(0, 500),
+      value: trim(region.tagName === 'INPUT' && trim(region.getAttribute('type')).toLowerCase() === 'password'
+        ? ''
+        : (region as HTMLInputElement).value || region.getAttribute('aria-valuenow') || region.getAttribute('aria-valuetext')).slice(0, 240),
+      expanded: region.hasAttribute('aria-expanded') ? region.getAttribute('aria-expanded') === 'true' : undefined,
+      selected: region.hasAttribute('aria-selected') ? region.getAttribute('aria-selected') === 'true' : undefined,
+      checked: region.hasAttribute('aria-checked') ? region.getAttribute('aria-checked') === 'true' : undefined,
+      pressed: region.hasAttribute('aria-pressed') ? region.getAttribute('aria-pressed') === 'true' : undefined,
+      current: trim(region.getAttribute('aria-current')).slice(0, 80) || undefined,
+      subtreeSignature: subtreeSignatureOf(region)
+    }));
   };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
@@ -421,6 +462,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       active: element.ownerDocument?.activeElement === element,
       actionable: contract.stateOf(element).actionable,
       subtreeSignature: subtreeSignatureOf(element),
+      associatedState: associatedStateOf(element),
       documentMutationVersion: Number.isSafeInteger(registry?.mutationVersion) ? registry?.mutationVersion : 0,
       ...(scrollStateOf(element) ? { scroll: scrollStateOf(element), scrollable: Boolean(scrollStateOf(element)?.canScrollY || scrollStateOf(element)?.canScrollX) } : {}),
       geometry: geometryOf(element, context),
@@ -635,6 +677,7 @@ export async function performSemanticInteraction(
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
+  let providerDispatchStarted = false;
   try {
     const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
     const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})())`;
@@ -675,6 +718,7 @@ export async function performSemanticInteraction(
     const chosen = matches[0]!.context;
     if (input.operation === 'select_date') {
       const expression = `(${dateSelectFunction.toString()})(${JSON.stringify({ target: input.target, value: input.value })}, (${browserDomContractFunction.toString()})())`;
+      providerDispatchStarted = true;
       let raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
       const widgetPending = raw?.recoverable === true && typeof raw.error === 'string' && /No supported visible calendar widget/i.test(raw.error);
       if (widgetPending) {
@@ -684,7 +728,7 @@ export async function performSemanticInteraction(
       if (!raw || raw.ok !== true) {
         const message = typeof raw?.error === 'string' ? raw.error : 'Calendar date selection did not complete.';
         if (raw?.staleRef === true) throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: input.target } });
-        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'possible', executionPhase: 'post_dispatch' } });
+        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'uncertain', executionPhase: 'dispatched' } });
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: input.target, value: input.value } });
       }
       return {
@@ -712,8 +756,8 @@ export async function performSemanticInteraction(
         throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
       }
       const dispatch = (params: JsonMap) => chosen.frame
-        ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
-        : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
       await dispatch({ type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0 });
       await dispatch({ type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1 });
       const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(dx, dy) / 20)));
@@ -753,8 +797,8 @@ export async function performSemanticInteraction(
       };
     }
     const sendKey = (params: JsonMap) => chosen.frame
-      ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
-      : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
+      ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal))
+      : (providerDispatchStarted = true, session.send('Input.dispatchKeyEvent', params, 8_000, signal));
     if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text' || input.operation === 'format_text') {
       const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
       const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
@@ -944,8 +988,8 @@ export async function performSemanticInteraction(
         dragDestination = { x: destinationX, y: destinationY, sample: destinationSecond };
       }
       const dispatch = (params: JsonMap) => chosen.frame
-        ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
-        : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
       if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
       } else if (input.operation === 'scroll') {
@@ -973,6 +1017,7 @@ export async function performSemanticInteraction(
       };
     }
     const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)}, (${browserDomContractFunction.toString()})())`;
+    providerDispatchStarted = true;
     let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
@@ -1001,6 +1046,21 @@ export async function performSemanticInteraction(
       value: value as JsonMap,
       ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
     };
+  } catch (error) {
+    if (providerDispatchStarted && error instanceof OperatorError
+      && error.details?.executionPhase === undefined && error.details?.sideEffectState === undefined) {
+      throw new OperatorError(error.code, error.message, {
+        retryable: error.retryable,
+        details: { ...(error.details ?? {}), sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+      });
+    }
+    if (providerDispatchStarted && !(error instanceof OperatorError)) {
+      throw new OperatorError('BROWSER_PROVIDER_EXECUTION_FAILED', error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        details: { sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+      });
+    }
+    throw error;
   } finally {
     await scope.stop();
   }

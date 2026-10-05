@@ -104,7 +104,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const caught = context.signal?.aborted ? abortError() : error;
       const normalized = action.capability === 'browser.interact'
         && caught instanceof OperatorError
-        && ['BROWSER_TARGET_STALE', 'BROWSER_STALE_TARGET', 'BROWSER_TARGET_NOT_FOUND', 'BROWSER_TARGET_NOT_SCROLLABLE'].includes(caught.code)
+        && caught.details?.executionPhase === undefined
         && caught.details?.sideEffectState === undefined
         ? new OperatorError(caught.code, caught.message, {
             retryable: caught.retryable,
@@ -479,6 +479,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const diagnostics = await collectDiagnostics(session);
     const expectDownload = action.input.expectDownload === true;
     let download: DownloadTracker | undefined;
+    let interactionDispatched = false;
     try {
       await session.send('Runtime.enable');
       if (expectDownload) {
@@ -521,21 +522,26 @@ export class BrowserCdpProvider implements CapabilityProvider {
         }
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
+      interactionDispatched = true;
       const matchedAutocomplete = Boolean(value.matched && typeof value.matched === 'object' && (value.matched as JsonMap).autocomplete === true);
       const settle = await settleAfterInteraction(session, signal, operation === 'type' && matchedAutocomplete ? 350 : 50);
       throwIfAborted(signal);
       const after = await pageIdentity(session);
       const afterTarget = await observeSemanticTargetState(session, targetSpec, signal);
+      const afterDestination = toTargetSpec ? await observeSemanticTargetState(session, toTargetSpec, signal) : undefined;
       const beforeTarget = value.matched && typeof value.matched === 'object' ? value.matched as JsonMap : {};
+      const beforeDestination = value.destination && typeof value.destination === 'object' ? value.destination as JsonMap : undefined;
       const compactTarget = (sample: JsonMap | undefined) => sample ? {
         identity: sample.identity, role: sample.role, name: sample.name, value: sample.value,
         checked: sample.checked, selected: sample.selected, expanded: sample.expanded, current: sample.current,
-        active: sample.active, scroll: sample.scroll, geometry: sample.geometry, localTreeState: sample.subtreeSignature
+        active: sample.active, scroll: sample.scroll, geometry: sample.geometry, localTreeState: sample.subtreeSignature,
+        associatedState: sample.associatedState
       } : null;
-      const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget) };
+      const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget), ...(beforeDestination ? { destination: compactTarget(beforeDestination) } : {}) };
       const afterRelevant = {
         page: { url: after.url, title: after.title },
-        target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status }
+        target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status },
+        ...(afterDestination ? { destination: afterDestination.status === 'observed' ? compactTarget(afterDestination.sample) : { status: afterDestination.status } } : {})
       };
       const semanticAfter = value.after && typeof value.after === 'object' ? value.after as JsonMap : undefined;
       const directSemanticProgress = ['type', 'select', 'set_value', 'select_date', 'select_text_range'].includes(operation)
@@ -552,6 +558,12 @@ export class BrowserCdpProvider implements CapabilityProvider {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
+      if (['drag', 'drag_by', 'drag_between'].includes(operation) && !stateProgress) {
+        throw new OperatorError('BROWSER_NO_PROGRESS', 'Drag input was dispatched but no source, destination, or associated objective state changed.', {
+          retryable: false,
+          details: { sideEffectState: 'none', executionPhase: 'effect_observed', actionFamily: 'drag', target: targetSpec, toTarget: toTargetSpec, before: beforeRelevant, after: afterRelevant }
+        });
+      }
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
       const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, xPx, yPx, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
       const noProgressFamily = (() => {
@@ -597,6 +609,21 @@ export class BrowserCdpProvider implements CapabilityProvider {
         evidence: evidenceItems,
         durationMs: Math.round(performance.now() - started)
       };
+    } catch (error) {
+      if (interactionDispatched && error instanceof OperatorError
+        && error.details?.executionPhase === undefined && error.details?.sideEffectState === undefined) {
+        throw new OperatorError(error.code, error.message, {
+          retryable: error.retryable,
+          details: { ...(error.details ?? {}), sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+        });
+      }
+      if (interactionDispatched && !(error instanceof OperatorError)) {
+        throw new OperatorError('BROWSER_POST_DISPATCH_FAILED', error instanceof Error ? error.message : String(error), {
+          retryable: true,
+          details: { sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+        });
+      }
+      throw error;
     } finally {
       diagnostics.stop();
       download?.stop();

@@ -202,6 +202,8 @@ class FakeElement {
       if (token === this.tagName.toLowerCase()) return true;
       if (token === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       if (token === '[role]') return this.hasAttribute('role');
+      if (token === '[aria-controls]') return this.hasAttribute('aria-controls');
+      if (token === '[aria-owns]') return this.hasAttribute('aria-owns');
       if (token === '[tabindex]') return this.hasAttribute('tabindex');
       if (token === '[contenteditable="true"]') return this.getAttribute('contenteditable') === 'true';
       if (token === '[role="heading"]') return this.getAttribute('role') === 'heading';
@@ -1226,4 +1228,72 @@ test('click-collapsible-nodelay regression exposes and verifies immediate expand
   const clicked = interactionFunction({ operation: 'click', target: { ref: target.ref }, value: null }) as any;
   assert.equal(clicked.ok, true);
   assert.equal((semanticLocatorFunction({ ref: target.ref }) as any).matches[0].expanded, true);
+});
+
+test('hierarchical observations preserve parent paths across menus, trees, listboxes, and portaled descendants', (t) => {
+  const root = new FakeRoot();
+  const navigation = new FakeElement('nav'); navigation.setAttribute('role', 'navigation'); navigation.setAttribute('aria-label', 'Workspace');
+  const menu = new FakeElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Create'); menu.parentElement = navigation;
+  const menuItem = new FakeElement('button', 'Document'); menuItem.setAttribute('role', 'menuitem'); menuItem.parentElement = menu;
+  navigation.children = [menu]; menu.children = [menuItem];
+
+  const tree = new FakeElement('div'); tree.setAttribute('role', 'tree'); tree.setAttribute('aria-label', 'Files');
+  const treeItem = new FakeElement('div', 'Reports'); treeItem.setAttribute('role', 'treeitem'); treeItem.parentElement = tree; tree.children = [treeItem];
+
+  const palette = new FakeElement('div'); palette.setAttribute('role', 'dialog'); palette.setAttribute('aria-label', 'Commands');
+  const options = new FakeElement('div'); options.setAttribute('role', 'listbox'); options.setAttribute('aria-label', 'Results'); options.parentElement = palette;
+  const option = new FakeElement('div', 'Open settings'); option.setAttribute('role', 'option'); option.parentElement = options;
+  palette.children = [options]; options.children = [option];
+
+  const portalOwner = new FakeElement('button', 'Account'); portalOwner.setAttribute('aria-controls', 'account-menu');
+  const portal = new FakeElement('div'); portal.id = 'account-menu'; portal.setAttribute('role', 'menu'); portal.setAttribute('aria-label', 'Account actions');
+  const portalItem = new FakeElement('button', 'Sign out'); portalItem.setAttribute('role', 'menuitem'); portalItem.parentElement = portal; portal.children = [portalItem];
+  attach(root, navigation, menu, menuItem, tree, treeItem, palette, options, option, portalOwner, portal, portalItem); installDocument(t, root);
+
+  const controls = (semanticSnapshotFunction() as any).controls;
+  const documentItem = controls.find((item: any) => item.name === 'Document');
+  const reports = controls.find((item: any) => item.name === 'Reports');
+  const command = controls.find((item: any) => item.name === 'Open settings');
+  const signOut = controls.find((item: any) => item.name === 'Sign out');
+  assert.deepEqual(documentItem.hierarchyPath.map((item: any) => item.name), ['Workspace', 'Create']);
+  assert.deepEqual(reports.hierarchyPath.map((item: any) => item.name), ['Files']);
+  assert.deepEqual(command.hierarchyPath.map((item: any) => item.name), ['Commands', 'Results']);
+  assert.equal(signOut.logicalParentName, 'Account');
+  assert.equal(signOut.hierarchyPath.at(-1).relationship, 'aria-owner');
+});
+
+test('objective-scoped state follows sibling, controlled, status, and repeated-result regions but ignores unrelated page noise', (t) => {
+  const root = new FakeRoot();
+  const panel = new FakeElement('section'); panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', 'Weather');
+  const refresh = new FakeElement('button', 'Refresh'); refresh.setAttribute('aria-controls', 'forecast'); refresh.parentElement = panel;
+  const forecast = new FakeElement('div', '18 C'); forecast.id = 'forecast'; forecast.setAttribute('role', 'status'); forecast.parentElement = panel;
+  panel.children = [refresh, forecast];
+  const noise = new FakeElement('div', 'frame 1');
+  attach(root, panel, refresh, forecast, noise); installDocument(t, root);
+
+  const first = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  forecast.textContent = '19 C';
+  const second = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  assert.notDeepEqual(second.associatedState, first.associatedState);
+  noise.textContent = 'frame 2';
+  const third = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  assert.deepEqual(third.associatedState, second.associatedState);
+  assert.ok(second.associatedState.some((region: any) => region.role === 'status' && region.text === '19 C'));
+});
+
+test('custom rendered widgets expose bounded perceptible state for grids, calendars, dashboards, swatches, and diagrams', (t) => {
+  const root = new FakeRoot();
+  const gridCell = new FakeElement('rect', 'X'); gridCell.setAttribute('role', 'gridcell'); gridCell.setAttribute('aria-selected', 'true'); gridCell.fill = 'rgb(1, 2, 3)';
+  const calendarDay = new FakeElement('button', '17'); calendarDay.setAttribute('aria-current', 'date'); calendarDay.setAttribute('class', 'today selected'); calendarDay.backgroundColor = 'rgb(4, 5, 6)';
+  const dashboard = new FakeElement('div', 'Online'); dashboard.setAttribute('role', 'status'); dashboard.setAttribute('data-status', 'healthy'); dashboard.setAttribute('class', 'success'); dashboard.backgroundColor = 'rgb(7, 8, 9)';
+  const swatch = new FakeElement('div'); swatch.setAttribute('role', 'option'); swatch.setAttribute('aria-label', 'Ocean'); swatch.setAttribute('aria-selected', 'true'); swatch.backgroundColor = 'rgb(10, 11, 12)';
+  const node = new FakeElement('circle', 'Gateway'); node.setAttribute('role', 'graphics-symbol'); node.setAttribute('aria-pressed', 'true'); node.setAttribute('class', 'highlighted'); node.fill = 'rgb(13, 14, 15)';
+  attach(root, gridCell, calendarDay, dashboard, swatch, node); installDocument(t, root);
+
+  const visuals = (semanticSnapshotFunction() as any).visualObjects;
+  assert.equal(visuals.find((item: any) => item.name === 'X').perceptibleState.selected, true);
+  assert.deepEqual(visuals.find((item: any) => item.name === '17').perceptibleState.stateTokens, ['today', 'selected']);
+  assert.equal(visuals.find((item: any) => item.name === 'Online').perceptibleState.status, 'healthy');
+  assert.equal(visuals.find((item: any) => item.name === 'Ocean').perceptibleState.selected, true);
+  assert.equal(visuals.find((item: any) => item.name === 'Gateway').perceptibleState.pressed, true);
 });

@@ -551,6 +551,16 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     });
     return ref;
   };
+  let ariaOwnersById: Map<string, Element[]> | undefined;
+  const ariaOwnerIndex = () => {
+    if (ariaOwnersById) return ariaOwnersById;
+    ariaOwnersById = new Map();
+    for (const { element: owner } of deepQuery('[aria-controls],[aria-owns]', 2000)) {
+      const ids = `${owner.getAttribute('aria-controls') ?? ''} ${owner.getAttribute('aria-owns') ?? ''}`.split(/\s+/).filter(Boolean).slice(0, 32);
+      for (const id of ids) ariaOwnersById.set(id, [...(ariaOwnersById.get(id) ?? []), owner]);
+    }
+    return ariaOwnersById;
+  };
   const relationshipOf = (element: Element) => {
     const parent = element.parentElement;
     const ownText = trim((element as HTMLElement).innerText ?? element.textContent, 240);
@@ -571,6 +581,30 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       if (repeatedItem) break;
     }
     const structural = structuralContextOf(element);
+    const ownedContainer = (() => {
+      let current: Element | null = element;
+      for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+        if (!current.id) continue;
+        const owners = ariaOwnerIndex().get(current.id) ?? [];
+        if (owners.length === 1) return { container: current, owner: owners[0]! };
+      }
+      return undefined;
+    })();
+    const hierarchy: Array<{ ref: string; role: string; name: string; relationship: 'dom' | 'aria-owner' }> = [];
+    const appendHierarchy = (candidate: Element, relationship: 'dom' | 'aria-owner') => {
+      const role = roleOf(candidate);
+      const name = accessibleName(candidate);
+      if (!role && !name) return;
+      const ref = observedRefOf(candidate);
+      if (!hierarchy.some((entry) => entry.ref === ref)) hierarchy.push({ ref, role, name, relationship });
+    };
+    const domAncestors: Element[] = [];
+    for (let current = element.parentElement, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = roleOf(current);
+      if (['menu','menubar','menuitem','tree','treeitem','listbox','option','group','dialog','navigation'].includes(role)) domAncestors.unshift(current);
+    }
+    for (const candidate of domAncestors) appendHierarchy(candidate, 'dom');
+    if (ownedContainer) appendHierarchy(ownedContainer.owner, 'aria-owner');
     const group = structural.group;
     const siblingLabels = parent ? Array.from(parent.children).slice(0, 12)
       .map((sibling) => trim(sibling.getAttribute('aria-label') || (sibling as HTMLElement).innerText || sibling.textContent, 80))
@@ -588,6 +622,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       repeatedCount: structural.repeatedCount,
       ordinalWithinRole: structural.repeatedOrdinal,
       semanticPath: structural.ancestorPath,
+      ...(hierarchy.length ? {
+        hierarchyPath: hierarchy,
+        logicalParentRef: hierarchy[hierarchy.length - 1]!.ref,
+        logicalParentRole: hierarchy[hierarchy.length - 1]!.role,
+        logicalParentName: hierarchy[hierarchy.length - 1]!.name
+      } : {}),
       ...(children.length ? { children } : {}),
       ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
       depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()
@@ -706,6 +746,33 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     if (tag === 'ellipse') return { ellipse: { coordinateSpace: 'svg-local', cx: finiteAttr('cx'), cy: finiteAttr('cy'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
     if (tag === 'rect') return { svgRect: { coordinateSpace: 'svg-local', x: finiteAttr('x'), y: finiteAttr('y'), width: finiteAttr('width'), height: finiteAttr('height'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
     return grid;
+  };
+  const perceptibleStateOf = (element: Element) => {
+    const input = element as HTMLInputElement | HTMLOptionElement;
+    const style = styleOf(element);
+    const stateTokenPattern = /^(?:active|checked|chosen|complete|current|disabled|empty|error|expanded|failed|filled|focused|healthy|highlighted|inactive|invalid|loading|occupied|open|pending|pressed|ready|selected|success|today|warning)$/i;
+    const classTokens = trim(element.getAttribute('class'), 240).split(/\s+/).filter((token) => stateTokenPattern.test(token)).slice(0, 12);
+    const rawDataState = trim(element.getAttribute('data-state') || element.getAttribute('data-status'), 80);
+    const dataState = stateTokenPattern.test(rawDataState) ? rawDataState : '';
+    const text = readableText(element, 240);
+    const value = element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'password'
+      ? ''
+      : trim((input as HTMLInputElement).value || element.getAttribute('aria-valuetext') || element.getAttribute('aria-valuenow'), 240);
+    return {
+      ...(text ? { text } : {}),
+      ...(value ? { value } : {}),
+      ...(element.hasAttribute('aria-checked') || ['checkbox', 'radio'].includes(trim(element.getAttribute('type')).toLowerCase()) ? { checked: element.hasAttribute('aria-checked') ? element.getAttribute('aria-checked') === 'true' : Boolean((input as HTMLInputElement).checked) } : {}),
+      ...(element.hasAttribute('aria-selected') || element.tagName === 'OPTION' ? { selected: element.hasAttribute('aria-selected') ? element.getAttribute('aria-selected') === 'true' : Boolean((input as HTMLOptionElement).selected) } : {}),
+      ...(element.hasAttribute('aria-expanded') ? { expanded: element.getAttribute('aria-expanded') === 'true' } : {}),
+      ...(element.hasAttribute('aria-pressed') ? { pressed: element.getAttribute('aria-pressed') === 'true' } : {}),
+      ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current'), 80) } : {}),
+      ...(dataState ? { status: dataState } : {}),
+      ...(classTokens.length ? { stateTokens: classTokens } : {}),
+      colors: {
+        color: trim(style?.color, 64).toLowerCase(), background: trim(style?.backgroundColor, 64).toLowerCase(),
+        fill: trim(style?.fill, 64).toLowerCase(), stroke: trim(style?.stroke, 64).toLowerCase()
+      }
+    };
   };
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -952,6 +1019,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}),
         disabled: state.disabled,
         actionable: state.actionable,
+        perceptibleState: perceptibleStateOf(element),
         ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
         ...(state.occluded ? { occluded: true } : {}),
         ...relationship,
@@ -1047,7 +1115,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const zone = `${rect.y + rect.height / 2 < viewportHeight / 3 ? 'top' : rect.y + rect.height / 2 > viewportHeight * 2 / 3 ? 'bottom' : 'middle'}-${rect.x + rect.width / 2 < viewportWidth / 3 ? 'left' : rect.x + rect.width / 2 > viewportWidth * 2 / 3 ? 'right' : 'center'}`;
     const numericText = trim((element as HTMLInputElement).value || element.getAttribute('aria-valuenow') || readableText(element), 80);
     const numericValue = /^-?(?:\d+\.?\d*|\.\d+)$/.test(numericText) ? Number(numericText) : undefined;
-    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), fontSize: trim(style?.fontSize, 32), area, aspectRatio: rect.height > 0 ? Math.round((rect.width / rect.height) * 1000) / 1000 : undefined, viewportZone: zone, ...(numericValue !== undefined ? { numericValue } : {}), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
+    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), perceptibleState: perceptibleStateOf(element), colors, opacity: trim(style?.opacity, 32), fontSize: trim(style?.fontSize, 32), area, aspectRatio: rect.height > 0 ? Math.round((rect.width / rect.height) * 1000) / 1000 : undefined, viewportZone: zone, ...(numericValue !== undefined ? { numericValue } : {}), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
     const score = (item: typeof left) => item._focusScore
       + (item.actionable ? 50 : 0)
