@@ -11,6 +11,9 @@ import type {
 function criteria():PolicyPromotionCriteria{
   return{
     minPairedDecisions:100,
+    minCandidateTasks:100,
+    minBaselineTasks:100,
+    minCalibrationSamples:100,
     minOutcomeCoverage:0.9,
     minProgressCoverage:0.8,
     minCostCoverage:0.8,
