@@ -7,7 +7,9 @@ export type DecisionKind='OBSERVATION'|'STRATEGY'|'RECOVERY'|'PROGRESS'|'LEARNIN
 export interface DecisionTraceInput {
   mode:DecisionMode;
   kind:DecisionKind;
+  runId:string;
   taskId:string;
+  goalId:string;
   policyVersion:string;
   decisionPointId?:string;
   selectedId?:string;
@@ -97,7 +99,9 @@ function normalize(input:DecisionTraceInput):DecisionTraceInput{
   return {
     mode:input.mode,
     kind:input.kind,
+    runId:bounded(input.runId,512,'runId'),
     taskId:bounded(input.taskId,512,'taskId'),
+    goalId:bounded(input.goalId,256,'goalId'),
     policyVersion:bounded(input.policyVersion,256,'policyVersion'),
     ...(input.decisionPointId?{decisionPointId:bounded(input.decisionPointId,512,'decisionPointId')}:{}),
     ...(input.selectedId?{selectedId:bounded(input.selectedId,512,'selectedId')}:{}),
