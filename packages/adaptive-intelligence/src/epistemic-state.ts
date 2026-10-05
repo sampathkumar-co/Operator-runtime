@@ -2,12 +2,17 @@ import type { BeliefObservation, BeliefResolution, EpistemicStatus, EvidenceRef 
 
 const SECRET_KEY = /(pass(word)?|secret|token|authorization|cookie|credential|private.?key|api.?key)/i;
 
-interface StoredObservation extends BeliefObservation {
+export interface EpistemicEpistemicStoredObservation extends BeliefObservation {
   insertedAt: string;
 }
 
+export interface EpistemicStateSnapshot {
+  claims: EpistemicEpistemicStoredObservation[];
+  unobservable: string[];
+}
+
 export class EpistemicStateEngine {
-  #claims = new Map<string, StoredObservation[]>();
+  #claims = new Map<string, EpistemicStoredObservation[]>();
   #unobservable = new Set<string>();
   #clock: () => Date;
   #maxClaimsPerFact: number;
@@ -15,6 +20,61 @@ export class EpistemicStateEngine {
   constructor(options: { clock?: () => Date; maxClaimsPerFact?: number } = {}) {
     this.#clock = options.clock ?? (() => new Date());
     this.#maxClaimsPerFact = boundedInteger(options.maxClaimsPerFact ?? 32, 1, 256, 'maxClaimsPerFact');
+  }
+
+  static fromState(
+    snapshotInput: EpistemicStateSnapshot,
+    options: { clock?: () => Date; maxClaimsPerFact?: number } = {}
+  ): EpistemicStateEngine {
+    if (!snapshotInput || typeof snapshotInput !== 'object') throw new Error('epistemic state snapshot is required.');
+    if (!Array.isArray(snapshotInput.claims) || snapshotInput.claims.length > 1_000_000) {
+      throw new Error('epistemic claims snapshot is invalid.');
+    }
+    if (!Array.isArray(snapshotInput.unobservable) || snapshotInput.unobservable.length > 100_000) {
+      throw new Error('epistemic unobservable snapshot is invalid.');
+    }
+
+    const engine = new EpistemicStateEngine(options);
+    const seen = new Set<string>();
+    for (const raw of snapshotInput.claims) {
+      const observation = normalizeStoredObservation(raw);
+      if (SECRET_KEY.test(observation.factKey)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
+      const identity = [
+        observation.factKey,
+        observation.valueDigest,
+        observation.polarity,
+        observation.evidence.digest,
+        observation.insertedAt
+      ].join('|');
+      if (seen.has(identity)) throw new Error('epistemic state snapshot contains duplicate claims.');
+      seen.add(identity);
+
+      const existing = engine.#claims.get(observation.factKey) ?? [];
+      if (existing.length >= engine.#maxClaimsPerFact) throw new Error('epistemic state snapshot exceeds per-fact claim capacity.');
+      existing.push(observation);
+      existing.sort((a, b) =>
+        b.evidence.observedAt.localeCompare(a.evidence.observedAt)
+        || b.insertedAt.localeCompare(a.insertedAt)
+      );
+      engine.#claims.set(observation.factKey, existing);
+    }
+
+    for (const keyInput of snapshotInput.unobservable) {
+      const key = boundedKey(keyInput, 'factKey');
+      if (SECRET_KEY.test(key)) throw new Error('Secret-bearing epistemic fact keys are rejected.');
+      engine.#unobservable.add(key);
+    }
+    return engine;
+  }
+
+  exportState(): EpistemicStateSnapshot {
+    const claims = [...this.#claims.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([, items]) => items.map((item) => structuredClone(item)));
+    return {
+      claims,
+      unobservable: [...this.#unobservable].sort()
+    };
   }
 
   observe(input: BeliefObservation): BeliefResolution {
@@ -71,7 +131,7 @@ export class EpistemicStateEngine {
 
     const supports = live.filter((item) => item.polarity === 'supports');
     const contradicts = live.filter((item) => item.polarity === 'contradicts');
-    const grouped = new Map<string, StoredObservation[]>();
+    const grouped = new Map<string, EpistemicStoredObservation[]>();
     for (const item of supports) {
       const values = grouped.get(item.valueDigest) ?? [];
       values.push(item);
@@ -118,7 +178,16 @@ export class EpistemicStateEngine {
   }
 }
 
-function normalizeObservation(input: BeliefObservation, now: Date): StoredObservation {
+function normalizeStoredObservation(input: EpistemicStoredObservation): EpistemicStoredObservation {
+  if (!input || typeof input !== 'object') throw new Error('Stored epistemic observation is required.');
+  const normalized = normalizeObservation(input, new Date(validIso(input.insertedAt, 'insertedAt')));
+  return {
+    ...normalized,
+    insertedAt: validIso(input.insertedAt, 'insertedAt')
+  };
+}
+
+function normalizeObservation(input: BeliefObservation, now: Date): EpistemicStoredObservation {
   if (!input || typeof input !== 'object') throw new Error('Belief observation is required.');
   const factKey = boundedKey(input.factKey, 'factKey');
   const valueDigest = sha256(input.valueDigest, 'valueDigest');
@@ -158,7 +227,7 @@ function freshnessWeight(observedAt: string, now: number): number {
   return Math.max(0.2, Math.pow(0.5, age / halfLife));
 }
 
-function independentConfidence(items: StoredObservation[], now: number): number {
+function independentConfidence(items: EpistemicStoredObservation[], now: number): number {
   const strongestByIndependenceKey = new Map<string, number>();
   for (const item of items) {
     const key = evidenceIndependenceKey(item.evidence);
