@@ -2,6 +2,8 @@ import type { DecisionTraceRecord } from './decision-trace.ts';
 
 export interface DecisionOutcomeVerificationReceiptRef {
   digest:string;
+  runId:string;
+  goalId:string;
   verifierId:string;
   verifiedAt:string;
   authoritySnapshotDigest:string;
@@ -9,7 +11,9 @@ export interface DecisionOutcomeVerificationReceiptRef {
 }
 
 export interface DecisionOutcome {
+  runId:string;
   taskId:string;
+  goalId:string;
   decisionDigest:string;
   verificationReceipt:DecisionOutcomeVerificationReceiptRef;
   progressScore?:number;
@@ -44,6 +48,7 @@ export function compareShadowToControl(
   if(!Number.isFinite(now.getTime())) throw new Error('shadow comparison time is invalid.');
 
   const traces=tracesInput.filter((trace)=>trace.kind==='STRATEGY'||trace.kind==='RECOVERY'||trace.kind==='OBSERVATION');
+  assertSingleRunCohort(traces);
   assertSinglePolicyCohort(traces.filter((trace)=>trace.mode==='SHADOW'),'shadow');
   assertSinglePolicyCohort(traces.filter((trace)=>trace.mode==='CONTROL'),'control');
 
@@ -117,7 +122,7 @@ function group(traces:DecisionTraceRecord[]):Map<string,DecisionTraceRecord[]>{
     const decisionPoint=trace.decisionPointId
       ? 'point:'+trace.decisionPointId
       : 'state:'+trace.inputStateDigest+'|'+trace.authoritySnapshotDigest;
-    const key=trace.taskId+'|'+trace.kind+'|'+decisionPoint;
+    const key=trace.runId+'|'+trace.taskId+'|'+trace.goalId+'|'+trace.kind+'|'+decisionPoint;
     const list=map.get(key)??[];
     list.push(trace);
     list.sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.decisionDigest.localeCompare(b.decisionDigest));
@@ -126,14 +131,23 @@ function group(traces:DecisionTraceRecord[]):Map<string,DecisionTraceRecord[]>{
   return map;
 }
 
+function assertSingleRunCohort(traces:DecisionTraceRecord[]):void{
+  const runs=new Set(traces.map((trace)=>trace.runId));
+  if(runs.size>1) throw new Error('Mixed evaluation run ids cannot be combined in one shadow comparison.');
+}
+
 function assertSinglePolicyCohort(traces:DecisionTraceRecord[],label:string):void{
   const versions=new Set(traces.map((trace)=>trace.policyVersion));
   if(versions.size>1) throw new Error('Mixed '+label+' policy versions cannot be combined in one shadow comparison.');
 }
 
 function validateOutcomeBinding(outcome:DecisionOutcome,trace:DecisionTraceRecord,now:Date):void{
+  if(outcome.runId!==trace.runId) throw new Error('Decision outcome run id does not match its trace.');
   if(outcome.taskId!==trace.taskId) throw new Error('Decision outcome task id does not match its trace.');
+  if(outcome.goalId!==trace.goalId) throw new Error('Decision outcome goal id does not match its trace.');
   if(outcome.decisionDigest!==trace.decisionDigest) throw new Error('Decision outcome digest does not match its trace.');
+  if(outcome.verificationReceipt.runId!==trace.runId) throw new Error('Decision verification receipt run id does not match its trace.');
+  if(outcome.verificationReceipt.goalId!==trace.goalId) throw new Error('Decision verification receipt goal id does not match its trace.');
   if(outcome.verificationReceipt.authoritySnapshotDigest!==trace.authoritySnapshotDigest){
     throw new Error('Decision outcome authority snapshot does not match its trace.');
   }
@@ -145,20 +159,24 @@ function validateOutcomeBinding(outcome:DecisionOutcome,trace:DecisionTraceRecor
 
 function normalizeOutcome(input:DecisionOutcome,now:Date):DecisionOutcome{
   if(!input||typeof input!=='object') throw new Error('decision outcome is required.');
+  const runId=bounded(input.runId,512,'decision outcome runId');
   const taskId=bounded(input.taskId,512,'decision outcome taskId');
+  const goalId=bounded(input.goalId,256,'decision outcome goalId');
   const decisionDigest=sha256(input.decisionDigest,'decisionDigest');
   if(!input.verificationReceipt||typeof input.verificationReceipt!=='object'){
     throw new Error('Authoritative decision outcome verification receipt is required.');
   }
   const receipt:DecisionOutcomeVerificationReceiptRef={
     digest:sha256(input.verificationReceipt.digest,'verificationReceipt.digest'),
+    runId:bounded(input.verificationReceipt.runId,512,'verificationReceipt.runId'),
+    goalId:bounded(input.verificationReceipt.goalId,256,'verificationReceipt.goalId'),
     verifierId:bounded(input.verificationReceipt.verifierId,512,'verificationReceipt.verifierId'),
     verifiedAt:validIso(input.verificationReceipt.verifiedAt,'verificationReceipt.verifiedAt'),
     authoritySnapshotDigest:sha256(input.verificationReceipt.authoritySnapshotDigest,'verificationReceipt.authoritySnapshotDigest'),
     outcome:outcomeValue(input.verificationReceipt.outcome)
   };
   if(Date.parse(receipt.verifiedAt)>now.getTime()) throw new Error('Decision outcome verification cannot be future-dated.');
-  const normalized:DecisionOutcome={taskId,decisionDigest,verificationReceipt:receipt};
+  const normalized:DecisionOutcome={runId,taskId,goalId,decisionDigest,verificationReceipt:receipt};
   if(input.progressScore!==undefined){
     const value=Number(input.progressScore); if(!Number.isFinite(value)) throw new Error('progressScore is invalid.'); normalized.progressScore=value;
   }
