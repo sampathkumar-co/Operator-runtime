@@ -51,3 +51,27 @@ test('state cannot rehydrate against a different plan version',()=>{
   const g2=graph(); g2.version=2;
   assert.throws(()=>new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),g2),state),/different goal\/plan lineage/);
 });
+
+test('belief refresh cannot reopen an executed mutation awaiting verification',()=>{
+  const runtime=new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),graph()));
+  runtime.startNode('observe','2026-10-05T10:00:00.000Z');
+  runtime.recordExecution('observe',{
+    changedFactKeys:['state.observed'],supportedFactKeys:['state.observed'],contradictedFactKeys:[],
+    executionOk:true,sideEffectState:'none'
+  },'2026-10-05T10:00:01.000Z');
+  runtime.bindBeliefs([belief('state.observed')],'2026-10-05T10:00:02.000Z');
+  runtime.startNode('act','2026-10-05T10:00:03.000Z');
+  runtime.recordExecution('act',{
+    changedFactKeys:['change.applied'],supportedFactKeys:['change.applied'],contradictedFactKeys:[],
+    executionOk:true,sideEffectState:'known'
+  },'2026-10-05T10:00:04.000Z');
+  assert.equal(runtime.states().find(s=>s.nodeId==='act')?.status,'BLOCKED');
+  runtime.bindBeliefs([belief('state.observed')],'2026-10-05T10:00:05.000Z');
+  assert.equal(runtime.states().find(s=>s.nodeId==='act')?.status,'BLOCKED');
+});
+
+test('belief rebinding is forbidden while an execution is running',()=>{
+  const runtime=new VerifiedPlanRuntime(goal(),validatePlanGraph(goal(),graph()));
+  runtime.startNode('observe');
+  assert.throws(()=>runtime.bindBeliefs([]),/forbidden while an execution node is running/);
+});
