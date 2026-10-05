@@ -6,6 +6,9 @@ import { canonicalJson } from './versioned-state.ts';
 
 export interface PolicyPromotionCriteria {
   minPairedDecisions:number;
+  minCandidateTasks:number;
+  minBaselineTasks:number;
+  minCalibrationSamples:number;
   minOutcomeCoverage:number;
   minProgressCoverage:number;
   minCostCoverage:number;
@@ -53,6 +56,9 @@ export function assessPolicyPromotion(
   const criteria=normalizeCriteria(criteriaInput);
   const checks:PromotionGateCheck[]=[
     check('paired-decisions',evidence.shadow.pairedDecisions>=criteria.minPairedDecisions,evidence.shadow.pairedDecisions,'>= '+criteria.minPairedDecisions),
+    check('candidate-task-sample',evidence.candidateMetrics.taskCount>=criteria.minCandidateTasks,evidence.candidateMetrics.taskCount,'>= '+criteria.minCandidateTasks),
+    check('baseline-task-sample',evidence.baselineMetrics.taskCount>=criteria.minBaselineTasks,evidence.baselineMetrics.taskCount,'>= '+criteria.minBaselineTasks),
+    check('calibration-sample',evidence.calibration.samples>=criteria.minCalibrationSamples,evidence.calibration.samples,'>= '+criteria.minCalibrationSamples),
     check('outcome-coverage',evidence.shadow.outcomeCoverage>=criteria.minOutcomeCoverage,evidence.shadow.outcomeCoverage,'>= '+criteria.minOutcomeCoverage),
     check('progress-coverage',evidence.shadow.progressCoverage>=criteria.minProgressCoverage,evidence.shadow.progressCoverage,'>= '+criteria.minProgressCoverage),
     check('cost-coverage',evidence.shadow.costCoverage>=criteria.minCostCoverage,evidence.shadow.costCoverage,'>= '+criteria.minCostCoverage),
@@ -129,6 +135,9 @@ function normalizeCriteria(input:PolicyPromotionCriteria):PolicyPromotionCriteri
   if(!input||typeof input!=='object') throw new Error('promotion criteria are required.');
   return{
     minPairedDecisions:integer(input.minPairedDecisions,1,10_000_000,'minPairedDecisions'),
+    minCandidateTasks:integer(input.minCandidateTasks,1,10_000_000,'minCandidateTasks'),
+    minBaselineTasks:integer(input.minBaselineTasks,1,10_000_000,'minBaselineTasks'),
+    minCalibrationSamples:integer(input.minCalibrationSamples,1,100_000_000,'minCalibrationSamples'),
     minOutcomeCoverage:unit(input.minOutcomeCoverage,'minOutcomeCoverage'),
     minProgressCoverage:unit(input.minProgressCoverage,'minProgressCoverage'),
     minCostCoverage:unit(input.minCostCoverage,'minCostCoverage'),
