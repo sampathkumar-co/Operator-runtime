@@ -35,14 +35,26 @@ export function selectObservation(
     ? Number.POSITIVE_INFINITY
     : boundedNumber(options.remainingCostBudget, 0, Number.MAX_SAFE_INTEGER, 'remainingCostBudget');
 
-  const ranked = candidatesInput.map(normalizeCandidate).map((candidate) => {
-    if (candidate.mutating) throw new Error('Adaptive observation policy accepts read-only observation candidates only.');
+  const normalizedCandidates = candidatesInput.map(normalizeCandidate);
+  if (normalizedCandidates.some((candidate) => candidate.mutating)) {
+    throw new Error('Adaptive observation policy accepts read-only observation candidates only.');
+  }
+  const eligibleCandidates = budget === Number.POSITIVE_INFINITY
+    ? normalizedCandidates
+    : normalizedCandidates.filter((candidate) => candidate.expectedCost <= budget);
+  if (eligibleCandidates.length === 0) {
+    throw new Error('No read-only observation candidate fits the remaining cost budget.');
+  }
+
+  const ranked = eligibleCandidates.map((candidate) => {
     const relevantUncertainty = candidate.resolvesFacts.reduce((sum, fact) => sum + (unresolved.get(fact) ?? 0), 0);
     const structureBonus = channelPriority(candidate.channel) * 0.12;
     const localBonus = candidate.targetLocal ? 0.08 : 0;
-    const costPenalty = budget === Number.POSITIVE_INFINITY || budget === 0
+    const costPenalty = budget === Number.POSITIVE_INFINITY
       ? Math.min(1, candidate.expectedCost / 100) * 0.12
-      : Math.min(2, candidate.expectedCost / Math.max(1, budget)) * 0.15;
+      : budget === 0
+        ? 0
+        : Math.min(2, candidate.expectedCost / budget) * 0.15;
     const irrelevantPenalty = relevantUncertainty === 0 ? 0.25 : 0;
     const fullVisualPenalty = candidate.channel === 'visual' && !candidate.targetLocal ? 0.08 : 0;
     const score =
