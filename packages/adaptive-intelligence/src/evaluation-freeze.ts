@@ -19,8 +19,11 @@ export interface EvaluationFreezeInput {
 }
 
 export interface EvaluationFreezeManifest extends EvaluationFreezeInput {
+  /** Stable configuration identity; intentionally excludes freeze time. */
   manifestDigest: string;
   frozenAt: string;
+  /** Integrity digest for this specific freeze record, including frozenAt. */
+  recordDigest: string;
 }
 
 export function createEvaluationFreezeManifest(
@@ -31,7 +34,9 @@ export function createEvaluationFreezeManifest(
   const manifestDigest=digestInput(normalized);
   const frozenAt=(options.clock??(()=>new Date()))();
   if(!Number.isFinite(frozenAt.getTime())) throw new Error('evaluation freeze clock returned an invalid date.');
-  return {...normalized,manifestDigest,frozenAt:frozenAt.toISOString()};
+  const frozenAtIso=frozenAt.toISOString();
+  const recordDigest=freezeRecordDigest(manifestDigest,frozenAtIso);
+  return {...normalized,manifestDigest,frozenAt:frozenAtIso,recordDigest};
 }
 
 export function verifyEvaluationFreezeManifest(
@@ -41,9 +46,11 @@ export function verifyEvaluationFreezeManifest(
     if(!input||typeof input!=='object') return false;
     const normalized=normalizeInput(input);
     const supplied=sha256(input.manifestDigest,'manifestDigest');
-    validIso(input.frozenAt,'frozenAt');
+    const frozenAt=validIso(input.frozenAt,'frozenAt');
+    const suppliedRecord=sha256(input.recordDigest,'recordDigest');
     const expected=digestInput(normalized);
-    return timingSafeHexEqual(expected,supplied);
+    if(!timingSafeHexEqual(expected,supplied)) return false;
+    return timingSafeHexEqual(freezeRecordDigest(supplied,frozenAt),suppliedRecord);
   }catch{
     return false;
   }
@@ -83,6 +90,10 @@ function normalizeInput(input:EvaluationFreezeInput):EvaluationFreezeInput{
     }:{}),
     ...(input.seed!==undefined?{seed:boundedSeed(input.seed)}:{})
   };
+}
+
+function freezeRecordDigest(manifestDigest:string,frozenAt:string):string{
+  return crypto.createHash('sha256').update(JSON.stringify({manifestDigest,frozenAt})).digest('hex');
 }
 
 function digestInput(input:EvaluationFreezeInput):string{
