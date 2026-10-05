@@ -17,6 +17,8 @@ export interface DecodeStateOptions<T> {
   kind: string;
   validate: (payload: unknown) => T;
   acceptedVersions?: number[];
+  now?: Date;
+  maxFutureSkewMs?: number;
 }
 
 export function encodeVersionedState<T>(
@@ -59,6 +61,12 @@ export function decodeVersionedState<T>(
   const kind = bounded(raw.kind, 256, 'kind');
   if (kind !== options.kind) throw new Error('Adaptive state kind mismatch.');
   const createdAt = validIso(raw.createdAt, 'createdAt');
+  const now = options.now ?? new Date();
+  if (!Number.isFinite(now.getTime())) throw new Error('Adaptive state decode time is invalid.');
+  const maxFutureSkewMs = integer(options.maxFutureSkewMs ?? 0, 0, Number.MAX_SAFE_INTEGER, 'maxFutureSkewMs');
+  if (Date.parse(createdAt) > now.getTime() + maxFutureSkewMs) {
+    throw new Error('Adaptive state envelope cannot be future-dated.');
+  }
   const payloadDigest = sha256(raw.payloadDigest, 'payloadDigest');
   const envelopeDigest = sha256(raw.envelopeDigest, 'envelopeDigest');
 
@@ -147,6 +155,11 @@ function bounded(input: unknown, max: number, label: string): string {
 function sha256(input: unknown, label: string): string {
   const value = String(input ?? '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new Error(label + ' must be SHA-256.');
+  return value;
+}
+function integer(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(label + ' is invalid.');
   return value;
 }
 function validIso(input: unknown, label: string): string {
