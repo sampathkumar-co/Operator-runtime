@@ -18,6 +18,8 @@ export class PromotionLedger {
   #entries:PromotionLedgerEntry[]=[];
   #verificationOwner=new Map<string,string>();
   #runFingerprint=new Map<string,string>();
+  #skillFingerprint=new Map<string,string>();
+  #fingerprintSkill=new Map<string,string>();
   #claimDigests=new Set<string>();
   #clock:()=>Date;
   #maxEntries:number;
@@ -39,6 +41,15 @@ export class PromotionLedger {
     };
     if(claim.sourceRunIds.length===0||claim.verificationDigests.length===0){
       throw new Error('Promotion claim requires source runs and verification digests.');
+    }
+
+    const priorFingerprint=this.#skillFingerprint.get(claim.skillId);
+    if(priorFingerprint&&priorFingerprint!==skillFingerprint){
+      throw new Error('Skill id cannot be rebound to a different semantic fingerprint.');
+    }
+    const priorSkill=this.#fingerprintSkill.get(skillFingerprint);
+    if(priorSkill&&priorSkill!==claim.skillId){
+      throw new Error('Semantic skill fingerprint cannot be aliased to a different skill id.');
     }
 
     for(const digest of claim.verificationDigests){
@@ -64,6 +75,8 @@ export class PromotionLedger {
 
     for(const digest of claim.verificationDigests) this.#verificationOwner.set(digest,skillFingerprint);
     for(const runId of claim.sourceRunIds) this.#runFingerprint.set(runId,skillFingerprint);
+    this.#skillFingerprint.set(claim.skillId,skillFingerprint);
+    this.#fingerprintSkill.set(skillFingerprint,claim.skillId);
     this.#claimDigests.add(claimDigest);
 
     const entry:PromotionLedgerEntry={...claim,claimDigest,recordedAt:this.#clock().toISOString()};
@@ -77,6 +90,10 @@ export class PromotionLedger {
 
   verificationOwner(digestInput:string):string|undefined{
     return this.#verificationOwner.get(sha256(digestInput,'verificationDigest'));
+  }
+
+  fingerprintForSkill(skillIdInput:string):string|undefined{
+    return this.#skillFingerprint.get(bounded(skillIdInput,256,'skillId'));
   }
 }
 
