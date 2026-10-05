@@ -62,12 +62,13 @@ export function searchCounterfactualPlans(
   if(!goal.length) throw new Error('lookahead requires at least one success fact.');
   const forbidden=new Set(unique(forbiddenFactKeys.map((v)=>bounded(v,512,'forbiddenFactKey'))));
 
-  let frontier:Frontier[]=[{
+  const initialFrontier:Frontier={
     facts:new Set(unique(initial.facts.map((v)=>bounded(v,512,'initial.fact')))),
     operatorIds:[],success:1,infoComplement:1,cost:0,riskComplement:1,verificationTotal:0,reversibleCount:0
-  }];
+  };
+  let frontier:Frontier[]=[initialFrontier];
   const completed:Frontier[]=[];
-  const bestByState=new Map<string,number>();
+  const paretoByState=new Map<string,Frontier[]>([[stateSignature(initialFrontier.facts),[initialFrontier]]]);
   let expanded=0;
 
   for(let depth=0;depth<maxDepth&&frontier.length;depth+=1){
@@ -95,10 +96,11 @@ export function searchCounterfactualPlans(
         };
         expanded+=1;
         const signature=stateSignature(successor.facts);
-        const heuristic=scoreFrontier(successor,goal);
-        const previous=bestByState.get(signature);
-        if(previous!==undefined&&previous>=heuristic) continue;
-        bestByState.set(signature,heuristic);
+        const existing=paretoByState.get(signature)??[];
+        if(existing.some((candidate)=>dominates(candidate,successor))) continue;
+        const survivors=existing.filter((candidate)=>!dominates(successor,candidate));
+        survivors.push(successor);
+        paretoByState.set(signature,survivors);
         if(goal.every((f)=>facts.has(f))) completed.push(successor);
         else next.push(successor);
       }
@@ -114,6 +116,33 @@ export function searchCounterfactualPlans(
   }).slice(0,beamWidth);
 }
 
+function dominates(a:Frontier,b:Frontier):boolean{
+  const aRisk=1-a.riskComplement;
+  const bRisk=1-b.riskComplement;
+  const aInfo=1-a.infoComplement;
+  const bInfo=1-b.infoComplement;
+  const aVerification=verificationAverage(a);
+  const bVerification=verificationAverage(b);
+  const aReversible=reversibleFraction(a);
+  const bReversible=reversibleFraction(b);
+  const noWorse=
+    a.cost<=b.cost &&
+    aRisk<=bRisk &&
+    a.success>=b.success &&
+    aInfo>=bInfo &&
+    aVerification>=bVerification &&
+    aReversible>=bReversible;
+  if(!noWorse) return false;
+  return a.cost<b.cost || aRisk<bRisk || a.success>b.success || aInfo>bInfo ||
+    aVerification>bVerification || aReversible>bReversible;
+}
+
+function verificationAverage(item:Frontier):number{
+  return item.operatorIds.length?item.verificationTotal/item.operatorIds.length:0;
+}
+function reversibleFraction(item:Frontier):number{
+  return item.operatorIds.length?item.reversibleCount/item.operatorIds.length:1;
+}
 function toPlan(item:Frontier,goal:string[],index:number):LookaheadPlan{
   const steps=Math.max(1,item.operatorIds.length);
   return {
@@ -135,14 +164,14 @@ function toPlan(item:Frontier,goal:string[],index:number):LookaheadPlan{
 function scoreFrontier(item:Frontier,goal:string[]):number{
   const coverage=goal.filter((f)=>item.facts.has(f)).length/goal.length;
   return coverage*.5+item.success*.2+(1-item.infoComplement)*.08+
-    (item.operatorIds.length?item.verificationTotal/item.operatorIds.length:0)*.1-
-    (1-item.riskComplement)*.1-Math.min(1,item.cost/100)*.02;
+    verificationAverage(item)*.1-(1-item.riskComplement)*.1-Math.min(1,item.cost/100)*.02;
 }
 function branchUtility(c:PlanBranchCandidate):number{
   return c.expectedSuccess*.45+c.verificationStrength*.16+c.expectedInformationGain*.1+c.reversibleFraction*.07-c.risk*.16-c.uncertainty*.08-Math.min(1,c.expectedCost/100)*.04;
 }
 function normalizeOperator(input:PlanningOperator):PlanningOperator{
   if(!input||typeof input!=='object') throw new Error('planning operator is required.');
+  if(!Array.isArray(input.requires)||!Array.isArray(input.adds)||!Array.isArray(input.removes)) throw new Error('planning operator fact lists are invalid.');
   return {
     id:bounded(input.id,256,'operator.id'),
     requires:unique(input.requires.map((v)=>bounded(v,512,'operator.requires'))),
