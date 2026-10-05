@@ -272,11 +272,21 @@ function step(index:number,effect:string,failed:boolean):TrajectoryStep{
   };
 }
 
+function finalMetricReceipt(goalId:string){
+  return{
+    digest:C,
+    goalId,
+    verifierId:'verification-kernel',
+    verifiedAt:T0,
+    authoritySnapshotDigest:D
+  };
+}
+
 test('same action family on different expected effects is not counted as repeated equivalent failure',()=>{
   const result=computeIntelligenceMetrics([{
     taskId:'task',
-    steps:[step(0,'left.changed',true),step(1,'right.changed',true)],
-    finalVerifiedSuccess:false
+    goalId:'goal-task',
+    steps:[step(0,'left.changed',true),step(1,'right.changed',true)]
   }]);
   assert.equal(result.repeatedEquivalentFailureRate,0);
 });
@@ -284,8 +294,9 @@ test('same action family on different expected effects is not counted as repeate
 test('eventual success after any failure is recovery success, not first-strategy success',()=>{
   const result=computeIntelligenceMetrics([{
     taskId:'task',
+    goalId:'goal-task',
     steps:[step(0,'phase.one',true),step(1,'phase.two',true),step(2,'goal.done',false)],
-    finalVerifiedSuccess:true
+    finalVerificationReceipt:finalMetricReceipt('goal-task')
   }]);
   assert.equal(result.firstStrategySuccessRate,0);
   assert.equal(result.recoverySuccessRate,1);
