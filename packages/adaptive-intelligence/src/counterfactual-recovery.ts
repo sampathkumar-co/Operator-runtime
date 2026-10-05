@@ -17,37 +17,71 @@ export function selectRecovery(input: RecoverySelectionInput): RecoveryDecision 
   }
   const options = input.options.map(normalizeOption);
   const primary = input.attribution.primary.class;
+  const budget = input.remainingCostBudget === undefined
+    ? Number.POSITIVE_INFINITY
+    : boundedNumber(input.remainingCostBudget, 0, Number.MAX_SAFE_INTEGER, 'remainingCostBudget');
 
   if (primary === 'AUTHORITY_DENIED' || primary === 'BUDGET_EXHAUSTED') {
     const failSafe = options.find((item) => item.kind === 'FAIL_SAFE');
     if (!failSafe) {
       throw new Error('Fail-safe recovery is mandatory for authority or budget failures.');
     }
-    return decision(failSafe, options, 'Authority/budget failure cannot be repaired by adaptive execution.');
+    return decision(
+      failSafe,
+      options,
+      'Authority/budget failure cannot be repaired by adaptive execution; execution stops safely.'
+    );
   }
 
   if (primary === 'SIDE_EFFECT_UNCERTAIN') {
-    const reconcile = options.find((item) => item.kind === 'RECONCILE');
-    if (!reconcile) {
-      throw new Error('Reconciliation recovery is mandatory when mutation side effects are uncertain.');
+    const affordableReconcile = options.find(
+      (item) => item.kind === 'RECONCILE' && fitsBudget(item, budget)
+    );
+    if (affordableReconcile) {
+      return decision(
+        affordableReconcile,
+        options,
+        'Uncertain mutation side effects require affordable reconciliation before any replay or alternate mutation.'
+      );
     }
-    return decision(reconcile, options, 'Uncertain mutation side effects require reconciliation before any replay or alternate mutation.');
+    const failSafe = options.find((item) => item.kind === 'FAIL_SAFE');
+    if (failSafe) {
+      return decision(
+        failSafe,
+        options,
+        'Reconciliation is mandatory for uncertain side effects, but no reconciliation option fits the remaining budget; failing safe.'
+      );
+    }
+    throw new Error('No affordable reconciliation or fail-safe recovery is available for uncertain side effects.');
   }
 
-  const budget = input.remainingCostBudget === undefined
-    ? Number.POSITIVE_INFINITY
-    : boundedNumber(input.remainingCostBudget, 0, Number.MAX_SAFE_INTEGER, 'remainingCostBudget');
+  const eligibleOptions = budget === Number.POSITIVE_INFINITY
+    ? options
+    : options.filter((option) => fitsBudget(option, budget));
+  if (eligibleOptions.length === 0) {
+    const failSafe = options.find((item) => item.kind === 'FAIL_SAFE');
+    if (failSafe) {
+      return decision(
+        failSafe,
+        options,
+        'No normal recovery option fits the remaining cost budget; failing safe.'
+      );
+    }
+    throw new Error('No recovery option fits the remaining cost budget.');
+  }
 
   const probability = new Map<FailureClass, number>([
     [input.attribution.primary.class, input.attribution.primary.probability],
     ...input.attribution.alternatives.map((item) => [item.class, item.probability] as const)
   ]);
 
-  const scored = options.map((option) => {
+  const scored = eligibleOptions.map((option) => {
     const coveredProbability = option.resolvesHypotheses.reduce((sum, cls) => sum + (probability.get(cls) ?? 0), 0);
-    const costPenalty = budget === Number.POSITIVE_INFINITY || budget === 0
+    const costPenalty = budget === Number.POSITIVE_INFINITY
       ? Math.min(1, option.expectedCost / 100) * 0.12
-      : Math.min(2, option.expectedCost / Math.max(1, budget)) * 0.15;
+      : budget === 0
+        ? 0
+        : Math.min(1, option.expectedCost / budget) * 0.15;
     const infoTerm = option.expectedInformationGain * (0.25 + input.attribution.entropy * 0.2);
     const score =
       option.expectedSuccess * 0.42
@@ -65,9 +99,13 @@ export function selectRecovery(input: RecoverySelectionInput): RecoveryDecision 
 
   const selected = scored[0]!.option;
   const reason = selected.resolvesHypotheses.includes(primary)
-    ? 'Selected recovery addresses the leading failure hypothesis while balancing information gain, cost, and risk.'
-    : 'Selected recovery maximizes expected information/success under current uncertainty without violating fail-safe constraints.';
+    ? 'Selected recovery addresses the leading failure hypothesis while respecting the hard cost budget.'
+    : 'Selected recovery maximizes expected information/success under current uncertainty without violating fail-safe or budget constraints.';
   return decision(selected, scored.map((item) => item.option), reason);
+}
+
+function fitsBudget(option: RecoveryOption, budget: number): boolean {
+  return budget === Number.POSITIVE_INFINITY || option.expectedCost <= budget;
 }
 
 function decision(selected: RecoveryOption, options: RecoveryOption[], reason: string): RecoveryDecision {
