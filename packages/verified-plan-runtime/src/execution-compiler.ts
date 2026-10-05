@@ -13,8 +13,12 @@ export function compileExecution(
 ):RankedExecutionCandidate[]{
   if(!Array.isArray(candidates)||candidates.length<1||candidates.length>100) throw new Error('execution candidates must contain 1-100 entries.');
   const budget=options.remainingCostBudget??Number.POSITIVE_INFINITY;
+  if(budget!==Number.POSITIVE_INFINITY&&(!Number.isFinite(budget)||budget<0)) throw new Error('remainingCostBudget is invalid.');
+  const maximumRisk=unit(options.maximumRisk??1,'maximumRisk');
+  if(node.risk>maximumRisk) throw new Error('plan node risk exceeds hard maximumRisk constraint.');
   const requireRollback=options.requireRollbackForMutation??false;
   const normalized=candidates.map(normalize);
+  if(new Set(normalized.map((candidate)=>candidate.id)).size!==normalized.length) throw new Error('execution candidate ids must be unique.');
   const allowed=new Set(node.allowedCapabilities);
   const eligible=normalized.filter((c)=>{
     if(!allowed.has(c.capability)) return false;
