@@ -1,4 +1,5 @@
-import type { ProgressLevel, TrajectoryStep } from './contracts.ts';
+import type { TrajectoryStep } from './contracts.ts';
+import { strategyFingerprint } from './strategy-engine.ts';
 
 export interface IntelligenceMetrics {
   taskCount:number;
@@ -27,7 +28,7 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
     averageStepsPerTask:0
   };
 
-  let firstStrategySuccesses=0;
+  let cleanFirstStrategySuccesses=0;
   let recoveryOpportunities=0;
   let recoverySuccesses=0;
   let claimedGoalProgress=0;
@@ -38,19 +39,17 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
 
   for(const record of records){
     totalSteps+=record.steps.length;
-    if(record.steps.length>0 && record.finalVerifiedSuccess && successfulProgress(record.steps[0]!.progress.level)){
-      firstStrategySuccesses+=1;
-    }
-
     let hadFailure=false;
-    const failedFamilies=new Map<string,number>();
+    const failedStrategies=new Map<string,number>();
+
     for(const step of record.steps){
-      const failed=Boolean(step.failure)||!step.outcome.ok||step.delta.expectedEffectsMissing.length>0;
+      const failed=isFailedStep(step);
       if(failed){
         failureEvents+=1;
         hadFailure=true;
-        const count=(failedFamilies.get(step.action.family)??0)+1;
-        failedFamilies.set(step.action.family,count);
+        const fingerprint=failureFingerprint(step);
+        const count=(failedStrategies.get(fingerprint)??0)+1;
+        failedStrategies.set(fingerprint,count);
         if(count>=2) repeatedFailureEvents+=1;
       }
       if(step.progress.level==='GOAL_ACHIEVED'){
@@ -58,6 +57,12 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
         if(!record.finalVerifiedSuccess) falseGoalProgress+=1;
       }
     }
+
+    // "First strategy success" is intentionally conservative: the task
+    // reached independently verified success without any failure/recovery
+    // event in its trajectory. A merely promising first action does not count.
+    if(record.finalVerifiedSuccess && !hadFailure) cleanFirstStrategySuccesses+=1;
+
     if(hadFailure){
       recoveryOpportunities+=1;
       if(record.finalVerifiedSuccess) recoverySuccesses+=1;
@@ -66,7 +71,7 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
 
   return {
     taskCount:records.length,
-    firstStrategySuccessRate:round(firstStrategySuccesses/records.length),
+    firstStrategySuccessRate:round(cleanFirstStrategySuccesses/records.length),
     recoverySuccessRate:round(recoverySuccesses/Math.max(1,recoveryOpportunities)),
     falseGoalProgressRate:round(falseGoalProgress/Math.max(1,claimedGoalProgress)),
     repeatedEquivalentFailureRate:round(repeatedFailureEvents/Math.max(1,failureEvents)),
@@ -74,8 +79,15 @@ export function computeIntelligenceMetrics(recordsInput:TaskTrajectoryRecord[]):
   };
 }
 
-function successfulProgress(level:ProgressLevel):boolean{
-  return level==='SUBGOAL_PROGRESS'||level==='GOAL_ACHIEVED';
+function isFailedStep(step:TrajectoryStep):boolean{
+  return Boolean(step.failure)||!step.outcome.ok||step.delta.expectedEffectsMissing.length>0;
+}
+function failureFingerprint(step:TrajectoryStep):string{
+  return strategyFingerprint({
+    family:step.action.strategyId ? 'strategy:'+step.action.strategyId : step.action.family,
+    requiresFacts:[],
+    expectedEffects:step.action.expectedEffects??[]
+  });
 }
 function normalizeRecord(input:TaskTrajectoryRecord):TaskTrajectoryRecord{
   if(!input||typeof input!=='object') throw new Error('task trajectory record is required.');
