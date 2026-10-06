@@ -45,6 +45,7 @@ import { ActionTransitionJournal } from '../../../src/core/action-transition-jou
 import { IntentRegistry } from '../../../src/core/intent-registry.ts';
 import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
+import { LOCAL_AGENT_DEFAULT_ALLOWED_CAPABILITIES } from './default-permissions.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -97,7 +98,7 @@ if (remoteLauncherIpc) {
   });
 }
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
+  allowedCapabilities: [...LOCAL_AGENT_DEFAULT_ALLOWED_CAPABILITIES],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
@@ -165,6 +166,7 @@ const runtime = createRuntime({
   browserDataDir: process.env.OPERATOR_BROWSER_DATA_DIR,
   windowsUiaPath: process.env.OPERATOR_WINDOWS_UIA_PATH,
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
+  developerWorktreeRoot: process.env.OPERATOR_DEVELOPER_WORKTREE_ROOT,
   perception
 });
 const agentKernel = new AgentKernel({

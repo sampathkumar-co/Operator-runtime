@@ -607,6 +607,65 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedRisk
   }, path));
 
+  server.registerTool('workspace.session', {
+    title: 'Manage a hermetic Developer Session worktree',
+    description: 'Provision, inspect, or release an exact-commit detached Git worktree bound to a durable Developer Session. Create requires an existing non-terminal session. Release is destructive-policy gated and requires a fresh fingerprint from inspect.',
+    inputSchema: z.object({
+      operation: z.enum(['create', 'inspect', 'release']),
+      sessionId: z.string().min(1).max(512).regex(/^[A-Za-z0-9._:@/+\-=]+$/),
+      repositoryRoot: z.string().min(1).max(32 * 1024),
+      baseCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i).optional(),
+      expectedFingerprint: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, sessionId, repositoryRoot, baseCommit, expectedFingerprint }) => {
+    if (operation === 'create' && !baseCommit) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.session create requires baseCommit.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'developer.worktree.create',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'DEVELOPER_WORKTREE_INPUT_REQUIRED', message: 'baseCommit is required for create.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    if (operation === 'release' && !expectedFingerprint) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.session release requires expectedFingerprint from a fresh inspect.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'developer.worktree.release',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'DEVELOPER_WORKTREE_PRECONDITION_REQUIRED', message: 'expectedFingerprint is required for release.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+
+    const capability = operation === 'create'
+      ? 'developer.worktree.create'
+      : operation === 'release'
+        ? 'developer.worktree.release'
+        : 'developer.worktree.inspect';
+    const risk = operation === 'create'
+      ? 'write'
+      : operation === 'release'
+        ? 'destructive'
+        : 'read';
+    return invoke(capability, risk, {
+      sessionId,
+      repositoryRoot,
+      ...(baseCommit ? { baseCommit } : {}),
+      ...(expectedFingerprint ? { expectedFingerprint } : {})
+    }, repositoryRoot);
+  });
+
   server.registerTool('workspace.edit.resolve', {
     title: 'Resolve LSP edits into a transactional workspace plan',
     description: 'Resolve versioned LSP text-document edits against exact current SHA-256 document bytes. This is read-only: it returns an immutable multi-file plan and affected-test hints; applying the plan requires a separate workspace.edit write action.',
