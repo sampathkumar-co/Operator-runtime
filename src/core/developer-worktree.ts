@@ -435,6 +435,12 @@ export class DeveloperWorktreeManager {
 
     const realWorktreeRoot = await fs.realpath(this.#worktreeRoot);
     const realStateDir = await fs.realpath(this.#stateDir);
+    // From this point forward derive every owned path from canonical roots.
+    // This avoids false ownership mismatches on platforms where temp/root
+    // ancestors are aliases (for example macOS /var -> /private/var) while
+    // still refusing a symlink/junction at the owned worktree leaf itself.
+    this.#worktreeRoot = realWorktreeRoot;
+    this.#stateDir = realStateDir;
     if (
       inside(realStateDir, realWorktreeRoot) ||
       inside(realWorktreeRoot, realStateDir)
