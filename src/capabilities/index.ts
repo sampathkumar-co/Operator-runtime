@@ -18,3 +18,4 @@ export * from './sandboxed-compute.ts';
 export * from './perception.ts';
 export * from './workspace-edit-transaction.ts';
 export * from './workspace-lsp-edit.ts';
+export * from './developer-worktree.ts';
