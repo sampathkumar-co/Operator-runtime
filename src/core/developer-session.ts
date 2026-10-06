@@ -32,6 +32,7 @@ const OPTIONS = {
   invalidMessage: 'Developer Session state is invalid.'
 } as const;
 const ID = /^[A-Za-z0-9._:@/+\-=]{1,512}$/;
+const LEGACY_FILENAME_SAFE_ID = /^[A-Za-z0-9._:@+\-=]{1,512}$/;
 
 export function createDeveloperSession(input: {
   objective: string;
@@ -106,41 +107,103 @@ export class DeveloperSessionStore {
   async put(sessionInput: DeveloperSession): Promise<void> {
     const session = normalizeDeveloperSession(sessionInput);
     await this.#init();
-    await writeDurableStateText(this.#file(session.id), JSON.stringify(session, null, 2), OPTIONS);
+    await writeDurableStateText(
+      this.#hashedFile(session.id),
+      JSON.stringify(session, null, 2),
+      OPTIONS
+    );
   }
 
   async get(idInput: string): Promise<DeveloperSession> {
     const id = validId(idInput, 'session id');
     await this.#init();
+
+    const hashed = this.#hashedFile(id);
     try {
-      return normalizeDeveloperSession(JSON.parse(await readDurableStateText(this.#file(id), OPTIONS)));
+      return await this.#readFile(hashed);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('DEVELOPER_SESSION_NOT_FOUND', `Developer Session ${id} was not found.`);
-      if (error instanceof OperatorError) throw error;
-      throw invalid('Developer Session could not be read.');
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        if (error instanceof OperatorError) throw error;
+        throw invalid('Developer Session could not be read.');
+      }
     }
+
+    const legacy = this.#legacyFile(id);
+    if (legacy) {
+      try {
+        return await this.#readFile(legacy);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          if (error instanceof OperatorError) throw error;
+          throw invalid('Developer Session could not be read.');
+        }
+      }
+    }
+
+    throw new OperatorError(
+      'DEVELOPER_SESSION_NOT_FOUND',
+      `Developer Session ${id} was not found.`
+    );
   }
 
   async list(limitInput = 100): Promise<DeveloperSession[]> {
     await this.#init();
-    const limit = Math.min(Math.max(Number.isSafeInteger(limitInput) ? limitInput : 100, 1), 1000);
-    const names = (await fs.readdir(this.#dir)).filter((name) => name.endsWith('.json')).sort();
-    const sessions: DeveloperSession[] = [];
+    const limit = Math.min(
+      Math.max(Number.isSafeInteger(limitInput) ? limitInput : 100, 1),
+      1000
+    );
+    const names = (await fs.readdir(this.#dir))
+      .filter((name) => name.endsWith('.json'))
+      .sort();
+
+    const byId = new Map<string, DeveloperSession>();
     for (const name of names) {
-      if (sessions.length >= limit) break;
-      const id = name.slice(0, -5);
-      sessions.push(await this.get(id));
+      const file = path.join(this.#dir, name);
+      let session: DeveloperSession;
+      try {
+        session = await this.#readFile(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      const prior = byId.get(session.id);
+      if (!prior || session.updatedAt > prior.updatedAt) byId.set(session.id, session);
     }
-    return sessions.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+
+    return [...byId.values()]
+      .sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+      .slice(0, limit);
+  }
+
+  async #readFile(file: string): Promise<DeveloperSession> {
+    try {
+      return normalizeDeveloperSession(
+        JSON.parse(await readDurableStateText(file, OPTIONS))
+      );
+    } catch (error) {
+      if (error instanceof SyntaxError) throw invalid('Developer Session contains invalid JSON.');
+      throw error;
+    }
   }
 
   async #init(): Promise<void> {
     await fs.mkdir(this.#dir, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(this.#dir);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw invalid('Developer Session state directory must be a real directory.');
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw invalid('Developer Session state directory must be a real directory.');
+    }
   }
 
-  #file(id: string): string { return path.join(this.#dir, `${validId(id,'session id')}.json`); }
+  #hashedFile(id: string): string {
+    const safeId = validId(id, 'session id');
+    const key = crypto.createHash('sha256').update(safeId, 'utf8').digest('hex');
+    return path.join(this.#dir, key + '.json');
+  }
+
+  #legacyFile(id: string): string | undefined {
+    if (!LEGACY_FILENAME_SAFE_ID.test(id)) return undefined;
+    return path.join(this.#dir, id + '.json');
+  }
 }
 
 export function updateDeveloperSession(
