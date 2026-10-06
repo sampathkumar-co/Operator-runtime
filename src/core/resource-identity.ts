@@ -25,6 +25,15 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     } else {
       add('file', input.path, keys);
     }
+  } else if (action.capability === 'workspace.edit.transaction' || action.capability === 'workspace.edit.verified') {
+    const root = input.workspaceRoot;
+    add('workspace', root, keys);
+    const files = (input.plan as { files?: Array<{ path?: unknown }> } | undefined)?.files;
+    if (typeof root === 'string' && Array.isArray(files)) {
+      for (const file of files.slice(0, 1000)) {
+        if (typeof file?.path === 'string') add('file', path.join(root, ...file.path.split('/')), keys);
+      }
+    }
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
@@ -66,6 +75,15 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
   if (action.capability.startsWith('file.')) {
     addPath(input.path); addPath(input.source); addPath(input.destination);
+  } else if (action.capability === 'workspace.edit.transaction' || action.capability === 'workspace.edit.verified') {
+    const root = input.workspaceRoot;
+    addPath(root);
+    const files = (input.plan as { files?: Array<{ path?: unknown }> } | undefined)?.files;
+    if (typeof root === 'string' && Array.isArray(files)) {
+      for (const file of files.slice(0, 1000)) {
+        if (typeof file?.path === 'string') addPath(path.join(root, ...file.path.split('/')));
+      }
+    }
   } else if (action.capability.startsWith('git.')) {
     addPath(input.cwd);
   } else if (action.capability.startsWith('project.')) {
