@@ -176,9 +176,8 @@ function resourceKeyList(input: unknown, max: number, label: string): string[] {
     const value = String(item ?? '');
     if (
       !value ||
-      value.includes('\0') ||
-      Buffer.byteLength(value, 'utf8') > 4096 ||
-      !/^[A-Za-z0-9._:@/+\-=\\]+$/.test(value)
+      /[\0\r\n]/.test(value) ||
+      Buffer.byteLength(value, 'utf8') > 4096
     ) {
       throw invalid(`${label} contains an invalid resource key.`);
     }
