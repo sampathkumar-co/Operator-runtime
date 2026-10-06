@@ -202,7 +202,7 @@ test('restart reconciliation rolls a partially applied transaction back to exact
   });
   const reconciled = await restarted.reconcile({ action: action('tx-recover', root, plan) });
 
-  assert.equal(reconciled.status, 'not_applied');
+  assert.equal(reconciled.status, 'not_applied', JSON.stringify(reconciled.evidence));
   assert.equal(await fs.readFile(targetA, 'utf8'), beforeA);
   assert.equal(await fs.readFile(targetB, 'utf8'), beforeB);
   for (const leftover of [backupA, tempA, discardA, backupB, tempB, discardB]) {
