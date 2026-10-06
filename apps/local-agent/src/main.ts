@@ -48,6 +48,7 @@ import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
 import { AdaptiveObservationShadowAdvisor } from '../../../src/core/adaptive-observation-shadow.ts';
 import { AdaptiveOutcomeShadowAdvisor } from '../../../src/core/adaptive-outcome-shadow.ts';
+import { AdaptivePlanNodeShadowAdvisor } from '../../../src/core/adaptive-plan-node-shadow.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -134,6 +135,7 @@ const optimizer = new ExecutionOptimizerStore(stateDir);
 const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
 const adaptiveObservationShadow = new AdaptiveObservationShadowAdvisor();
 const adaptiveOutcomeShadow = new AdaptiveOutcomeShadowAdvisor();
+const adaptivePlanNodeShadow = new AdaptivePlanNodeShadowAdvisor();
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const semanticMigration = new SemanticCheckpointManager(stateDir, {
   identity: deviceIdentity,
@@ -438,6 +440,7 @@ const taskOrchestrator = new TaskOrchestrator({
   actionJournal,
   intelligence: taskIntelligence,
   observationShadow: adaptiveObservationShadow,
+  planNodeShadow: adaptivePlanNodeShadow,
   outcomeShadow: adaptiveOutcomeShadow,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {

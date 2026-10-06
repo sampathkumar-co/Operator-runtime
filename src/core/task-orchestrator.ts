@@ -150,6 +150,30 @@ export interface TaskObservationShadowAdvisor {
   }): TaskObservationShadowRecommendation | undefined | Promise<TaskObservationShadowRecommendation | undefined>;
 }
 
+export interface TaskPlanNodeShadowRecommendation {
+  mode: 'SHADOW';
+  policyVersion: string;
+  selectedCapability: string;
+  controlCapability: string;
+  alternatives: Array<{ capability: string; utility: number; risk: number }>;
+  agreement: boolean;
+  decisionDigest: string;
+  authoritySnapshotDigest: string;
+  inputStateDigest: string;
+}
+
+export interface TaskPlanNodeShadowAdvisor {
+  recommend(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    risk: ActionRisk;
+    intelligence: TaskIntelligenceContext;
+    permissions: PermissionProfile;
+  }): TaskPlanNodeShadowRecommendation | undefined | Promise<TaskPlanNodeShadowRecommendation | undefined>;
+}
+
 export interface TaskOutcomeShadowAssessment {
   mode: 'SHADOW';
   policyVersion: string;
@@ -255,6 +279,7 @@ export class TaskOrchestrator {
   #monotonicNow: () => number;
   #intelligence?: TaskIntelligenceProvider;
   #observationShadow?: TaskObservationShadowAdvisor;
+  #planNodeShadow?: TaskPlanNodeShadowAdvisor;
   #outcomeShadow?: TaskOutcomeShadowAdvisor;
 
   constructor(options: {
@@ -270,6 +295,7 @@ export class TaskOrchestrator {
     monotonicNow?: () => number;
     intelligence?: TaskIntelligenceProvider;
     observationShadow?: TaskObservationShadowAdvisor;
+    planNodeShadow?: TaskPlanNodeShadowAdvisor;
     outcomeShadow?: TaskOutcomeShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
@@ -285,6 +311,7 @@ export class TaskOrchestrator {
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#intelligence = options.intelligence;
     this.#observationShadow = options.observationShadow;
+    this.#planNodeShadow = options.planNodeShadow;
     this.#outcomeShadow = options.outcomeShadow;
   }
 
@@ -673,6 +700,18 @@ export class TaskOrchestrator {
           observationShadowUnavailable = true;
         }
       }
+      let planNodeShadow: TaskPlanNodeShadowRecommendation | undefined;
+      let planNodeShadowUnavailable = false;
+      if (this.#planNodeShadow) {
+        try {
+          planNodeShadow = await this.#planNodeShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions)
+          });
+        } catch {
+          planNodeShadowUnavailable = true;
+        }
+      }
       let result: ActionResult | undefined;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
       let executionDispatched = false;
@@ -829,6 +868,26 @@ export class TaskOrchestrator {
       } else if (observationShadowUnavailable) {
         task.evidence.push(evidence('adaptive_observation_shadow', 'info', 'Adaptive observation shadow evaluation was unavailable; production control execution remained authoritative.', {
           mode: 'SHADOW', controlId: decision.capability, actualOk: result.ok
+        }));
+      }
+      if (planNodeShadow) {
+        task.evidence.push(evidence('adaptive_plan_node_shadow', 'info', 'Compared the production planner node with a non-executable low-risk plan-node recommendation.', {
+          mode: planNodeShadow.mode,
+          policyVersion: planNodeShadow.policyVersion,
+          decisionDigest: planNodeShadow.decisionDigest,
+          authoritySnapshotDigest: planNodeShadow.authoritySnapshotDigest,
+          inputStateDigest: planNodeShadow.inputStateDigest,
+          selectedCapability: planNodeShadow.selectedCapability,
+          controlCapability: planNodeShadow.controlCapability,
+          alternatives: planNodeShadow.alternatives,
+          agreement: planNodeShadow.agreement,
+          actualOk: result.ok,
+          actualProvider: result.provider,
+          ...(result.error ? { actualErrorCode: result.error.code } : {})
+        }));
+      } else if (planNodeShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_plan_node_shadow', 'info', 'Low-risk plan-node shadow evaluation was unavailable; the production planner node remained authoritative.', {
+          mode: 'SHADOW', controlCapability: decision.capability, actualOk: result.ok
         }));
       }
       const productionFailure = result.ok ? undefined : classifyTaskFailure(result.error);
