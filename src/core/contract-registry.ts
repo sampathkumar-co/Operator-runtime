@@ -15,6 +15,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'durable-task-plan', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'execution-context-identity', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'evaluation-state', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'evaluation' },
+  { name: 'shadow-decision', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'evaluation' },
   { name: 'action-request', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'evidence', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' }
 ] satisfies readonly ContractRegistration[]);
