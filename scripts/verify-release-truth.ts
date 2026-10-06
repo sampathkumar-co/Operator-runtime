@@ -98,12 +98,18 @@ export function validateReleaseTruthEvidence(input: {
   requireEqual(runtimeVersion, RELEASE_TRUTH.source.runtimePackageVersion, 'source runtime package version');
   requireEqual(bootstrapVersion, RELEASE_TRUTH.source.bootstrapPackageVersion, 'source bootstrap package version');
 
+  const recordedProductionSource = requireSha(input.releaseState.production?.sourceCommit, 'recorded production source commit');
+  const recordedPublicMcp = requireHttps(input.releaseState.production?.publicMcp, 'recorded production public MCP');
+  const recordedDeveloperMcp = requireHttps(input.releaseState.production?.developerMcp, 'recorded production developer MCP');
+  const recordedPublicVersion = requireSemver(input.releaseState.versions?.publicProduct, 'recorded production public surface version');
+  const recordedRuntimeVersion = requireSemver(input.releaseState.versions?.runtimePackage, 'recorded production runtime package version');
+
   requireEqual(input.releaseState.statusDate, RELEASE_TRUTH.production.statusDate, 'production status date');
-  requireEqual(input.releaseState.production?.sourceCommit?.toLowerCase(), productionSource, 'production source commit');
-  requireEqual(input.releaseState.production?.publicMcp, publicMcp, 'production public MCP');
-  requireEqual(input.releaseState.production?.developerMcp, developerMcp, 'production developer MCP');
-  requireEqual(input.releaseState.versions?.publicProduct, publicVersion, 'production public surface version');
-  requireEqual(input.releaseState.versions?.runtimePackage, productionRuntimeVersion, 'production runtime package version');
+  requireEqual(recordedProductionSource, productionSource, 'production source commit');
+  requireEqual(recordedPublicMcp, publicMcp, 'production public MCP');
+  requireEqual(recordedDeveloperMcp, developerMcp, 'production developer MCP');
+  requireEqual(recordedPublicVersion, publicVersion, 'production public surface version');
+  requireEqual(recordedRuntimeVersion, productionRuntimeVersion, 'production runtime package version');
   requireEqual(input.releaseState.versions?.runtimeTag, RELEASE_TRUTH.production.runtimeTag, 'production runtime tag');
 
   const headCommit = input.headCommit === undefined || input.headCommit === null
