@@ -45,7 +45,7 @@ export class PathScope {
 
   async withExisting<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
     const absolute = this.#absolute(inputPath);
-    const root = process.platform === 'win32' ? this.#lexicalRoot(absolute) : this.roots[0]!;
+    const root = await this.#leaseRoot(absolute);
     return await withWindowsPathLease({
       root,
       target: absolute,
@@ -56,7 +56,7 @@ export class PathScope {
 
   async withForWrite<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
     const absolute = this.#absolute(inputPath);
-    const root = process.platform === 'win32' ? this.#lexicalRoot(absolute) : this.roots[0]!;
+    const root = await this.#leaseRoot(absolute);
     const parentPath = path.dirname(absolute);
     try {
       const parentStat = await fs.lstat(parentPath);
@@ -95,6 +95,28 @@ export class PathScope {
       throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative path escapes the authorized root.');
     }
     return resolved;
+  }
+
+  async #leaseRoot(absolute: string): Promise<string> {
+    if (process.platform !== 'win32') return this.roots[0]!;
+
+    const lexicalCandidates = this.roots.filter((root) => lexicalInside(absolute, root));
+    lexicalCandidates.sort((a, b) => b.length - a.length);
+    if (lexicalCandidates[0]) return lexicalCandidates[0];
+
+    // Windows realpath may canonicalize an authorized root through a different
+    // case, long/short-name representation, or junction-resolved spelling.
+    // Accept only aliases that are themselves the realpath of an authorized
+    // root; the native path-lease helper still performs the race-resistant
+    // authority check before the operation executes.
+    const canonicalRoots = await Promise.all(this.roots.map(async (root) => {
+      try { return await fs.realpath(root); } catch { return root; }
+    }));
+    const canonicalCandidates = canonicalRoots.filter((root) => lexicalInside(absolute, root));
+    canonicalCandidates.sort((a, b) => b.length - a.length);
+    if (canonicalCandidates[0]) return canonicalCandidates[0];
+
+    throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Requested path escapes the authorized roots.');
   }
 
   #lexicalRoot(absolute: string): string {
