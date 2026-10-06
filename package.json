@@ -42,17 +42,9 @@
     "typecheck:production": "node apps/mcp-server/node_modules/typescript/bin/tsc -p tsconfig.production.json",
     "verify:r1-source": "node --experimental-strip-types scripts/verify-r1-canonical-source.ts",
     "evidence:r1": "node --experimental-strip-types scripts/generate-r1-release-evidence.ts",
-    "test:r2": "node --experimental-strip-types --test test/adaptive-planning-shadow.test.ts test/adaptive-planning-control.test.ts"
+    "test:r2": "node --experimental-strip-types --test test/adaptive-planning-shadow.test.ts test/adaptive-planning-control.test.ts test/r2-promotion-evidence-bridge.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",
-  "workspaces": [
-    "apps/mcp-server",
-    "apps/relay-server",
-    "deploy/auth-portal",
-    "packages/adaptive-intelligence",
-    "packages/mecord-connect",
-    "packages/operator-runtime-cli",
-    "packages/verified-plan-runtime"
-  ]
+  "mecordWorkspaceLayout": "./workspace-layout.json"
 }

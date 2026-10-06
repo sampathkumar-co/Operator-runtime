@@ -52,6 +52,8 @@ import { AdaptivePlanNodeShadowAdvisor } from '../../../src/core/adaptive-plan-n
 import { AdaptiveRecoveryShadowAdvisor } from '../../../src/core/adaptive-recovery-shadow.ts';
 import { AdaptiveModalityShadowAdvisor } from '../../../src/core/adaptive-modality-shadow.ts';
 import { AdaptiveStrategyShadowAdvisor } from '../../../src/core/adaptive-strategy-shadow.ts';
+import { createLocalStateComponents } from './state-components.ts';
+import { LocalRuntimeLifecycle } from './runtime-lifecycle.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -72,7 +74,7 @@ const terminalAllowedExecutables = (process.env.OPERATOR_TERMINAL_ALLOWED_EXECUT
   .filter(Boolean);
 
 const token = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
-if (!token || token.length < 32) {
+if (token.length < 32) {
   console.error('[operator] OPERATOR_AGENT_TOKEN must be set to a secret of at least 32 characters.');
   process.exit(2);
 }
@@ -111,47 +113,39 @@ const permissions = {
   allowSystemChanges: false,
   allowDestructive: false
 };
-const emergencyStop = new EmergencyStopStore(stateDir);
+const {
+  emergencyStop,
+  approvals,
+  actionExecutions,
+  sessionApprovals,
+  audit,
+  tasks,
+  resourceLeases,
+  actionJournal,
+  intentRegistry,
+  procedures,
+  world,
+  perception,
+  optimizer,
+  taskIntelligence,
+  deviceIdentity,
+  deviceRegistry,
+  semanticMigration,
+  deviceRouting,
+  devicePool,
+  enterprisePolicy,
+  events,
+  privacy
+} = await createLocalStateComponents(stateDir);
 const startupEmergencyStatus = await emergencyStop.status();
 let emergencyExecutionGeneration = new AbortController();
 if (startupEmergencyStatus.engaged) emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
-const approvals = new ApprovalStore(stateDir);
-const actionExecutions = new LocalActionExecutionStore(stateDir);
-const sessionApprovals = new SessionApprovalStore();
-const deviceIdentity = new DeviceIdentityStore(stateDir);
-const localDeviceIdentity = await deviceIdentity.loadOrCreate();
-const audit = new AuditLog(stateDir, {
-  authenticator: {
-    keyId: localDeviceIdentity.fingerprint,
-    sign: async (payload) => await deviceIdentity.sign(payload),
-    verify: async (payload, signature) => await deviceIdentity.verify(payload, signature)
-  }
-});
-const tasks = new TaskStore(stateDir);
-const resourceLeases = new ResourceLeaseStore(stateDir);
-const actionJournal = new ActionTransitionJournal(stateDir);
-const intentRegistry = new IntentRegistry(stateDir);
-const procedures = new ProcedureMemoryStore(stateDir);
-const world = new WorldModelStore(stateDir);
-const perception = new PerceptionGraphStore(stateDir);
-const optimizer = new ExecutionOptimizerStore(stateDir);
-const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
 const adaptiveObservationShadow = new AdaptiveObservationShadowAdvisor();
 const adaptiveOutcomeShadow = new AdaptiveOutcomeShadowAdvisor();
 const adaptivePlanNodeShadow = new AdaptivePlanNodeShadowAdvisor();
 const adaptiveRecoveryShadow = new AdaptiveRecoveryShadowAdvisor();
 const adaptiveModalityShadow = new AdaptiveModalityShadowAdvisor();
 const adaptiveStrategyShadow = new AdaptiveStrategyShadowAdvisor();
-const deviceRegistry = new DeviceRegistryStore(stateDir);
-const semanticMigration = new SemanticCheckpointManager(stateDir, {
-  identity: deviceIdentity,
-  registry: deviceRegistry
-});
-const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
-const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
-const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const events = new DurableEventRuntime(stateDir);
-const privacy = new LocalPrivacyDataStore(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
 const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
@@ -303,39 +297,31 @@ let relayConnectionStatus: Record<string, unknown> = {
   state: relayUrl ? 'STARTING' : 'DISABLED',
   updatedAt: new Date().toISOString()
 };
-let shuttingDown = false;
-let shutdownPromise: Promise<void> | null = null;
-
 function stopRelay(): void {
   relayRunner?.stop();
   relaySessionCredentials?.stop();
 }
 
+const lifecycle = new LocalRuntimeLifecycle({
+  stopRelay,
+  pendingRelay: () => relayRun,
+  stopServices: () => [
+    desiredStateReconciler.stop(),
+    eventTicker.stop(),
+    agent.close(),
+    runtime.close()
+  ],
+  releaseStateLock: () => stateInstanceLock.release(),
+  setExitCode: (code) => { process.exitCode = code; },
+  log: (message) => console.error(message)
+});
+
 async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
-  if (shutdownPromise) return await shutdownPromise;
-  shuttingDown = true;
-  shutdownPromise = (async () => {
-    console.error(`[operator] shutting down (${reason})`);
-    stopRelay();
-    // Fatal relay shutdown is invoked from relayRun's own rejection chain. Do
-    // not make that path wait on itself; signal/launcher shutdown still drains
-    // the independent active relay promise before releasing durable state.
-    const pendingRelay = options.awaitRelay === false ? null : relayRun;
-    await Promise.allSettled([
-      pendingRelay,
-      desiredStateReconciler.stop(),
-      eventTicker.stop(),
-      agent.close(),
-      runtime.close()
-    ].filter(Boolean) as Array<Promise<unknown>>);
-    await stateInstanceLock.release();
-    process.exitCode = exitCode;
-  })();
-  return await shutdownPromise;
+  await lifecycle.shutdown(exitCode, reason, options);
 }
 
 async function failRequiredRelay(error: unknown): Promise<void> {
-  if (!relayRequired || shuttingDown) return;
+  if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
   await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
@@ -343,7 +329,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
 }
 
 function startRelay(): void {
-  if (!relayUrl || shuttingDown || relayRun) return;
+  if (!relayUrl || lifecycle.shuttingDown || relayRun) return;
   const enrollment = new RelayEnrollmentClient({
     relayUrl, resultUrl: relayResultUrl, identity: deviceIdentity,
     allowLoopbackInsecure: relayAllowInsecureLoopback,
@@ -403,7 +389,7 @@ function startRelay(): void {
   const runner = relayRunner;
   relayRun = runner.run()
     .then(async () => {
-      if (relayRequired && !shuttingDown) {
+      if (relayRequired && !lifecycle.shuttingDown) {
         await failRequiredRelay(new OperatorError('RELAY_REQUIRED_STOPPED', 'The required relay connection stopped.'));
       }
     })
@@ -627,7 +613,7 @@ if (relayUrl && startupEmergencyStatus.engaged) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
+    if (lifecycle.shuttingDown) return;
     void shutdownRuntime(0, signal.toLowerCase()).finally(() => process.exit(0));
   });
 }

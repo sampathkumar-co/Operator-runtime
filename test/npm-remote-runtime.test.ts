@@ -255,13 +255,16 @@ test('relay-only main reports loopback readiness only to the trusted Mecord laun
 test('remote launcher owns child lifetime and orphaned runtime exits when IPC authority disappears', async () => {
   const cli = await fs.readFile(path.resolve('packages/mecord-connect/src/cli.mjs'), 'utf8');
   const main = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  const lifecycle = await fs.readFile(path.resolve('apps/local-agent/src/runtime-lifecycle.ts'), 'utf8');
   assert.match(cli, /process\.once\('SIGINT', onSigint\)/);
   assert.match(cli, /process\.once\('SIGTERM', onSigterm\)/);
   assert.match(cli, /child\.send\(\{ type: 'mecord-shutdown', signal \}\)/);
   assert.match(cli, /setTimeout\(\(\) => \{[\s\S]*child\.kill\('SIGTERM'\)[\s\S]*\}, 8_000\)/);
   assert.match(main, /process\.once\('disconnect'/);
   assert.match(main, /raw\.type !== 'mecord-shutdown'/);
-  assert.match(main, /await stateInstanceLock\.release\(\)/);
+  assert.match(main, /releaseStateLock: \(\) => stateInstanceLock\.release\(\)/);
+  assert.match(lifecycle, /await this\.#options\.releaseStateLock\(\)/);
+  assert.match(lifecycle, /Promise\.allSettled/);
   assert.match(main, /launcherShutdownHandler = \(\) =>/);
 });
 

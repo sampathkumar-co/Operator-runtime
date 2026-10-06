@@ -18,8 +18,8 @@ class DurableStateReadRace extends Error {}
 
 // Genuine path/link topology races are retried long enough to survive loaded
 // CI and desktop schedulers, while persistent unsafe topology still fails
-// closed after a small bounded window (~100 ms total).
-const TRANSIENT_RACE_DELAYS_MS = [1, 4, 10, 25, 60] as const;
+// closed after a bounded sub-second window (~470 ms total).
+const TRANSIENT_RACE_DELAYS_MS = [2, 10, 25, 60, 125, 250] as const;
 
 export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);

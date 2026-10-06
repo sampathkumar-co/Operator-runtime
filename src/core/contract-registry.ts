@@ -26,6 +26,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'release-truth', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'release' },
   { name: 'intent-binding', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'task-capsule', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
+  { name: 'task-observation-summary', schemaVersion: 2, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'durable-task-plan', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'execution-context-identity', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'evaluation-state', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'evaluation' },
@@ -65,6 +66,17 @@ export function contractRegistration(name: string): ContractRegistration {
   const found = CONTRACT_REGISTRY.find((item) => item.name === name);
   if (!found) throw new Error(`Unknown contract: ${name}`);
   return found;
+}
+
+export type ContractReadCompatibility = 'current' | 'previous' | 'unsupported';
+
+export function contractReadCompatibility(name: string, storedSchemaVersion: number): ContractReadCompatibility {
+  const registration = contractRegistration(name);
+  if (!Number.isSafeInteger(storedSchemaVersion) || storedSchemaVersion < 1) return 'unsupported';
+  if (storedSchemaVersion === registration.schemaVersion) return 'current';
+  if (registration.compatibility === 'backward-readable' && registration.schemaVersion > 1 &&
+      storedSchemaVersion === registration.schemaVersion - 1) return 'previous';
+  return 'unsupported';
 }
 
 export function assertContractRegistryValid(): void {

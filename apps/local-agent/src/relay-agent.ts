@@ -2,7 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
+import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayExpiredRecoveryDecision, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
@@ -83,7 +83,7 @@ export class LocalAgentRelayRunner {
       onConnectionState: options.onConnectionState,
       onDelivery: (delivery) => this.#handleDelivery(delivery),
       onRecovery: (context) => this.#recoverStoredResult(context.delivery.seq, context.delivery.id, context.delivery),
-      onExpiredRecovery: async (context) => (await this.#recoverStoredResult(context.processing.seq, context.processing.id)) === 'ack' ? 'ack' : 'stop',
+      onExpiredRecovery: (context) => this.#recoverExpiredStoredResult(context.processing.seq, context.processing.id),
       onAcknowledged: (delivery) => this.#discardStoredResult(delivery.seq, delivery.id)
     });
   }
@@ -125,7 +125,10 @@ export class LocalAgentRelayRunner {
   async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, seq);
-    if (stored && stored.deliveryId === deliveryId && stored.result) {
+    if (stored && stored.deliveryId === deliveryId) {
+      if (!stored.result) {
+        throw new OperatorError('RELAY_RESULT_CORRUPT', 'Durable relay result record is missing its bounded result payload.');
+      }
       await this.#submitResultWithRetry(seq, deliveryId, stored.result);
       return 'ack';
     }
@@ -140,6 +143,11 @@ export class LocalAgentRelayRunner {
       if (recovered.state === 'processing') return 'stop';
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
+  }
+
+  async #recoverExpiredStoredResult(seq: number, deliveryId: string): Promise<RelayExpiredRecoveryDecision> {
+    const decision = await this.#recoverStoredResult(seq, deliveryId);
+    return decision === 'ack' ? 'ack' : 'stop';
   }
 
   async #discardStoredResult(seq: number, deliveryId: string): Promise<void> {
