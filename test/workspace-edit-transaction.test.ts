@@ -118,10 +118,13 @@ test('restart reconciliation rolls a partially applied transaction back to exact
   const { root, stateDir } = await fixture(t);
   const beforeA = 'export const a = 1;\n';
   const beforeB = 'export const b = 2;\n';
-  const targetA = path.join(root, 'a.ts');
-  const targetB = path.join(root, 'b.ts');
-  await fs.writeFile(targetA, beforeA);
-  await fs.writeFile(targetB, beforeB);
+  const targetAInput = path.join(root, 'a.ts');
+  const targetBInput = path.join(root, 'b.ts');
+  await fs.writeFile(targetAInput, beforeA);
+  await fs.writeFile(targetBInput, beforeB);
+  const canonicalRoot = await fs.realpath(root);
+  const targetA = path.join(canonicalRoot, 'a.ts');
+  const targetB = path.join(canonicalRoot, 'b.ts');
 
   const plan = createMultiFileEditPlan({
     files: [
@@ -158,7 +161,7 @@ test('restart reconciliation rolls a partially applied transaction back to exact
   const record: WorkspaceEditTransactionRecord = {
     schemaVersion: 1,
     actionId: 'tx-recover',
-    workspaceRoot: root,
+    workspaceRoot: canonicalRoot,
     planId: plan.id,
     phase: 'APPLYING',
     files: [
@@ -217,11 +220,13 @@ test('reconciliation fails closed and preserves unknown target bytes', async (t)
   const before = 'export const value = 1;\n';
   const after = 'export const value = 2;\n';
   const unknown = 'export const value = 999;\n';
-  const target = path.join(root, 'value.ts');
-  const backup = path.join(root, '.value.ts.operator-edit-ambiguous.bak');
-  const temp = path.join(root, '.value.ts.operator-edit-ambiguous.tmp');
-  const discard = path.join(root, '.value.ts.operator-edit-ambiguous.discard');
-  await fs.writeFile(target, unknown);
+  const targetInput = path.join(root, 'value.ts');
+  await fs.writeFile(targetInput, unknown);
+  const canonicalRoot = await fs.realpath(root);
+  const target = path.join(canonicalRoot, 'value.ts');
+  const backup = path.join(canonicalRoot, '.value.ts.operator-edit-ambiguous.bak');
+  const temp = path.join(canonicalRoot, '.value.ts.operator-edit-ambiguous.tmp');
+  const discard = path.join(canonicalRoot, '.value.ts.operator-edit-ambiguous.discard');
   await fs.writeFile(backup, before);
 
   const plan = createMultiFileEditPlan({
@@ -235,7 +240,7 @@ test('reconciliation fails closed and preserves unknown target bytes', async (t)
   const record: WorkspaceEditTransactionRecord = {
     schemaVersion: 1,
     actionId: 'tx-ambiguous',
-    workspaceRoot: root,
+    workspaceRoot: canonicalRoot,
     planId: plan.id,
     phase: 'APPLYING',
     files: [{
