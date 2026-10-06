@@ -1,0 +1,49 @@
+name: R2 Empirical Certification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['program/r1-r3-closeout-20261006']
+    paths:
+      - 'scripts/run-r2-historical-replay.ts'
+      - 'scripts/verify-r2-empirical-certification.ts'
+      - '.github/workflows/r2-empirical-certification.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-empirical-certification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  historical-replay:
+    name: R2 1000-task historical replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Assert public-repository zero-paid-service campaign
+        shell: bash
+        run: |
+          test "$GITHUB_REPOSITORY_VISIBILITY" = "public"
+          test -z "${OPENAI_API_KEY:-}"
+          test -z "${ANTHROPIC_API_KEY:-}"
+          test -z "${GEMINI_API_KEY:-}"
+      - name: Run frozen non-benchmark historical cohort
+        run: node --experimental-strip-types scripts/run-r2-historical-replay.ts
+      - name: Independently verify promotion artifacts
+        run: node --experimental-strip-types scripts/verify-r2-empirical-certification.ts
+      - name: Publish certification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r2-empirical-certification-${{ github.sha }}
+          path: artifacts/r2-empirical/*
+          if-no-files-found: error
+          retention-days: 90
