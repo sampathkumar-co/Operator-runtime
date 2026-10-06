@@ -29,3 +29,5 @@ export * from './outcome-planner.ts';
 export * from './release-truth.ts';
 export * from './contract-registry.ts';
 export * from './execution-context-identity.ts';
+export * from './artifact-store.ts';
+export * from './evidence-pack.ts';
