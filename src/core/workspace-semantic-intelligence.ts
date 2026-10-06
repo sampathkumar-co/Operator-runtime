@@ -540,15 +540,14 @@ function isDeclarationCallToken(
     symbol.name === callee
   );
   for (const declaration of declarations) {
-    const namePattern = new RegExp('\\\\b' + escapeRegExp(declaration.name) + '\\\\s*\\\\(', 'g');
+    const namePattern = new RegExp('\\b' + declaration.name + '\\s*\\(', 'g');
     const token = namePattern.exec(line);
     if (token?.index === callOffset) return true;
   }
   return false;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^$\\{\}()|[\]\\\\]/g, '\\\\function resolveCallCandidates(
+function resolveCallCandidates(
   callee: string,
   callerPath: string,
   byName: Map<string, SemanticSyntaxNode[]>
