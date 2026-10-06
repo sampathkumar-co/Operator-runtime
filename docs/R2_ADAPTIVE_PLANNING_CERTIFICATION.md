@@ -59,7 +59,10 @@ Implemented:
 - zero unsafe replay;
 - deterministic restart proof;
 - rollback snapshot;
-- independent verification receipts.
+- independent verification receipts;
+- frozen evaluation lineage, candidate/baseline manifest and promotion-criteria digests.
+
+The bridge is implemented in `scripts/derive-r2-promotion-evidence.ts`. It validates the existing Adaptive Intelligence frozen promotion bundle, rejects benchmark-tagged cohorts, refuses weakened GENERAL thresholds, binds operational rollback/replay evidence to the exact evaluation lineage, and only then emits the evidence shape accepted by the core runtime promotion gate.
 
 ## Remaining certification evidence
 
