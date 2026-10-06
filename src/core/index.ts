@@ -29,3 +29,6 @@ export * from './outcome-planner.ts';
 export * from './release-truth.ts';
 export * from './contract-registry.ts';
 export * from './execution-context-identity.ts';
+export * from './intelligence-adapters.ts';
+export * from './shadow-decision-store.ts';
+export * from './adaptive-planning-shadow.ts';

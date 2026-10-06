@@ -29,7 +29,10 @@ export function encodeVersionedState<T>(
   const kind = bounded(kindInput, 256, 'kind');
   const createdAt = (options.clock ?? (() => new Date()))().toISOString();
   const payloadDigest = crypto.createHash('sha256').update(canonicalJson(payload)).digest('hex');
-  const metadata = {
+  const metadata: Pick<
+    VersionedStateEnvelope<T>,
+    'schema' | 'version' | 'kind' | 'createdAt' | 'payloadDigest'
+  > = {
     schema: ADAPTIVE_STATE_SCHEMA,
     version: ADAPTIVE_STATE_VERSION,
     kind,
