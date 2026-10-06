@@ -16,7 +16,7 @@ const SCORE: CapabilityScore = {
 
 const STATIC_EXPECTED = {
   'computer.inspect': 'read', 'project.inspect': 'read', 'project.command.inspect': 'read',
-  'project.transaction.run': 'destructive', 'workspace.edit.transaction': 'write', 'workspace.edit.resolve_lsp': 'read', 'file.read': 'read', 'file.list': 'read',
+  'project.transaction.run': 'destructive', 'workspace.edit.transaction': 'write', 'workspace.edit.resolve_lsp': 'read', 'workspace.worktree.create': 'write', 'workspace.worktree.inspect': 'read', 'workspace.worktree.release': 'destructive', 'file.read': 'read', 'file.list': 'read',
   'file.write': 'write', 'file.create': 'write', 'file.replace': 'destructive', 'file.info': 'read', 'file.search': 'read',
   'git.status': 'read', 'git.diff': 'read', 'git.rev-parse': 'read',
   'git.checkpoint.inspect': 'read', 'git.checkpoint.create': 'write', 'git.checkpoint.restore': 'destructive',
