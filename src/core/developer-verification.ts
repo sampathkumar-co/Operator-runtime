@@ -308,7 +308,8 @@ export class DeveloperVerificationCoordinator {
         };
       }
 
-      const latest = latestReceipts(run.receipts);
+      const validatedReceiptRefs = await this.#validateReceiptArtifacts(run);
+      const latest = latestReceipts(validatedReceiptRefs);
       const missingCommandIds: string[] = [];
       const failedCommandIds: string[] = [];
       for (const requirement of run.requirements) {
@@ -398,6 +399,49 @@ export class DeveloperVerificationCoordinator {
     } finally {
       await lease.release();
     }
+  }
+
+  async #validateReceiptArtifacts(
+    run: DeveloperVerificationRun
+  ): Promise<DeveloperVerificationReceiptRef[]> {
+    const validated: DeveloperVerificationReceiptRef[] = [];
+    for (const ref of run.receipts) {
+      const artifact = await this.#artifacts.read(ref.artifactId);
+      if (
+        artifact.record.kind !== 'test-report' ||
+        artifact.record.mediaType !== 'application/json'
+      ) {
+        throw new OperatorError(
+          'DEVELOPER_VERIFICATION_RECEIPT_INVALID',
+          'Verification receipt artifact has the wrong immutable artifact class.'
+        );
+      }
+      let receipt: DeveloperVerificationReceipt;
+      try {
+        receipt = normalizeReceipt(JSON.parse(artifact.bytes.toString('utf8')));
+      } catch (error) {
+        if (error instanceof OperatorError) throw error;
+        throw new OperatorError(
+          'DEVELOPER_VERIFICATION_RECEIPT_INVALID',
+          'Verification receipt artifact is not valid JSON.'
+        );
+      }
+      if (
+        receipt.runId !== run.id ||
+        receipt.developerSessionId !== run.developerSessionId ||
+        receipt.commandId !== ref.commandId ||
+        receipt.ok !== ref.ok ||
+        receipt.recordedAt !== ref.recordedAt ||
+        artifact.record.executionContextDigest !== receipt.executionContextDigest
+      ) {
+        throw new OperatorError(
+          'DEVELOPER_VERIFICATION_RECEIPT_INVALID',
+          'Verification receipt artifact does not match its durable run reference.'
+        );
+      }
+      validated.push(ref);
+    }
+    return validated;
   }
 
   async #init(): Promise<void> {
@@ -576,6 +620,65 @@ function normalizeRun(input: unknown): DeveloperVerificationRun {
     ...(evidencePackArtifactId ? { evidencePackArtifactId } : {}),
     createdAt,
     updatedAt
+  };
+}
+
+function normalizeReceipt(input: unknown): DeveloperVerificationReceipt {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt must be an object.');
+  }
+  const raw = input as Record<string, unknown>;
+  if (raw.schemaVersion !== 1) {
+    throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt schemaVersion must be 1.');
+  }
+  const runId = digest(raw.runId, 'receipt runId');
+  const developerSessionId = boundedToken(raw.developerSessionId, 512, 'receipt developerSessionId');
+  const commandId = commandIdValue(raw.commandId);
+  const actionId = validActionId(raw.actionId);
+  if (raw.provider !== 'project.command.trusted' || raw.capability !== 'project.command.run') {
+    throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt provider/capability is invalid.');
+  }
+  if (typeof raw.ok !== 'boolean') {
+    throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt ok flag is invalid.');
+  }
+  const errorCode = raw.errorCode === undefined ? undefined : boundedCode(raw.errorCode);
+  const durationMs = boundedDuration(raw.durationMs);
+  if (!Array.isArray(raw.evidence) || raw.evidence.length > 2000) {
+    throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt evidence is invalid.');
+  }
+  const evidence = raw.evidence.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt evidence entry is invalid.');
+    }
+    const value = item as Record<string, unknown>;
+    const kind = boundedToken(value.kind, 128, 'receipt evidence kind');
+    if (!['pass', 'fail', 'info'].includes(String(value.status))) {
+      throw new OperatorError('DEVELOPER_VERIFICATION_RECEIPT_INVALID', 'Verification receipt evidence status is invalid.');
+    }
+    return { kind, status: value.status as 'pass' | 'fail' | 'info' };
+  });
+  if (!evidence.some((item) => item.kind === 'command_registry' && item.status === 'pass')) {
+    throw new OperatorError(
+      'DEVELOPER_VERIFICATION_RECEIPT_INVALID',
+      'Verification receipt does not retain proof of trusted command-registry execution.'
+    );
+  }
+  const executionContextDigestValue = digest(raw.executionContextDigest, 'receipt executionContextDigest');
+  const recordedAt = canonicalIso(raw.recordedAt, 'receipt recordedAt');
+  return {
+    schemaVersion: 1,
+    runId,
+    developerSessionId,
+    commandId,
+    actionId,
+    ok: raw.ok,
+    provider: 'project.command.trusted',
+    capability: 'project.command.run',
+    ...(errorCode ? { errorCode } : {}),
+    durationMs,
+    evidence,
+    executionContextDigest: executionContextDigestValue,
+    recordedAt
   };
 }
 
