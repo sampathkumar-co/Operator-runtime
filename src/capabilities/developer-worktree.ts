@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   ActionRequest,
@@ -77,7 +78,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           repositoryRoot,
           baseCommit
         });
-        assertRepositoryBinding(inspected, repositoryRoot);
+        await assertRepositoryBinding(inspected, repositoryRoot);
         return resultFor(action, inspected, started, [
           evidence(
             'developer_worktree_create',
@@ -106,7 +107,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           );
         }
         const inspected = await this.#manager.inspect(sessionId);
-        assertRepositoryBinding(inspected, repositoryRoot);
+        await assertRepositoryBinding(inspected, repositoryRoot);
         return resultFor(action, inspected, started, [
           evidence(
             'developer_worktree_inspect',
@@ -130,7 +131,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           );
         }
         const before = await this.#manager.inspect(sessionId);
-        assertRepositoryBinding(before, repositoryRoot);
+        await assertRepositoryBinding(before, repositoryRoot);
         const expectedFingerprint = requiredDigest(
           action.input.expectedFingerprint,
           'expectedFingerprint'
@@ -139,7 +140,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           sessionId,
           expectedFingerprint
         });
-        assertRepositoryBinding(released, repositoryRoot);
+        await assertRepositoryBinding(released, repositoryRoot);
         return resultFor(action, released, started, [
           evidence(
             'developer_worktree_release',
@@ -229,7 +230,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
         }
         throw error;
       }
-      assertRepositoryBinding(inspected, repositoryRoot);
+      await assertRepositoryBinding(inspected, repositoryRoot);
 
       if (action.capability === 'workspace.worktree.create') {
         const expectedCommit = requiredCommit(action.input.baseCommit);
@@ -370,7 +371,7 @@ function resultFor(
   };
 }
 
-function assertRepositoryBinding(
+function await assertRepositoryBinding(
   inspected: DeveloperWorktreeInspection,
   requested: string
 ): void {
