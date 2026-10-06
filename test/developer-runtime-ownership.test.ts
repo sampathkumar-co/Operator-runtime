@@ -204,6 +204,7 @@ test('persisted ownership state contains no command arguments, environment, or s
       'processSessionId',
       'developerSessionId',
       'phase',
+      'launcherProcessInstance',
       'processInstance',
       'ports',
       'createdAt',
