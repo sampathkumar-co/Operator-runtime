@@ -25,12 +25,17 @@ const RECORD_OPTIONS = {
 } as const;
 
 async function git(cwd: string, args: string[]): Promise<string> {
+  const nullConfig = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const result = await execFileAsync('git', args, {
     cwd,
     encoding: 'utf8',
     env: {
       ...process.env,
-      GIT_TERMINAL_PROMPT: '0'
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_CONFIG_GLOBAL: nullConfig,
+      GIT_CONFIG_SYSTEM: nullConfig,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_NO_LAZY_FETCH: '1'
     }
   });
   return String(result.stdout ?? '').trim();
@@ -155,7 +160,7 @@ test('Developer Worktree creation recovery promotes an exact Git-created worktre
     RECORD_OPTIONS
   );
 
-  await git(fx.repo, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', ownedPath, fx.commit]);
+  await git(fx.repo, ['-c', 'core.hooksPath=' + (process.platform === 'win32' ? 'NUL' : '/dev/null'), 'worktree', 'add', '--detach', ownedPath, fx.commit]);
 
   const recovered = await manager(fx).inspect(sessionId);
   assert.equal(recovered.record.phase, 'ACTIVE');
