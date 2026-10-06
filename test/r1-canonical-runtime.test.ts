@@ -33,12 +33,21 @@ test('R1 contract registry covers canonical execution identities and envelopes',
   for (const name of REQUIRED_CONTRACTS) assert.equal(names.has(name), true, `missing canonical contract: ${name}`);
 });
 
-test('R1 root workspace declares every package-bearing production boundary', async () => {
+test('R1 root workspace declares every package-bearing production boundary without shadowing nested release locks', async () => {
   const manifest = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
     workspaces?: string[];
+    mecordWorkspaceLayout?: string;
     scripts?: Record<string, string>;
   };
-  assert.deepEqual(manifest.workspaces, [
+  const layout = JSON.parse(await fs.readFile(new URL('../workspace-layout.json', import.meta.url), 'utf8')) as {
+    strategy?: string;
+    packages?: Array<{ path: string; lockfile: string | null }>;
+    invariants?: Record<string, boolean>;
+  };
+  assert.equal(manifest.workspaces, undefined);
+  assert.equal(manifest.mecordWorkspaceLayout, './workspace-layout.json');
+  assert.equal(layout.strategy, 'independently-locked-packages');
+  assert.deepEqual(layout.packages?.map((item) => item.path), [
     'apps/mcp-server',
     'apps/relay-server',
     'deploy/auth-portal',
@@ -47,6 +56,8 @@ test('R1 root workspace declares every package-bearing production boundary', asy
     'packages/operator-runtime-cli',
     'packages/verified-plan-runtime'
   ]);
+  assert.equal(layout.invariants?.nestedReleaseLocksRemainAuthoritative, true);
+  assert.equal(layout.invariants?.rootNpmWorkspacesDisabledToPreventLockfileShadowing, true);
   assert.equal(typeof manifest.scripts?.['typecheck:production'], 'string');
   assert.equal(typeof manifest.scripts?.['verify:r1-source'], 'string');
   assert.equal(typeof manifest.scripts?.['evidence:r1'], 'string');
