@@ -66,6 +66,25 @@ test('semantic intelligence builds declaration tree and resolves unique call edg
   assert.deepEqual(impact.suggestedTestPaths, ['test/main.test.ts']);
 });
 
+test('semantic intelligence excludes declaration heads but preserves real same-line recursion', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-semantic-recursive-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(
+    path.join(root, 'recursive.ts'),
+    'export function recurse(n: number) { return n > 0 ? recurse(n - 1) : 0; }\n'
+  );
+
+  const index = await new WorkspaceCodeIndexer(root).build();
+  const semantic = new WorkspaceSemanticIntelligence(root);
+  const snapshot = await semantic.build(index);
+  const recurse = semantic.searchSyntax(snapshot, { name: 'recurse', nameMode: 'exact' });
+
+  assert.equal(recurse.length, 1);
+  const callers = semantic.callers(snapshot, recurse[0]!.id);
+  assert.equal(callers.length, 1);
+  assert.equal(callers[0]?.fromNodeId, recurse[0]!.id);
+});
+
 test('semantic intelligence refuses stale source bytes after code-index observation', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-semantic-stale-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
