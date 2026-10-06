@@ -51,6 +51,7 @@ import { AdaptiveOutcomeShadowAdvisor } from '../../../src/core/adaptive-outcome
 import { AdaptivePlanNodeShadowAdvisor } from '../../../src/core/adaptive-plan-node-shadow.ts';
 import { AdaptiveRecoveryShadowAdvisor } from '../../../src/core/adaptive-recovery-shadow.ts';
 import { AdaptiveModalityShadowAdvisor } from '../../../src/core/adaptive-modality-shadow.ts';
+import { AdaptiveStrategyShadowAdvisor } from '../../../src/core/adaptive-strategy-shadow.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -140,6 +141,7 @@ const adaptiveOutcomeShadow = new AdaptiveOutcomeShadowAdvisor();
 const adaptivePlanNodeShadow = new AdaptivePlanNodeShadowAdvisor();
 const adaptiveRecoveryShadow = new AdaptiveRecoveryShadowAdvisor();
 const adaptiveModalityShadow = new AdaptiveModalityShadowAdvisor();
+const adaptiveStrategyShadow = new AdaptiveStrategyShadowAdvisor();
 const deviceRegistry = new DeviceRegistryStore(stateDir);
 const semanticMigration = new SemanticCheckpointManager(stateDir, {
   identity: deviceIdentity,
@@ -448,6 +450,7 @@ const taskOrchestrator = new TaskOrchestrator({
   outcomeShadow: adaptiveOutcomeShadow,
   recoveryShadow: adaptiveRecoveryShadow,
   modalityShadow: adaptiveModalityShadow,
+  strategyShadow: adaptiveStrategyShadow,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {

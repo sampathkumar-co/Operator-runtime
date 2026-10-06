@@ -9,6 +9,7 @@ import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { validateRecoveryShadowRecommendation } from './adaptive-recovery-shadow.ts';
+import { validateStrategyShadowAssessment } from './adaptive-strategy-shadow.ts';
 import {
   currentProcessInstance,
   observeProcessInstance,
@@ -591,6 +592,10 @@ function validateEvidenceArray(input: unknown, max: number, label: string): Evid
     if (kind === 'adaptive_recovery_shadow') {
       try { data = validateRecoveryShadowRecommendation(data) as unknown as Record<string, unknown>; }
       catch { throw corrupt(`${label} entry ${index} recovery shadow lineage is invalid.`); }
+    }
+    if (kind === 'adaptive_strategy_shadow') {
+      try { data = validateStrategyShadowAssessment(data) as unknown as Record<string, unknown>; }
+      catch { throw corrupt(`${label} entry ${index} strategy shadow lineage is invalid.`); }
     }
     return { kind, status, message, ...(data ? { data } : {}), timestamp };
   });

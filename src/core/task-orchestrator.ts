@@ -300,6 +300,68 @@ export interface TaskModalityShadowAdvisor {
   }): TaskModalityShadowAssessment | undefined | Promise<TaskModalityShadowAssessment | undefined>;
 }
 
+export type TaskStrategyShadowKind =
+  | 'CONTINUE_CURRENT_BRANCH'
+  | 'OBSERVE_THEN_CONTINUE'
+  | 'LOCAL_REPAIR'
+  | 'ALTERNATIVE_BRANCH'
+  | 'GLOBAL_REPLAN'
+  | 'RECONCILE'
+  | 'VERIFY'
+  | 'WAIT'
+  | 'STOP_UNRESOLVED';
+
+export interface TaskStrategyShadowAssessment {
+  schemaVersion: 1;
+  mode: 'SHADOW';
+  policyVersion: string;
+  taskId: string;
+  actionId: string;
+  decisionKey: string;
+  planId: string;
+  planVersion: number;
+  planDigest: string;
+  authorityGeneration: number | null;
+  authoritySnapshotDigest: string;
+  observationDigest: string;
+  verificationDigest: string;
+  inputStateDigest: string;
+  recommendedStrategy: TaskStrategyShadowKind;
+  productionStrategy: TaskStrategyShadowKind;
+  candidates: Array<{
+    kind: TaskStrategyShadowKind;
+    utility: number;
+    expectedSuccess: number;
+    expectedCost: number;
+    uncertainty: number;
+    verificationStrength: number;
+    penalties: string[];
+  }>;
+  semanticLoopCount: number;
+  controlAllowed: false;
+  assessmentDigest: string;
+}
+
+export interface TaskStrategyShadowAdvisor {
+  assess(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    risk: ActionRisk;
+    intelligence: TaskIntelligenceContext;
+    permissions: PermissionProfile;
+    result: ActionResult;
+    observation: TaskObservationSummaryV2;
+    sideEffectState: SideEffectState;
+    executionPhase: ExecutionPhase;
+    productionFailure?: TaskFailureDecision;
+    outcomeAssessment?: TaskOutcomeShadowAssessment;
+    recoveryRecommendation?: TaskRecoveryShadowRecommendation;
+    modalityAssessment?: TaskModalityShadowAssessment;
+  }): TaskStrategyShadowAssessment | undefined | Promise<TaskStrategyShadowAssessment | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -370,6 +432,7 @@ export class TaskOrchestrator {
   #outcomeShadow?: TaskOutcomeShadowAdvisor;
   #recoveryShadow?: TaskRecoveryShadowAdvisor;
   #modalityShadow?: TaskModalityShadowAdvisor;
+  #strategyShadow?: TaskStrategyShadowAdvisor;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -388,6 +451,7 @@ export class TaskOrchestrator {
     outcomeShadow?: TaskOutcomeShadowAdvisor;
     recoveryShadow?: TaskRecoveryShadowAdvisor;
     modalityShadow?: TaskModalityShadowAdvisor;
+    strategyShadow?: TaskStrategyShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -406,6 +470,7 @@ export class TaskOrchestrator {
     this.#outcomeShadow = options.outcomeShadow;
     this.#recoveryShadow = options.recoveryShadow;
     this.#modalityShadow = options.modalityShadow;
+    this.#strategyShadow = options.strategyShadow;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -1089,6 +1154,29 @@ export class TaskOrchestrator {
         task.evidence.push(evidence('adaptive_modality_shadow', 'info', 'Recorded a non-executable modality comparison; production routing remained authoritative.', modalityShadow));
       } else if (modalityShadowUnavailable) {
         task.evidence.push(evidence('adaptive_modality_shadow_unavailable', 'info', 'Modality shadow evaluation was unavailable; production routing remained authoritative.', { mode: 'SHADOW', actionId }));
+      }
+      let strategyShadow: TaskStrategyShadowAssessment | undefined;
+      let strategyShadowUnavailable = false;
+      if (this.#strategyShadow) {
+        try {
+          strategyShadow = await this.#strategyShadow.assess({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions),
+            result: structuredClone(result), observation: structuredClone(normalizedObservation),
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {}),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {}),
+            ...(recoveryShadow ? { recoveryRecommendation: structuredClone(recoveryShadow) } : {}),
+            ...(modalityShadow ? { modalityAssessment: structuredClone(modalityShadow) } : {})
+          });
+        } catch {
+          strategyShadowUnavailable = true;
+        }
+      }
+      if (strategyShadow) {
+        task.evidence.push(evidence('adaptive_strategy_shadow', 'info', 'Recorded a non-executable strategy comparison; production planner control remained authoritative.', strategyShadow));
+      } else if (strategyShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_strategy_shadow_unavailable', 'info', 'Strategy shadow evaluation was unavailable; production planner control remained authoritative.', { mode: 'SHADOW', actionId }));
       }
       const plannerEvent = plannerEventFromResult(result, productionFailure);
       if (plannerEvent) {
