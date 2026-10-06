@@ -391,10 +391,19 @@ export class DeveloperContainerManager {
     if (record.phase === 'CREATED' && state === 'running') {
       record = { ...record, phase: 'ACTIVE', updatedAt: this.#now() };
       await this.#writeRecord(record);
+    } else if (
+      record.phase === 'ACTIVE' &&
+      (state === 'created' || state === 'exited')
+    ) {
+      // A host reboot or daemon restart can stop an exact owned container
+      // without changing its immutable image/mount/isolation identity. Demote
+      // to CREATED so create() may re-run the explicit start + postcondition.
+      record = { ...record, phase: 'CREATED', updatedAt: this.#now() };
+      await this.#writeRecord(record);
     } else if (record.phase === 'ACTIVE' && state !== 'running') {
       throw new OperatorError(
         'DEVELOPER_CONTAINER_STATE_CONTRADICTED',
-        'Active Developer container is no longer running.',
+        'Active Developer container entered an unsupported state.',
         { details: { state } }
       );
     }
