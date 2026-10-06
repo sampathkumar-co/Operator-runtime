@@ -1,10 +1,10 @@
 # R2 Integrated Adaptive Planning Runtime Certification
 
-Status: **IMPLEMENTED_AWAITING_PROMOTION_EVIDENCE**
+Status: **IMPLEMENTED_NOT_CERTIFIED**
 
 Branch: `program/r1-r3-closeout-20261006`
 
-R2 code paths are implemented through general bounded control, but production promotion is intentionally fail-closed until the roadmap's real shadow-evidence thresholds are met. Synthetic tests prove the gate; they do not substitute for representative non-benchmark production evidence.
+R2 code paths are implemented through general bounded control, but the roadmap exit gate is intentionally fail-closed until the required representative shadow-evidence thresholds are met. Synthetic tests prove the gate; they do not substitute for representative non-benchmark production evidence.
 
 ## R2.1 Contract integration
 
