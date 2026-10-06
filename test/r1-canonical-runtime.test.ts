@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import test from 'node:test';
-import { CONTRACT_REGISTRY, assertContractRegistryValid } from '../src/core/contract-registry.ts';
+import { CONTRACT_REGISTRY, assertContractRegistryValid, contractReadCompatibility } from '../src/core/contract-registry.ts';
 
 const REQUIRED_CONTRACTS = [
   'principal',
@@ -78,4 +78,14 @@ test('R1 production TypeScript config is strict and spans all runtime sources', 
     'packages/adaptive-intelligence/src/**/*.ts',
     'packages/verified-plan-runtime/src/**/*.ts'
   ]) assert.equal(config.include?.includes(required), true, `missing typecheck boundary: ${required}`);
+});
+
+
+test('R1 schema compatibility explicitly accepts the current task observation schema and its supported previous version', () => {
+  assert.equal(contractReadCompatibility('task-observation-summary', 2), 'current');
+  assert.equal(contractReadCompatibility('task-observation-summary', 1), 'previous');
+  assert.equal(contractReadCompatibility('task-observation-summary', 0), 'unsupported');
+  assert.equal(contractReadCompatibility('task-observation-summary', 3), 'unsupported');
+  assert.equal(contractReadCompatibility('execution-context-identity', 1), 'current');
+  assert.equal(contractReadCompatibility('execution-context-identity', 2), 'unsupported');
 });
