@@ -88,8 +88,8 @@ test('PID reuse marks prior ownership EXITED and releases its ports', async (t) 
   }));
 });
 
-test('restart recovery makes uncommitted launch intent AMBIGUOUS and keeps port blocked', async (t) => {
-  const { store } = await fixture(t);
+test('restart recovery makes dead-launcher intent AMBIGUOUS and keeps port blocked', async (t) => {
+  const { store, live } = await fixture(t);
   await store.beginLaunch({
     processSessionId: uuid('20'),
     developerSessionId: 'developer-session-1',
@@ -97,6 +97,7 @@ test('restart recovery makes uncommitted launch intent AMBIGUOUS and keeps port 
     now: '2026-10-06T00:00:00.000Z'
   });
 
+  live.set(OWNER.pid, null);
   const recovered = await store.recover('2026-10-06T00:00:05.000Z');
   assert.equal(recovered[0]?.phase, 'AMBIGUOUS');
 
@@ -214,4 +215,32 @@ test('persisted ownership state contains no command arguments, environment, or s
   for (const forbidden of ['args', 'environment', 'env', 'stdin', 'stdout', 'stderr', 'command']) {
     assert.equal(raw.toLowerCase().includes(forbidden), false);
   }
+});
+
+
+test('recovery preserves a launch intent while its exact launcher process is still alive', async (t) => {
+  const { store } = await fixture(t);
+  await store.beginLaunch({
+    processSessionId: uuid('60'),
+    developerSessionId: 'developer-session-live-launcher',
+    ports: [7500],
+    now: '2026-10-06T00:00:00.000Z'
+  });
+
+  const recovered = await store.recover('2026-10-06T00:00:01.000Z');
+  const record = recovered.find((item) => item.processSessionId === uuid('60'));
+  assert.equal(record?.phase, 'LAUNCH_INTENT');
+
+  await assert.rejects(
+    () => store.beginLaunch({
+      processSessionId: uuid('61'),
+      developerSessionId: 'developer-session-other',
+      ports: [7500],
+      now: '2026-10-06T00:00:02.000Z'
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_RUNTIME_PORT_BUSY');
+      return true;
+    }
+  );
 });
