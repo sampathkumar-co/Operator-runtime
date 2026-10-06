@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "typeRoots": ["./apps/mcp-server/node_modules/@types"],
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "apps/local-agent/src/**/*.ts",
+    "apps/mcp-server/src/**/*.ts",
+    "apps/relay-server/src/**/*.ts",
+    "packages/adaptive-intelligence/src/**/*.ts",
+    "packages/verified-plan-runtime/src/**/*.ts"
+  ],
+  "exclude": [
+    "**/node_modules/**",
+    "test/**",
+    "security/**",
+    "performance/**"
+  ]
+}
