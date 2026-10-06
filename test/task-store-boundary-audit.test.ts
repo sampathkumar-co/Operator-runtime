@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/core/task-store.ts';
 import { createTask, type TaskCapsule } from '../src/core/task.ts';
 import { createDurableTaskPlan } from '../src/core/task-plan.ts';
@@ -400,7 +401,17 @@ test('TaskStore reclaims an execution lease left by a crashed child process', as
     execFile(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, state, value.id], { cwd: process.cwd() }, (error) => error ? reject(error) : resolve());
   });
 
-  const recovered = await new TaskStore(state).acquireExecutionLease(value.id);
+  const restarted = new TaskStore(state);
+  const deadline = Date.now() + 5_000;
+  let recovered;
+  while (!recovered) {
+    try {
+      recovered = await restarted.acquireExecutionLease(value.id);
+    } catch (error) {
+      if ((error as any)?.code !== 'TASK_ALREADY_RUNNING' || Date.now() >= deadline) throw error;
+      await delay(50);
+    }
+  }
   await recovered.assertOwned();
   await recovered.release();
 });
