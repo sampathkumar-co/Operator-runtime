@@ -11,6 +11,8 @@ export type MutationReconciliationPolicy = {
 export const MUTATION_RECONCILIATION_POLICIES = Object.freeze<Record<string, MutationReconciliationPolicy>>({
   'project.command.run': { mode: 'provider', rationale: 'Trusted commands can change declared project artifacts.' },
   'project.transaction.run': { mode: 'provider', rationale: 'Transactions can change both project files and command artifacts.' },
+  'workspace.edit.transaction': { mode: 'provider', rationale: 'Workspace edit transactions reconcile through their durable transaction journal and exact file hashes.' },
+  'workspace.edit.rollback': { mode: 'provider', rationale: 'Workspace edit rollback reconciles through its durable rollback journal and exact restored file hashes.' },
   'file.write': { mode: 'provider', rationale: 'Filesystem writes reconcile against the requested byte digest.' },
   'file.create': { mode: 'provider', rationale: 'Filesystem creates reconcile against existence and the requested byte digest.' },
   'file.replace': { mode: 'provider', rationale: 'Filesystem replacements reconcile against the requested byte digest.' },

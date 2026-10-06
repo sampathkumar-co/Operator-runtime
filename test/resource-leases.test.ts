@@ -256,6 +256,7 @@ test('canonical resource extractor registry covers every policy capability and m
     if (capability.startsWith('project.')) return { path: root, cwd: root };
     if (capability === 'file.manage') return { operation: 'move', source: path.join(root, 'a'), destination: path.join(root, 'b') };
     if (capability.startsWith('file.')) return { path: path.join(root, 'a') };
+    if (capability.startsWith('workspace.edit.')) return { workspaceRoot: root };
     if (capability.startsWith('git.')) return { cwd: root };
     if (capability.startsWith('docker.')) return { path: root };
     if (capability.startsWith('postgres.')) return { path: root, profileId: 'main' };

@@ -26,390 +26,90 @@ import {
   taskPlanComplete, verifySubgoal, type DurableTaskPlan, type TaskPlanSubgoal
 } from './task-plan.ts';
 import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
+import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
 
-export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
-export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
-export type PhysicalInputTaskOperation = 'move' | 'click' | 'double_click' | 'drag' | 'scroll' | 'type_text' | 'key_press' | 'hotkey';
-export type VisualTaskSelector = { name?: string; className?: string; processId?: number };
-export type AppPhysicalFallback = {
-  source: 'screen' | 'window' | 'region';
-  selector?: VisualTaskSelector;
-  region?: { x: number; y: number; width: number; height: number };
-  operation: PhysicalInputTaskOperation;
-  x?: number; y?: number; toX?: number; toY?: number;
-  deltaX?: number; deltaY?: number;
-  text?: string; key?: string; keys?: string[];
-  maxWidth?: number; maxHeight?: number;
-};
-export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
-export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
-export type ProjectQualityCheck = 'lint' | 'test' | 'build';
-export type AutonomousTaskAction = { capability: string; input: Record<string, unknown>; target?: string };
-export type AutonomousTaskStep = {
-  key: string;
-  title: string;
-  parentKey?: string;
-  dependsOn?: string[];
-  resourceScope?: string[];
-  observe: AutonomousTaskAction;
-  action: AutonomousTaskAction;
-  verify: AutonomousTaskAction & { assertions: TaskStateAssertion[] };
-};
-
-export type AtomicSemanticTaskGoal =
-  | { kind: 'controlled-file-change'; root: string; path: string; content: string }
-  | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
-  | { kind: 'browser-navigation'; url: string; targetId?: string }
-  | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
-  | {
-      kind: 'postgres-select'; root: string; profileId: string; schema?: string; table: string;
-      columns?: string[]; filters?: PostgresTaskFilter[]; orderBy?: PostgresTaskOrder[];
-      limit?: number; offset?: number; timeoutMs?: number;
-    }
-  | {
-      kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
-      value?: string; horizontalAmount?: string; verticalAmount?: string;
-      verifySelector?: UiaTaskSelector; waitMs?: number;
-      physicalFallback?: AppPhysicalFallback;
-    };
-
-export type SemanticTaskGoal =
-  | AtomicSemanticTaskGoal
-  | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
-  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] }
-  | { kind: 'autonomous-workflow'; roots?: string[]; browserOrigins?: string[]; application?: boolean; steps: AutonomousTaskStep[] };
-
-export interface TaskPlannerContext {
-  task: TaskCapsule;
-  goal: SemanticTaskGoal;
-  budget: {
-    maxSteps: number;
-    usedSteps: number;
-    remainingSteps: number;
-    plannerIterations: number;
-    preDispatchReobserves: number;
-    dispatchedActions: number;
-    maxAttemptsPerStep: number;
-    activeDeadlineMsRemaining: number;
-  };
-  recentEvents: TaskPlannerEvent[];
-  intelligence: TaskIntelligenceContext;
-  decisionBudget: TaskDecisionBudget;
-}
-
-export interface TaskIntelligenceContext {
-  retrievedAt: string;
-  scopeKey: string;
-  sceneKey?: string;
-  world: Array<{
-    entityKey: string; type: string; updatedAt: string;
-    facts: Array<{ key: string; claimCount: number; freshestAt?: string; maxConfidence: number; evidenceDigests: string[] }>;
-  }>;
-  procedures: Array<{
-    id: string; confidence: number; capabilities: string[]; verifiedRuns: number; failedRuns: number; verificationDigest: string;
-  }>;
-  perception: Array<{
-    nodeId: string; semanticId?: string; confidence: number; channels: string[]; role?: string; name?: string; bounds?: PerceptionBoundsLike;
-  }>;
-  strategies: Array<{ id: string; score: number; staticScore: number; learnedAdjustment: number; samples: number }>;
-}
-
-type PerceptionBoundsLike = { x: number; y: number; width: number; height: number };
-
-export interface TaskIntelligenceRequest {
-  task: TaskCapsule;
-  goal: SemanticTaskGoal;
-  budget: TaskPlannerContext['budget'];
-  recentEvents: TaskPlannerEvent[];
-}
-
-export interface TaskIntelligenceProvider {
-  retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
-}
-
-export interface TaskObservationShadowRecommendation {
-  mode: 'SHADOW';
-  policyVersion: string;
-  selectedId: string;
-  controlId: string;
-  alternatives: string[];
-  agreement: boolean;
-  decisionDigest: string;
-  authoritySnapshotDigest: string;
-}
-
-export interface TaskObservationShadowAdvisor {
-  recommend(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    risk: ActionRisk;
-    intelligence: TaskIntelligenceContext;
-    permissions: PermissionProfile;
-  }): TaskObservationShadowRecommendation | undefined | Promise<TaskObservationShadowRecommendation | undefined>;
-}
-
-export interface TaskPlanNodeShadowRecommendation {
-  mode: 'SHADOW';
-  policyVersion: string;
-  selectedCapability: string;
-  controlCapability: string;
-  alternatives: Array<{ capability: string; utility: number; risk: number }>;
-  agreement: boolean;
-  decisionDigest: string;
-  authoritySnapshotDigest: string;
-  inputStateDigest: string;
-}
-
-export interface TaskPlanNodeShadowAdvisor {
-  recommend(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    risk: ActionRisk;
-    intelligence: TaskIntelligenceContext;
-    permissions: PermissionProfile;
-  }): TaskPlanNodeShadowRecommendation | undefined | Promise<TaskPlanNodeShadowRecommendation | undefined>;
-}
-
-export interface TaskOutcomeShadowAssessment {
-  mode: 'SHADOW';
-  policyVersion: string;
-  progress: {
-    level: 'NONE' | 'ACTION_EXECUTED' | 'STATE_CHANGED' | 'SUBGOAL_PROGRESS' | 'GOAL_ACHIEVED';
-    confidence: number;
-    creditedSignals: string[];
-    rejectedSignals: string[];
-    verificationRequired: boolean;
-  };
-  failure?: {
-    primaryClass: string;
-    probability: number;
-    alternatives: Array<{ class: string; probability: number }>;
-    entropy: number;
-    evidenceCoverage: number;
-  };
-  decisionDigest: string;
-  authoritySnapshotDigest: string;
-  inputStateDigest: string;
-}
-
-export interface TaskOutcomeShadowAdvisor {
-  analyze(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    risk: ActionRisk;
-    permissions: PermissionProfile;
-    result: ActionResult;
-    observation: TaskObservationSummaryV2;
-    previousObservation?: TaskObservationSummaryV2;
-    sideEffectState: SideEffectState;
-    executionPhase: ExecutionPhase;
-    productionFailure?: TaskFailureDecision;
-  }): TaskOutcomeShadowAssessment | undefined | Promise<TaskOutcomeShadowAssessment | undefined>;
-}
-
-export interface TaskRecoveryShadowRecommendation {
-  schemaVersion: 1;
-  mode: 'SHADOW';
-  policyVersion: string;
-  taskId: string;
-  goalKind: SemanticTaskGoal['kind'];
-  planId: string;
-  planVersion: number;
-  planDigest: string;
-  failedNodeId: string;
-  actionId: string;
-  attempt: number;
-  observationDigest: string;
-  verificationResultDigest: string;
-  authoritySnapshotDigest: string;
-  authorityGeneration: number | null;
-  inputStateDigest: string;
-  failureClass: string;
-  selected: { id: string; kind: 'REOBSERVE' | 'REGROUND' | 'REPLAN' | 'REPAIR' | 'RECONCILE' | 'WAIT' | 'VERIFY' | 'FAIL_SAFE' };
-  alternatives: Array<{ id: string; kind: 'REOBSERVE' | 'REGROUND' | 'REPLAN' | 'REPAIR' | 'RECONCILE' | 'WAIT' | 'VERIFY' | 'FAIL_SAFE' }>;
-  productionStrategy: TaskFailureDecision['strategy'];
-  semanticLoopCount: number;
-  recommendationDigest: string;
-}
-
-export interface TaskRecoveryShadowAdvisor {
-  recommend(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    failedNodeId: string;
-    attempt: number;
-    risk: ActionRisk;
-    permissions: PermissionProfile;
-    result: ActionResult;
-    observation: TaskObservationSummaryV2;
-    sideEffectState: SideEffectState;
-    executionPhase: ExecutionPhase;
-    productionFailure: TaskFailureDecision;
-    outcomeAssessment?: TaskOutcomeShadowAssessment;
-  }): TaskRecoveryShadowRecommendation | undefined | Promise<TaskRecoveryShadowRecommendation | undefined>;
-}
-
-export type TaskExecutionModality = 'GUI' | 'DOM' | 'ACCESSIBILITY' | 'UIA' | 'PLAYWRIGHT' | 'APPLICATION' | 'API' | 'MCP' | 'TERMINAL' | 'OBSERVE';
-
-export interface TaskModalityShadowAssessment {
-  schemaVersion: 1;
-  mode: 'SHADOW';
-  policyVersion: string;
-  taskId: string;
-  actionId: string;
-  capability: string;
-  recommendedModality: TaskExecutionModality;
-  actualProductionModality: TaskExecutionModality;
-  candidates: Array<{ modality: TaskExecutionModality; available: boolean; predictedSuccess: number; predictedRisk: number; predictedCost: number; verificationStrength: number; utility: number | null }>;
-  actualOutcome: 'SUCCEEDED' | 'FAILED' | 'UNCERTAIN';
-  verificationResult: 'SUPPORTED' | 'FAILED' | 'UNRESOLVED';
-  recoveryCost: number;
-  latencyMs: number;
-  failureAttribution: string | null;
-  switchAllowed: boolean;
-  authoritySnapshotDigest: string;
-  observationDigest: string;
-  inputStateDigest: string;
-  assessmentDigest: string;
-}
-
-export interface TaskModalityShadowAdvisor {
-  assess(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    risk: ActionRisk;
-    intelligence: TaskIntelligenceContext;
-    permissions: PermissionProfile;
-    result: ActionResult;
-    observation: TaskObservationSummaryV2;
-    sideEffectState: SideEffectState;
-    executionPhase: ExecutionPhase;
-    productionFailure?: TaskFailureDecision;
-    outcomeAssessment?: TaskOutcomeShadowAssessment;
-    recoveryRecommendation?: TaskRecoveryShadowRecommendation;
-  }): TaskModalityShadowAssessment | undefined | Promise<TaskModalityShadowAssessment | undefined>;
-}
-
-export type TaskStrategyShadowKind =
-  | 'CONTINUE_CURRENT_BRANCH'
-  | 'OBSERVE_THEN_CONTINUE'
-  | 'LOCAL_REPAIR'
-  | 'ALTERNATIVE_BRANCH'
-  | 'GLOBAL_REPLAN'
-  | 'RECONCILE'
-  | 'VERIFY'
-  | 'WAIT'
-  | 'STOP_UNRESOLVED';
-
-export interface TaskStrategyShadowAssessment {
-  schemaVersion: 1;
-  mode: 'SHADOW';
-  policyVersion: string;
-  taskId: string;
-  actionId: string;
-  decisionKey: string;
-  planId: string;
-  planVersion: number;
-  planDigest: string;
-  authorityGeneration: number | null;
-  authoritySnapshotDigest: string;
-  observationDigest: string;
-  verificationDigest: string;
-  inputStateDigest: string;
-  recommendedStrategy: TaskStrategyShadowKind;
-  productionStrategy: TaskStrategyShadowKind;
-  candidates: Array<{
-    kind: TaskStrategyShadowKind;
-    utility: number;
-    expectedSuccess: number;
-    expectedCost: number;
-    uncertainty: number;
-    verificationStrength: number;
-    penalties: string[];
-  }>;
-  semanticLoopCount: number;
-  controlAllowed: false;
-  assessmentDigest: string;
-}
-
-export interface TaskStrategyShadowAdvisor {
-  assess(input: {
-    task: TaskCapsule;
-    goal: SemanticTaskGoal;
-    decision: Extract<PlannerDecision, { type: 'step' }>;
-    actionId: string;
-    risk: ActionRisk;
-    intelligence: TaskIntelligenceContext;
-    permissions: PermissionProfile;
-    result: ActionResult;
-    observation: TaskObservationSummaryV2;
-    sideEffectState: SideEffectState;
-    executionPhase: ExecutionPhase;
-    productionFailure?: TaskFailureDecision;
-    outcomeAssessment?: TaskOutcomeShadowAssessment;
-    recoveryRecommendation?: TaskRecoveryShadowRecommendation;
-    modalityAssessment?: TaskModalityShadowAssessment;
-  }): TaskStrategyShadowAssessment | undefined | Promise<TaskStrategyShadowAssessment | undefined>;
-}
-
-/** Stable semantic observation boundary. A future visual provider can populate the
- * same contract with channel="visual" without changing planner control flow. */
-export interface TaskObservation {
-  channel: 'semantic' | 'visual';
-  domain: TaskObservationDomain;
-  observedAt: string;
-  ok: boolean;
-  capability: string;
-  provider: string;
-  output?: unknown;
-  evidence: ActionResult['evidence'];
-  error?: ActionResult['error'];
-}
-
-export type PlannerDecision =
-  | { type: 'complete'; message: string }
-  | { type: 'step'; key: string; title: string; capability: string; input: Record<string, unknown>; target?: string };
-
-export interface TaskPlanner {
-  readonly id: string;
-  supports(goal: SemanticTaskGoal): boolean;
-  next(context: TaskPlannerContext): PlannerDecision;
-  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
-  accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
-  fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
-}
-
-export interface TaskRunAuthorization {
-  permissionProvider?: (action: ActionRequest) => PermissionProfile | Promise<PermissionProfile>;
-  onActionResult?: (action: ActionRequest, result: ActionResult) => void | Promise<void>;
-  onApprovalRequired?: (
-    action: ActionRequest,
-    remainingMs: number
-  ) => 'retry' | 'deny' | void | Promise<'retry' | 'deny' | void>;
-}
-
-export interface SubmitTaskOptions {
-  requestId?: string;
-  objective: string;
-  authorizedScope: string[];
-  prohibitedScope?: string[];
-  successConditions: string[];
-  goal: SemanticTaskGoal;
-  maxSteps?: number;
-  maxAttemptsPerStep?: number;
-  timeoutMs?: number;
-  intent?: IntentBinding;
-}
+import type {
+  AppPhysicalFallback,
+  AtomicSemanticTaskGoal,
+  AutonomousTaskAction,
+  AutonomousTaskStep,
+  PhysicalInputTaskOperation,
+  PlannerDecision,
+  PostgresTaskFilter,
+  PostgresTaskOrder,
+  ProjectQualityCheck,
+  SemanticTaskGoal,
+  SubmitTaskOptions,
+  TaskIntelligenceContext,
+  TaskIntelligenceProvider,
+  TaskObservation,
+  TaskPlanner,
+  TaskPlannerContext,
+  TaskPlanningInfluence,
+  TaskPlanningInfluenceProvider,
+  TaskRunAuthorization,
+  UiaTaskOperation,
+  UiaTaskSelector,
+  VisualTaskSelector
+} from './task-orchestrator-contracts.ts';
+import type {
+  TaskModalityShadowAdvisor,
+  TaskModalityShadowAssessment,
+  TaskObservationShadowAdvisor,
+  TaskObservationShadowRecommendation,
+  TaskOutcomeShadowAdvisor,
+  TaskOutcomeShadowAssessment,
+  TaskPlanNodeShadowAdvisor,
+  TaskPlanNodeShadowRecommendation,
+  TaskRecoveryShadowAdvisor,
+  TaskRecoveryShadowRecommendation,
+  TaskStrategyShadowAdvisor,
+  TaskStrategyShadowAssessment
+} from './task-shadow-contracts.ts';
+export type {
+  AppPhysicalFallback,
+  AtomicSemanticTaskGoal,
+  AutonomousTaskAction,
+  AutonomousTaskStep,
+  PhysicalInputTaskOperation,
+  PlannerDecision,
+  PostgresTaskFilter,
+  PostgresTaskOrder,
+  ProjectQualityCheck,
+  SemanticTaskGoal,
+  SubmitTaskOptions,
+  TaskExecuteAction,
+  TaskIntelligenceContext,
+  TaskIntelligenceProvider,
+  TaskIntelligenceRequest,
+  TaskObservation,
+  TaskPlanner,
+  TaskPlannerContext,
+  TaskPlanningInfluence,
+  TaskPlanningInfluenceProvider,
+  TaskPlanningInfluenceRequest,
+  TaskRunAuthorization,
+  UiaTaskOperation,
+  UiaTaskSelector,
+  VisualTaskSelector
+} from './task-orchestrator-contracts.ts';
+export type {
+  TaskExecutionModality,
+  TaskModalityShadowAdvisor,
+  TaskModalityShadowAssessment,
+  TaskObservationShadowAdvisor,
+  TaskObservationShadowRecommendation,
+  TaskOutcomeShadowAdvisor,
+  TaskOutcomeShadowAssessment,
+  TaskPlanNodeShadowAdvisor,
+  TaskPlanNodeShadowRecommendation,
+  TaskRecoveryShadowAdvisor,
+  TaskRecoveryShadowKind,
+  TaskRecoveryShadowRecommendation,
+  TaskStrategyShadowAdvisor,
+  TaskStrategyShadowAssessment,
+  TaskStrategyShadowKind
+} from './task-shadow-contracts.ts';
 
 export class TaskOrchestrator {
   #runtime: OperatorRuntime;
@@ -433,6 +133,7 @@ export class TaskOrchestrator {
   #recoveryShadow?: TaskRecoveryShadowAdvisor;
   #modalityShadow?: TaskModalityShadowAdvisor;
   #strategyShadow?: TaskStrategyShadowAdvisor;
+  #planningInfluence?: TaskPlanningInfluenceProvider;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -452,6 +153,7 @@ export class TaskOrchestrator {
     recoveryShadow?: TaskRecoveryShadowAdvisor;
     modalityShadow?: TaskModalityShadowAdvisor;
     strategyShadow?: TaskStrategyShadowAdvisor;
+    planningInfluence?: TaskPlanningInfluenceProvider;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -471,6 +173,7 @@ export class TaskOrchestrator {
     this.#recoveryShadow = options.recoveryShadow;
     this.#modalityShadow = options.modalityShadow;
     this.#strategyShadow = options.strategyShadow;
+    this.#planningInfluence = options.planningInfluence;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -772,6 +475,69 @@ export class TaskOrchestrator {
           retryAllowed: false, reobserveAllowed: false, replanAllowed: true
         }, assertLease);
         return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', issue, assertLease);
+      }
+
+      const proposalDigest = sha256(canonicalJson({
+        taskId: task.id,
+        stepKey: decision.key,
+        capability: decision.capability,
+        target: decision.target ?? null,
+        inputHash,
+        risk
+      }));
+      if (this.#planningInfluence) {
+        let influence: TaskPlanningInfluence | undefined;
+        try {
+          influence = await this.#planningInfluence.review({
+            proposalDigest,
+            task: structuredClone(task),
+            goal: structuredClone(goal),
+            decision: structuredClone(decision),
+            risk,
+            budget: structuredClone(budget),
+            recentEvents: structuredClone(recentEvents),
+            intelligence: structuredClone(intelligence),
+            decisionBudget: structuredClone(decisionBudget)
+          });
+        } catch (error) {
+          return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        }
+        if (influence) {
+          task.evidence.push(evidence('adaptive_planning_influence', 'info', 'Adaptive planning recommendation was evaluated without granting execution authority.', {
+            command: influence.command,
+            effect: influence.effect,
+            reason: influence.reason.slice(0, 512),
+            proposalDigest
+          }));
+          if (influence.effect === 'CONTROL_ALLOWED') {
+            if (influence.grantsAuthority !== false || influence.runtimeVetoRequired !== true || influence.proposalDigest !== proposalDigest) {
+              return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_INVALID', 'Adaptive control influence was not bound to the exact current proposal and runtime veto.', assertLease);
+            }
+            if (influence.command === 'FAIL_SAFE') {
+              return await this.#fail(task, 'TASK_ADAPTIVE_FAIL_SAFE', 'Adaptive control requested fail-safe termination.', assertLease);
+            }
+            if (influence.command === 'ESCALATE' || influence.command === 'WAIT' || influence.command === 'RECONCILE') {
+              task.state = 'BLOCKED';
+              task.evidence.push(evidence('adaptive_planning_block', 'info', 'Adaptive control deferred execution for authoritative review or reconciliation.', {
+                command: influence.command,
+                proposalDigest
+              }));
+              await this.#persistRunState(task, assertLease);
+              return task;
+            }
+            current.preDispatchReobserves = (current.preDispatchReobserves ?? 0) + 1;
+            current.plannerEvents ??= [];
+            current.plannerEvents.push(plannerEventFromAdaptiveInfluence(influence.command, influence.reason));
+            if (current.plannerEvents.length > 100) current.plannerEvents.splice(0, current.plannerEvents.length - 100);
+            task.evidence.push(evidence('adaptive_planning_replan', 'info', 'Adaptive control vetoed the current proposal and returned bounded control to the existing planner.', {
+              command: influence.command,
+              proposalDigest,
+              preDispatchReobserves: current.preDispatchReobserves
+            }));
+            await this.#persistRunState(task, assertLease);
+            continue;
+          }
+        }
       }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const replayRecord = blockedReplay ?? recoveryReplay;
@@ -2412,6 +2178,25 @@ function autonomousPlan(task: TaskCapsule, goal: Extract<SemanticTaskGoal, { kin
   if (plan.taskId !== task.id) throw new OperatorError('TASK_PLAN_INVALID', 'Durable task plan belongs to a different task.');
   task.execution!.plannerState.durablePlan = plan;
   return plan;
+}
+
+function plannerEventFromAdaptiveInfluence(command: RuntimeAdvisoryCommand, reason: string): TaskPlannerEvent {
+  const decision: TaskPlannerEvent['decision'] =
+    command === 'REPLAN' ? 'REPLAN' :
+    command === 'REPAIR' ? 'REPAIR' :
+    command === 'RECONCILE' ? 'RECONCILE' :
+    command === 'WAIT' ? 'WAIT' :
+    command === 'FAIL_SAFE' || command === 'ESCALATE' ? 'FAIL' :
+    'REOBSERVE';
+  return {
+    kind: command === 'RECONCILE' ? 'RECONCILIATION_REQUIRED' : command === 'WAIT' ? 'RESOURCE_BUSY' : 'STATE_CHANGED',
+    decision,
+    code: 'ADAPTIVE_' + command,
+    at: new Date().toISOString(),
+    provider: 'adaptive-planning-control',
+    capability: 'planner',
+    reason: reason.slice(0, 1024)
+  };
 }
 
 function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {

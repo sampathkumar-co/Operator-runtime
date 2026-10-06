@@ -1,0 +1,70 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import test from 'node:test';
+import { CONTRACT_REGISTRY, assertContractRegistryValid } from '../src/core/contract-registry.ts';
+
+const REQUIRED_CONTRACTS = [
+  'principal',
+  'delegation',
+  'intent-binding',
+  'goal',
+  'durable-task-plan',
+  'plan-revision',
+  'plan-node',
+  'task-capsule',
+  'action-request',
+  'action-attempt',
+  'authority-envelope',
+  'resource-identity',
+  'resource-revision',
+  'resource-lease',
+  'fence-token',
+  'evidence',
+  'verification-receipt',
+  'artifact-record',
+  'event',
+  'evaluation-run',
+  'execution-context-identity'
+] as const;
+
+test('R1 contract registry covers canonical execution identities and envelopes', () => {
+  assert.doesNotThrow(() => assertContractRegistryValid());
+  const names = new Set(CONTRACT_REGISTRY.map((item) => item.name));
+  for (const name of REQUIRED_CONTRACTS) assert.equal(names.has(name), true, `missing canonical contract: ${name}`);
+});
+
+test('R1 root workspace declares every package-bearing production boundary', async () => {
+  const manifest = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+    workspaces?: string[];
+    scripts?: Record<string, string>;
+  };
+  assert.deepEqual(manifest.workspaces, [
+    'apps/mcp-server',
+    'apps/relay-server',
+    'deploy/auth-portal',
+    'packages/adaptive-intelligence',
+    'packages/mecord-connect',
+    'packages/operator-runtime-cli',
+    'packages/verified-plan-runtime'
+  ]);
+  assert.equal(typeof manifest.scripts?.['typecheck:production'], 'string');
+  assert.equal(typeof manifest.scripts?.['verify:r1-source'], 'string');
+  assert.equal(typeof manifest.scripts?.['evidence:r1'], 'string');
+});
+
+test('R1 production TypeScript config is strict and spans all runtime sources', async () => {
+  const config = JSON.parse(await fs.readFile(new URL('../tsconfig.production.json', import.meta.url), 'utf8')) as {
+    compilerOptions?: Record<string, unknown>;
+    include?: string[];
+  };
+  assert.equal(config.compilerOptions?.strict, true);
+  assert.equal(config.compilerOptions?.noEmit, true);
+  for (const required of [
+    'src/**/*.ts',
+    'apps/local-agent/src/**/*.ts',
+    'apps/mcp-server/src/**/*.ts',
+    'apps/relay-server/src/**/*.ts',
+    'packages/adaptive-intelligence/src/**/*.ts',
+    'packages/verified-plan-runtime/src/**/*.ts'
+  ]) assert.equal(config.include?.includes(required), true, `missing typecheck boundary: ${required}`);
+});

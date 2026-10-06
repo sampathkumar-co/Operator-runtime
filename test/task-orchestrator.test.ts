@@ -127,6 +127,80 @@ test('task executor completes and durably verifies a real semantic multi-action 
   assert.deepEqual(await store.get(submitted.id), completed);
 });
 
+test('adaptive planning control can veto one exact proposal and return bounded control to the existing planner', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-task-adaptive-replan-root-');
+  const state = await tempDir(t, 'operator-task-adaptive-replan-state-');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => execFile('git', ['init', '--quiet'], { cwd: root }, (error) => error ? reject(error) : resolve()));
+
+  let reviews = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)).register(new GitProvider({ allowedRoots: [root] })),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.read', 'git.status']),
+    planningInfluence: {
+      async review(request) {
+        reviews += 1;
+        if (reviews !== 1) return undefined;
+        return {
+          command: 'REPLAN',
+          effect: 'CONTROL_ALLOWED',
+          reason: 'exercise exact-proposal bounded replan',
+          proposalDigest: request.proposalDigest,
+          grantsAuthority: false,
+          runtimeVetoRequired: true
+        };
+      }
+    }
+  });
+
+  const submitted = await orchestrator.submit({
+    objective: 'Create a file after one bounded adaptive replan.',
+    authorizedScope: [root],
+    successConditions: ['exact file content is verified'],
+    goal: { kind: 'controlled-file-change', root, path: 'adaptive.txt', content: 'adaptive\n' }
+  });
+  const completed = await orchestrator.run(submitted.id);
+
+  assert.equal(completed.state, 'VERIFIED');
+  assert.ok(reviews > 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'adaptive_planning_replan'));
+  assert.equal(await fs.readFile(path.join(root, 'adaptive.txt'), 'utf8'), 'adaptive\n');
+});
+
+test('adaptive control fails closed when a control recommendation is bound to a stale proposal', async (t) => {
+  const root = await tempDir(t, 'operator-task-adaptive-stale-root-');
+  const state = await tempDir(t, 'operator-task-adaptive-stale-state-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list']),
+    planningInfluence: {
+      async review() {
+        return {
+          command: 'REPLAN',
+          effect: 'CONTROL_ALLOWED',
+          reason: 'stale recommendation',
+          proposalDigest: '0'.repeat(64),
+          grantsAuthority: false,
+          runtimeVetoRequired: true
+        };
+      }
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Never execute a stale adaptive control recommendation.',
+    authorizedScope: [root],
+    successConditions: ['stale control is rejected'],
+    goal: { kind: 'controlled-file-change', root, path: 'never.txt', content: 'never\n' }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'FAILED');
+  assert.equal(completed.failures.at(-1)?.code, 'TASK_ADAPTIVE_CONTROL_INVALID');
+  await assert.rejects(() => fs.stat(path.join(root, 'never.txt')), (error: any) => error?.code === 'ENOENT');
+});
+
 test('generic autonomous workflow observes, mutates through the kernel boundary, and independently verifies durable machine state', async (t) => {
   const root = await tempDir(t, 'operator-task-autonomous-root-');
   const state = await tempDir(t, 'operator-task-autonomous-state-');

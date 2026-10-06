@@ -19,6 +19,7 @@ export const RESOURCE_EXTRACTOR_CAPABILITIES = Object.freeze([
   'computer.inspect',
   'project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run',
   'file.read', 'file.list', 'file.write', 'file.create', 'file.replace', 'file.info', 'file.search', 'file.manage',
+  'workspace.edit.resolve_lsp', 'workspace.edit.transaction', 'workspace.edit.rollback',
   'git.status', 'git.diff', 'git.rev-parse', 'git.checkpoint.inspect', 'git.checkpoint.create', 'git.checkpoint.restore', 'git.write',
   'docker.inspect', 'docker.manage', 'compute.run', 'postgres.inspect', 'postgres.select',
   'vscode.inspect', 'vscode.open', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage',
@@ -49,6 +50,17 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   const values: unknown[] = [];
   if (action.capability === 'file.manage') values.push(input.path, input.source, input.destination);
   else if (action.capability.startsWith('file.')) values.push(input.path);
+  else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') values.push(input.workspaceRoot);
+  else if (action.capability === 'workspace.edit.transaction') {
+    const root = input.workspaceRoot;
+    values.push(root);
+    const files = (input.plan as { files?: Array<{ path?: unknown }> } | undefined)?.files;
+    if (typeof root === 'string' && Array.isArray(files)) {
+      for (const file of files.slice(0, 1000)) {
+        if (typeof file?.path === 'string') values.push(path.join(root, ...file.path.split('/')));
+      }
+    }
+  }
   else if (action.capability.startsWith('git.')) values.push(input.cwd);
   else if (action.capability.startsWith('project.')) values.push(input.path ?? input.cwd);
   else if (action.capability.startsWith('docker.')) values.push(input.path);
@@ -80,8 +92,23 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     keys.add('computer:local');
   } else if (action.capability.startsWith('file.')) {
     if (action.capability === 'file.manage') {
-      add('file', input.path, keys); add('file', input.source, keys); add('file', input.destination, keys);
-    } else add('file', input.path, keys);
+      add('file', input.path, keys);
+      add('file', input.source, keys);
+      add('file', input.destination, keys);
+    } else {
+      add('file', input.path, keys);
+    }
+  } else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') {
+    add('workspace', input.workspaceRoot, keys);
+  } else if (action.capability === 'workspace.edit.transaction') {
+    const root = input.workspaceRoot;
+    add('workspace', root, keys);
+    const files = (input.plan as { files?: Array<{ path?: unknown }> } | undefined)?.files;
+    if (typeof root === 'string' && Array.isArray(files)) {
+      for (const file of files.slice(0, 1000)) {
+        if (typeof file?.path === 'string') add('file', path.join(root, ...file.path.split('/')), keys);
+      }
+    }
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
@@ -108,8 +135,15 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
       const affected = terminalAffectedPaths(action);
       if (affected.length === 0) keys.add('filesystem:any');
       else for (const affectedPath of affected) add('file', affectedPath, keys);
+      if (Array.isArray(input.ports)) {
+        for (const value of input.ports.slice(0, 128)) {
+          const port = Number(value);
+          if (Number.isSafeInteger(port) && port >= 1 && port <= 65535) keys.add('network:tcp:' + String(port));
+        }
+      }
+    } else if (typeof input.sessionId === 'string' && input.sessionId) {
+      keys.add(`process:session/${requiredSegment(input.sessionId, 'session')}`);
     }
-    else if (typeof input.sessionId === 'string' && input.sessionId) keys.add(`process:session/${requiredSegment(input.sessionId, 'session')}`);
   } else if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
     const pid = Number(input.pid);
     keys.add(Number.isSafeInteger(pid) && pid > 0 ? `process:windows/${pid}` : 'process:windows');

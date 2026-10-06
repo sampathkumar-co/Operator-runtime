@@ -16,16 +16,23 @@ export async function readDurableStateText(file: string, options: DurableStateOp
 
 class DurableStateReadRace extends Error {}
 
+// Genuine path/link topology races are retried long enough to survive loaded
+// CI and desktop schedulers, while persistent unsafe topology still fails
+// closed after a small bounded window (~100 ms total).
+const TRANSIENT_RACE_DELAYS_MS = [1, 4, 10, 25, 60] as const;
+
 export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);
   let lastRace: DurableStateReadRace | undefined;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt <= TRANSIENT_RACE_DELAYS_MS.length; attempt += 1) {
     try {
       return await readDurableStateBytesOnce(file, options);
     } catch (error) {
       if (!(error instanceof DurableStateReadRace)) throw error;
       lastRace = error;
-      if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 1 << attempt));
+      if (attempt < TRANSIENT_RACE_DELAYS_MS.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, TRANSIENT_RACE_DELAYS_MS[attempt]));
+      }
     }
   }
   try {
