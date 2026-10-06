@@ -50,6 +50,13 @@ export interface SyntaxSearchOptions {
   limit?: number;
 }
 
+export interface SemanticSymbolImpact {
+  changedNodeIds: string[];
+  impactedNodeIds: string[];
+  impactedPaths: string[];
+  suggestedTestPaths: string[];
+}
+
 export interface SemanticConflictAnalysis {
   status:
     | 'UNCHANGED'
@@ -202,6 +209,74 @@ export class WorkspaceSemanticIntelligence {
     return snapshot.calls
       .filter((edge) => edge.fromNodeId === nodeId)
       .map((edge) => structuredClone(edge));
+  }
+
+  impactForSymbols(
+    snapshotInput: WorkspaceSemanticSnapshot,
+    indexInput: WorkspaceCodeIndexSnapshot,
+    changedNodeIdsInput: string[]
+  ): SemanticSymbolImpact {
+    const snapshot = validateSemanticSnapshot(snapshotInput);
+    const index = this.#validateIndex(indexInput);
+    if (snapshot.codeIndexId !== index.id) {
+      throw invalid('Semantic snapshot and code index do not describe the same workspace observation.');
+    }
+    if (!Array.isArray(changedNodeIdsInput) || changedNodeIdsInput.length < 1 || changedNodeIdsInput.length > 10_000) {
+      throw invalid('changedNodeIds is invalid.');
+    }
+    const byId = new Map(snapshot.nodes.map((node) => [node.id, node]));
+    const changedNodeIds = [...new Set(changedNodeIdsInput)].sort();
+    for (const id of changedNodeIds) {
+      if (!byId.has(id)) throw invalid('changedNodeIds contains an unknown semantic node.');
+    }
+
+    const impactedNodes = new Set(changedNodeIds);
+    const queue = [...changedNodeIds];
+    const reverseCalls = new Map<string, Set<string>>();
+    for (const edge of snapshot.calls) {
+      if (!edge.resolvedNodeId || !edge.fromNodeId) continue;
+      const bucket = reverseCalls.get(edge.resolvedNodeId) ?? new Set<string>();
+      bucket.add(edge.fromNodeId);
+      reverseCalls.set(edge.resolvedNodeId, bucket);
+    }
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const caller of reverseCalls.get(current) ?? []) {
+        if (impactedNodes.has(caller)) continue;
+        impactedNodes.add(caller);
+        queue.push(caller);
+      }
+    }
+
+    const impactedPathsSet = new Set(
+      [...impactedNodes].map((id) => byId.get(id)!.path)
+    );
+    const reverseImports = new Map<string, Set<string>>();
+    for (const file of index.files) {
+      for (const dependency of file.imports) {
+        if (!dependency.targetPath) continue;
+        const bucket = reverseImports.get(dependency.targetPath) ?? new Set<string>();
+        bucket.add(file.path);
+        reverseImports.set(dependency.targetPath, bucket);
+      }
+    }
+    const pathQueue = [...impactedPathsSet];
+    while (pathQueue.length > 0) {
+      const current = pathQueue.shift()!;
+      for (const dependent of reverseImports.get(current) ?? []) {
+        if (impactedPathsSet.has(dependent)) continue;
+        impactedPathsSet.add(dependent);
+        pathQueue.push(dependent);
+      }
+    }
+
+    const impactedPaths = [...impactedPathsSet].sort();
+    return {
+      changedNodeIds,
+      impactedNodeIds: [...impactedNodes].sort(),
+      impactedPaths,
+      suggestedTestPaths: impactedPaths.filter(isLikelyTestPath)
+    };
   }
 
   #validateIndex(input: WorkspaceCodeIndexSnapshot): WorkspaceCodeIndexSnapshot {
@@ -618,6 +693,17 @@ function normalizeRelativePath(input: unknown): string {
 function inside(child: string, root: string): boolean {
   const relative = path.relative(root, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isLikelyTestPath(value: string): boolean {
+  const lower = value.toLocaleLowerCase();
+  return lower.includes('/test/') ||
+    lower.includes('/tests/') ||
+    /(?:^|\/)[^/]+\.(?:test|spec)\.[^.]+$/.test(lower) ||
+    lower.endsWith('test.java') ||
+    lower.endsWith('_test.py') ||
+    lower.startsWith('test_') ||
+    lower.includes('/test_');
 }
 
 function boundedInteger(value: unknown, min: number, max: number, label: string): number {
