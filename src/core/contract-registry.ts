@@ -30,6 +30,8 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'execution-context-identity', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'evaluation-state', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'evaluation' },
   { name: 'shadow-decision', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'evaluation' },
+  { name: 'adaptive-planning-control-state', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
+  { name: 'adaptive-planning-promotion-evidence', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'evaluation' },
   { name: 'artifact-record', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'evidence-pack', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'workspace-graph', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
