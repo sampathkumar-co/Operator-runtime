@@ -607,6 +607,72 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedRisk
   }, path));
 
+  server.registerTool('workspace.edit.resolve', {
+    title: 'Resolve LSP edits into a transactional workspace plan',
+    description: 'Resolve versioned LSP text-document edits against exact current SHA-256 document bytes. This is read-only: it returns an immutable multi-file plan and affected-test hints; applying the plan requires a separate workspace.edit write action.',
+    inputSchema: z.object({
+      workspaceRoot: z.string().min(1).max(4096),
+      documents: z.array(z.object({
+        uri: z.string().min(1).max(8192),
+        expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+        version: z.number().int().nullable().optional(),
+        edits: z.array(z.object({
+          start: z.object({
+            line: z.number().int().min(0).max(10_000_000),
+            character: z.number().int().min(0).max(100_000_000)
+          }),
+          end: z.object({
+            line: z.number().int().min(0).max(10_000_000),
+            character: z.number().int().min(0).max(100_000_000)
+          }),
+          newText: z.string().max(256 * 1024)
+        })).min(1).max(2000)
+      })).min(1).max(200),
+      trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
+      includeImpactAnalysis: z.boolean().default(true)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ workspaceRoot, documents, trustedCommandIds, includeImpactAnalysis }) => {
+    const expectedDocumentSha256: Record<string, string> = {};
+    for (const document of documents) {
+      const prior = expectedDocumentSha256[document.uri];
+      if (prior && prior.toLowerCase() !== document.expectedSha256.toLowerCase()) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'workspace.edit.resolve: duplicate document URI has conflicting SHA-256 bindings.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'workspace.edit.resolve_lsp',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'LSP_EDIT_DIGEST_CONFLICT', message: 'Duplicate document URI has conflicting SHA-256 bindings.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      expectedDocumentSha256[document.uri] = document.expectedSha256.toLowerCase();
+    }
+    const edit = {
+      documentChanges: documents.map((document) => ({
+        textDocument: {
+          uri: document.uri,
+          ...(document.version !== undefined ? { version: document.version } : {})
+        },
+        edits: document.edits.map((entry) => ({
+          range: { start: entry.start, end: entry.end },
+          newText: entry.newText
+        }))
+      }))
+    };
+    return invoke('workspace.edit.resolve_lsp', 'read', {
+      workspaceRoot,
+      edit,
+      expectedDocumentSha256,
+      trustedCommandIds,
+      includeImpactAnalysis
+    }, workspaceRoot);
+  });
+
   server.registerTool('workspace.edit', {
     title: 'Apply transactional multi-file workspace edit',
     description: 'Apply a bounded multi-file edit plan using exact SHA-256 preconditions. Mecord stages every target before the first mutation, journals hashes and phases without storing source contents, verifies post-edit hashes, and rolls back or reconciles safely after failure.',
