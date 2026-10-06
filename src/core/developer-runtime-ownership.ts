@@ -194,6 +194,16 @@ export class DeveloperRuntimeOwnershipStore {
     return rows;
   }
 
+  async listAll(nowInput = new Date().toISOString()): Promise<DeveloperRuntimeOwnershipRecord[]> {
+    const now = canonicalIso(nowInput, 'now');
+    let rows: DeveloperRuntimeOwnershipRecord[] = [];
+    await this.#mutate(async (state) => {
+      await reconcileDeadRecords(state, this.#inspect, now);
+      rows = state.records.map((item) => structuredClone(item));
+    });
+    return rows;
+  }
+
   async get(
     processSessionIdInput: string,
     nowInput = new Date().toISOString()
@@ -265,6 +275,7 @@ export class DeveloperRuntimeOwnershipStore {
           'Exit observation does not match the owned process instance.'
         );
       }
+      if (record.phase === 'TERMINATED' || record.phase === 'EXITED') return;
       if (record.phase === 'AMBIGUOUS' || record.phase === 'LAUNCH_INTENT') {
         throw new OperatorError('DEVELOPER_RUNTIME_TRANSITION_INVALID', 'Ambiguous launch ownership cannot accept an exit claim.');
       }
