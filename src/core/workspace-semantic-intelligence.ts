@@ -125,6 +125,7 @@ export class WorkspaceSemanticIntelligence {
         while ((match = CALL.exec(line))) {
           const callee = match[1]!;
           if (CALL_KEYWORDS.has(callee)) continue;
+          if (isDeclarationCallToken(file, lineIndex + 1, line, match.index, callee)) continue;
           const from = innermostNodeAtLine(fileNodes, lineIndex + 1);
           const candidates = resolveCallCandidates(callee, file.path, nodeByName);
           calls.push({
@@ -524,6 +525,34 @@ function stripCommentsAndStrings(line: string): string {
     out += ' ';
   }
   return out;
+}
+
+function isDeclarationCallToken(
+  file: CodeIndexFile,
+  lineNumber: number,
+  line: string,
+  callOffset: number,
+  callee: string
+): boolean {
+  const declarations = file.symbols.filter((symbol) =>
+    symbol.line === lineNumber &&
+    (symbol.kind === 'function' || symbol.kind === 'method') &&
+    symbol.name === callee
+  );
+  for (const declaration of declarations) {
+    const namePattern = new RegExp('\\\\b' + escapeRegExp(declaration.name) + '\\\\s*\\\\(', 'g');
+    const token = namePattern.exec(line);
+    if (token?.index === callOffset) return true;
+  }
+  return false;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^$\\{\}()|[\]\\\\]/g, '\\\\function resolveCallCandidates(
+  callee: string,
+  callerPath: string,
+  byName: Map<string, SemanticSyntaxNode[]>
+): SemanticSyntaxNode[] {');
 }
 
 function resolveCallCandidates(
