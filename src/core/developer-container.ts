@@ -678,6 +678,17 @@ async function validateInspectPayload(
   if (workspace.length !== 1) {
     throw new OperatorError('DEVELOPER_CONTAINER_MOUNT_INVALID', 'Developer container requires exactly one /workspace mount.');
   }
+  const unexpectedMounts = mounts.filter((item) => {
+    const destination = String(item.Destination ?? '');
+    const type = String(item.Type ?? '');
+    return destination !== '/workspace' && !(destination === '/tmp' && type === 'tmpfs');
+  });
+  if (unexpectedMounts.length > 0) {
+    throw new OperatorError(
+      'DEVELOPER_CONTAINER_MOUNT_INVALID',
+      'Developer container contains an undeclared host or volume mount.'
+    );
+  }
   const mount = workspace[0]!;
   if (
     String(mount.Type ?? '') !== 'bind' ||
