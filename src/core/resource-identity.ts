@@ -25,6 +25,9 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     } else {
       add('file', input.path, keys);
     }
+  } else if (action.capability.startsWith('workspace.worktree.')) {
+    add('repo', input.repositoryRoot, keys);
+    if (typeof input.sessionId === 'string' && input.sessionId) keys.add(`developer-worktree:${String(input.sessionId).toLowerCase()}`);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
     add('workspace', root, keys);
@@ -75,6 +78,8 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
   if (action.capability.startsWith('file.')) {
     addPath(input.path); addPath(input.source); addPath(input.destination);
+  } else if (action.capability.startsWith('workspace.worktree.')) {
+    addPath(input.repositoryRoot);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
     addPath(root);
