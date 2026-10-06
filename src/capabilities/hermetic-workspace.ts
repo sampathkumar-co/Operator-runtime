@@ -447,17 +447,15 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
   }
 
   async #prepareOwnedRoot(sourceRoot: string): Promise<void> {
-    if (inside(this.#ownedRoot, sourceRoot) || inside(sourceRoot, this.#ownedRoot)) {
-      throw new OperatorError('HERMETIC_WORKSPACE_ROOT_OVERLAP', 'Mecord-owned worktrees may not overlap the source repository.');
-    }
     await fs.mkdir(this.#ownedRoot, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(this.#ownedRoot);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
       throw new OperatorError('HERMETIC_WORKSPACE_OWNED_ROOT_UNSAFE', 'Owned worktree root has unsafe topology.');
     }
     const real = await fs.realpath(this.#ownedRoot);
-    if (canonicalPath(real) !== canonicalPath(this.#ownedRoot)) {
-      throw new OperatorError('HERMETIC_WORKSPACE_OWNED_ROOT_UNSAFE', 'Owned worktree root resolves through an unexpected alias.');
+    this.#ownedRoot = real;
+    if (inside(this.#ownedRoot, sourceRoot) || inside(sourceRoot, this.#ownedRoot)) {
+      throw new OperatorError('HERMETIC_WORKSPACE_ROOT_OVERLAP', 'Mecord-owned worktrees may not overlap the source repository.');
     }
   }
 
