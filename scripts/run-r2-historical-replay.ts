@@ -747,7 +747,7 @@ async function runArm(task: HistoricalTask, arm: 'candidate' | 'control', armRoo
     arm,
     state: completed.state,
     verification,
-    evidenceDigest: sha256(canonicalJson(completed.evidence)),
+    evidenceDigest: sha256(JSON.stringify(completed.evidence)),
     verified
   }));
   const progressScore = round(matched / task.items.length);
