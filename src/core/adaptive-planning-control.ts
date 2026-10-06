@@ -24,6 +24,10 @@ export interface AdaptivePlanningPromotionEvidence {
   rollbackSnapshotDigest: string;
   verificationReceiptDigests: string[];
   evaluatedAt: string;
+  evaluationLineageDigest: string;
+  candidateManifestDigest: string;
+  baselineManifestDigest: string;
+  criteriaDigest: string;
 }
 
 export interface AdaptivePlanningControlState {
@@ -258,7 +262,11 @@ function normalizePromotionEvidence(input: AdaptivePlanningPromotionEvidence): A
     deterministicRestartVerified: input.deterministicRestartVerified === true,
     rollbackSnapshotDigest: sha256(input.rollbackSnapshotDigest, 'rollbackSnapshotDigest'),
     verificationReceiptDigests,
-    evaluatedAt: input.evaluatedAt
+    evaluatedAt: input.evaluatedAt,
+    evaluationLineageDigest: sha256(input.evaluationLineageDigest, 'evaluationLineageDigest'),
+    candidateManifestDigest: sha256(input.candidateManifestDigest, 'candidateManifestDigest'),
+    baselineManifestDigest: sha256(input.baselineManifestDigest, 'baselineManifestDigest'),
+    criteriaDigest: sha256(input.criteriaDigest, 'criteriaDigest')
   };
 }
 
