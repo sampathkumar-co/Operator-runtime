@@ -2,7 +2,7 @@
 
 This package is a dependency-light successor module undergoing progressive integration with Mecord Connect's production `Operator-runtime`.
 
-Observation selection, normalized outcome progress/failure reasoning, and low-risk plan-node recommendation are wired into `TaskOrchestrator` in **SHADOW mode only**. Observation selection can rank already-authorized read-only capabilities; outcome reasoning can classify secret-minimized machine evidence after the authoritative action result; plan-node recommendation can compare capability identities from the current node and verified procedure memory through Verified Plan Runtime hard risk/budget gates. These stages record comparison evidence, but cannot supply executable inputs, dispatch actions, alter planner control flow or durable plan graphs, select recovery, widen authority, or bypass policy, approvals, and resource leases. Repair planning, modality selection, strategy control, browser CDP, UIA, provider routing, and every mutating control path remain deliberately isolated pending later activation stages. The offline/local source successor may contain newer 2.0.5 hardening that must be reconciled before further integration.
+Observation selection, normalized outcome progress/failure reasoning, low-risk plan-node recommendation, and bounded recovery recommendation are wired into `TaskOrchestrator` in **SHADOW mode only**. Observation selection can rank already-authorized read-only capabilities; outcome reasoning can classify secret-minimized machine evidence after the authoritative action result; plan-node recommendation can compare capability identities from the current node and verified procedure memory through Verified Plan Runtime hard risk/budget gates; recovery shadow can recommend only a recovery option identity bound to exact task, plan, observation, verification, and authority lineage. These stages record comparison evidence, but cannot supply executable inputs, dispatch actions, alter planner control flow or durable plan graphs, execute recovery, widen authority, or bypass policy, approvals, and resource leases. Uncertain mutations require reconciliation or fail safe, authority denials and irreversible failures fail safe, and repeated semantic repairs are bounded. Modality selection, strategy control, browser CDP, UIA, provider routing, and every mutating control path remain deliberately isolated pending later activation stages.
 
 ## Purpose
 
@@ -84,5 +84,5 @@ Before merging into production:
 2. inspect the actual `codex/deep-hardening` HEAD (known prior state reached at least the 2.0.5 hardening line);
 3. compare this package against newer epistemic/reobservation/recovery implementations;
 4. delete or adapt duplicates rather than overwriting newer runtime logic;
-5. integrate contracts first, then shadow attribution/progress, then recovery selection, then strategy control;
+5. integrate contracts first, then shadow attribution/progress, capability-only plan-node comparison, recovery recommendation shadow, modality shadow, and only later strategy control;
 6. keep AgentKernel and existing independent verification authoritative.

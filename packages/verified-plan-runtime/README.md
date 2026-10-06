@@ -33,7 +33,7 @@ Adaptive Intelligence Core. It adds the missing future-state layer:
 2. Reconcile the latest production Mecord runtime and the Adaptive Intelligence branch.
 3. Shadow plan generation and record prediction-vs-outcome lineage.
 4. Compare capability-only low-risk plan-node recommendations without executable inputs or plan mutation.
-5. Enable local repair/replanning.
-6. Enable hybrid execution compilation.
+5. Compare identity-only local repair/replanning recommendations in shadow mode, bound to exact plan and authority lineage.
+6. Compare hybrid execution modality compilation in shadow mode.
 7. Enable irreversible/high-risk control only behind production authority + verification.
 8. Run restart/soak/security/performance validation, then frozen benchmark certification.

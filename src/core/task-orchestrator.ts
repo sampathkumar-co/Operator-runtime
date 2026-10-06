@@ -213,6 +213,50 @@ export interface TaskOutcomeShadowAdvisor {
   }): TaskOutcomeShadowAssessment | undefined | Promise<TaskOutcomeShadowAssessment | undefined>;
 }
 
+export interface TaskRecoveryShadowRecommendation {
+  schemaVersion: 1;
+  mode: 'SHADOW';
+  policyVersion: string;
+  taskId: string;
+  goalKind: SemanticTaskGoal['kind'];
+  planId: string;
+  planVersion: number;
+  planDigest: string;
+  failedNodeId: string;
+  actionId: string;
+  attempt: number;
+  observationDigest: string;
+  verificationResultDigest: string;
+  authoritySnapshotDigest: string;
+  authorityGeneration: number | null;
+  inputStateDigest: string;
+  failureClass: string;
+  selected: { id: string; kind: 'REOBSERVE' | 'REGROUND' | 'REPLAN' | 'REPAIR' | 'RECONCILE' | 'WAIT' | 'VERIFY' | 'FAIL_SAFE' };
+  alternatives: Array<{ id: string; kind: 'REOBSERVE' | 'REGROUND' | 'REPLAN' | 'REPAIR' | 'RECONCILE' | 'WAIT' | 'VERIFY' | 'FAIL_SAFE' }>;
+  productionStrategy: TaskFailureDecision['strategy'];
+  semanticLoopCount: number;
+  recommendationDigest: string;
+}
+
+export interface TaskRecoveryShadowAdvisor {
+  recommend(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    failedNodeId: string;
+    attempt: number;
+    risk: ActionRisk;
+    permissions: PermissionProfile;
+    result: ActionResult;
+    observation: TaskObservationSummaryV2;
+    sideEffectState: SideEffectState;
+    executionPhase: ExecutionPhase;
+    productionFailure: TaskFailureDecision;
+    outcomeAssessment?: TaskOutcomeShadowAssessment;
+  }): TaskRecoveryShadowRecommendation | undefined | Promise<TaskRecoveryShadowRecommendation | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -281,6 +325,7 @@ export class TaskOrchestrator {
   #observationShadow?: TaskObservationShadowAdvisor;
   #planNodeShadow?: TaskPlanNodeShadowAdvisor;
   #outcomeShadow?: TaskOutcomeShadowAdvisor;
+  #recoveryShadow?: TaskRecoveryShadowAdvisor;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -297,6 +342,7 @@ export class TaskOrchestrator {
     observationShadow?: TaskObservationShadowAdvisor;
     planNodeShadow?: TaskPlanNodeShadowAdvisor;
     outcomeShadow?: TaskOutcomeShadowAdvisor;
+    recoveryShadow?: TaskRecoveryShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -313,6 +359,7 @@ export class TaskOrchestrator {
     this.#observationShadow = options.observationShadow;
     this.#planNodeShadow = options.planNodeShadow;
     this.#outcomeShadow = options.outcomeShadow;
+    this.#recoveryShadow = options.recoveryShadow;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -937,6 +984,42 @@ export class TaskOrchestrator {
       } else if (outcomeShadowUnavailable) {
         task.evidence.push(evidence('adaptive_outcome_shadow', 'info', 'Adaptive outcome shadow evaluation was unavailable; production progress and recovery logic remained authoritative.', {
           mode: 'SHADOW', actualOk: result.ok, ...(productionFailure ? { productionFailureCode: productionFailure.code } : {})
+        }));
+      }
+      const resultOutputForRecovery = result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+        ? result.output as Record<string, unknown>
+        : {};
+      const stateDeltaForRecovery = resultOutputForRecovery.stateDelta && typeof resultOutputForRecovery.stateDelta === 'object'
+        && !Array.isArray(resultOutputForRecovery.stateDelta)
+        ? resultOutputForRecovery.stateDelta as Record<string, unknown>
+        : undefined;
+      const recoveryFailure = productionFailure ?? (stateDeltaForRecovery?.progress === false
+        ? classifyTaskFailure({
+            code: 'ACTION_NO_PROGRESS', message: 'The authoritative provider reported no goal progress.', retryable: false,
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase
+          })
+        : undefined);
+      let recoveryShadow: TaskRecoveryShadowRecommendation | undefined;
+      let recoveryShadowUnavailable = false;
+      if (recoveryFailure && this.#recoveryShadow) {
+        try {
+          recoveryShadow = await this.#recoveryShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, failedNodeId: latestNode.id, attempt: latestRecord.attempt, risk,
+            permissions: structuredClone(permissions), result: structuredClone(result),
+            observation: structuredClone(normalizedObservation), sideEffectState: latestRecord.sideEffectState,
+            executionPhase: latestRecord.executionPhase, productionFailure: structuredClone(recoveryFailure),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {})
+          });
+        } catch {
+          recoveryShadowUnavailable = true;
+        }
+      }
+      if (recoveryShadow) {
+        task.evidence.push(evidence('adaptive_recovery_shadow', 'info', 'Recorded a non-executable recovery recommendation; production recovery remained authoritative.', recoveryShadow));
+      } else if (recoveryShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_recovery_shadow_unavailable', 'info', 'Recovery shadow evaluation was unavailable; production recovery remained authoritative.', {
+          mode: 'SHADOW', actionId, productionFailureCode: recoveryFailure?.code
         }));
       }
       const plannerEvent = plannerEventFromResult(result, productionFailure);

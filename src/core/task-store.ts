@@ -8,6 +8,7 @@ import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from '.
 import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { validateRecoveryShadowRecommendation } from './adaptive-recovery-shadow.ts';
 import {
   currentProcessInstance,
   observeProcessInstance,
@@ -586,7 +587,11 @@ function validateEvidenceArray(input: unknown, max: number, label: string): Evid
     if (!status) throw corrupt(`${label} entry ${index} status is invalid.`);
     const message = boundedText(raw.message, 64 * 1024, `${label} entry ${index} message`);
     const timestamp = validIso(raw.timestamp, `${label} entry ${index} timestamp`);
-    const data = raw.data === undefined ? undefined : jsonObject(raw.data, `${label} entry ${index} data`);
+    let data = raw.data === undefined ? undefined : jsonObject(raw.data, `${label} entry ${index} data`);
+    if (kind === 'adaptive_recovery_shadow') {
+      try { data = validateRecoveryShadowRecommendation(data) as unknown as Record<string, unknown>; }
+      catch { throw corrupt(`${label} entry ${index} recovery shadow lineage is invalid.`); }
+    }
     return { kind, status, message, ...(data ? { data } : {}), timestamp };
   });
 }
