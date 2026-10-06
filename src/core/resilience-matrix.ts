@@ -13,6 +13,7 @@ export type ResilienceControl =
   | 'provenance-binding' | 'freshness-check' | 'artifact-gating' | 'capability-routing'
   | 'independent-evidence' | 'provider-fallback' | 'provider-quarantine' | 'dag-validation'
   | 'bounded-decomposition' | 'resource-leases' | 'revision-cas' | 'idempotency'
+  | 'resource-quarantine' | 'transaction-recovery' | 'emergency-cancellation' | 'monotonic-authority'
   | 'side-effect-reconciliation' | 'compensation' | 'tool-result-validation' | 'action-bound-approval'
   | 'heterogeneous-verification' | 'hard-budget' | 'deadline-budget' | 'learning-quarantine'
   | 'audit-causal-chain' | 'durable-checkpoint' | 'data-sovereignty' | 'human-escalation'
@@ -73,10 +74,10 @@ export const FAILURE_FAMILIES: readonly FailureFamily[] = Object.freeze([
   F('F23','Missing dependency','A node becomes runnable before its prerequisite is satisfied.',['COMPLETION_REQUIRES_INDEPENDENT_VERIFICATION','PARALLEL_MUTATION_IS_COORDINATED'],['dag-validation','resource-leases']),
   F('F24','Circular dependency','The work graph contains a dependency cycle.',['LONG_TASKS_SURVIVE_FAILURE','BUDGETS_REMAIN_BOUNDED'],['dag-validation','bounded-decomposition']),
   F('F25','Infinite decomposition','Planning recursively creates new work without converging.',['BUDGETS_REMAIN_BOUNDED','ONE_COHERENT_USER_CONVERSATION'],['bounded-decomposition','hard-budget']),
-  F('F26','Concurrent mutation','Two workers attempt to mutate the same resource.',['PARALLEL_MUTATION_IS_COORDINATED','BAD_WORKER_HAS_BOUNDED_BLAST_RADIUS'],['resource-leases','revision-cas','blast-radius']),
-  F('F27','Stale resource ownership','A worker acts after its lease or revision is stale.',['PARALLEL_MUTATION_IS_COORDINATED','WORKER_CANNOT_EXPAND_AUTHORITY'],['resource-leases','revision-cas','policy-fail-closed']),
+  F('F26','Concurrent mutation','Two workers attempt to mutate the same resource.',['PARALLEL_MUTATION_IS_COORDINATED','BAD_WORKER_HAS_BOUNDED_BLAST_RADIUS'],['resource-leases','resource-quarantine','revision-cas','blast-radius']),
+  F('F27','Stale resource ownership','A worker acts after its lease, resource identity, process identity, or authority generation is stale.',['PARALLEL_MUTATION_IS_COORDINATED','WORKER_CANNOT_EXPAND_AUTHORITY'],['resource-leases','revision-cas','policy-fail-closed','monotonic-authority']),
   F('F28','Duplicate execution','The same mutation is delivered or resumed more than once.',['MUTATIONS_ARE_IDEMPOTENT','CONSEQUENTIAL_ACTIONS_HAVE_CAUSAL_TRACE'],['idempotency','audit-causal-chain']),
-  F('F29','Unknown side effect','Connectivity fails after a mutation may have happened.',['UNCERTAIN_SIDE_EFFECTS_REQUIRE_RECONCILIATION','MUTATIONS_ARE_IDEMPOTENT'],['side-effect-reconciliation','idempotency']),
+  F('F29','Unknown side effect','Connectivity or a partial durable commit fails after a mutation may have happened.',['UNCERTAIN_SIDE_EFFECTS_REQUIRE_RECONCILIATION','MUTATIONS_ARE_IDEMPOTENT'],['side-effect-reconciliation','resource-quarantine','transaction-recovery','idempotency']),
   F('F30','Rollback failure','Compensation fails or only partially restores state.',['UNCERTAIN_SIDE_EFFECTS_REQUIRE_RECONCILIATION','BAD_WORKER_HAS_BOUNDED_BLAST_RADIUS'],['compensation','side-effect-reconciliation','human-escalation']),
   F('F31','Tool result corruption','A tool returns partial, malformed, stale, or contradictory output.',['HYPOTHESIS_CANNOT_AUTHORIZE_IRREVERSIBLE_ACTION','COMPLETION_REQUIRES_INDEPENDENT_VERIFICATION'],['tool-result-validation','provenance-binding','independent-evidence']),
   F('F32','Authority escalation','A worker requests action beyond its granted envelope.',['WORKER_CANNOT_EXPAND_AUTHORITY','MODEL_CONFIDENCE_NEVER_GRANTS_PERMISSION'],['authority-non-expansion','policy-fail-closed']),
@@ -87,7 +88,7 @@ export const FAILURE_FAMILIES: readonly FailureFamily[] = Object.freeze([
   F('F37','Latency explosion','Correct work never converges in useful time.',['BUDGETS_REMAIN_BOUNDED','LONG_TASKS_SURVIVE_FAILURE'],['deadline-budget','bounded-decomposition','provider-fallback']),
   F('F38','Learning corruption','Bad outcomes poison future routing or policy.',['LEARNING_NEVER_EXPANDS_AUTHORITY','WORKER_CANNOT_EXPAND_AUTHORITY'],['learning-quarantine','provider-quarantine','authority-non-expansion']),
   F('F39','Audit or observability failure','The system acts but cannot reconstruct why.',['CONSEQUENTIAL_ACTIONS_HAVE_CAUSAL_TRACE','EXPLANATIONS_EXCLUDE_INTERNAL_CHATTER'],['audit-causal-chain','provenance-binding']),
-  F('F40','Infrastructure disaster','A process, device, service, or region disappears while work is active.',['PROVIDER_LOSS_IS_RECOVERABLE','LONG_TASKS_SURVIVE_FAILURE'],['durable-checkpoint','provider-fallback','side-effect-reconciliation'])
+  F('F40','Infrastructure disaster','A process, device, service, or region disappears while work is active.',['PROVIDER_LOSS_IS_RECOVERABLE','LONG_TASKS_SURVIVE_FAILURE'],['durable-checkpoint','transaction-recovery','emergency-cancellation','provider-fallback','side-effect-reconciliation'])
 ]);
 
 const M = (id: StressCondition['id'], name: string, condition: string, controls: ResilienceControl[]): StressCondition =>
@@ -97,12 +98,12 @@ export const STRESS_CONDITIONS: readonly StressCondition[] = Object.freeze([
   M('M01','First interaction','No prior user or project history exists.',['provenance-binding','minimum-context']),
   M('M02','Very long conversation','Hundreds of previous turns and artifacts exist.',['minimum-context','hard-budget']),
   M('M03','Mid-execution user message','The user sends a new instruction while work is active.',['intent-versioning','intent-revalidation','graph-reconciliation']),
-  M('M04','Immediately before mutation','Intent or evidence changes immediately before a side effect.',['intent-revalidation','policy-fail-closed']),
-  M('M05','Immediately after mutation','Intent changes after a side effect may already have happened.',['side-effect-reconciliation','graph-reconciliation']),
-  M('M06','Worker concurrency','Several workers operate in parallel.',['resource-leases','revision-cas','blast-radius']),
+  M('M04','Immediately before mutation','Intent, evidence, or authority generation changes immediately before a side effect.',['intent-revalidation','policy-fail-closed','monotonic-authority']),
+  M('M05','Immediately after mutation','Intent changes after a side effect may already have happened.',['side-effect-reconciliation','resource-quarantine','graph-reconciliation']),
+  M('M06','Worker concurrency','Several workers operate in parallel across exact, hierarchical, or unresolved resource identities.',['resource-leases','resource-quarantine','revision-cas','blast-radius']),
   M('M07','Device concurrency','Several paired computers participate.',['resource-leases','audit-causal-chain']),
   M('M08','Cross-device migration','Execution moves from one device to another.',['durable-checkpoint','side-effect-reconciliation','provenance-binding']),
-  M('M09','Process crash','The orchestrator process stops unexpectedly.',['durable-checkpoint','idempotency']),
+  M('M09','Process crash','The orchestrator process stops during a multi-store or result-publication transaction.',['durable-checkpoint','transaction-recovery','idempotency']),
   M('M10','Network partition','The control plane cannot determine current machine state.',['side-effect-reconciliation','safe-read-only-continuation']),
   M('M11','Provider timeout','The selected intelligence provider does not return.',['provider-fallback','deadline-budget']),
   M('M12','Partial tool failure','A tool completes only part of an operation.',['side-effect-reconciliation','tool-result-validation']),

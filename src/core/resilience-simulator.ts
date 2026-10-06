@@ -10,7 +10,10 @@ export type ResilienceHazard =
   | 'conversation-fragmentation' | 'internal-chatter-leak' | 'untrusted-provenance' | 'stale-evidence'
   | 'evidence-conflict' | 'capability-mismatch' | 'correlated-reasoning' | 'invalid-graph'
   | 'missing-dependency' | 'graph-cycle' | 'graph-unbounded' | 'rollback-failed'
-  | 'tool-corruption' | 'approval-replay' | 'verification-false-positive' | 'correlated-verification';
+  | 'tool-corruption' | 'approval-replay' | 'verification-false-positive' | 'correlated-verification'
+  | 'cross-action-resource-uncertainty' | 'hierarchical-resource-conflict' | 'unknown-process-liveness'
+  | 'snapshot-partial-restore' | 'emergency-stop-mid-dispatch' | 'terminal-orphan'
+  | 'partial-completion-commit' | 'stale-authority-generation' | 'unresolved-target-selection';
 
 const FAMILY_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
   F01: ['stale-intent','conversation-fragmentation'],
@@ -38,10 +41,10 @@ const FAMILY_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
   F23: ['missing-dependency','concurrent-mutation'],
   F24: ['graph-cycle','budget-overrun'],
   F25: ['graph-unbounded','budget-overrun'],
-  F26: ['concurrent-mutation','unbounded-blast-radius'],
-  F27: ['stale-lease','authority-expansion'],
+  F26: ['concurrent-mutation','unbounded-blast-radius','hierarchical-resource-conflict','unresolved-target-selection'],
+  F27: ['stale-lease','authority-expansion','unknown-process-liveness','stale-authority-generation'],
   F28: ['duplicate-mutation','missing-causal-trace'],
-  F29: ['uncertain-side-effect','duplicate-mutation'],
+  F29: ['uncertain-side-effect','duplicate-mutation','cross-action-resource-uncertainty','partial-completion-commit'],
   F30: ['uncertain-side-effect','rollback-failed'],
   F31: ['tool-corruption','untrusted-provenance'],
   F32: ['authority-expansion','confidence-as-permission'],
@@ -52,19 +55,19 @@ const FAMILY_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
   F37: ['deadline-overrun','graph-unbounded'],
   F38: ['learning-poison','learning-authority-escalation'],
   F39: ['missing-causal-trace','internal-chatter-leak'],
-  F40: ['provider-unavailable','lost-durable-state','uncertain-side-effect']
+  F40: ['provider-unavailable','lost-durable-state','uncertain-side-effect','snapshot-partial-restore','emergency-stop-mid-dispatch','terminal-orphan']
 };
 
 const MODIFIER_HAZARDS: Record<string, readonly ResilienceHazard[]> = {
   M01: [],
   M02: ['context-overexposure','budget-overrun'],
   M03: ['stale-intent'],
-  M04: ['stale-intent'],
-  M05: ['uncertain-side-effect'],
-  M06: ['concurrent-mutation','stale-lease'],
+  M04: ['stale-intent','stale-authority-generation'],
+  M05: ['uncertain-side-effect','cross-action-resource-uncertainty'],
+  M06: ['concurrent-mutation','stale-lease','hierarchical-resource-conflict','unresolved-target-selection'],
   M07: ['concurrent-mutation','missing-causal-trace'],
   M08: ['lost-durable-state','uncertain-side-effect','untrusted-provenance'],
-  M09: ['lost-durable-state','duplicate-mutation'],
+  M09: ['lost-durable-state','duplicate-mutation','snapshot-partial-restore','terminal-orphan','partial-completion-commit'],
   M10: ['uncertain-side-effect'],
   M11: ['provider-unavailable','deadline-overrun'],
   M12: ['uncertain-side-effect','tool-corruption'],
@@ -101,7 +104,8 @@ const CONTROL_EFFECTS: Record<ResilienceControl, readonly ResilienceHazard[]> = 
   'provider-quarantine': ['provider-drift','learning-poison'],
   'dag-validation': ['invalid-graph','missing-dependency','graph-cycle'],
   'bounded-decomposition': ['graph-unbounded','graph-cycle','budget-overrun'],
-  'resource-leases': ['concurrent-mutation','stale-lease'],
+  'resource-leases': ['concurrent-mutation','stale-lease','hierarchical-resource-conflict','unknown-process-liveness','unresolved-target-selection'],
+  'resource-quarantine': ['cross-action-resource-uncertainty'],
   'revision-cas': ['concurrent-mutation','stale-lease'],
   'idempotency': ['duplicate-mutation'],
   'side-effect-reconciliation': ['uncertain-side-effect','rollback-failed'],
@@ -114,6 +118,9 @@ const CONTROL_EFFECTS: Record<ResilienceControl, readonly ResilienceHazard[]> = 
   'learning-quarantine': ['learning-poison','learning-authority-escalation'],
   'audit-causal-chain': ['missing-causal-trace','internal-chatter-leak'],
   'durable-checkpoint': ['lost-durable-state'],
+  'transaction-recovery': ['snapshot-partial-restore','partial-completion-commit','terminal-orphan'],
+  'emergency-cancellation': ['emergency-stop-mid-dispatch'],
+  'monotonic-authority': ['stale-authority-generation'],
   'data-sovereignty': ['privacy-policy-bypass'],
   'human-escalation': ['conversation-fragmentation','evidence-conflict','rollback-failed','missing-critical-context'],
   'uncertainty-budget': ['evidence-conflict','missing-critical-context','hypothesis-as-fact'],

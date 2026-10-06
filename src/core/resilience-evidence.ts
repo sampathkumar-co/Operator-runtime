@@ -98,5 +98,86 @@ export const CRITICAL_RESILIENCE_EVIDENCE: readonly ExecutableResilienceEvidence
     executableTestFile: 'test/relay-client.test.ts', executableTestName: 'unexpected network loss drains an in-flight destructive delivery before reconnecting',
     injectedFault: 'The relay transport disappears while destructive delivery work is in flight.',
     expectedEvidence: 'No replacement connection opens until work reaches a durable boundary.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'cross-action-resource-quarantine',
+    invariant: 'PARALLEL_MUTATION_IS_COORDINATED',
+    mechanism: 'Durable physical-resource quarantine across distinct action identities',
+    implementationFile: 'src/core/agent-kernel.ts', implementationSymbol: 'await this.#leases.quarantine(entry.actionId',
+    executableTestFile: 'test/agent-kernel-p0.test.ts', executableTestName: 'uncertain mutation quarantines the physical resource across action IDs until reconciliation',
+    injectedFault: 'A mutation becomes uncertain and another action ID attempts to mutate the same physical resource.',
+    expectedEvidence: 'The second action is blocked until the first action is reconciled.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'hierarchical-resource-conflict',
+    invariant: 'PARALLEL_MUTATION_IS_COORDINATED',
+    mechanism: 'Parent-child resource identities conflict under one canonical lease discipline',
+    implementationFile: 'src/core/resource-leases.ts', implementationSymbol: 'resourceKeysConflict(item.key, key)',
+    executableTestFile: 'test/agent-kernel-p0.test.ts', executableTestName: 'hierarchical resource leases reject parent-child mutation overlap',
+    injectedFault: 'Concurrent mutations lease a parent resource and one of its descendants under different action IDs.',
+    expectedEvidence: 'The descendant mutation is rejected while the parent lease remains active.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'unknown-process-liveness',
+    invariant: 'PARALLEL_MUTATION_IS_COORDINATED',
+    mechanism: 'Unknown process liveness preserves ownership instead of guessing that a lease is stale',
+    implementationFile: 'src/core/resource-leases.ts', implementationSymbol: "if (observation.status === 'unknown') return true;",
+    executableTestFile: 'test/resource-leases.test.ts', executableTestName: 'resource leases preserve a holder when process liveness is unknown',
+    injectedFault: 'The runtime cannot determine whether the process holding a resource lease is still alive.',
+    expectedEvidence: 'The lease is retained and a conflicting mutation cannot steal ownership.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'snapshot-crash-transaction',
+    invariant: 'LONG_TASKS_SURVIVE_FAILURE',
+    mechanism: 'Write-ahead multi-store snapshot restore with startup rollback recovery',
+    implementationFile: 'src/core/state-snapshot.ts', implementationSymbol: 'recoverPendingSnapshotRestores',
+    executableTestFile: 'test/state-snapshot.test.ts', executableTestName: 'startup recovery rolls back a hard-crashed multi-store restore to one coherent prior generation',
+    injectedFault: 'The process hard-crashes after only part of a multi-store snapshot restore is durable.',
+    expectedEvidence: 'Startup recovery restores every store to the same coherent prior generation.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'emergency-stop-mid-dispatch',
+    invariant: 'BAD_WORKER_HAS_BOUNDED_BLAST_RADIUS',
+    mechanism: 'Emergency-stop generation aborts already-dispatched provider work',
+    implementationFile: 'apps/local-agent/src/server.ts', implementationSymbol: "emergencyExecutionGeneration.abort('EMERGENCY_STOPPED')",
+    executableTestFile: 'test/emergency-stop-state-boundary-audit.test.ts', executableTestName: 'engaging emergency stop aborts an already-dispatched local provider request',
+    injectedFault: 'Emergency stop is engaged after a local provider mutation has already been dispatched.',
+    expectedEvidence: 'The in-flight provider receives the abort signal and the request fails closed.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'terminal-orphan-restart',
+    invariant: 'LONG_TASKS_SURVIVE_FAILURE',
+    mechanism: 'Exact process-instance orphan recovery with durable terminal tombstones',
+    implementationFile: 'src/capabilities/process.ts', implementationSymbol: 'Exact owned orphan was quiesced during startup recovery.',
+    executableTestFile: 'test/terminal-session-durability.test.ts', executableTestName: 'reconstruction recovers an exact surviving orphan and keeps truthful tombstone semantics',
+    injectedFault: 'The owner restarts while an exact terminal-session child process survives as an orphan.',
+    expectedEvidence: 'Only the exact owned orphan is quiesced and its durable tombstone remains truthful.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'receipt-partial-commit',
+    invariant: 'MUTATIONS_ARE_IDEMPOTENT',
+    mechanism: 'Completion-journal recovery repairs a receipt crash window without provider replay',
+    implementationFile: 'src/core/action-transition-journal.ts', implementationSymbol: 'recoverPendingCompletion(',
+    executableTestFile: 'test/local-action-execution-receipt.test.ts', executableTestName: 'restart repairs crash after kernel completion without replaying the provider mutation',
+    injectedFault: 'The process crashes after kernel completion but before the local execution receipt is finalized.',
+    expectedEvidence: 'Restart reconstructs the receipt from durable completion evidence without replaying the mutation.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'authority-generation-rotation',
+    invariant: 'WORKER_CANNOT_EXPAND_AUTHORITY',
+    mechanism: 'Relay delivery capability is bound to one monotonic authority generation',
+    implementationFile: 'src/core/relay-client.ts', implementationSymbol: 'validateDeliveryCapabilityAuthority(frame, capabilityAuthority)',
+    executableTestFile: 'test/relay-client.test.ts', executableTestName: 'authority generation change cannot inherit mutation authority from an old connection',
+    injectedFault: 'A relay reconnect changes authority generation while an old delivery capability is retained.',
+    expectedEvidence: 'The old capability cannot authorize mutation under the replacement connection.', status: 'EXECUTABLE'
+  },
+  {
+    id: 'browser-any-target-conflict',
+    invariant: 'PARALLEL_MUTATION_IS_COORDINATED',
+    mechanism: 'Untargeted browser identity hierarchically covers every target in one browser instance',
+    implementationFile: 'src/core/resource-identity.ts', implementationSymbol: 'if (!requestedTarget) return targets;',
+    executableTestFile: 'test/resource-leases.test.ts', executableTestName: 'untargeted browser lease remains authoritative until target resolution',
+    injectedFault: 'An untargeted browser mutation overlaps a concrete target mutation in the same browser instance.',
+    expectedEvidence: 'The instance-wide lease blocks the concrete target until target resolution releases it.', status: 'EXECUTABLE'
   }
 ]);

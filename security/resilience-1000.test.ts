@@ -88,6 +88,32 @@ test('parallel workers require leases and revision checks', () => {
   }
 });
 
+test('resource ambiguity and cross-action uncertainty require hierarchical leases and quarantine', () => {
+  for (const scenario of scenarios.filter((entry) => ['F26','M06'].includes(entry.familyId) || ['F26','M06'].includes(entry.modifierId))) {
+    assert.ok(scenario.controls.includes('resource-leases'));
+    assert.ok(scenario.controls.includes('resource-quarantine'));
+  }
+});
+
+test('stale process and authority observations fail closed under monotonic authority', () => {
+  for (const scenario of scenarios.filter((entry) => ['F27','M04'].includes(entry.familyId) || ['F27','M04'].includes(entry.modifierId))) {
+    assert.ok(scenario.controls.includes('monotonic-authority'));
+  }
+});
+
+test('disaster recovery requires transaction recovery and emergency cancellation', () => {
+  for (const scenario of scenarios.filter((entry) => entry.familyId === 'F40')) {
+    assert.ok(scenario.controls.includes('transaction-recovery'));
+    assert.ok(scenario.controls.includes('emergency-cancellation'));
+  }
+});
+
+test('multi-store and partial durable commits require transaction recovery', () => {
+  for (const scenario of scenarios.filter((entry) => entry.familyId === 'F29' || entry.modifierId === 'M09')) {
+    assert.ok(scenario.controls.includes('transaction-recovery'));
+  }
+});
+
 test('historical replay cases bind identity, approval, idempotency and freshness', () => {
   for (const scenario of scenarios.filter((entry) => entry.modifierId === 'M15')) {
     assert.ok(scenario.controls.includes('idempotency'));

@@ -28,3 +28,32 @@ test('every modeled condition maps to an explicit control', () => {
     }
   }
 });
+
+test('expanded production hazards have explicit resolving controls', () => {
+  const expected = new Map<string, string>([
+    ['cross-action-resource-uncertainty', 'resource-quarantine'],
+    ['hierarchical-resource-conflict', 'resource-leases'],
+    ['unknown-process-liveness', 'resource-leases'],
+    ['snapshot-partial-restore', 'transaction-recovery'],
+    ['emergency-stop-mid-dispatch', 'emergency-cancellation'],
+    ['terminal-orphan', 'transaction-recovery'],
+    ['partial-completion-commit', 'transaction-recovery'],
+    ['stale-authority-generation', 'monotonic-authority'],
+    ['unresolved-target-selection', 'resource-leases']
+  ]);
+  const results = scenarios.map((scenario) => simulateResilienceScenario(scenario));
+  const injected = new Set(results.flatMap((result) => result.injected));
+  for (const [hazard, control] of expected) {
+    assert.ok(injected.has(hazard), `${hazard} is never injected`);
+    for (const result of results.filter((candidate) => candidate.injected.includes(hazard as any))) {
+      assert.ok(result.controlCoverage[hazard]?.includes(control as any), `${result.scenarioId} lacks ${control} for ${hazard}`);
+    }
+  }
+});
+
+test('the full 1000-case simulation is deterministic across 10,000 executions', () => {
+  const baseline = scenarios.map((scenario) => simulateResilienceScenario(scenario));
+  for (let pass = 0; pass < 10; pass += 1) {
+    assert.deepEqual(scenarios.map((scenario) => simulateResilienceScenario(scenario)), baseline);
+  }
+});

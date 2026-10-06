@@ -15,6 +15,8 @@ const requiredEvidence: Record<string, string[]> = {
     'security/resilience-executable-evidence.test.ts', 'security/resilience-1000.test.ts',
     'test/local-action-execution-receipt.test.ts', 'test/team-api.test.ts', 'test/state-snapshot.test.ts',
     'test/relay-client.test.ts', 'test/privacy-data.test.ts', 'test/resource-leases.test.ts',
+    'test/agent-kernel-p0.test.ts', 'test/emergency-stop-state-boundary-audit.test.ts',
+    'test/terminal-session-durability.test.ts', 'test/enterprise-policy.test.ts',
     'test/windows-uia.test.ts', 'test/desired-state.test.ts', 'test/digital-operations.test.ts'
   ],
   performanceControls: ['performance/performance.test.ts', 'security/performance-control-evidence.test.ts'],
