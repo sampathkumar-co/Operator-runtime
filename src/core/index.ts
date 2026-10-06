@@ -41,3 +41,7 @@ export * from './operation-trace.ts';
 export * from './agent-gateway-contract.ts';
 export * from './principal-delegation.ts';
 export * from './enterprise-policy-simulation.ts';
+export * from './counterfactual-twin.ts';
+export * from './proof-kernel.ts';
+export * from './distributed-placement.ts';
+export * from './autonomous-objective-certification.ts';
