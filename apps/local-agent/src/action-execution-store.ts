@@ -144,7 +144,7 @@ export class LocalActionExecutionStore {
 
     let entry;
     try {
-      entry = await journal.inspect(action.id);
+      entry = await journal.recoverPendingCompletion(action.id, action);
     } catch (error) {
       if (error instanceof OperatorError && error.code === 'ACTION_JOURNAL_NOT_FOUND') {
         if (local.status === 'completed' && local.result.ok) throw reconciliationRequired('A successful local receipt has no authoritative kernel journal entry.');

@@ -116,7 +116,13 @@ test('restart repairs crash after kernel completion without replaying the provid
     capability: action.capability,
     provider: 'test.runtime',
     output: { execution: 1 },
-    evidence: [],
+    evidence: [{
+      kind: 'kernel_verification',
+      status: 'pass' as const,
+      message: 'Kernel verified the action outcome.',
+      data: { verificationDigest: 'b'.repeat(64) },
+      timestamp: new Date().toISOString()
+    }],
     durationMs: 1
   };
   const agentKernel = {

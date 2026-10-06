@@ -104,6 +104,7 @@ export class AgentKernel {
     }
 
     prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+    if (action.risk !== 'read') prepared = await this.#journal.recoverPendingCompletion(action.id, action);
 
     if (prepared.state === 'COMPLETED' && action.risk !== 'read') {
       const replay = await this.#journal.replayCompleted(action.id);

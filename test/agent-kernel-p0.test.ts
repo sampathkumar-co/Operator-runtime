@@ -753,6 +753,53 @@ test('completed mutation result replays from the central journal without provide
   assert.equal(replayed.evidence.some((item) => item.kind === 'action_journal_replay'), true);
 });
 
+test('kernel restart promotes a staged verified result without replaying the provider mutation', async (t) => {
+  const stateDir = await temp(t);
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  let injected = false;
+  const faultingJournal = new ActionTransitionJournal(stateDir, {
+    completionFault: (point) => {
+      if (!injected && point === 'after_result_staged') {
+        injected = true;
+        throw new Error('hard crash after verified result stage');
+      }
+    }
+  });
+  const firstKernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal: faultingJournal
+  });
+  const action: ActionRequest = {
+    id: 'journal-staged-result-recovery',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 92 },
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  await assert.rejects(firstKernel.execute(action, permissions(['file.write'])), /hard crash after verified result stage/);
+  assert.equal(injected, true);
+  assert.equal(provider.calls, 1);
+  assert.equal((await faultingJournal.inspect(action.id)).state, 'OBSERVED');
+
+  const restartedJournal = new ActionTransitionJournal(stateDir);
+  const restartedKernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal: restartedJournal
+  });
+  const recovered = await restartedKernel.execute(action, permissions(['file.write']));
+  assert.equal(recovered.ok, true);
+  assert.equal(provider.calls, 1, 'staged verified result must complete without provider redispatch');
+  assert.equal(provider.values.get('x'), 92);
+  assert.equal((await restartedJournal.inspect(action.id)).state, 'COMPLETED');
+  assert.equal(recovered.evidence.some((item) => item.kind === 'action_journal_replay'), true);
+});
+
 test('detached dispatched mutation reconciles to completed without provider replay', async (t) => {
   const stateDir = await temp(t);
   const provider = new StateProvider();
