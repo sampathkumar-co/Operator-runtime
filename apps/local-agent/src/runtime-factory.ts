@@ -1,5 +1,5 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider, WorkspaceEditTransactionProvider, WorkspaceLspEditProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider, WorkspaceEditTransactionProvider, WorkspaceLspEditProvider, DeveloperWorktreeProvider } from '../../../src/capabilities/index.ts';
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 
@@ -22,6 +22,7 @@ export function createRuntime(config: {
   browserDataDir?: string;
   windowsUiaPath?: string;
   windowsPathLeasePath?: string;
+  developerWorktreeRoot?: string;
   perception?: PerceptionGraphStore;
 }): OperatorRuntime {
   const runtime = new OperatorRuntime(config.stateDir ? { learning: new ProviderLearningStore(config.stateDir) } : {})
@@ -73,6 +74,11 @@ export function createRuntime(config: {
       executablePath: config.browserPath,
       dataDir: config.browserDataDir
     }));
+  if (config.stateDir && config.developerWorktreeRoot) runtime.register(new DeveloperWorktreeProvider({
+    allowedRepositoryRoots: config.allowedRoots,
+    worktreeRoot: config.developerWorktreeRoot,
+    stateDir: config.stateDir
+  }));
   runtime.register(new WorkspaceLspEditProvider({
     allowedRoots: config.allowedRoots,
     windowsPathLeaseExecutable: config.windowsPathLeasePath
