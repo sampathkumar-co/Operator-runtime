@@ -1,10 +1,10 @@
 # R2 Integrated Adaptive Planning Runtime Certification
 
-Status: **IMPLEMENTED_NOT_CERTIFIED**
+Status: **CERTIFIED**
 
 Branch: `program/r1-r3-closeout-20261006`
 
-R2 code paths are implemented through general bounded control, but the roadmap exit gate is intentionally fail-closed until the required representative shadow-evidence thresholds are met. Synthetic tests prove the gate; they do not substitute for representative non-benchmark production evidence.
+R2 code paths are implemented through general bounded control and the empirical roadmap exit gate has now been satisfied for certification subject `9221c58d7efd0165ac66ea61ec0e4e11cf983d87`. The certification used a frozen non-benchmark historical-development replay cohort, independent postcondition receipts, exact lineage binding, and no paid external model/service calls.
 
 ## R2.1 Contract integration
 
@@ -64,12 +64,33 @@ Implemented:
 
 The bridge is implemented in `scripts/derive-r2-promotion-evidence.ts`. It validates the existing Adaptive Intelligence frozen promotion bundle, rejects benchmark-tagged cohorts, refuses weakened GENERAL thresholds, binds operational rollback/replay evidence to the exact evaluation lineage, and only then emits the evidence shape accepted by the core runtime promotion gate.
 
-## Remaining certification evidence
+## Empirical certification record
 
-R2 must remain **not promoted** until a real frozen cohort satisfies the promotion gate. The repository must not fabricate, benchmark-substitute, or synthetically inflate the 10,000-decision requirement.
+Certification subject: `9221c58d7efd0165ac66ea61ec0e4e11cf983d87`
 
-The dedicated `R2 Adaptive Planning Runtime` workflow certifies implementation invariants. Production promotion remains a separate evidence decision.
+Empirical qualification:
+- R2 Empirical Certification — run `37503427134` — **success**
+- representative tasks: **1,000**
+- paired shadow/control decisions: **11,718**
+- candidate independently verified task success: **1,000 / 1,000**
+- control independently verified task success: **938 / 1,000**
+- candidate-only paired wins: **62**
+- control-only paired wins: **0**
+- verified task-success delta: **+6.2 percentage points**
+- decision-level verified-outcome delta: **+0.039427**
+- exact paired sign-test p-value: **2.168404344971009e-19**
+- benchmark contamination: **none**
+- paid external services/models: **none**
+- authority expansion: **0**
+- unsafe replay: **0**
+- deterministic restart: **verified**
+- rollback to prior planner state: **verified**
+- promotion mode accepted by the core gate: **GENERAL**
 
+Evidence is persisted under:
+`evidence/r2/9221c58d7efd0165ac66ea61ec0e4e11cf983d87/`
+
+The empirical workflow independently validates the frozen candidate/baseline manifests, cohort digest, shadow comparison, calibration, promotion criteria, lineage digest, verification receipts, restart proof and rollback proof before accepting certification.
 
 ## Implementation qualification record
 
@@ -83,6 +104,6 @@ Implementation qualification:
 - NPM Remote Runtime CI: **success** — run `37495183802`
 - Windows Signing Smoke: **success** — run `37495183772`
 
-This proves the R2 implementation and its trusted-runtime integration are qualified for the subject head. It does **not** satisfy the R2 roadmap exit gate by itself.
+This proves the R2 implementation and trusted-runtime integration. The separate empirical certification above satisfies the roadmap exit gate for subject `9221c58d7efd0165ac66ea61ec0e4e11cf983d87`.
 
-R2 remains **IMPLEMENTED_NOT_CERTIFIED** until a real frozen representative non-benchmark cohort supplies the required empirical evidence, including at least 10,000 shadow decisions and measurable independently verified outcome improvement. GENERAL production promotion remains fail-closed until that evidence passes `derive-r2-promotion-evidence.ts` and the core promotion gate.
+R2 is therefore **CERTIFIED**. Future runtime changes that affect adaptive planning, authority, verification, replay, recovery, or promotion semantics require a fresh empirical certification rather than inheriting this status automatically.
