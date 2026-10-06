@@ -28,6 +28,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'proof-kernel-decision', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'distributed-placement-plan', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'autonomous-objective-certification', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'hermetic-workspace-manifest', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'action-request', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'evidence', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' }
 ] satisfies readonly ContractRegistration[]);

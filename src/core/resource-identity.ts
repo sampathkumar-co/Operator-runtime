@@ -25,6 +25,9 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     } else {
       add('file', input.path, keys);
     }
+  } else if (action.capability.startsWith('workspace.hermetic.')) {
+    add('repo', input.sourceRoot, keys);
+    if (typeof input.sessionId === 'string' && input.sessionId) keys.add('workspace-session:' + input.sessionId.toLowerCase());
   } else if (action.capability.startsWith('git.')) {
     add('repo', input.cwd, keys);
   } else if (action.capability.startsWith('project.')) {
@@ -66,6 +69,8 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 
   if (action.capability.startsWith('file.')) {
     addPath(input.path); addPath(input.source); addPath(input.destination);
+  } else if (action.capability.startsWith('workspace.hermetic.')) {
+    addPath(input.sourceRoot);
   } else if (action.capability.startsWith('git.')) {
     addPath(input.cwd);
   } else if (action.capability.startsWith('project.')) {
