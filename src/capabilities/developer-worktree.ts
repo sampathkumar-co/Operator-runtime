@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   ActionRequest,
@@ -95,7 +96,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           repositoryRoot: repositoryRootInput,
           baseCommit
         });
-        assertRepositoryMatch(created, repositoryRootInput);
+        await assertRepositoryMatch(created, repositoryRootInput);
         return ok(action, started, created, {
           operation: 'create',
           sessionStatus: session.status
@@ -110,7 +111,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           );
         }
         const inspected = await this.#manager.inspect(sessionId);
-        assertRepositoryMatch(inspected, repositoryRootInput);
+        await assertRepositoryMatch(inspected, repositoryRootInput);
         const session = await this.#optionalSession(sessionId);
         return ok(action, started, inspected, {
           operation: 'inspect',
@@ -126,7 +127,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           );
         }
         const before = await this.#manager.inspect(sessionId);
-        assertRepositoryMatch(before, repositoryRootInput);
+        await assertRepositoryMatch(before, repositoryRootInput);
         const expectedFingerprint = boundedDigest(
           action.input.expectedFingerprint,
           'expectedFingerprint'
@@ -136,7 +137,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           sessionId,
           expectedFingerprint
         });
-        assertRepositoryMatch(released, repositoryRootInput);
+        await assertRepositoryMatch(released, repositoryRootInput);
         const session = await this.#optionalSession(sessionId);
         return ok(action, started, released, {
           operation: 'release',
@@ -192,7 +193,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
       const sessionId = boundedId(action.input.sessionId, 'sessionId');
       const repositoryRoot = boundedPath(action.input.repositoryRoot, 'repositoryRoot');
       const inspected = await this.#manager.inspect(sessionId);
-      assertRepositoryMatch(inspected, repositoryRoot);
+      await assertRepositoryMatch(inspected, repositoryRoot);
 
       if (action.capability === 'developer.worktree.create') {
         if (inspected.record.phase === 'ACTIVE' && inspected.exists) {
@@ -396,13 +397,29 @@ function ok(
   };
 }
 
-function assertRepositoryMatch(
+async function assertRepositoryMatch(
   inspection: DeveloperWorktreeInspection,
   requestedRepositoryRoot: string
-): void {
-  const requested = canonicalPath(requestedRepositoryRoot);
-  const recorded = canonicalPath(inspection.record.repositoryRoot);
-  if (requested !== recorded) {
+): Promise<void> {
+  let requested: string;
+  let recorded: string;
+  try {
+    [requested, recorded] = await Promise.all([
+      fs.realpath(requestedRepositoryRoot),
+      fs.realpath(inspection.record.repositoryRoot)
+    ]);
+  } catch (error) {
+    throw new OperatorError(
+      'DEVELOPER_WORKTREE_REPOSITORY_PRECONDITION_CHANGED',
+      'repositoryRoot could not be re-established as the same physical repository.',
+      {
+        details: {
+          code: (error as NodeJS.ErrnoException).code ?? 'REALPATH_FAILED'
+        }
+      }
+    );
+  }
+  if (canonicalPath(requested) !== canonicalPath(recorded)) {
     throw new OperatorError(
       'DEVELOPER_WORKTREE_REPOSITORY_PRECONDITION_CHANGED',
       'repositoryRoot does not match the Developer Worktree ownership record.'
