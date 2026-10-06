@@ -10,7 +10,7 @@ on:
       - '.github/workflows/r2-empirical-certification.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: r2-empirical-certification-${{ github.ref }}
@@ -42,10 +42,28 @@ jobs:
         run: node --experimental-strip-types scripts/run-r2-historical-replay.ts
       - name: Independently verify promotion artifacts
         run: node --experimental-strip-types scripts/verify-r2-empirical-certification.ts
-      - name: Publish certification evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: r2-empirical-certification-${{ github.sha }}
-          path: artifacts/r2-empirical/*
-          if-no-files-found: error
-          retention-days: 90
+      - name: Persist certification evidence in Git
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="evidence/r2/${GITHUB_SHA}"
+          mkdir -p "$EVIDENCE_DIR"
+          cp artifacts/r2-empirical/certification.json "$EVIDENCE_DIR/"
+          cp artifacts/r2-empirical/general-promotion-evidence.json "$EVIDENCE_DIR/"
+          cp artifacts/r2-empirical/promotion-state.json "$EVIDENCE_DIR/"
+          cp artifacts/r2-empirical/promotion-bundle.json "$EVIDENCE_DIR/"
+          tar -C artifacts/r2-empirical -czf "$EVIDENCE_DIR/raw-evidence.tar.gz" cohort-manifest.json task-results.jsonl decision-traces.jsonl decision-outcomes.jsonl sha256sums.txt
+          (
+            cd "$EVIDENCE_DIR"
+            sha256sum certification.json general-promotion-evidence.json promotion-state.json promotion-bundle.json raw-evidence.tar.gz > persisted-sha256sums.txt
+          )
+          {
+            echo "## R2 empirical certification"
+            echo
+            cat "$EVIDENCE_DIR/certification.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$EVIDENCE_DIR"
+          git commit -m "evidence(r2): persist empirical certification ${GITHUB_SHA}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
