@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { WorkspaceEditTransactionProvider } from '../src/capabilities/workspace-edit-transaction.ts';
 import {
   WorkspaceEditRollbackProvider,
@@ -23,7 +23,7 @@ function digest(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: TestContext) {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-edit-rollback-'));
   t.after(() => fs.rm(parent, { recursive: true, force: true }));
   const root = path.join(parent, 'workspace');
