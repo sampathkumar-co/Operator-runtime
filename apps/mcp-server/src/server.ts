@@ -1078,22 +1078,29 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('terminal.session', {
     title: 'Manage interactive terminal session',
-    description: 'Start an allowlisted shell-free process session, read bounded cursor-based output, write bounded stdin, list owned sessions, or terminate the owned process tree. Start/write/terminate remain destructive-policy gated.',
+    description: 'Start an allowlisted shell-free process session, optionally bind it durably to an ACTIVE Developer Session with declared ports, read bounded cursor-based output, write bounded stdin, list owned/recovered sessions, or terminate the exact owned process tree. Start/write/terminate remain destructive-policy gated.',
     inputSchema: z.object({
       operation: z.enum(['start', 'list', 'read', 'write', 'terminate']),
       executable: z.string().min(1).optional(),
       args: z.array(z.string()).max(200).default([]),
       cwd: z.string().min(1).optional(),
       sessionId: z.string().uuid().optional(),
+      developerSessionId: z.string().uuid().optional(),
+      ports: z.array(z.number().int().min(1).max(65535)).max(128).default([]),
       input: z.string().max(65536).optional(),
       afterCursor: z.number().int().min(0).optional(),
       maxEvents: z.number().int().min(1).max(500).default(100),
       maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
+  }, async ({ operation, executable, args, cwd, sessionId, developerSessionId, ports, input, afterCursor, maxEvents, maxBytes }) => {
     const risk = operation === 'list' || operation === 'read' ? 'read' : 'destructive';
-    return invoke('terminal.session', risk, { operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }, cwd);
+    return invoke(
+      'terminal.session',
+      risk,
+      { operation, executable, args, cwd, sessionId, developerSessionId, ports, input, afterCursor, maxEvents, maxBytes },
+      cwd
+    );
   });
 
   server.registerTool('process.inspect', {
