@@ -121,9 +121,10 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       if (context.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Workspace edit was cancelled.');
 
       const parsed = parseAction(action);
+      const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
       const existing = await this.#readRecord(action.id);
       if (existing) {
-        assertRecordMatchesAction(existing, parsed.workspaceRootInput, parsed.plan);
+        assertRecordMatchesAction(existing, workspaceRoot, parsed.plan);
         const reconciled = await this.#reconcileRecord(action, existing);
         if (reconciled.status === 'completed' && reconciled.result) return reconciled.result;
         if (reconciled.status === 'not_applied') {
@@ -138,8 +139,13 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         );
       }
 
-      const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
-      const prepared = await this.#stage(action, workspaceRoot, parsed.plan, context);
+      const prepared = await this.#stage(
+        action,
+        parsed.workspaceRootInput,
+        workspaceRoot,
+        parsed.plan,
+        context
+      );
       await this.#writeRecord(prepared);
 
       const applying = { ...prepared, phase: 'APPLYING' as const, updatedAt: this.#now() };
@@ -230,6 +236,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
   async #reconcileSerial(action: ActionRequest): Promise<ProviderReconciliationResult> {
     try {
       const parsed = parseAction(action);
+      const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
       const record = await this.#readRecord(action.id);
       if (!record) {
         return {
@@ -241,7 +248,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
           )]
         };
       }
-      assertRecordMatchesAction(record, parsed.workspaceRootInput, parsed.plan);
+      assertRecordMatchesAction(record, workspaceRoot, parsed.plan);
       return await this.#reconcileRecord(action, record);
     } catch (error) {
       const op = asOperatorError(error, 'WORKSPACE_EDIT_RECONCILIATION_FAILED');
@@ -354,6 +361,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
 
   async #stage(
     action: ActionRequest,
+    workspaceRootInput: string,
     workspaceRoot: string,
     plan: MultiFileEditPlan,
     context: CapabilityExecutionContext
@@ -363,7 +371,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
 
     for (const file of plan.files) {
       if (context.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Workspace edit was cancelled during staging.');
-      const targetInput = path.join(workspaceRoot, ...file.path.split('/'));
+      const targetInput = path.join(workspaceRootInput, ...file.path.split('/'));
       await this.#scope.withExisting(targetInput, async (targetPath) => {
         const stat = await fs.lstat(targetPath);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
@@ -626,14 +634,14 @@ function parseAction(action: ActionRequest): { workspaceRootInput: string; plan:
 
 function assertRecordMatchesAction(
   record: WorkspaceEditTransactionRecord,
-  workspaceRootInput: string,
+  resolvedWorkspaceRoot: string,
   plan: MultiFileEditPlan
 ): void {
   if (record.planId !== plan.id) {
     throw new OperatorError('WORKSPACE_EDIT_ACTION_REUSE_INVALID', 'Action id is bound to a different edit plan.');
   }
-  const requested = canonicalPath(path.resolve(workspaceRootInput));
-  const recorded = canonicalPath(path.resolve(record.workspaceRoot));
+  const requested = canonicalPath(resolvedWorkspaceRoot);
+  const recorded = canonicalPath(record.workspaceRoot);
   if (requested !== recorded) {
     throw new OperatorError('WORKSPACE_EDIT_ACTION_REUSE_INVALID', 'Action id is bound to a different workspace root.');
   }
