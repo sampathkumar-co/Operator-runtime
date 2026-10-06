@@ -551,13 +551,6 @@ function resolveCallCandidates(
   callee: string,
   callerPath: string,
   byName: Map<string, SemanticSyntaxNode[]>
-): SemanticSyntaxNode[] {');
-}
-
-function resolveCallCandidates(
-  callee: string,
-  callerPath: string,
-  byName: Map<string, SemanticSyntaxNode[]>
 ): SemanticSyntaxNode[] {
   const candidates = byName.get(callee) ?? [];
   const sameFile = candidates.filter((item) => item.path === callerPath);
