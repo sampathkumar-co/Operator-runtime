@@ -652,6 +652,9 @@ export class RelayHub {
         return;
       }
 
+      if (!next.authority || requiredCapabilities === undefined) {
+        throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Routable delivery lost its authority or capability binding before dispatch.');
+      }
       await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
       connection.inFlight.set(next.seq, { readOnly, heavy });
       try {
