@@ -27,6 +27,7 @@ import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 import { TOOL_NAMES } from './tool-surface.ts';
 import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
+import { createMultiFileEditPlan } from '../../../src/core/multi-file-edit-plan.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -605,6 +606,50 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     commandId,
     expectedRisk
   }, path));
+
+  server.registerTool('workspace.edit', {
+    title: 'Apply transactional multi-file workspace edit',
+    description: 'Apply a bounded multi-file edit plan using exact SHA-256 preconditions. Mecord stages every target before the first mutation, journals hashes and phases without storing source contents, verifies post-edit hashes, and rolls back or reconciles safely after failure.',
+    inputSchema: z.object({
+      workspaceRoot: z.string().min(1).max(4096),
+      files: z.array(z.object({
+        path: z.string().min(1).max(4096),
+        expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+        edits: z.array(z.object({
+          start: z.number().int().min(0).max(16 * 1024 * 1024),
+          end: z.number().int().min(0).max(16 * 1024 * 1024),
+          replacement: z.string().max(256 * 1024)
+        })).min(1).max(2000)
+      })).min(1).max(200),
+      verification: z.object({
+        trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
+        requiredTestPaths: z.array(z.string().min(1).max(4096)).max(1000).default([])
+      }).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ workspaceRoot, files, verification }) => {
+    let plan;
+    try {
+      plan = createMultiFileEditPlan({
+        files,
+        ...(verification ? { verification } : {})
+      });
+    } catch {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit: edit plan is invalid.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.edit.transaction',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'WORKSPACE_EDIT_PLAN_INVALID', message: 'Edit plan is invalid.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke('workspace.edit.transaction', 'write', { workspaceRoot, plan }, workspaceRoot);
+  });
 
   server.registerTool('file.read', {
     title: 'Read project file',

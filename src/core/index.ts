@@ -45,3 +45,5 @@ export * from './counterfactual-twin.ts';
 export * from './proof-kernel.ts';
 export * from './distributed-placement.ts';
 export * from './autonomous-objective-certification.ts';
+export * from './workspace-code-index.ts';
+export * from './multi-file-edit-plan.ts';
