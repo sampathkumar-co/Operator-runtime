@@ -52,3 +52,4 @@ export * from './developer-worktree.ts';
 export * from './developer-runtime-ownership.ts';
 export * from './developer-verification.ts';
 export * from './developer-container.ts';
+export * from './developer-change-qualification.ts';
