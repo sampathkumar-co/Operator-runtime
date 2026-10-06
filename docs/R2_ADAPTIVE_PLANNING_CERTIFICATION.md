@@ -69,3 +69,20 @@ The bridge is implemented in `scripts/derive-r2-promotion-evidence.ts`. It valid
 R2 must remain **not promoted** until a real frozen cohort satisfies the promotion gate. The repository must not fabricate, benchmark-substitute, or synthetically inflate the 10,000-decision requirement.
 
 The dedicated `R2 Adaptive Planning Runtime` workflow certifies implementation invariants. Production promotion remains a separate evidence decision.
+
+
+## Implementation qualification record
+
+Qualification subject: `9f55093d1e8c93fe9b51db0251c4184c2ede4c9a`
+
+Implementation qualification:
+- R2 Adaptive Planning Runtime: **success** — run `37495183718`
+- R1 Canonical Runtime dependency boundary: **success** — run `37495183715`
+- CI: **success** — run `37495183741`
+- Platform Matrix (Ubuntu/macOS/Windows): **success** — run `37495183707`
+- NPM Remote Runtime CI: **success** — run `37495183802`
+- Windows Signing Smoke: **success** — run `37495183772`
+
+This proves the R2 implementation and its trusted-runtime integration are qualified for the subject head. It does **not** satisfy the R2 roadmap exit gate by itself.
+
+R2 remains **IMPLEMENTED_NOT_CERTIFIED** until a real frozen representative non-benchmark cohort supplies the required empirical evidence, including at least 10,000 shadow decisions and measurable independently verified outcome improvement. GENERAL production promotion remains fail-closed until that evidence passes `derive-r2-promotion-evidence.ts` and the core promotion gate.
