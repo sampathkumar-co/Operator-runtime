@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "repository": "sampathkumar-co/Operator-runtime",
+  "canonicalCloseoutBranch": "program/r1-r3-closeout-20261006",
+  "requiredAncestors": [
+    {
+      "name": "main baseline",
+      "sha": "ed5948ff3f386f91ccd27674ed278a8ba5c624e6"
+    },
+    {
+      "name": "release 2.0.4",
+      "sha": "afc9ee9a4a8826bda27e85b11d201a396aad1044"
+    },
+    {
+      "name": "deep hardening",
+      "sha": "7cdcfc3bb5009f41fb5a116d93c5882dd0fe02ee"
+    },
+    {
+      "name": "R1 canonical runtime foundation",
+      "sha": "439bcda756b11610bb1cabca110db438fecb0fa6"
+    },
+    {
+      "name": "R2 adaptive planning convergence",
+      "sha": "57d8eabb6b82ef3670e0d5676f485141d77279af"
+    },
+    {
+      "name": "R3 developer workstation closeout",
+      "sha": "3babc5c0aa6c8c65b8e035e3857c09557fe19fe7"
+    }
+  ],
+  "policy": {
+    "currentHeadMustContainEveryRequiredAncestor": true,
+    "productionPromotionMustUseReleaseTruth": true,
+    "historicalBranchesDoNotGrantProductionStatus": true
+  }
+}
