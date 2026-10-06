@@ -457,7 +457,7 @@ const certification = {
   historicalWindowEnd: HISTORY_END,
   historicalWindowLeakageGuard: 'cohort ends before R1/R2/R3 closeout candidate work',
   taskCount: TASK_COUNT,
-  faultSignalTaskCount,
+  faultSignalTaskCount: faultTaskCount,
   pairedDecisions: shadowReport.pairedDecisions,
   pairedOutcomeDecisions: shadowReport.pairedOutcomeDecisions,
   benchmarkExcluded: true,
