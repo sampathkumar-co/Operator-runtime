@@ -295,7 +295,7 @@ export class ProcessProvider implements CapabilityProvider {
       let launchIntent = false;
       let ownershipCommitted = false;
       let child: ChildProcessWithoutNullStreams | undefined;
-      let processInstance: ProcessInstanceIdentity | undefined;
+      let processInstance: ProcessInstanceIdentity | null | undefined;
       const ownsProcessGroup = process.platform !== 'win32';
 
       try {
