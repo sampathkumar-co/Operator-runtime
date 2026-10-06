@@ -81,7 +81,6 @@ class FakeDocker {
 
     if (docker[0] === 'ps') {
       if (!this.container) return { code: 0, stdout: '', stderr: '' };
-      const requestedLabel = docker[docker.indexOf('--filter') + 1];
       const filters = docker
         .map((item, index) => item === '--filter' ? docker[index + 1] : undefined)
         .filter(Boolean);
