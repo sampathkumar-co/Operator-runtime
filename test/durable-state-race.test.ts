@@ -30,7 +30,7 @@ test('durable reads retry a transient link-topology race and return only after t
   const cleanup = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       fs.rm(alias).then(() => resolve(), reject);
-    }, 3);
+    }, 40);
     timer.unref?.();
   });
 
