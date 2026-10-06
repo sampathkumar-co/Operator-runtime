@@ -208,14 +208,47 @@ export class ProcessProvider implements CapabilityProvider {
       let sessionId: string;
       try { sessionId = requiredSessionId(action.input.sessionId); }
       catch { return processReconciliation('uncertain', 'Managed-session termination reconciliation requires a valid sessionId.'); }
+
+      await this.#ensureOwnershipRecovered();
       const session = this.#sessions.get(sessionId);
-      if (!session) {
-        return processReconciliation('uncertain', 'Managed session is not present in this provider instance; restart history cannot be inferred.');
+      if (session) {
+        if (session.state === 'running') {
+          return processReconciliation('not_applied', 'Managed session is still running.');
+        }
+        return processReconciled(action, this.name, 'Managed session is no longer running.', this.#sessionSummary(session));
       }
-      if (session.state === 'running') {
-        return processReconciliation('not_applied', 'Managed session is still running.');
+
+      if (this.#ownership) {
+        try {
+          const owned = await this.#ownership.get(sessionId);
+          if (owned.phase === 'RUNNING' || owned.phase === 'TERMINATION_PENDING') {
+            return processReconciliation(
+              'not_applied',
+              'Exact durably owned process instance is still present after provider restart.'
+            );
+          }
+          if (owned.phase === 'EXITED' || owned.phase === 'TERMINATED') {
+            return processReconciled(
+              action,
+              this.name,
+              'Durable ownership proves the exact process instance is no longer running.',
+              this.#ownedRecordSummary(owned)
+            );
+          }
+          return processReconciliation(
+            'uncertain',
+            'Durable launch ownership is ambiguous and cannot prove termination.'
+          );
+        } catch (error) {
+          if ((error as { code?: string }).code !== 'DEVELOPER_RUNTIME_SESSION_NOT_FOUND') {
+            return processReconciliation(
+              'uncertain',
+              error instanceof Error ? error.message : 'Durable session reconciliation failed.'
+            );
+          }
+        }
       }
-      return processReconciled(action, this.name, 'Managed session is no longer running.', this.#sessionSummary(session));
+      return processReconciliation('uncertain', 'Managed session has no durable restart ownership record.');
     }
 
     return processReconciliation('uncertain', 'Process provider cannot prove the outcome of this mutation from current state.');
@@ -762,10 +795,37 @@ export class ProcessProvider implements CapabilityProvider {
   }
 
   async close(): Promise<void> {
-    await Promise.allSettled([...this.#sessions.values()].filter((session) => session.state === 'running').map(async (session) => {
-      await terminateProcessTree(session.child, session.pid);
-      session.state = 'terminated';
-    }));
+    await this.#ensureOwnershipRecovered();
+    await Promise.allSettled([...this.#sessions.values()]
+      .filter((session) => session.state === 'running')
+      .map(async (session) => {
+        if (session.processInstance && this.#ownership) {
+          const identity = await this.#ownership.claimTermination(session.id);
+          if (identity) {
+            await terminateOwnedProcessInstance(identity);
+            await this.#ownership.markTerminated(session.id, identity);
+          }
+        } else {
+          await terminateProcessTree(session.child, session.pid, undefined, session.ownsProcessGroup);
+        }
+        session.state = 'terminated';
+      }));
+
+    if (this.#ownership) {
+      const inMemory = new Set(this.#sessions.keys());
+      const recovered = await this.#ownership.listAll();
+      await Promise.allSettled(recovered
+        .filter((record) =>
+          !inMemory.has(record.processSessionId) &&
+          (record.phase === 'RUNNING' || record.phase === 'TERMINATION_PENDING')
+        )
+        .map(async (record) => {
+          const identity = await this.#ownership!.claimTermination(record.processSessionId);
+          if (!identity) return;
+          await terminateOwnedProcessInstance(identity);
+          await this.#ownership!.markTerminated(record.processSessionId, identity);
+        }));
+    }
     this.#sessions.clear();
   }
 }
