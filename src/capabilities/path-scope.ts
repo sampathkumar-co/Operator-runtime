@@ -45,7 +45,7 @@ export class PathScope {
 
   async withExisting<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
     const absolute = this.#absolute(inputPath);
-    const root = this.#lexicalRoot(absolute);
+    const root = process.platform === 'win32' ? this.#lexicalRoot(absolute) : this.roots[0]!;
     return await withWindowsPathLease({
       root,
       target: absolute,
@@ -56,7 +56,7 @@ export class PathScope {
 
   async withForWrite<T>(inputPath: string, operation: (resolvedPath: string) => Promise<T>): Promise<T> {
     const absolute = this.#absolute(inputPath);
-    const root = this.#lexicalRoot(absolute);
+    const root = process.platform === 'win32' ? this.#lexicalRoot(absolute) : this.roots[0]!;
     const parentPath = path.dirname(absolute);
     try {
       const parentStat = await fs.lstat(parentPath);
