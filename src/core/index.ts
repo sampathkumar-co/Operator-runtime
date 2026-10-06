@@ -48,3 +48,4 @@ export * from './autonomous-objective-certification.ts';
 export * from './workspace-code-index.ts';
 export * from './multi-file-edit-plan.ts';
 export * from './lsp-workspace-edit.ts';
+export * from './developer-worktree.ts';
