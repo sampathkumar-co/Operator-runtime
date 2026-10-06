@@ -115,6 +115,7 @@ export type ExecutionModality =
   | 'APPLICATION'
   | 'API'
   | 'MCP'
+  | 'TERMINAL'
   | 'OBSERVE';
 
 export interface ExecutionCandidate {

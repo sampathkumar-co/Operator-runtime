@@ -257,6 +257,49 @@ export interface TaskRecoveryShadowAdvisor {
   }): TaskRecoveryShadowRecommendation | undefined | Promise<TaskRecoveryShadowRecommendation | undefined>;
 }
 
+export type TaskExecutionModality = 'GUI' | 'DOM' | 'ACCESSIBILITY' | 'UIA' | 'PLAYWRIGHT' | 'APPLICATION' | 'API' | 'MCP' | 'TERMINAL' | 'OBSERVE';
+
+export interface TaskModalityShadowAssessment {
+  schemaVersion: 1;
+  mode: 'SHADOW';
+  policyVersion: string;
+  taskId: string;
+  actionId: string;
+  capability: string;
+  recommendedModality: TaskExecutionModality;
+  actualProductionModality: TaskExecutionModality;
+  candidates: Array<{ modality: TaskExecutionModality; available: boolean; predictedSuccess: number; predictedRisk: number; predictedCost: number; verificationStrength: number; utility: number | null }>;
+  actualOutcome: 'SUCCEEDED' | 'FAILED' | 'UNCERTAIN';
+  verificationResult: 'SUPPORTED' | 'FAILED' | 'UNRESOLVED';
+  recoveryCost: number;
+  latencyMs: number;
+  failureAttribution: string | null;
+  switchAllowed: boolean;
+  authoritySnapshotDigest: string;
+  observationDigest: string;
+  inputStateDigest: string;
+  assessmentDigest: string;
+}
+
+export interface TaskModalityShadowAdvisor {
+  assess(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    risk: ActionRisk;
+    intelligence: TaskIntelligenceContext;
+    permissions: PermissionProfile;
+    result: ActionResult;
+    observation: TaskObservationSummaryV2;
+    sideEffectState: SideEffectState;
+    executionPhase: ExecutionPhase;
+    productionFailure?: TaskFailureDecision;
+    outcomeAssessment?: TaskOutcomeShadowAssessment;
+    recoveryRecommendation?: TaskRecoveryShadowRecommendation;
+  }): TaskModalityShadowAssessment | undefined | Promise<TaskModalityShadowAssessment | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -326,6 +369,7 @@ export class TaskOrchestrator {
   #planNodeShadow?: TaskPlanNodeShadowAdvisor;
   #outcomeShadow?: TaskOutcomeShadowAdvisor;
   #recoveryShadow?: TaskRecoveryShadowAdvisor;
+  #modalityShadow?: TaskModalityShadowAdvisor;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -343,6 +387,7 @@ export class TaskOrchestrator {
     planNodeShadow?: TaskPlanNodeShadowAdvisor;
     outcomeShadow?: TaskOutcomeShadowAdvisor;
     recoveryShadow?: TaskRecoveryShadowAdvisor;
+    modalityShadow?: TaskModalityShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -360,6 +405,7 @@ export class TaskOrchestrator {
     this.#planNodeShadow = options.planNodeShadow;
     this.#outcomeShadow = options.outcomeShadow;
     this.#recoveryShadow = options.recoveryShadow;
+    this.#modalityShadow = options.modalityShadow;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -1021,6 +1067,28 @@ export class TaskOrchestrator {
         task.evidence.push(evidence('adaptive_recovery_shadow_unavailable', 'info', 'Recovery shadow evaluation was unavailable; production recovery remained authoritative.', {
           mode: 'SHADOW', actionId, productionFailureCode: recoveryFailure?.code
         }));
+      }
+      let modalityShadow: TaskModalityShadowAssessment | undefined;
+      let modalityShadowUnavailable = false;
+      if (this.#modalityShadow) {
+        try {
+          modalityShadow = await this.#modalityShadow.assess({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions),
+            result: structuredClone(result), observation: structuredClone(normalizedObservation),
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {}),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {}),
+            ...(recoveryShadow ? { recoveryRecommendation: structuredClone(recoveryShadow) } : {})
+          });
+        } catch {
+          modalityShadowUnavailable = true;
+        }
+      }
+      if (modalityShadow) {
+        task.evidence.push(evidence('adaptive_modality_shadow', 'info', 'Recorded a non-executable modality comparison; production routing remained authoritative.', modalityShadow));
+      } else if (modalityShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_modality_shadow_unavailable', 'info', 'Modality shadow evaluation was unavailable; production routing remained authoritative.', { mode: 'SHADOW', actionId }));
       }
       const plannerEvent = plannerEventFromResult(result, productionFailure);
       if (plannerEvent) {

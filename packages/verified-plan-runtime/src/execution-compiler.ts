@@ -32,7 +32,7 @@ export function compileExecution(
     const costPenalty=budget===Number.POSITIVE_INFINITY?Math.min(1,c.expectedCost/100)*0.08:budget===0?0:Math.min(1,c.expectedCost/budget)*0.16;
     const mutationPenalty=c.mutating?(node.reversible?0.03:0.12):0;
     const rollbackBonus=c.supportsRollback?0.05:0;
-    const structureBonus=['API','MCP','APPLICATION','DOM','ACCESSIBILITY','UIA','PLAYWRIGHT'].includes(c.modality)?0.06:0;
+    const structureBonus=['API','MCP','TERMINAL','APPLICATION','DOM','ACCESSIBILITY','UIA','PLAYWRIGHT'].includes(c.modality)?0.06:0;
     const utility=c.expectedSuccess*0.5+c.verificationStrength*0.18+structureBonus+rollbackBonus-c.uncertainty*0.2-costPenalty-mutationPenalty;
     const penalties:string[]=[];
     if(c.uncertainty>0.4) penalties.push('high-uncertainty');
@@ -42,7 +42,7 @@ export function compileExecution(
   }).sort((a,b)=>b.utility-a.utility||b.expectedSuccess-a.expectedSuccess||b.verificationStrength-a.verificationStrength||a.expectedCost-b.expectedCost||a.id.localeCompare(b.id));
 }
 function normalize(c:ExecutionCandidate):ExecutionCandidate{
-  const modes=new Set(['GUI','DOM','ACCESSIBILITY','UIA','PLAYWRIGHT','APPLICATION','API','MCP','OBSERVE']);
+  const modes=new Set(['GUI','DOM','ACCESSIBILITY','UIA','PLAYWRIGHT','APPLICATION','API','MCP','TERMINAL','OBSERVE']);
   if(!c||typeof c!=='object'||!modes.has(c.modality)) throw new Error('execution candidate is invalid.');
   return {
     id:bounded(c.id,256,'execution.id'),modality:c.modality,capability:bounded(c.capability,512,'execution.capability'),
