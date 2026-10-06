@@ -31,3 +31,5 @@ export * from './contract-registry.ts';
 export * from './execution-context-identity.ts';
 export * from './artifact-store.ts';
 export * from './evidence-pack.ts';
+export * from './workspace-graph.ts';
+export * from './developer-session.ts';
