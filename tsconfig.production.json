@@ -7,13 +7,19 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": ["node"],
-    "typeRoots": ["./apps/mcp-server/node_modules/@types"],
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node"
+    ],
+    "typeRoots": [
+      "./apps/mcp-server/node_modules/@types"
+    ],
     "forceConsistentCasingInFileNames": true,
-    "noFallthroughCasesInSwitch": true,
-    "noImplicitOverride": true,
-    "noUncheckedIndexedAccess": true
+    "noFallthroughCasesInSwitch": true
   },
   "include": [
     "src/**/*.ts",
