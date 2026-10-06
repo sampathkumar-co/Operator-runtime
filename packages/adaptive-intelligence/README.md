@@ -2,7 +2,7 @@
 
 This package is a dependency-light successor module undergoing progressive integration with Mecord Connect's production `Operator-runtime`.
 
-Observation selection is wired into `TaskOrchestrator` in **SHADOW mode only**: it can rank already-authorized read-only observation capabilities and record comparison evidence, but it cannot dispatch actions, alter planner control flow, widen authority, or bypass policy, approvals, and resource leases. Progress/failure reasoning, repair planning, strategy selection, browser CDP, UIA, provider routing, and every mutating control path remain deliberately isolated pending later activation stages. The offline/local source successor may contain newer 2.0.5 hardening that must be reconciled before further integration.
+Observation selection and normalized outcome progress/failure reasoning are wired into `TaskOrchestrator` in **SHADOW mode only**. Observation selection can rank already-authorized read-only capabilities; outcome reasoning can classify secret-minimized machine evidence after the authoritative action result. Both record comparison evidence, but neither can dispatch actions, alter planner control flow, select recovery, widen authority, or bypass policy, approvals, and resource leases. Repair planning, strategy selection, browser CDP, UIA, provider routing, and every mutating control path remain deliberately isolated pending later activation stages. The offline/local source successor may contain newer 2.0.5 hardening that must be reconciled before further integration.
 
 ## Purpose
 

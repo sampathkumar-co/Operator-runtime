@@ -3,14 +3,14 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
-import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain, TaskRejectedDecision } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain, TaskObservationSummaryV2, TaskRejectedDecision } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
-import { classifyTaskFailure } from './task-failure.ts';
+import { classifyTaskFailure, type TaskFailureDecision } from './task-failure.ts';
 import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
@@ -150,6 +150,45 @@ export interface TaskObservationShadowAdvisor {
   }): TaskObservationShadowRecommendation | undefined | Promise<TaskObservationShadowRecommendation | undefined>;
 }
 
+export interface TaskOutcomeShadowAssessment {
+  mode: 'SHADOW';
+  policyVersion: string;
+  progress: {
+    level: 'NONE' | 'ACTION_EXECUTED' | 'STATE_CHANGED' | 'SUBGOAL_PROGRESS' | 'GOAL_ACHIEVED';
+    confidence: number;
+    creditedSignals: string[];
+    rejectedSignals: string[];
+    verificationRequired: boolean;
+  };
+  failure?: {
+    primaryClass: string;
+    probability: number;
+    alternatives: Array<{ class: string; probability: number }>;
+    entropy: number;
+    evidenceCoverage: number;
+  };
+  decisionDigest: string;
+  authoritySnapshotDigest: string;
+  inputStateDigest: string;
+}
+
+export interface TaskOutcomeShadowAdvisor {
+  analyze(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    risk: ActionRisk;
+    permissions: PermissionProfile;
+    result: ActionResult;
+    observation: TaskObservationSummaryV2;
+    previousObservation?: TaskObservationSummaryV2;
+    sideEffectState: SideEffectState;
+    executionPhase: ExecutionPhase;
+    productionFailure?: TaskFailureDecision;
+  }): TaskOutcomeShadowAssessment | undefined | Promise<TaskOutcomeShadowAssessment | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -216,6 +255,7 @@ export class TaskOrchestrator {
   #monotonicNow: () => number;
   #intelligence?: TaskIntelligenceProvider;
   #observationShadow?: TaskObservationShadowAdvisor;
+  #outcomeShadow?: TaskOutcomeShadowAdvisor;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -230,6 +270,7 @@ export class TaskOrchestrator {
     monotonicNow?: () => number;
     intelligence?: TaskIntelligenceProvider;
     observationShadow?: TaskObservationShadowAdvisor;
+    outcomeShadow?: TaskOutcomeShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -244,6 +285,7 @@ export class TaskOrchestrator {
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#intelligence = options.intelligence;
     this.#observationShadow = options.observationShadow;
+    this.#outcomeShadow = options.outcomeShadow;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -757,6 +799,11 @@ export class TaskOrchestrator {
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
+      const previousObservation = [...latestExecution.records].reverse()
+        .filter((candidate) => candidate !== latestRecord)
+        .map((candidate) => candidate.observation)
+        .find((candidate): candidate is TaskObservationSummaryV2 => candidate?.schemaVersion === 2
+          && candidate.entityId === normalizedObservation.entityId);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
       latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
@@ -784,7 +831,56 @@ export class TaskOrchestrator {
           mode: 'SHADOW', controlId: decision.capability, actualOk: result.ok
         }));
       }
-      const plannerEvent = plannerEventFromResult(result, result.ok ? undefined : classifyTaskFailure(result.error));
+      const productionFailure = result.ok ? undefined : classifyTaskFailure(result.error);
+      let outcomeShadow: TaskOutcomeShadowAssessment | undefined;
+      let outcomeShadowUnavailable = false;
+      if (this.#outcomeShadow) {
+        try {
+          outcomeShadow = await this.#outcomeShadow.analyze({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, permissions: structuredClone(permissions), result: structuredClone(result),
+            observation: structuredClone(normalizedObservation),
+            ...(previousObservation ? { previousObservation: structuredClone(previousObservation) } : {}),
+            sideEffectState: latestRecord.sideEffectState,
+            executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {})
+          });
+        } catch {
+          outcomeShadowUnavailable = true;
+        }
+      }
+      if (outcomeShadow) {
+        task.evidence.push(evidence('adaptive_outcome_shadow', 'info', 'Compared the authoritative action outcome with non-controlling adaptive progress and failure reasoning.', {
+          mode: outcomeShadow.mode,
+          policyVersion: outcomeShadow.policyVersion,
+          decisionDigest: outcomeShadow.decisionDigest,
+          authoritySnapshotDigest: outcomeShadow.authoritySnapshotDigest,
+          inputStateDigest: outcomeShadow.inputStateDigest,
+          progressLevel: outcomeShadow.progress.level,
+          progressConfidence: outcomeShadow.progress.confidence,
+          progressCreditedSignals: outcomeShadow.progress.creditedSignals,
+          progressRejectedSignals: outcomeShadow.progress.rejectedSignals,
+          verificationRequired: outcomeShadow.progress.verificationRequired,
+          ...(outcomeShadow.failure ? {
+            failurePrimaryClass: outcomeShadow.failure.primaryClass,
+            failureProbability: outcomeShadow.failure.probability,
+            failureAlternatives: outcomeShadow.failure.alternatives,
+            failureEntropy: outcomeShadow.failure.entropy,
+            failureEvidenceCoverage: outcomeShadow.failure.evidenceCoverage
+          } : {}),
+          actualOk: result.ok,
+          ...(productionFailure ? {
+            productionFailureClass: productionFailure.class,
+            productionFailureStrategy: productionFailure.strategy,
+            productionFailureCode: productionFailure.code
+          } : {})
+        }));
+      } else if (outcomeShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_outcome_shadow', 'info', 'Adaptive outcome shadow evaluation was unavailable; production progress and recovery logic remained authoritative.', {
+          mode: 'SHADOW', actualOk: result.ok, ...(productionFailure ? { productionFailureCode: productionFailure.code } : {})
+        }));
+      }
+      const plannerEvent = plannerEventFromResult(result, productionFailure);
       if (plannerEvent) {
         latestExecution.plannerEvents ??= [];
         latestExecution.plannerEvents.push(plannerEvent);
@@ -859,7 +955,7 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
-      const failureDecision = classifyTaskFailure(result.error);
+      const failureDecision = productionFailure!;
       task.evidence.push(evidence('failure_classification', 'info', 'Classified failed task action before choosing recovery strategy.', {
         code: failureDecision.code,
         class: failureDecision.class,
