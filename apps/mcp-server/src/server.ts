@@ -674,9 +674,10 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
   });
 
   server.registerTool('workspace.edit', {
-    title: 'Apply transactional multi-file workspace edit',
-    description: 'Apply a bounded multi-file edit plan using exact SHA-256 preconditions. Mecord stages every target before the first mutation, journals hashes and phases without storing source contents, verifies post-edit hashes, and rolls back or reconciles safely after failure.',
+    title: 'Apply or rollback transactional multi-file workspace edit',
+    description: 'Apply a bounded SHA-bound edit plan with crash-safe staging, optionally publishing a sensitive immutable rollback artifact; or restore a previously committed edit from that artifact under destructive approval.',
     inputSchema: z.object({
+      mode: z.enum(['apply', 'rollback']).default('apply'),
       workspaceRoot: z.string().min(1).max(4096),
       files: z.array(z.object({
         path: z.string().min(1).max(4096),
@@ -686,14 +687,53 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
           end: z.number().int().min(0).max(16 * 1024 * 1024),
           replacement: z.string().max(256 * 1024)
         })).min(1).max(2000)
-      })).min(1).max(200),
+      })).max(200).default([]),
       verification: z.object({
         trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
         requiredTestPaths: z.array(z.string().min(1).max(4096)).max(1000).default([])
-      }).optional()
+      }).optional(),
+      retainRollback: z.boolean().default(true),
+      rollbackArtifactId: z.string().regex(/^[0-9a-f]{64}$/i).optional()
     }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  }, async ({ workspaceRoot, files, verification }) => {
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ mode, workspaceRoot, files, verification, retainRollback, rollbackArtifactId }) => {
+    if (mode === 'rollback') {
+      if (!rollbackArtifactId) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'workspace.edit rollback requires rollbackArtifactId.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'workspace.edit.rollback',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'WORKSPACE_EDIT_ROLLBACK_ARTIFACT_REQUIRED', message: 'rollbackArtifactId is required.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      return invoke(
+        'workspace.edit.rollback',
+        'destructive',
+        { workspaceRoot, rollbackArtifactId },
+        workspaceRoot
+      );
+    }
+
+    if (files.length < 1) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit apply requires at least one file.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.edit.transaction',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'WORKSPACE_EDIT_PLAN_INVALID', message: 'At least one edit file is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
     let plan;
     try {
       plan = createMultiFileEditPlan({
@@ -714,7 +754,12 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
         }
       };
     }
-    return invoke('workspace.edit.transaction', 'write', { workspaceRoot, plan }, workspaceRoot);
+    return invoke(
+      'workspace.edit.transaction',
+      'write',
+      { workspaceRoot, plan, retainRollback },
+      workspaceRoot
+    );
   });
 
   server.registerTool('file.read', {
