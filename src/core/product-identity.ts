@@ -1,8 +1,10 @@
-export const PRODUCT_NAME = 'mecord-connect';
-export const PRODUCT_TITLE = 'Mecord Connect';
+import { RELEASE_TRUTH } from './release-truth.ts';
+
+export const PRODUCT_NAME = RELEASE_TRUTH.product.name;
+export const PRODUCT_TITLE = RELEASE_TRUTH.product.title;
 // Public product version tracks the stable public MCP/review snapshot.
-// The separately distributed Windows runtime may advance patch versions without changing this value.
-export const PUBLIC_PRODUCT_VERSION = '1.0.0';
+// The separately distributed Windows runtime may advance independently.
+export const PUBLIC_PRODUCT_VERSION = RELEASE_TRUTH.product.publicSurfaceVersion;
 export const PRODUCT_VERSION = PUBLIC_PRODUCT_VERSION;
 
 export function runtimeProductIdentity(): { name: string; title: string; version: string } {

@@ -1,0 +1,35 @@
+name: Adaptive Intelligence Core
+
+on:
+  push:
+    branches:
+      - feature/adaptive-intelligence-core
+    paths:
+      - 'packages/adaptive-intelligence/**'
+      - '.github/workflows/adaptive-intelligence.yml'
+  pull_request:
+    paths:
+      - 'packages/adaptive-intelligence/**'
+      - '.github/workflows/adaptive-intelligence.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adaptive-intelligence-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  standalone-core:
+    name: Standalone adaptive intelligence qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Import and adversarial unit tests
+        working-directory: packages/adaptive-intelligence
+        run: npm run qualify

@@ -1,0 +1,35 @@
+name: Verified Plan Runtime
+
+on:
+  push:
+    branches:
+      - feature/verified-plan-runtime
+    paths:
+      - 'packages/verified-plan-runtime/**'
+      - '.github/workflows/verified-plan-runtime.yml'
+  pull_request:
+    paths:
+      - 'packages/verified-plan-runtime/**'
+      - '.github/workflows/verified-plan-runtime.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verified-plan-runtime-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  standalone-plan-runtime:
+    name: Standalone verified plan runtime qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Import and adversarial unit tests
+        working-directory: packages/verified-plan-runtime
+        run: npm run qualify
