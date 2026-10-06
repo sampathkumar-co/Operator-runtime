@@ -94,14 +94,18 @@ await fs.writeFile(file, canonical, 'utf8');
 await fs.writeFile(path.join(outputDir, 'release-evidence.sha256'), sha256(canonical) + '  release-evidence.json\n', 'utf8');
 console.log(`r1-release-evidence:PASS file=${path.relative(root, file)} sha256=${sha256(canonical)}`);
 
-async function packageVersion(relative: string): Promise<{ name: string; version: string }> {
-  const parsed = JSON.parse(await fs.readFile(path.join(root, relative), 'utf8')) as { name?: unknown; version?: unknown };
+async function packageVersion(relative: string): Promise<{ name: string; version: string | null; private: boolean; manifestDigest: string }> {
+  const text = await fs.readFile(path.join(root, relative), 'utf8');
+  const parsed = JSON.parse(text) as { name?: unknown; version?: unknown; private?: unknown };
   const name = String(parsed.name ?? '');
-  const version = String(parsed.version ?? '');
-  if (!name || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+  const version = parsed.version === undefined ? null : String(parsed.version);
+  if (!name || (version !== null && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version))) {
     throw new Error('Invalid package identity in ' + relative);
   }
-  return { name, version };
+  if (version === null && parsed.private !== true) {
+    throw new Error('Unversioned package must be explicitly private: ' + relative);
+  }
+  return { name, version, private: parsed.private === true, manifestDigest: sha256(text) };
 }
 
 async function cargoPackageVersion(relative: string): Promise<string> {
