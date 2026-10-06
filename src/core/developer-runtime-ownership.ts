@@ -25,6 +25,7 @@ export interface DeveloperRuntimeOwnershipRecord {
   processSessionId: string;
   developerSessionId: string;
   phase: DeveloperRuntimeOwnershipPhase;
+  launcherProcessInstance: ProcessInstanceIdentity;
   processInstance?: ProcessInstanceIdentity;
   ports: number[];
   createdAt: string;
@@ -83,6 +84,7 @@ export class DeveloperRuntimeOwnershipStore {
     const developerSessionId = validId(input.developerSessionId, 'developerSessionId');
     const ports = normalizePorts(input.ports ?? []);
     const now = canonicalIso(input.now ?? new Date().toISOString(), 'now');
+    const launcherProcessInstance = this.#ownerProcess ?? await currentProcessInstance();
     let created!: DeveloperRuntimeOwnershipRecord;
 
     await this.#mutate(async (state) => {
@@ -102,6 +104,7 @@ export class DeveloperRuntimeOwnershipStore {
         processSessionId,
         developerSessionId,
         phase: 'LAUNCH_INTENT',
+        launcherProcessInstance,
         ports,
         createdAt: now,
         updatedAt: now
@@ -167,7 +170,9 @@ export class DeveloperRuntimeOwnershipStore {
     let records: DeveloperRuntimeOwnershipRecord[] = [];
     await this.#mutate(async (state) => {
       for (const record of state.records) {
-        if (record.phase === 'LAUNCH_INTENT') {
+        if (record.phase !== 'LAUNCH_INTENT') continue;
+        const launcherLive = await this.#inspect(record.launcherProcessInstance.pid);
+        if (!sameProcessInstance(record.launcherProcessInstance, launcherLive)) {
           record.phase = 'AMBIGUOUS';
           record.updatedAt = now;
         }
@@ -499,6 +504,10 @@ function validateRecord(input: unknown): DeveloperRuntimeOwnershipRecord {
   if (typeof raw.phase !== 'string' || !phases.includes(raw.phase as DeveloperRuntimeOwnershipPhase)) {
     throw corrupt('Ownership phase is invalid.');
   }
+  const launcherProcessInstance = validProcessInstance(raw.launcherProcessInstance);
+  if (!launcherProcessInstance) {
+    throw corrupt('Ownership launcher process identity is invalid.');
+  }
   const processInstance = raw.processInstance === undefined
     ? undefined
     : validProcessInstance(raw.processInstance);
@@ -520,6 +529,7 @@ function validateRecord(input: unknown): DeveloperRuntimeOwnershipRecord {
     processSessionId,
     developerSessionId,
     phase: raw.phase as DeveloperRuntimeOwnershipPhase,
+    launcherProcessInstance,
     ...(processInstance ? { processInstance } : {}),
     ports,
     createdAt,
