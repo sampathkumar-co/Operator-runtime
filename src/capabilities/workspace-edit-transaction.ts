@@ -142,7 +142,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         return successResult(action, committed, started, false, false);
       } catch (error) {
         const op = asOperatorError(error, 'WORKSPACE_EDIT_FINALIZE_FAILED');
-        return transactionControlFailure(action, op.code, op.message, started, 'known');
+        return transactionControlFailure(action, op.code, op.message, started, 'uncertain');
       }
     });
   }
