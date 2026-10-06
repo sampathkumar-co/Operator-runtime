@@ -127,6 +127,29 @@ export interface TaskIntelligenceProvider {
   retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
 }
 
+export interface TaskObservationShadowRecommendation {
+  mode: 'SHADOW';
+  policyVersion: string;
+  selectedId: string;
+  controlId: string;
+  alternatives: string[];
+  agreement: boolean;
+  decisionDigest: string;
+  authoritySnapshotDigest: string;
+}
+
+export interface TaskObservationShadowAdvisor {
+  recommend(input: {
+    task: TaskCapsule;
+    goal: SemanticTaskGoal;
+    decision: Extract<PlannerDecision, { type: 'step' }>;
+    actionId: string;
+    risk: ActionRisk;
+    intelligence: TaskIntelligenceContext;
+    permissions: PermissionProfile;
+  }): TaskObservationShadowRecommendation | undefined | Promise<TaskObservationShadowRecommendation | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -192,6 +215,7 @@ export class TaskOrchestrator {
   #wallNow: () => number;
   #monotonicNow: () => number;
   #intelligence?: TaskIntelligenceProvider;
+  #observationShadow?: TaskObservationShadowAdvisor;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -205,6 +229,7 @@ export class TaskOrchestrator {
     wallNow?: () => number;
     monotonicNow?: () => number;
     intelligence?: TaskIntelligenceProvider;
+    observationShadow?: TaskObservationShadowAdvisor;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -218,6 +243,7 @@ export class TaskOrchestrator {
     this.#wallNow = options.wallNow ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#intelligence = options.intelligence;
+    this.#observationShadow = options.observationShadow;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -593,6 +619,18 @@ export class TaskOrchestrator {
         approvedActionIds: [...new Set([...(basePermissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       const learningContext = semanticLearningContext(goal, task);
+      let observationShadow: TaskObservationShadowRecommendation | undefined;
+      let observationShadowUnavailable = false;
+      if (this.#observationShadow) {
+        try {
+          observationShadow = await this.#observationShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions)
+          });
+        } catch {
+          observationShadowUnavailable = true;
+        }
+      }
       let result: ActionResult | undefined;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
       let executionDispatched = false;
@@ -726,6 +764,26 @@ export class TaskOrchestrator {
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
+      if (observationShadow) {
+        task.evidence.push(evidence('adaptive_observation_shadow', 'info', 'Compared the production observation choice with a non-authoritative adaptive recommendation.', {
+          mode: observationShadow.mode,
+          policyVersion: observationShadow.policyVersion,
+          decisionDigest: observationShadow.decisionDigest,
+          authoritySnapshotDigest: observationShadow.authoritySnapshotDigest,
+          selectedId: observationShadow.selectedId,
+          controlId: observationShadow.controlId,
+          alternatives: observationShadow.alternatives,
+          agreement: observationShadow.agreement,
+          actualOk: result.ok,
+          actualProvider: result.provider,
+          actualDurationMs: result.durationMs,
+          ...(result.error ? { actualErrorCode: result.error.code } : {})
+        }));
+      } else if (observationShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_observation_shadow', 'info', 'Adaptive observation shadow evaluation was unavailable; production control execution remained authoritative.', {
+          mode: 'SHADOW', controlId: decision.capability, actualOk: result.ok
+        }));
+      }
       const plannerEvent = plannerEventFromResult(result, result.ok ? undefined : classifyTaskFailure(result.error));
       if (plannerEvent) {
         latestExecution.plannerEvents ??= [];

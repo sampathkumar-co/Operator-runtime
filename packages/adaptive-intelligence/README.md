@@ -1,8 +1,8 @@
 # Mecord Adaptive Intelligence Core
 
-This package is an isolated, dependency-light successor module intended for later integration with Mecord Connect's production `Operator-runtime`.
+This package is a dependency-light successor module undergoing progressive integration with Mecord Connect's production `Operator-runtime`.
 
-It is deliberately **not wired into TaskOrchestrator, AgentKernel, browser CDP, UIA, policy, approvals, resource leases, or provider routing yet**. The offline/local source successor may contain newer 2.0.5 hardening that must be reconciled before integration.
+Observation selection is wired into `TaskOrchestrator` in **SHADOW mode only**: it can rank already-authorized read-only observation capabilities and record comparison evidence, but it cannot dispatch actions, alter planner control flow, widen authority, or bypass policy, approvals, and resource leases. Progress/failure reasoning, repair planning, strategy selection, browser CDP, UIA, provider routing, and every mutating control path remain deliberately isolated pending later activation stages. The offline/local source successor may contain newer 2.0.5 hardening that must be reconciled before further integration.
 
 ## Purpose
 
