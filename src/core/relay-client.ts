@@ -3,6 +3,15 @@ import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import {
+  createRelayCapabilitySessionBinding,
+  relayCapabilitySessionDigest,
+  sameRelayAccountAuthority,
+  validateRelayAccountAuthority,
+  validateRelayCapabilityDigest,
+  type RelayAccountAuthority,
+  type RelayCapabilitySessionBinding
+} from './relay-capability-binding.ts';
 
 const PROTOCOL = 1;
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -98,6 +107,8 @@ interface WelcomeFrame {
   heartbeatMs?: number;
   capabilityBinding?: 1;
   capabilities?: string[];
+  authority?: RelayAccountAuthority;
+  capabilityBindingDigest?: string;
   readConcurrency?: number;
 }
 
@@ -107,6 +118,9 @@ interface DeliveryFrame {
   id: string;
   kind: string;
   payload: JsonObject;
+  authority?: RelayAccountAuthority;
+  requiredCapabilities?: string[];
+  capabilityBindingDigest?: string;
 }
 
 interface PongFrame { type: 'pong'; nonce: string }
@@ -302,6 +316,7 @@ export class RelayClient {
       let drainRequested = false;
       let connectionDrain: Promise<void> | null = null;
       let readConcurrency = 1;
+      let capabilityAuthority: Readonly<RelayCapabilitySessionBinding> | null = null;
       let nextReceiveSeq = state.lastAckedServerSeq + 1;
       let nextAckSeq = state.lastAckedServerSeq + 1;
       const activeReads = new Set<number>();
@@ -364,9 +379,10 @@ export class RelayClient {
       const processMessage = async (frame: ServerFrame) => {
         if (!welcomed) {
           if (frame.type !== 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a non-welcome frame before handshake completion.');
-          const negotiated = await this.#validateWelcome(frame, state, supportedCapabilities);
+          const negotiated = await this.#validateWelcome(frame, state, supportedCapabilities, identity);
           if (this.#stopped) return;
           readConcurrency = negotiated.readConcurrency;
+          capabilityAuthority = negotiated.capabilityAuthority;
           nextReceiveSeq = frame.resumeFromSeq + 1;
           nextAckSeq = frame.resumeFromSeq + 1;
           welcomed = true;
@@ -382,6 +398,7 @@ export class RelayClient {
           return;
         }
         if (frame.type === 'welcome') throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay sent a duplicate welcome frame.');
+        validateDeliveryCapabilityAuthority(frame, capabilityAuthority);
         const delivery = validateDelivery(frame);
         if (readConcurrency > 1 && isConcurrentReadDelivery(delivery)) {
           const durable = await this.#readState();
@@ -477,22 +494,45 @@ export class RelayClient {
     this.#socket = null;
   }
 
-  async #validateWelcome(frame: WelcomeFrame, state: RelayState, supportedCapabilities: readonly string[]): Promise<{ capabilities: string[]; readConcurrency: number }> {
+  async #validateWelcome(
+    frame: WelcomeFrame,
+    state: RelayState,
+    supportedCapabilities: readonly string[],
+    identity: { deviceId: string; fingerprint: string }
+  ): Promise<{ capabilities: string[]; readConcurrency: number; capabilityAuthority: Readonly<RelayCapabilitySessionBinding> | null }> {
     if (frame.protocol !== PROTOCOL) throw new OperatorError('RELAY_PROTOCOL_VERSION', 'Relay protocol version mismatch.');
     let effectiveCapabilities = [...supportedCapabilities];
+    let capabilityAuthority: Readonly<RelayCapabilitySessionBinding> | null = null;
     if (this.#requireCapabilityBinding) {
-      const legacyRelay = frame.capabilityBinding === undefined && frame.capabilities === undefined;
-      if (!legacyRelay) {
-        if (frame.capabilityBinding !== 1 || frame.capabilities === undefined) {
-          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay returned a partial or invalid capability-binding negotiation.', { retryable: false });
-        }
-        const effective = validateSupportedCapabilities(frame.capabilities);
-        const advertised = new Set(supportedCapabilities);
-        if (effective.some((capability) => !advertised.has(capability))) {
-          throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
-        }
-        effectiveCapabilities = effective;
+      if (frame.capabilityBinding !== 1 || frame.capabilities === undefined || frame.authority === undefined || frame.capabilityBindingDigest === undefined) {
+        const partial = frame.capabilityBinding !== undefined || frame.capabilities !== undefined || frame.authority !== undefined || frame.capabilityBindingDigest !== undefined;
+        throw new OperatorError(
+          partial ? 'RELAY_CAPABILITY_BINDING_INVALID' : 'RELAY_CAPABILITY_BINDING_REQUIRED',
+          partial ? 'Relay returned a partial capability-binding negotiation.' : 'Capability-aware relay client refused a legacy welcome without session authority.',
+          { retryable: false }
+        );
       }
+      const effective = validateSupportedCapabilities(frame.capabilities);
+      const advertised = new Set(supportedCapabilities);
+      if (effective.some((capability) => !advertised.has(capability))) {
+        throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay acknowledged a capability that the local runtime did not advertise.', { retryable: false });
+      }
+      const authority = validateRelayAccountAuthority(frame.authority);
+      capabilityAuthority = createRelayCapabilitySessionBinding({
+        protocol: 1,
+        capabilityBinding: 1,
+        connectionId: frame.connectionId,
+        logicalSessionId: frame.logicalSessionId ?? '',
+        deviceId: identity.deviceId,
+        deviceFingerprint: identity.fingerprint,
+        authority,
+        capabilities: effective
+      });
+      const suppliedDigest = validateRelayCapabilityDigest(frame.capabilityBindingDigest);
+      if (suppliedDigest !== relayCapabilitySessionDigest(capabilityAuthority)) {
+        throw new OperatorError('RELAY_CAPABILITY_BINDING_INVALID', 'Relay capability session authority digest does not match the negotiated welcome.', { retryable: false });
+      }
+      effectiveCapabilities = effective;
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(frame.connectionId)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay connection ID is invalid.');
     if (frame.logicalSessionId !== undefined && validLogicalSessionId(frame.logicalSessionId) !== this.#logicalSessionId) {
@@ -509,7 +549,7 @@ export class RelayClient {
     }
     if (frame.resumeFromSeq === state.lastAckedServerSeq) {
       if (expiredThroughSeq !== undefined) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay supplied an unnecessary expired-history reconciliation proof.');
-      return { capabilities: effectiveCapabilities, readConcurrency };
+      return { capabilities: effectiveCapabilities, readConcurrency, capabilityAuthority };
     }
     if (frame.resumeFromSeq < state.lastAckedServerSeq || expiredThroughSeq !== frame.resumeFromSeq) {
       throw new OperatorError('RELAY_RESUME_MISMATCH', 'Relay resume cursor does not match the durable local acknowledgement cursor.', { retryable: true });
@@ -527,7 +567,7 @@ export class RelayClient {
     if (state.processing && state.processing.seq <= frame.resumeFromSeq) {
       await this.#notifyAcknowledged(state.processing);
     }
-    return { capabilities: effectiveCapabilities, readConcurrency };
+    return { capabilities: effectiveCapabilities, readConcurrency, capabilityAuthority };
   }
 
   #emitStatus(status: RelayClientStatus): void {
@@ -728,6 +768,47 @@ function validateDelivery(frame: DeliveryFrame): RelayDelivery {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(kind)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay delivery kind is invalid.');
   if (!frame.payload || typeof frame.payload !== 'object' || Array.isArray(frame.payload)) throw new OperatorError('RELAY_PROTOCOL_ERROR', 'Relay delivery payload must be an object.');
   return { seq: frame.seq, id, kind, payload: frame.payload };
+}
+
+function validateDeliveryCapabilityAuthority(
+  frame: DeliveryFrame,
+  binding: Readonly<RelayCapabilitySessionBinding> | null
+): void {
+  if (!binding) return;
+  const digest = validateRelayCapabilityDigest(frame.capabilityBindingDigest);
+  if (digest !== relayCapabilitySessionDigest(binding)) {
+    throw new OperatorError('RELAY_CAPABILITY_AUTHORITY_CHANGED', 'Relay delivery does not belong to the immutable negotiated capability session.', { retryable: false });
+  }
+  const authority = validateRelayAccountAuthority(frame.authority);
+  if (!sameRelayAccountAuthority(authority, binding.authority)) {
+    throw new OperatorError('RELAY_CAPABILITY_AUTHORITY_CHANGED', 'Relay delivery account authority differs from the negotiated session authority.', { retryable: false });
+  }
+  if (!Array.isArray(frame.requiredCapabilities) || frame.requiredCapabilities.length > 128) {
+    throw new OperatorError('RELAY_DELIVERY_AUTHORITY_INVALID', 'Relay delivery is missing its bounded capability requirements.', { retryable: false });
+  }
+  const requiredCapabilities = frame.requiredCapabilities.map((item) => String(item ?? ''));
+  if (new Set(requiredCapabilities).size !== requiredCapabilities.length) {
+    throw new OperatorError('RELAY_DELIVERY_AUTHORITY_INVALID', 'Relay delivery capability requirements contain duplicates.', { retryable: false });
+  }
+  const normalizedRequired = validateSupportedCapabilities(requiredCapabilities);
+  const negotiated = new Set(binding.capabilities);
+  if (normalizedRequired.some((capability) => !negotiated.has(capability))) {
+    throw new OperatorError('RELAY_CAPABILITY_NOT_NEGOTIATED', 'Relay delivery requires a capability absent from the immutable negotiated session.', { retryable: false });
+  }
+  const payloadAuthority = validateRelayAccountAuthority(frame.payload?.approvalAuthority);
+  if (!sameRelayAccountAuthority(payloadAuthority, binding.authority)) {
+    throw new OperatorError('RELAY_CAPABILITY_AUTHORITY_CHANGED', 'Relay delivery payload authority differs from the negotiated session authority.', { retryable: false });
+  }
+  if (frame.kind === 'action') {
+    const action = frame.payload.action;
+    if (!action || typeof action !== 'object' || Array.isArray(action)) {
+      throw new OperatorError('RELAY_DELIVERY_AUTHORITY_INVALID', 'Relay action delivery is missing a valid action authority subject.', { retryable: false });
+    }
+    const capability = String((action as Record<string, unknown>).capability ?? '');
+    if (!normalizedRequired.includes(capability)) {
+      throw new OperatorError('RELAY_DELIVERY_AUTHORITY_INVALID', 'Relay action capability is not declared by the delivery authority envelope.', { retryable: false });
+    }
+  }
 }
 
 function validDeliveryId(value: string): string {

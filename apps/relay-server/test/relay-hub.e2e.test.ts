@@ -277,7 +277,7 @@ test('relay intersects signed local capabilities with session scopes before rout
 });
 
 
-test('new relay preserves legacy scope routing for clients without capability-binding negotiation', async (t) => {
+test('legacy relay clients retain read-only routing but cannot receive mutation authority', async (t) => {
   const authorityState = await tempDir(t, 'operator-relay-legacy-rollout-authority-');
   const deviceState = await tempDir(t, 'operator-relay-legacy-rollout-device-');
   const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
@@ -330,15 +330,14 @@ test('new relay preserves legacy scope routing for clients without capability-bi
   assert.equal(Object.hasOwn(welcome, 'capabilities'), false);
 
   await waitFor(async () => (await hub.onlineDevices(account.accountId)).length === 1);
-  assert.deepEqual((await hub.onlineDevices(account.accountId))[0]?.capabilities, ['file.read', 'git.write']);
-  const dispatched = await hub.dispatch({
+  assert.deepEqual((await hub.onlineDevices(account.accountId))[0]?.capabilities, ['file.read']);
+  await assert.rejects(hub.dispatch({
     accountId: account.accountId,
     explicitDeviceId: device.deviceId,
     requiredCapabilities: ['git.write'],
     kind: 'task.dispatch',
     payload: { compatibility: 'legacy-client-new-relay' }
-  });
-  assert.equal(dispatched.route.deviceId, device.deviceId);
+  }), (error: any) => error?.code === 'ROUTE_CAPABILITY_MISMATCH');
 });
 
 test('capability downgrade retires an incompatible queued head and keeps the same reconnected client usable', { timeout: 20_000 }, async (t) => {
@@ -1422,7 +1421,10 @@ test('device transfer preserves relay cursor continuity without exposing old-own
   await waitFor(async () => (await hub!.onlineDevices(ownerA.accountId)).length === 1);
   for (let seq = 1; seq <= 3; seq += 1) {
     await hub.dispatch({ accountId: ownerA.accountId, explicitDeviceId: device.deviceId,
-      requiredCapabilities: ['file.read'], kind: 'action', payload: { ownerASecret: `old-${seq}` } });
+      requiredCapabilities: ['file.read'], kind: 'action', payload: {
+        ownerASecret: `old-${seq}`,
+        action: { id: `owner-a-read-${seq}`, capability: 'file.read', risk: 'read' }
+      } });
     await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === seq);
   }
   assert.deepEqual(seenA, [1, 2, 3]);
@@ -1456,7 +1458,7 @@ test('device transfer preserves relay cursor continuity without exposing old-own
     explicitDeviceId: device.deviceId,
     requiredCapabilities: ['file.read'],
     kind: 'action',
-    payload: { owner: 'b', fresh: true }
+    payload: { owner: 'b', fresh: true, action: { id: 'owner-b-read', capability: 'file.read', risk: 'read' } }
   });
   assert.equal(fresh.delivery.seq, 4);
   await waitFor(async () => (await hub!.deliveryCursor(device.deviceId)).lastAckedSeq === 4);

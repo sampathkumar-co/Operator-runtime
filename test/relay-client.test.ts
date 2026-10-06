@@ -5,6 +5,60 @@ import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { createRelayCapabilitySessionBinding, relayCapabilitySessionDigest } from '../src/core/relay-capability-binding.ts';
+
+const TEST_ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
+
+function modernSession(hello: any, input: {
+  connectionId: string;
+  capabilities: string[];
+  resumeFromSeq?: number;
+  heartbeatMs?: number;
+  readConcurrency?: number;
+  authorityGeneration?: number;
+}) {
+  const authority = {
+    accountId: TEST_ACCOUNT_ID,
+    deviceId: String(hello.payload.deviceId),
+    generation: input.authorityGeneration ?? 1
+  };
+  const binding = createRelayCapabilitySessionBinding({
+    protocol: 1,
+    capabilityBinding: 1,
+    connectionId: input.connectionId,
+    logicalSessionId: String(hello.payload.logicalSessionId),
+    deviceId: authority.deviceId,
+    deviceFingerprint: String(hello.payload.fingerprint),
+    authority,
+    capabilities: input.capabilities
+  });
+  const capabilityBindingDigest = relayCapabilitySessionDigest(binding);
+  return {
+    authority,
+    capabilityBindingDigest,
+    welcome: {
+      type: 'welcome', protocol: 1, connectionId: input.connectionId,
+      logicalSessionId: binding.logicalSessionId,
+      resumeFromSeq: input.resumeFromSeq ?? 0,
+      heartbeatMs: input.heartbeatMs ?? 60_000,
+      ...(input.readConcurrency === undefined ? {} : { readConcurrency: input.readConcurrency }),
+      capabilityBinding: 1,
+      capabilities: [...binding.capabilities],
+      authority: { ...authority },
+      capabilityBindingDigest
+    },
+    delivery(requiredCapabilities: string[]) {
+      return {
+        authority: { ...authority },
+        requiredCapabilities: [...requiredCapabilities],
+        capabilityBindingDigest
+      };
+    },
+    payload<T extends Record<string, unknown>>(payload: T): T & { approvalAuthority: typeof authority } {
+      return { ...payload, approvalAuthority: { ...authority } };
+    }
+  };
+}
 
 class FakeSocket implements RelaySocketLike {
   readyState = 0;
@@ -86,9 +140,10 @@ test('relay sends signed outbound hello, processes one delivery, persists ACK cu
           assert.equal(frame.payload.resumeAfterSeq, connectionNumber === 1 ? 0 : 1);
           assert.equal(frame.payload.capabilityBinding, 1);
           assert.deepEqual(frame.payload.capabilities, ['file.read', 'git.status']);
-          socket.server({ type: 'welcome', protocol: 1, connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, heartbeatMs: 60_000, capabilityBinding: 1, capabilities: ['file.read', 'git.status'] });
+          const session = modernSession(frame, { connectionId: `conn-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, capabilities: ['file.read', 'git.status'] });
+          socket.server(session.welcome);
           if (connectionNumber === 1) {
-            socket.server({ type: 'delivery', seq: 1, id: 'delivery-1', kind: 'task.dispatch', payload: { taskId: 't1' } });
+            socket.server({ type: 'delivery', seq: 1, id: 'delivery-1', kind: 'task.dispatch', ...session.delivery([]), payload: session.payload({ taskId: 't1' }) });
           } else {
             client.stop();
             socket.close();
@@ -284,15 +339,7 @@ test('relay recomputes signed capabilities before every reconnect hello', async 
       const expected = connectionNumber === 1 ? ['file.read', 'git.write'] : ['file.read'];
       assert.equal(frame.payload.capabilityBinding, 1);
       assert.deepEqual(frame.payload.capabilities, expected);
-      socket.server({
-        type: 'welcome',
-        protocol: 1,
-        connectionId: `dynamic-${connectionNumber}`,
-        resumeFromSeq: 0,
-        heartbeatMs: 60_000,
-        capabilityBinding: 1,
-        capabilities: expected
-      });
+      socket.server(modernSession(frame, { connectionId: `dynamic-${connectionNumber}`, capabilities: expected }).welcome);
       setTimeout(() => {
         if (connectionNumber === 1) client.reconnect();
         else { client.stop(); socket.close(); }
@@ -320,20 +367,23 @@ test('relay recomputes signed capabilities before every reconnect hello', async 
 });
 
 
-test('capability-aware client negotiates binding but remains compatible with a legacy relay welcome', async (t) => {
+test('capability-aware client rejects legacy welcome and mutation before local dispatch', async (t) => {
   const state = await stateDir(t, 'operator-relay-capability-binding-');
   const identity = new DeviceIdentityStore(state, { platform: 'linux' });
   await identity.loadOrCreate('Capability Binding PC');
   const socket = new FakeSocket();
-  let client!: RelayClient;
+  let deliveries = 0;
   socket.onSend = (frame) => {
     if (frame.type !== 'hello') return;
     assert.equal(frame.payload.capabilityBinding, 1);
     assert.deepEqual(frame.payload.capabilities, ['file.read']);
     socket.server({ type: 'welcome', protocol: 1, connectionId: 'old-relay', resumeFromSeq: 0, heartbeatMs: 60_000 });
-    setTimeout(() => { client.stop(); socket.close(); }, 0);
+    socket.server({
+      type: 'delivery', seq: 1, id: 'legacy-mutation', kind: 'action',
+      payload: { action: { id: 'legacy-mutation', capability: 'file.write', risk: 'write' } }
+    });
   };
-  client = new RelayClient({
+  const client = new RelayClient({
     stateDir: state,
     url: 'ws://127.0.0.1:9999/relay',
     allowLoopbackInsecureWs: true,
@@ -341,10 +391,11 @@ test('capability-aware client negotiates binding but remains compatible with a l
     socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
     getSessionToken: async () => 'session',
     supportedCapabilities: ['file.read'],
-    onDelivery: async () => { throw new Error('no delivery expected'); },
+    onDelivery: async () => { deliveries += 1; },
     sleep: async () => {}
   });
-  await client.run();
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_BINDING_REQUIRED');
+  assert.equal(deliveries, 0);
 });
 
 test('capability-aware client rejects partial capability-binding negotiation', async (t) => {
@@ -369,6 +420,182 @@ test('capability-aware client rejects partial capability-binding negotiation', a
     sleep: async () => {}
   });
   await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_BINDING_INVALID');
+});
+
+test('valid capability-bound mutation executes under its immutable delivery envelope', async (t) => {
+  const state = await stateDir(t, 'operator-relay-valid-bound-mutation-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Valid Bound Mutation PC');
+  const socket = new FakeSocket();
+  let deliveries = 0;
+  let client!: RelayClient;
+  socket.onSend = (frame) => {
+    if (frame.type === 'hello') {
+      const session = modernSession(frame, { connectionId: 'valid-bound-mutation', capabilities: ['file.write'] });
+      socket.server(session.welcome);
+      socket.server({
+        type: 'delivery', seq: 1, id: 'valid-bound-mutation', kind: 'action',
+        ...session.delivery(['file.write']),
+        payload: session.payload({ action: { id: 'valid-bound-mutation', capability: 'file.write', risk: 'write' } })
+      });
+    } else if (frame.type === 'ack') {
+      client.stop();
+      socket.close();
+    }
+  };
+  client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session', supportedCapabilities: ['file.write'],
+    onDelivery: async () => { deliveries += 1; }, sleep: async () => {}
+  });
+  await client.run();
+  assert.equal(deliveries, 1);
+});
+
+test('capability-bound client rejects a locally supported capability absent from negotiation', async (t) => {
+  const state = await stateDir(t, 'operator-relay-capability-absent-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Capability Absent PC');
+  const socket = new FakeSocket();
+  let deliveries = 0;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'capability-absent', capabilities: ['file.read'] });
+    socket.server(session.welcome);
+    socket.server({
+      type: 'delivery', seq: 1, id: 'capability-absent', kind: 'action',
+      ...session.delivery(['file.write']),
+      payload: session.payload({ action: { id: 'capability-absent', capability: 'file.write', risk: 'write' } })
+    });
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session', supportedCapabilities: ['file.read', 'file.write'],
+    onDelivery: async () => { deliveries += 1; }, sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_NOT_NEGOTIATED');
+  assert.equal(deliveries, 0);
+});
+
+test('authority generation change cannot inherit mutation authority from an old connection', async (t) => {
+  const state = await stateDir(t, 'operator-relay-stale-authority-generation-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Stale Authority PC');
+  const socket = new FakeSocket();
+  let deliveries = 0;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'stale-authority-generation', capabilities: ['file.write'], authorityGeneration: 1 });
+    const changedAuthority = { ...session.authority, generation: 2 };
+    socket.server(session.welcome);
+    socket.server({
+      type: 'delivery', seq: 1, id: 'stale-authority-generation', kind: 'action',
+      authority: changedAuthority, requiredCapabilities: ['file.write'], capabilityBindingDigest: session.capabilityBindingDigest,
+      payload: { action: { id: 'stale-authority-generation', capability: 'file.write', risk: 'write' }, approvalAuthority: changedAuthority }
+    });
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session', supportedCapabilities: ['file.write'],
+    onDelivery: async () => { deliveries += 1; }, sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_AUTHORITY_CHANGED');
+  assert.equal(deliveries, 0);
+});
+
+test('reconnect renegotiates a fresh authority generation before mutation execution', async (t) => {
+  const state = await stateDir(t, 'operator-relay-authority-renegotiation-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Authority Renegotiation PC');
+  const sockets: FakeSocket[] = [];
+  const observedGenerations: number[] = [];
+  let client!: RelayClient;
+  const factory = () => {
+    const connectionNumber = sockets.length + 1;
+    const socket = new FakeSocket();
+    sockets.push(socket);
+    socket.onSend = (frame) => {
+      if (frame.type === 'hello') {
+        const session = modernSession(frame, { connectionId: `authority-${connectionNumber}`, capabilities: ['file.write'], authorityGeneration: connectionNumber });
+        socket.server(session.welcome);
+        if (connectionNumber === 1) setTimeout(() => client.reconnect(), 0);
+        else socket.server({
+          type: 'delivery', seq: 1, id: 'fresh-authority-mutation', kind: 'action',
+          ...session.delivery(['file.write']),
+          payload: session.payload({ action: { id: 'fresh-authority-mutation', capability: 'file.write', risk: 'write' } })
+        });
+      } else if (frame.type === 'ack') {
+        client.stop();
+        socket.close();
+      }
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+  client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: factory, getSessionToken: async () => 'session', supportedCapabilities: ['file.write'],
+    onDelivery: async (delivery) => { observedGenerations.push(Number((delivery.payload.approvalAuthority as any)?.generation)); },
+    sleep: async () => {}
+  });
+  await client.run();
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(observedGenerations, [2]);
+});
+
+test('tampered binding digest is rejected before mutation dispatch', async (t) => {
+  const state = await stateDir(t, 'operator-relay-binding-tamper-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Binding Tamper PC');
+  const socket = new FakeSocket();
+  let deliveries = 0;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'binding-tamper', capabilities: ['file.write'] });
+    socket.server(session.welcome);
+    socket.server({
+      type: 'delivery', seq: 1, id: 'binding-tamper', kind: 'action',
+      ...session.delivery(['file.write']), capabilityBindingDigest: '0'.repeat(64),
+      payload: session.payload({ action: { id: 'binding-tamper', capability: 'file.write', risk: 'write' } })
+    });
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session', supportedCapabilities: ['file.write'],
+    onDelivery: async () => { deliveries += 1; }, sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_CAPABILITY_AUTHORITY_CHANGED');
+  assert.equal(deliveries, 0);
+});
+
+test('post-establishment legacy welcome cannot downgrade negotiated session authority', async (t) => {
+  const state = await stateDir(t, 'operator-relay-post-establishment-downgrade-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Post Establishment Downgrade PC');
+  const socket = new FakeSocket();
+  let deliveries = 0;
+  socket.onSend = (frame) => {
+    if (frame.type !== 'hello') return;
+    const session = modernSession(frame, { connectionId: 'post-establishment-downgrade', capabilities: ['file.write'] });
+    socket.server(session.welcome);
+    socket.server({ type: 'welcome', protocol: 1, connectionId: 'legacy-replacement', resumeFromSeq: 0 });
+    socket.server({
+      type: 'delivery', seq: 1, id: 'post-downgrade-mutation', kind: 'action',
+      payload: { action: { id: 'post-downgrade-mutation', capability: 'file.write', risk: 'write' } }
+    });
+  };
+  const client = new RelayClient({
+    stateDir: state, url: 'ws://127.0.0.1:9999/relay', allowLoopbackInsecureWs: true,
+    identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
+    getSessionToken: async () => 'session', supportedCapabilities: ['file.write'],
+    onDelivery: async () => { deliveries += 1; }, sleep: async () => {}
+  });
+  await assert.rejects(client.run(), (error: any) => error?.code === 'RELAY_PROTOCOL_ERROR');
+  assert.equal(deliveries, 0);
 });
 test('uncertain delivery after a crash is reconciled instead of automatically replayed', async (t) => {
   const state = await stateDir(t, 'operator-relay-recovery-');
@@ -524,15 +751,7 @@ test('explicit reconnect does not depend on the current WebSocket emitting close
     sockets.push(socket);
     socket.onSend = (frame) => {
       if (frame.type !== 'hello') return;
-      socket.server({
-        type: 'welcome',
-        protocol: 1,
-        connectionId: `interrupt-${connectionNumber}`,
-        resumeFromSeq: 0,
-        heartbeatMs: 60_000,
-        capabilityBinding: 1,
-        capabilities: ['file.read']
-      });
+      socket.server(modernSession(frame, { connectionId: `interrupt-${connectionNumber}`, capabilities: ['file.read'] }).welcome);
       setTimeout(() => {
         if (connectionNumber === 1) client.reconnect();
         else {
@@ -582,22 +801,16 @@ test('explicit reconnect drains an in-flight destructive delivery before opening
     socket.onSend = (frame) => {
       if (frame.type === 'hello') {
         events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
-        socket.server({
-          type: 'welcome',
-          protocol: 1,
-          connectionId: `drain-${connectionNumber}`,
-          resumeFromSeq: frame.payload.resumeAfterSeq,
-          heartbeatMs: 60_000,
-          capabilityBinding: 1,
-          capabilities: ['file.replace']
-        });
+        const session = modernSession(frame, { connectionId: `drain-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, capabilities: ['file.replace'] });
+        socket.server(session.welcome);
         if (connectionNumber === 1) {
           socket.server({
             type: 'delivery',
             seq: 1,
             id: 'destructive-1',
             kind: 'action',
-            payload: { action: { id: 'destructive-1', capability: 'file.replace', risk: 'destructive' } }
+            ...session.delivery(['file.replace']),
+            payload: session.payload({ action: { id: 'destructive-1', capability: 'file.replace', risk: 'destructive' } })
           });
         } else {
           setTimeout(() => { client.stop(); socket.close(); }, 0);
@@ -661,22 +874,16 @@ test('unexpected network loss drains an in-flight destructive delivery before re
     socket.onSend = (frame) => {
       if (frame.type !== 'hello') return;
       events.push(`hello-${connectionNumber}-resume-${frame.payload.resumeAfterSeq}`);
-      socket.server({
-        type: 'welcome',
-        protocol: 1,
-        connectionId: `network-loss-${connectionNumber}`,
-        resumeFromSeq: frame.payload.resumeAfterSeq,
-        heartbeatMs: 60_000,
-        capabilityBinding: 1,
-        capabilities: ['file.replace']
-      });
+      const session = modernSession(frame, { connectionId: `network-loss-${connectionNumber}`, resumeFromSeq: frame.payload.resumeAfterSeq, capabilities: ['file.replace'] });
+      socket.server(session.welcome);
       if (connectionNumber === 1) {
         socket.server({
           type: 'delivery',
           seq: 1,
           id: 'network-loss-destructive-1',
           kind: 'action',
-          payload: { action: { id: 'network-loss-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+          ...session.delivery(['file.replace']),
+          payload: session.payload({ action: { id: 'network-loss-destructive-1', capability: 'file.replace', risk: 'destructive' } })
         });
       } else {
         setTimeout(() => { client.stop(); socket.close(); }, 0);
@@ -733,21 +940,15 @@ test('controlled shutdown waits for an in-flight destructive delivery to reach t
 
   socket.onSend = (frame) => {
     if (frame.type !== 'hello') return;
-    socket.server({
-      type: 'welcome',
-      protocol: 1,
-      connectionId: 'shutdown-drain',
-      resumeFromSeq: 0,
-      heartbeatMs: 60_000,
-      capabilityBinding: 1,
-      capabilities: ['file.replace']
-    });
+    const session = modernSession(frame, { connectionId: 'shutdown-drain', capabilities: ['file.replace'] });
+    socket.server(session.welcome);
     socket.server({
       type: 'delivery',
       seq: 1,
       id: 'shutdown-destructive-1',
       kind: 'action',
-      payload: { action: { id: 'shutdown-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+      ...session.delivery(['file.replace']),
+      payload: session.payload({ action: { id: 'shutdown-destructive-1', capability: 'file.replace', risk: 'destructive' } })
     });
   };
 
@@ -799,21 +1000,15 @@ test('protocol failure waits for accepted destructive work to become durable bef
 
   socket.onSend = (frame) => {
     if (frame.type !== 'hello') return;
-    socket.server({
-      type: 'welcome',
-      protocol: 1,
-      connectionId: 'protocol-drain',
-      resumeFromSeq: 0,
-      heartbeatMs: 60_000,
-      capabilityBinding: 1,
-      capabilities: ['file.replace']
-    });
+    const session = modernSession(frame, { connectionId: 'protocol-drain', capabilities: ['file.replace'] });
+    socket.server(session.welcome);
     socket.server({
       type: 'delivery',
       seq: 1,
       id: 'protocol-drain-destructive-1',
       kind: 'action',
-      payload: { action: { id: 'protocol-drain-destructive-1', capability: 'file.replace', risk: 'destructive' } }
+      ...session.delivery(['file.replace']),
+      payload: session.payload({ action: { id: 'protocol-drain-destructive-1', capability: 'file.replace', risk: 'destructive' } })
     });
   };
 
@@ -863,21 +1058,15 @@ test('heartbeat pong bypasses a long serialized delivery so healthy transport do
 
   socket.onSend = (frame) => {
     if (frame.type === 'hello') {
-      socket.server({
-        type: 'welcome',
-        protocol: 1,
-        connectionId: 'heartbeat-long-delivery',
-        resumeFromSeq: 0,
-        heartbeatMs: 5_000,
-        capabilityBinding: 1,
-        capabilities: ['file.replace']
-      });
+      const session = modernSession(frame, { connectionId: 'heartbeat-long-delivery', capabilities: ['file.replace'], heartbeatMs: 5_000 });
+      socket.server(session.welcome);
       socket.server({
         type: 'delivery',
         seq: 1,
         id: 'heartbeat-long-delivery-1',
         kind: 'action',
-        payload: { action: { id: 'heartbeat-long-delivery-1', capability: 'file.replace', risk: 'destructive' } }
+        ...session.delivery(['file.replace']),
+        payload: session.payload({ action: { id: 'heartbeat-long-delivery-1', capability: 'file.replace', risk: 'destructive' } })
       });
       return;
     }
@@ -942,15 +1131,7 @@ test('stage7 relay signs bounded resource profile into authenticated hello', asy
     });
     void (async () => {
       assert.equal(await identity.verify(Buffer.from(JSON.stringify(frame.payload), 'utf8'), frame.signature), true);
-      socket.server({
-        type: 'welcome',
-        protocol: 1,
-        connectionId: 'resource-profile',
-        resumeFromSeq: 0,
-        heartbeatMs: 60_000,
-        capabilityBinding: 1,
-        capabilities: ['file.read']
-      });
+      socket.server(modernSession(frame, { connectionId: 'resource-profile', capabilities: ['file.read'] }).welcome);
       setTimeout(() => { client.stop(); socket.close(); }, 0);
     })();
   };
