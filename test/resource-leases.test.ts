@@ -7,6 +7,7 @@ import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
 import { CAPABILITY_RISK_RULES } from '../src/core/capability-policy.ts';
 import { RESOURCE_EXTRACTOR_CAPABILITIES, resolvePhysicalResourceKeysForAction, resourceKeysConflict, resourceKeysForAction, validateResourceExtractorCoverage } from '../src/core/resource-identity.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
+import { PolicyEngine } from '../src/core/policy.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-resource-lease-'));
@@ -278,6 +279,166 @@ test('canonical resource extractor registry covers every policy capability and m
     assert.ok(keys.length > 0, capability);
     assert.equal(keys.some((key) => key.startsWith('cap:')), false, capability);
   }
+});
+
+test('terminal declarations bind external mutation paths without parsing argv', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  const external = path.join(state, 'other', 'output.txt');
+  await fs.mkdir(path.dirname(external), { recursive: true });
+  await fs.mkdir(cwd, { recursive: true });
+  await fs.writeFile(external, 'before');
+  const terminalKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'terminal-external', capability: 'terminal.execute', risk: 'destructive',
+    input: {
+      executable: 'tool', args: ['--output', external], cwd,
+      affectedResources: [{ kind: 'path', path: external }]
+    },
+    provenance: { kind: 'runtime' }
+  });
+  const fileKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'file-external', capability: 'file.replace', risk: 'write',
+    input: { path: external, content: 'after' }, provenance: { kind: 'runtime' }
+  });
+
+  assert.equal(terminalKeys.some((left) => fileKeys.some((right) => resourceKeysConflict(left, right))), true);
+  assert.equal(terminalKeys.includes('filesystem:any'), false);
+});
+
+test('same terminal cwd can retain independent declared effect identities', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  const first = path.join(state, 'first.txt');
+  const second = path.join(state, 'second.txt');
+  await fs.mkdir(cwd, { recursive: true });
+  await fs.writeFile(first, 'first');
+  await fs.writeFile(second, 'second');
+  const keys = async (id: string, affectedPath: string) => await resolvePhysicalResourceKeysForAction({
+    id, capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'tool', args: [], cwd, affectedResources: [{ kind: 'path', path: affectedPath }] },
+    provenance: { kind: 'runtime' }
+  });
+  const firstKeys = await keys('terminal-first', first);
+  const secondKeys = await keys('terminal-second', second);
+
+  assert.equal(firstKeys.some((left) => secondKeys.some((right) => resourceKeysConflict(left, right))), false);
+});
+
+test('undeclared terminal mutation takes a conservative filesystem lease and argv creates no fake authority', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  const argvPath = path.join(state, 'looks-like-a-path.txt');
+  await fs.mkdir(cwd, { recursive: true });
+  const terminalKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'terminal-opaque-argv', capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'tool', args: ['ordinary-token', argvPath], cwd }, provenance: { kind: 'runtime' }
+  });
+  const fileKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'file-different', capability: 'file.write', risk: 'write',
+    input: { path: path.join(state, 'different.txt') }, provenance: { kind: 'runtime' }
+  });
+
+  assert.deepEqual(terminalKeys, ['filesystem:any']);
+  assert.equal(terminalKeys.some((left) => fileKeys.some((right) => resourceKeysConflict(left, right))), true);
+  assert.equal(terminalKeys.some((key) => key.includes('looks-like-a-path')), false);
+});
+
+test('terminal resource declarations reject ambiguous or untyped values', () => {
+  const base = {
+    capability: 'terminal.execute', risk: 'destructive' as const,
+    provenance: { kind: 'runtime' as const }
+  };
+  assert.throws(
+    () => resourceKeysForAction({ ...base, id: 'relative', input: { cwd: path.resolve('.'), affectedResources: [{ kind: 'path', path: 'relative.txt' }] } }),
+    (error: any) => error?.code === 'RESOURCE_DECLARATION_INVALID'
+  );
+  assert.throws(
+    () => resourceKeysForAction({ ...base, id: 'untyped', input: { cwd: path.resolve('.'), affectedResources: [path.resolve('value.txt')] } }),
+    (error: any) => error?.code === 'RESOURCE_DECLARATION_INVALID'
+  );
+  assert.throws(
+    () => resourceKeysForAction({ ...base, id: 'extra-field', input: { cwd: path.resolve('.'), affectedResources: [{ kind: 'path', path: path.resolve('value.txt'), authority: true }] } }),
+    (error: any) => error?.code === 'RESOURCE_DECLARATION_INVALID'
+  );
+});
+
+test('terminal affected path outside authorized roots is denied before dispatch', async (t) => {
+  const state = await temp(t);
+  const allowed = path.join(state, 'allowed');
+  const outside = path.join(state, 'outside', 'output.txt');
+  await fs.mkdir(allowed, { recursive: true });
+  const action = {
+    id: 'terminal-outside-policy', capability: 'terminal.execute', risk: 'destructive' as const,
+    input: { executable: 'tool', args: [], cwd: allowed, affectedResources: [{ kind: 'path', path: outside }] },
+    provenance: { kind: 'runtime' as const }
+  };
+  assert.throws(
+    () => new PolicyEngine().authorizeBase(action, { allowedCapabilities: ['terminal.execute'], allowedRoots: [allowed] }),
+    (error: any) => error?.code === 'PATH_OUTSIDE_SCOPE'
+  );
+});
+
+test('terminal affected resource quarantine uses the same physical identity', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  const affected = path.join(state, 'external.txt');
+  await fs.mkdir(cwd, { recursive: true });
+  await fs.writeFile(affected, 'value');
+  const terminalKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'uncertain-terminal', capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'tool', args: [], cwd, affectedResources: [{ kind: 'path', path: affected }] },
+    provenance: { kind: 'runtime' }
+  });
+  const fileKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'competing-file', capability: 'file.replace', risk: 'write',
+    input: { path: affected, content: 'next' }, provenance: { kind: 'runtime' }
+  });
+  const store = new ResourceLeaseStore(state);
+  await store.quarantine('uncertain-terminal', terminalKeys);
+  await assert.rejects(
+    () => store.acquire('competing-file', fileKeys, 'exclusive', { mutationActionId: 'competing-file' }),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED'
+  );
+});
+
+test('terminal declarations resolve symbolic paths to the same physical resource', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  const actual = path.join(state, 'actual');
+  const linked = path.join(state, 'linked');
+  await fs.mkdir(cwd, { recursive: true });
+  await fs.mkdir(actual, { recursive: true });
+  await fs.writeFile(path.join(actual, 'value.txt'), 'value');
+  try {
+    await fs.symlink(actual, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return t.skip('symbolic link creation is unavailable on this runner');
+    throw error;
+  }
+  const terminalKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'terminal-linked', capability: 'terminal.execute', risk: 'destructive',
+    input: { executable: 'tool', args: [], cwd, affectedResources: [{ kind: 'path', path: path.join(linked, 'value.txt') }] },
+    provenance: { kind: 'runtime' }
+  });
+  const fileKeys = await resolvePhysicalResourceKeysForAction({
+    id: 'file-actual', capability: 'file.replace', risk: 'write',
+    input: { path: path.join(actual, 'value.txt'), content: 'next' }, provenance: { kind: 'runtime' }
+  });
+  assert.equal(terminalKeys.some((left) => fileKeys.some((right) => resourceKeysConflict(left, right))), true);
+});
+
+test('legacy cwd-only terminal journal upgrades to conservative filesystem authority', async (t) => {
+  const state = await temp(t);
+  const cwd = path.join(state, 'cwd');
+  await fs.mkdir(cwd, { recursive: true });
+  const action = {
+    id: 'legacy-terminal-retry', capability: 'terminal.execute', risk: 'destructive' as const,
+    input: { executable: 'tool', args: [], cwd }, provenance: { kind: 'runtime' as const }
+  };
+  const journal = new ActionTransitionJournal(state);
+  await journal.prepare({ action, ownerKind: 'test', ownerId: action.id, resourceKeys: [`workspace:${cwd.replace(/\\/g, '/').toLowerCase()}`, `fs-path:${cwd.replace(/\\/g, '/').toLowerCase()}`] });
+  const retried = await journal.prepare({ action, ownerKind: 'test', ownerId: action.id, resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
+  assert.equal(retried.actionId, action.id);
 });
 
 test('physical resource identities conflict across repo and child-file capability families', async (t) => {

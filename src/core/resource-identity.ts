@@ -54,9 +54,18 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   else if (action.capability.startsWith('docker.')) values.push(input.path);
   else if (action.capability.startsWith('postgres.')) values.push(input.path);
   else if (action.capability === 'vscode.open') values.push(input.path, input.leftPath, input.rightPath);
-  else if (action.capability === 'terminal.execute') values.push(input.cwd);
-  else if (action.capability === 'terminal.session' && input.operation === 'start') values.push(input.cwd);
+  else if (action.capability === 'terminal.execute') values.push(input.cwd, ...terminalAffectedPaths(action));
+  else if (action.capability === 'terminal.session' && input.operation === 'start') values.push(input.cwd, ...terminalAffectedPaths(action));
   return [...new Set(values.filter((value): value is string => typeof value === 'string' && value.length > 0 && !value.includes('\0')))];
+}
+
+/** Host paths whose contents may change, distinct from authorization-only operands such as terminal cwd. */
+function resourceEffectPathOperandsForAction(action: ActionRequest): string[] {
+  if (action.capability === 'terminal.execute'
+    || (action.capability === 'terminal.session' && action.input.operation === 'start')) {
+    return terminalAffectedPaths(action);
+  }
+  return resourcePathOperandsForAction(action);
 }
 
 /** Stable resource identities shared by Task, Team and future workflow schedulers. */
@@ -91,9 +100,15 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     add('file', input.path, keys); add('file', input.leftPath, keys); add('file', input.rightPath, keys);
     keys.add('desktop:windows/vscode');
   } else if (action.capability === 'terminal.execute') {
-    add('workspace', input.cwd, keys);
+    const affected = terminalAffectedPaths(action);
+    if (affected.length === 0) keys.add('filesystem:any');
+    else for (const affectedPath of affected) add('file', affectedPath, keys);
   } else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') add('workspace', input.cwd, keys);
+    if (input.operation === 'start') {
+      const affected = terminalAffectedPaths(action);
+      if (affected.length === 0) keys.add('filesystem:any');
+      else for (const affectedPath of affected) add('file', affectedPath, keys);
+    }
     else if (typeof input.sessionId === 'string' && input.sessionId) keys.add(`process:session/${requiredSegment(input.sessionId, 'session')}`);
   } else if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
     const pid = Number(input.pid);
@@ -116,7 +131,7 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
 export async function resolvePhysicalResourceKeysForAction(action: ActionRequest): Promise<string[]> {
   const keys = new Set<string>(resourceKeysForAction(action));
   const input = action.input;
-  const paths = resourcePathOperandsForAction(action);
+  const paths = resourceEffectPathOperandsForAction(action);
 
   for (const candidate of paths) {
     const physical = await physicalPathIdentity(candidate);
@@ -143,6 +158,8 @@ export function resourceKeysConflict(left: string, right: string): boolean {
   const normalizedLeft = normalizeLegacyResourceKey(left);
   const normalizedRight = normalizeLegacyResourceKey(right);
   if (normalizedLeft === normalizedRight) return true;
+  if ((normalizedLeft === 'filesystem:any' && isFilesystemResource(normalizedRight))
+    || (normalizedRight === 'filesystem:any' && isFilesystemResource(normalizedLeft))) return true;
   const hierarchicalPrefixes = ['fs-path:', 'browser:', 'database:', 'process:', 'desktop:'];
   for (const prefix of hierarchicalPrefixes) {
     if (!normalizedLeft.startsWith(prefix) || !normalizedRight.startsWith(prefix)) continue;
@@ -155,7 +172,10 @@ export function resourceKeysConflict(left: string, right: string): boolean {
 
 /** Canonicalizes persisted resource keys across compatible identity schema upgrades. */
 export function canonicalResourceKeys(keys: readonly string[]): string[] {
-  return [...new Set(keys.map(normalizeLegacyResourceKey))].sort();
+  const normalized = [...new Set(keys.map(normalizeLegacyResourceKey))];
+  return normalized.includes('filesystem:any')
+    ? ['filesystem:any', ...normalized.filter((key) => !isFilesystemResource(key))].sort()
+    : normalized.sort();
 }
 
 function browserResourceKey(action: ActionRequest): string {
@@ -176,6 +196,7 @@ function browserResourceKey(action: ActionRequest): string {
 }
 
 function normalizeLegacyResourceKey(key: string): string {
+  if (key.startsWith('workspace:')) return 'filesystem:any';
   const legacy = /^browser:session:([^/]+)\/target:([^/]+)(?:\/frame:([^/]+))?$/.exec(key);
   if (!legacy) return key;
   const [, instance, target, frame] = legacy;
@@ -183,6 +204,36 @@ function normalizeLegacyResourceKey(key: string): string {
   if (target === 'global') return targets;
   const concrete = `${targets}/${target}`;
   return frame ? `${concrete}/frames/${frame}` : concrete;
+}
+
+function terminalAffectedPaths(action: ActionRequest): string[] {
+  const raw = action.input.affectedResources;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 128) {
+    throw new OperatorError('RESOURCE_DECLARATION_INVALID', 'affectedResources must be a bounded array of typed resource declarations.');
+  }
+  const paths = raw.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must be a typed resource declaration.`);
+    }
+    const declaration = item as Record<string, unknown>;
+    const fields = Object.keys(declaration).sort();
+    if (fields.join('\0') !== 'kind\0path' || declaration.kind !== 'path'
+      || typeof declaration.path !== 'string' || declaration.path.length < 1
+      || declaration.path.length > 4096 || declaration.path.includes('\0')) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}] must contain only kind=path and a bounded path.`);
+    }
+    if (!path.isAbsolute(declaration.path)) {
+      throw new OperatorError('RESOURCE_DECLARATION_INVALID', `affectedResources[${index}].path must be an absolute host path.`);
+    }
+    return path.resolve(declaration.path);
+  });
+  return [...new Set(paths)];
+}
+
+function isFilesystemResource(key: string): boolean {
+  return key === 'filesystem:any'
+    || ['fs-path:', 'fs-object:', 'file:', 'repo:', 'workspace:'].some((prefix) => key.startsWith(prefix));
 }
 
 async function physicalPathIdentity(input: string): Promise<{ pathKey: string; objectKey?: string }> {

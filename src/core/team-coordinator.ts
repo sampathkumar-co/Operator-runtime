@@ -13,6 +13,7 @@ import { VerificationKernel } from './verification-kernel.ts';
 import { validIntentBinding, type IntentRegistry } from './intent-registry.ts';
 import type { AgentKernel } from './agent-kernel.ts';
 import { executeCanonicalVerification } from './canonical-verification.ts';
+import { canonicalResourceKeys } from './resource-identity.ts';
 import {
   currentProcessInstance,
   observeProcessInstance,
@@ -528,10 +529,14 @@ export class TeamCoordinator {
       if (risk !== 'read' && risk !== item.risk) {
         throw new OperatorError('TEAM_RISK_DENIED', `Work item declared risk ${item.risk} and cannot execute ${risk} action.`);
       }
-      const requestedResources = uniqueStrings(input.resourceKeys ?? [], MAX_RESOURCES, 1024, 'execution resourceKeys').map(normalizeResourceKey);
+      const requestedResources = canonicalResourceKeys(
+        uniqueStrings(input.resourceKeys ?? [], MAX_RESOURCES, 1024, 'execution resourceKeys').map(normalizeResourceKey)
+      );
+      const assignedResources = new Map(item.resources.map((key) => [canonicalResourceKeys([key])[0]!, key]));
       for (const key of requestedResources) {
-        if (!item.resources.includes(key)) throw new OperatorError('TEAM_RESOURCE_DENIED', `Resource ${key} is not assigned to this work item.`);
-        const resource = requireResource(current, key);
+        const assignedKey = assignedResources.get(key);
+        if (!assignedKey) throw new OperatorError('TEAM_RESOURCE_DENIED', `Resource ${key} is not assigned to this work item.`);
+        const resource = requireResource(current, assignedKey);
         if (resource.uncertain || resource.lock?.leaseId !== lease.id) throw new OperatorError('TEAM_ARTIFACT_CONFLICT', `Resource ${key} is not safely owned by this lease.`);
       }
       if (risk !== 'read' && item.resources.length > 0 && requestedResources.length === 0) {

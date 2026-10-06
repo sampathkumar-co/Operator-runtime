@@ -955,15 +955,16 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
-    description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
+    description: 'Execute an allowlisted executable with an argv array and no command shell. Declare every absolute host path the process may mutate in affectedResources; an omitted declaration receives a conservative host-filesystem mutation lease.',
     inputSchema: z.object({
       executable: z.string().min(1),
       args: z.array(z.string()).max(200).default([]),
       cwd: z.string().min(1),
+      affectedResources: z.array(z.object({ kind: z.literal('path'), path: z.string().min(1).max(4096) }).strict()).max(128).optional(),
       timeoutMs: z.number().int().min(100).max(600000).default(30000)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, timeoutMs }, cwd));
+  }, async ({ executable, args, cwd, affectedResources, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, affectedResources, timeoutMs }, cwd));
 
   server.registerTool('terminal.session', {
     title: 'Manage interactive terminal session',
@@ -973,6 +974,7 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       executable: z.string().min(1).optional(),
       args: z.array(z.string()).max(200).default([]),
       cwd: z.string().min(1).optional(),
+      affectedResources: z.array(z.object({ kind: z.literal('path'), path: z.string().min(1).max(4096) }).strict()).max(128).optional(),
       sessionId: z.string().uuid().optional(),
       input: z.string().max(65536).optional(),
       afterCursor: z.number().int().min(0).optional(),
@@ -980,9 +982,13 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
       maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
+  }, async ({ operation, executable, args, cwd, affectedResources, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
     const risk = operation === 'list' || operation === 'read' ? 'read' : 'destructive';
-    return invoke('terminal.session', risk, { operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }, cwd);
+    return invoke('terminal.session', risk, {
+      operation, executable, args, cwd,
+      ...(operation === 'start' && affectedResources ? { affectedResources } : {}),
+      sessionId, input, afterCursor, maxEvents, maxBytes
+    }, cwd);
   });
 
   server.registerTool('process.inspect', {
