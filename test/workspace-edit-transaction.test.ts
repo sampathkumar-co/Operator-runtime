@@ -144,12 +144,12 @@ test('restart reconciliation rolls a partially applied transaction back to exact
   const afterA = applied.contentByPath['a.ts']!;
   const afterB = applied.contentByPath['b.ts']!;
 
-  const backupA = path.join(root, '.a.ts.operator-edit-recovery.bak');
-  const tempA = path.join(root, '.a.ts.operator-edit-recovery.tmp');
-  const discardA = path.join(root, '.a.ts.operator-edit-recovery.discard');
-  const backupB = path.join(root, '.b.ts.operator-edit-recovery.bak');
-  const tempB = path.join(root, '.b.ts.operator-edit-recovery.tmp');
-  const discardB = path.join(root, '.b.ts.operator-edit-recovery.discard');
+  const backupA = path.join(canonicalRoot, '.a.ts.operator-edit-recovery.bak');
+  const tempA = path.join(canonicalRoot, '.a.ts.operator-edit-recovery.tmp');
+  const discardA = path.join(canonicalRoot, '.a.ts.operator-edit-recovery.discard');
+  const backupB = path.join(canonicalRoot, '.b.ts.operator-edit-recovery.bak');
+  const tempB = path.join(canonicalRoot, '.b.ts.operator-edit-recovery.tmp');
+  const discardB = path.join(canonicalRoot, '.b.ts.operator-edit-recovery.discard');
 
   await fs.writeFile(backupA, beforeA);
   await fs.writeFile(targetA, afterA);
