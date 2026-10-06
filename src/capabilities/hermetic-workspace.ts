@@ -283,8 +283,6 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
 
     const sourceRoot = await this.#resolveSourceRoot(sourceInput);
     await assertNoRepoLocalContentFilters(sourceRoot, context.signal);
-    await this.#prepareOwnedRoot(sourceRoot);
-
     const actualHead = (await runGit(sourceRoot, ['rev-parse', '--verify', 'HEAD'], context.signal)).stdout.trim().toLowerCase();
     if (actualHead !== expectedHead) {
       throw new OperatorError('HERMETIC_WORKSPACE_HEAD_CHANGED', 'Source repository HEAD does not match expectedHead.', {
@@ -292,6 +290,7 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
         details: { expectedHead, actualHead }
       });
     }
+    await this.#prepareOwnedRoot(sourceRoot);
 
     const worktreeRoot = path.join(this.#ownedRoot, sessionDigest(sessionId));
     const rootState = await inspectOwnedDirectory(worktreeRoot, this.#ownedRoot);
