@@ -25,6 +25,10 @@ function evidence(overrides: Partial<AdaptivePlanningPromotionEvidence> = {}): A
     rollbackSnapshotDigest: D,
     verificationReceiptDigests: [R],
     evaluatedAt: '2026-10-06T00:00:00.000Z',
+    evaluationLineageDigest: D,
+    candidateManifestDigest: R,
+    baselineManifestDigest: D,
+    criteriaDigest: R,
     ...overrides
   };
 }
