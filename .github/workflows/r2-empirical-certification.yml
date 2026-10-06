@@ -31,8 +31,10 @@ jobs:
           package-manager-cache: false
       - name: Assert public-repository zero-paid-service campaign
         shell: bash
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
-          test "$GITHUB_REPOSITORY_VISIBILITY" = "public"
+          test "$REPO_VISIBILITY" = "public"
           test -z "${OPENAI_API_KEY:-}"
           test -z "${ANTHROPIC_API_KEY:-}"
           test -z "${GEMINI_API_KEY:-}"
