@@ -45,6 +45,7 @@ import { ActionTransitionJournal } from '../../../src/core/action-transition-jou
 import { IntentRegistry } from '../../../src/core/intent-registry.ts';
 import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
+import { createLocalStateComponents } from './state-components.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -103,31 +104,30 @@ const permissions = {
   allowSystemChanges: false,
   allowDestructive: false
 };
-const emergencyStop = new EmergencyStopStore(stateDir);
-const approvals = new ApprovalStore(stateDir);
-const actionExecutions = new LocalActionExecutionStore(stateDir);
-const sessionApprovals = new SessionApprovalStore();
-const audit = new AuditLog(stateDir);
-const tasks = new TaskStore(stateDir);
-const resourceLeases = new ResourceLeaseStore(stateDir);
-const actionJournal = new ActionTransitionJournal(stateDir);
-const intentRegistry = new IntentRegistry(stateDir);
-const procedures = new ProcedureMemoryStore(stateDir);
-const world = new WorldModelStore(stateDir);
-const perception = new PerceptionGraphStore(stateDir);
-const optimizer = new ExecutionOptimizerStore(stateDir);
-const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
-const deviceIdentity = new DeviceIdentityStore(stateDir);
-const deviceRegistry = new DeviceRegistryStore(stateDir);
-const semanticMigration = new SemanticCheckpointManager(stateDir, {
-  identity: deviceIdentity,
-  registry: deviceRegistry
-});
-const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
-const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
-const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const events = new DurableEventRuntime(stateDir);
-const privacy = new LocalPrivacyDataStore(stateDir);
+const {
+  emergencyStop,
+  approvals,
+  actionExecutions,
+  sessionApprovals,
+  audit,
+  tasks,
+  resourceLeases,
+  actionJournal,
+  intentRegistry,
+  procedures,
+  world,
+  perception,
+  optimizer,
+  taskIntelligence,
+  deviceIdentity,
+  deviceRegistry,
+  semanticMigration,
+  deviceRouting,
+  devicePool,
+  enterprisePolicy,
+  events,
+  privacy
+} = createLocalStateComponents(stateDir);
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
 const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
