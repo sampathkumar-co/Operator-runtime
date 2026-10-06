@@ -630,11 +630,14 @@ export function createLocalAgentServer(options: {
     if (pathname === '/v1/control-center/runtime' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 200) : 100;
-      const [tasks, journal, approvals] = await Promise.all([
+      const [summaries, journal, approvals] = await Promise.all([
         options.tasks ? options.tasks.list(limit) : [],
         options.agentKernel ? options.agentKernel.journal.list(Math.min(1000, limit * 5)) : [],
         options.approvals ? options.approvals.list() : []
       ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
       send(res, 200, {
         ok: true,
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
