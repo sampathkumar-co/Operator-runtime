@@ -282,8 +282,8 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
     }
 
     const sourceRoot = await this.#resolveSourceRoot(sourceInput);
-    await this.#prepareOwnedRoot(sourceRoot);
     await assertNoRepoLocalContentFilters(sourceRoot, context.signal);
+    await this.#prepareOwnedRoot(sourceRoot);
 
     const actualHead = (await runGit(sourceRoot, ['rev-parse', '--verify', 'HEAD'], context.signal)).stdout.trim().toLowerCase();
     if (actualHead !== expectedHead) {
@@ -453,16 +453,25 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
   }
 
   async #prepareOwnedRoot(sourceRoot: string): Promise<void> {
+    if (inside(this.#stateDir, sourceRoot) || inside(sourceRoot, this.#stateDir)) {
+      throw new OperatorError('HERMETIC_WORKSPACE_ROOT_OVERLAP', 'Mecord state and owned worktrees may not overlap the source repository.');
+    }
+    await fs.mkdir(this.#stateDir, { recursive: true, mode: 0o700 });
+    const stateStat = await fs.lstat(this.#stateDir);
+    if (!stateStat.isDirectory() || stateStat.isSymbolicLink()) {
+      throw new OperatorError('HERMETIC_WORKSPACE_OWNED_ROOT_UNSAFE', 'Mecord state root has unsafe topology.');
+    }
+    const realStateDir = await fs.realpath(this.#stateDir);
+    if (inside(realStateDir, sourceRoot) || inside(sourceRoot, realStateDir)) {
+      throw new OperatorError('HERMETIC_WORKSPACE_ROOT_OVERLAP', 'Canonical Mecord state and source repository may not overlap.');
+    }
+    this.#ownedRoot = path.join(realStateDir, 'hermetic-workspaces');
     await fs.mkdir(this.#ownedRoot, { recursive: true, mode: 0o700 });
     const stat = await fs.lstat(this.#ownedRoot);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
       throw new OperatorError('HERMETIC_WORKSPACE_OWNED_ROOT_UNSAFE', 'Owned worktree root has unsafe topology.');
     }
-    const real = await fs.realpath(this.#ownedRoot);
-    this.#ownedRoot = real;
-    if (inside(this.#ownedRoot, sourceRoot) || inside(sourceRoot, this.#ownedRoot)) {
-      throw new OperatorError('HERMETIC_WORKSPACE_ROOT_OVERLAP', 'Mecord-owned worktrees may not overlap the source repository.');
-    }
+    this.#ownedRoot = await fs.realpath(this.#ownedRoot);
   }
 
   async #readRecord(sessionId: string): Promise<HermeticWorkspaceRecord | undefined> {
