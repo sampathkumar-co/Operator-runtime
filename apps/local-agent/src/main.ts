@@ -188,8 +188,11 @@ const agentKernel = new AgentKernel({
   intents: intentRegistry,
   globalAbortSignal: () => emergencyExecutionGeneration.signal,
   beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
-    if (actionPermissions.enterprisePolicyDigest) {
-      await enterprisePolicy.assertCurrentDigest(actionPermissions.enterprisePolicyDigest);
+    if (actionPermissions.enterprisePolicyDigest !== undefined || actionPermissions.enterprisePolicyGeneration !== undefined) {
+      await enterprisePolicy.assertCurrentAuthority({
+        digest: actionPermissions.enterprisePolicyDigest ?? '',
+        generation: actionPermissions.enterprisePolicyGeneration ?? 0
+      });
     }
     if ((await emergencyStop.status()).engaged) {
       throw new OperatorError(

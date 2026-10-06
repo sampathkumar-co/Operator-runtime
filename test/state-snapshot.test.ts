@@ -7,6 +7,7 @@ import test from 'node:test';
 import { StateSnapshotManager, currentSnapshotCatalogDigest, recoverPendingSnapshotRestores, type SnapshotAuthenticator } from '../src/core/state-snapshot.ts';
 import { runOfflineStateSnapshot } from '../apps/local-agent/src/state-maintenance.ts';
 import { acquireLocalAgentStateInstanceLock } from '../apps/local-agent/src/state-instance-lock.ts';
+import { EnterprisePolicyStore } from '../src/core/enterprise-policy.ts';
 
 async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -105,6 +106,31 @@ test('restore refuses to cross newer monotonic authority before mutating rewinda
   );
   assert.equal(await fs.readFile(path.join(state, 'tasks', 'one.json'), 'utf8'), '{"state":"revoked-newer"}');
   assert.equal(await fs.readFile(path.join(state, 'world-model.json'), 'utf8'), '{"state":"live-newer"}');
+});
+
+test('snapshot restore cannot cross an A-B-A enterprise policy generation', async (t) => {
+  const state = await temp(t, 'operator-snapshot-enterprise-state-');
+  const snapshots = await temp(t, 'operator-snapshot-enterprise-output-');
+  const enterprise = new EnterprisePolicyStore(state);
+  const configure = async (capabilities: string[]) => await enterprise.configure({
+    roles: [{
+      id: 'developer', capabilities, rootPrefixes: [], maxRisk: 'write',
+      environments: [], projectPrefixes: [], deviceGroups: []
+    }],
+    bindings: [{ id: 'developer-binding', principalId: 'alice', roleId: 'developer', enabled: true }]
+  });
+  await configure(['file.read']);
+  const manager = new StateSnapshotManager(state, snapshots, { authenticator: testAuthenticator() });
+  await manager.create({ epoch: 'enterprise-a', withQuiescence: quiescent });
+  await configure(['file.read', 'file.write']);
+  await configure(['file.read']);
+  assert.equal((await enterprise.inspect()).generation, 3);
+
+  await assert.rejects(
+    manager.restore({ epoch: 'enterprise-a', withQuiescence: quiescent }),
+    (error: any) => error?.code === 'SNAPSHOT_AUTHORITY_STALE'
+  );
+  assert.equal((await new EnterprisePolicyStore(state).inspect()).generation, 3);
 });
 
 test('snapshot manifest remains tamper-evident when an attacker recomputes the public digest', async (t) => {

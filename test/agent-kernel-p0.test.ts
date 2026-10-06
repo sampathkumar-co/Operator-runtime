@@ -233,13 +233,17 @@ test('enterprise policy freshness is revalidated at the shared AgentKernel dispa
     leases: new ResourceLeaseStore(stateDir),
     journal,
     beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
-      if (actionPermissions.enterprisePolicyDigest) {
-        await enterprise.assertCurrentDigest(actionPermissions.enterprisePolicyDigest);
+      if (actionPermissions.enterprisePolicyDigest !== undefined || actionPermissions.enterprisePolicyGeneration !== undefined) {
+        await enterprise.assertCurrentAuthority({
+          digest: actionPermissions.enterprisePolicyDigest ?? '',
+          generation: actionPermissions.enterprisePolicyGeneration ?? 0
+        });
       }
     }
   });
 
   await configure(['file.read']);
+  await configure(['file.write']);
   const action: ActionRequest = {
     id: 'enterprise-stale-before-dispatch',
     capability: 'file.write',

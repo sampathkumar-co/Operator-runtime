@@ -722,14 +722,14 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as Record<string, unknown>;
         const roles = Array.isArray(body.roles) ? body.roles as any : [];
         const bindings = Array.isArray(body.bindings) ? body.bindings as any : [];
-        await options.enterprisePolicy.configure({ roles, bindings });
+        const configured = await options.enterprisePolicy.configure({ roles, bindings });
         await options.audit?.append({
           capability: 'enterprise.policy.configure',
           result: 'success',
           risk: 'system',
-          details: { roleCount: roles.length, bindingCount: bindings.length }
+          details: { roleCount: roles.length, bindingCount: bindings.length, policyGeneration: configured.generation }
         });
-        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured() });
+        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured(), generation: configured.generation });
       } catch (error) {
         send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_POLICY_INVALID', message: error instanceof Error ? error.message : String(error) } });
       }

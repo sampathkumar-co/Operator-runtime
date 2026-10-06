@@ -80,6 +80,8 @@ export interface PermissionProfile {
   allowDestructive?: boolean;
   /** Canonical digest of the mutable enterprise policy used to derive this profile. */
   enterprisePolicyDigest?: string;
+  /** Strictly monotonic epoch of the enterprise policy authority. */
+  enterprisePolicyGeneration?: number;
 }
 
 export interface CapabilityScore {

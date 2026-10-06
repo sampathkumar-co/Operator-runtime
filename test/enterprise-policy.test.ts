@@ -209,7 +209,7 @@ test('stage16 role grants cannot widen an already narrower parent risk ceiling',
 });
 
 
-test('enterprise policy decisions carry a canonical freshness digest and reject stale authority', async (t) => {
+test('enterprise policy decisions bind content digest and monotonic generation across A-B-A', async (t) => {
   const root = path.resolve('/tmp/company/freshness');
   const store = new EnterprisePolicyStore(await temp(t));
   const configure = async (capabilities: string[]) => await store.configure({
@@ -238,13 +238,95 @@ test('enterprise policy decisions carry a canonical freshness digest and reject 
   }, { principalId: 'alice' });
 
   assert.match(String(decision.permissions.enterprisePolicyDigest), /^[0-9a-f]{64}$/);
-  await assert.doesNotReject(() => store.assertCurrentDigest(decision.permissions.enterprisePolicyDigest!));
+  assert.equal(decision.permissions.enterprisePolicyGeneration, 1);
+  await assert.doesNotReject(() => store.assertCurrentAuthority({
+    digest: decision.permissions.enterprisePolicyDigest!,
+    generation: decision.permissions.enterprisePolicyGeneration!
+  }));
 
   await configure(['file.read']);
   await assert.rejects(
-    () => store.assertCurrentDigest(decision.permissions.enterprisePolicyDigest!),
+    () => store.assertCurrentAuthority({
+      digest: decision.permissions.enterprisePolicyDigest!,
+      generation: decision.permissions.enterprisePolicyGeneration!
+    }),
     (error: any) => error?.code === 'ENTERPRISE_POLICY_STALE'
       && error?.details?.executionPhase === 'pre_dispatch'
       && error?.details?.sideEffectState === 'none'
+  );
+
+  await configure(['file.read', 'file.write']);
+  const restored = await store.currentAuthority();
+  assert.equal(restored.digest, decision.permissions.enterprisePolicyDigest);
+  assert.equal(restored.generation, 3);
+  await assert.rejects(
+    () => store.assertCurrentAuthority({
+      digest: decision.permissions.enterprisePolicyDigest!,
+      generation: decision.permissions.enterprisePolicyGeneration!
+    }),
+    (error: any) => error?.code === 'ENTERPRISE_POLICY_STALE'
+      && error?.details?.expectedGeneration === 1
+      && error?.details?.actualGeneration === 3
+  );
+});
+
+test('enterprise policy generation survives restart and identical configuration is idempotent', async (t) => {
+  const state = await temp(t);
+  const policy = {
+    roles: [{
+      id: 'reader', capabilities: ['file.read'], rootPrefixes: [], maxRisk: 'read' as const,
+      environments: [], projectPrefixes: [], deviceGroups: []
+    }],
+    bindings: [{ id: 'reader-binding', principalId: 'alice', roleId: 'reader', enabled: true }]
+  };
+  const first = await new EnterprisePolicyStore(state).configure(policy);
+  assert.equal(first.generation, 1);
+  const restarted = new EnterprisePolicyStore(state);
+  assert.equal((await restarted.inspect()).generation, 1);
+  assert.equal((await restarted.configure(policy)).generation, 1);
+  assert.equal((await new EnterprisePolicyStore(state).inspect()).generation, 1);
+});
+
+test('enterprise policy concurrent updates serialize strictly increasing generations', async (t) => {
+  const store = new EnterprisePolicyStore(await temp(t));
+  const configure = (id: string) => store.configure({
+    roles: [{
+      id, capabilities: ['file.read'], rootPrefixes: [], maxRisk: 'read',
+      environments: [], projectPrefixes: [], deviceGroups: []
+    }],
+    bindings: [{ id: `${id}-binding`, principalId: 'alice', roleId: id, enabled: true }]
+  });
+  assert.equal((await configure('a')).generation, 1);
+  const [second, third] = await Promise.all([configure('b'), configure('c')]);
+  assert.deepEqual([second.generation, third.generation], [2, 3]);
+  assert.equal((await store.inspect()).generation, 3);
+});
+
+test('enterprise policy rejects generation tamper and migrates legacy v1 authority', async (t) => {
+  const state = await temp(t);
+  const file = path.join(state, 'enterprise-policy.json');
+  const legacy = {
+    version: 1,
+    roles: [{
+      id: 'legacy', capabilities: ['file.read'], rootPrefixes: [], maxRisk: 'read',
+      environments: [], projectPrefixes: [], deviceGroups: [], deviceIds: []
+    }],
+    bindings: [{ id: 'legacy-binding', principalId: 'alice', roleId: 'legacy', enabled: true }]
+  };
+  await fs.writeFile(file, JSON.stringify(legacy));
+  const store = new EnterprisePolicyStore(state);
+  assert.equal((await store.inspect()).generation, 1);
+  const updated = await store.configure({
+    roles: [{ ...legacy.roles[0]!, capabilities: ['file.read', 'file.write'] }],
+    bindings: legacy.bindings
+  });
+  assert.equal(updated.generation, 2);
+
+  const raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  raw.generation = 1;
+  await fs.writeFile(file, JSON.stringify(raw));
+  await assert.rejects(
+    new EnterprisePolicyStore(state).inspect(),
+    (error: any) => error?.code === 'ENTERPRISE_POLICY_CORRUPT'
   );
 });
