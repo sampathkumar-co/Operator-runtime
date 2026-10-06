@@ -218,13 +218,14 @@ test('Developer Worktree refuses repository-local content filters before checkou
   );
 });
 
-test('Developer Worktree control state cannot live inside an authorized source repository', async (t) => {
+test('Developer Worktree control state cannot live inside an authorized source repository and fails before mkdir', async (t) => {
   if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
   const fx = await fixture(t);
+  const badStateDir = path.join(fx.repo, '.mecord-control');
   const bad = new DeveloperWorktreeManager({
     allowedRepositoryRoots: [fx.repo],
     worktreeRoot: fx.worktreeRoot,
-    stateDir: path.join(fx.repo, '.mecord-control')
+    stateDir: badStateDir
   });
 
   await assert.rejects(
@@ -237,6 +238,10 @@ test('Developer Worktree control state cannot live inside an authorized source r
       assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP');
       return true;
     }
+  );
+  await assert.rejects(
+    fs.stat(badStateDir),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
 });
 
@@ -324,5 +329,71 @@ test('Developer Worktree control root cannot contain an authorized source reposi
       assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP');
       return true;
     }
+  );
+});
+
+
+test('Developer Worktree isolation root inside a source repository fails before mkdir', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const badWorktreeRoot = path.join(fx.repo, '.mecord-worktrees');
+  const mgr = new DeveloperWorktreeManager({
+    allowedRepositoryRoots: [fx.repo],
+    worktreeRoot: badWorktreeRoot,
+    stateDir: fx.stateDir
+  });
+
+  await assert.rejects(
+    () => mgr.create({
+      sessionId: 'session-bad-worktree-root',
+      repositoryRoot: fx.repo,
+      baseCommit: fx.commit
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_ROOT_PROJECT_OVERLAP');
+      return true;
+    }
+  );
+  await assert.rejects(
+    fs.stat(badWorktreeRoot),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
+});
+
+test('Developer Worktree preflight resolves symlinked ancestors before creating control state', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const fx = await fixture(t);
+  const alias = path.join(fx.parent, 'repo-alias');
+  try {
+    await fs.symlink(fx.repo, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      t.skip('symlink/junction creation unavailable');
+      return;
+    }
+    throw error;
+  }
+  const badStateDir = path.join(alias, '.mecord-control-via-alias');
+  const actualTarget = path.join(fx.repo, '.mecord-control-via-alias');
+  const mgr = new DeveloperWorktreeManager({
+    allowedRepositoryRoots: [fx.repo],
+    worktreeRoot: fx.worktreeRoot,
+    stateDir: badStateDir
+  });
+
+  await assert.rejects(
+    () => mgr.create({
+      sessionId: 'session-alias-control-state',
+      repositoryRoot: fx.repo,
+      baseCommit: fx.commit
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP');
+      return true;
+    }
+  );
+  await assert.rejects(
+    fs.stat(actualTarget),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
 });

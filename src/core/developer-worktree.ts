@@ -413,6 +413,17 @@ export class DeveloperWorktreeManager {
 
   async #init(): Promise<void> {
     if (this.#initialized) return;
+
+    const allowed = await this.#canonicalAllowedRepositoryRoots();
+    const prospectiveWorktreeRoot = await prospectivePhysicalPath(this.#worktreeRoot);
+    const prospectiveStateDir = await prospectivePhysicalPath(this.#stateDir);
+
+    assertControlBoundaries(
+      prospectiveWorktreeRoot,
+      prospectiveStateDir,
+      allowed
+    );
+
     await fs.mkdir(this.#worktreeRoot, { recursive: true, mode: 0o700 });
     await fs.mkdir(this.#stateDir, { recursive: true, mode: 0o700 });
 
@@ -435,38 +446,15 @@ export class DeveloperWorktreeManager {
 
     const realWorktreeRoot = await fs.realpath(this.#worktreeRoot);
     const realStateDir = await fs.realpath(this.#stateDir);
+    // Re-check after creation in case topology changed between preflight and mkdir.
+    assertControlBoundaries(realWorktreeRoot, realStateDir, allowed);
+
     // From this point forward derive every owned path from canonical roots.
     // This avoids false ownership mismatches on platforms where temp/root
     // ancestors are aliases (for example macOS /var -> /private/var) while
     // still refusing a symlink/junction at the owned worktree leaf itself.
     this.#worktreeRoot = realWorktreeRoot;
     this.#stateDir = realStateDir;
-    if (
-      inside(realStateDir, realWorktreeRoot) ||
-      inside(realWorktreeRoot, realStateDir)
-    ) {
-      throw new OperatorError(
-        'DEVELOPER_WORKTREE_CONTROL_BOUNDARY_INVALID',
-        'stateDir and worktreeRoot must be separate non-nested directories.'
-      );
-    }
-
-    const allowed = await this.#canonicalAllowedRepositoryRoots();
-    for (const root of allowed) {
-      if (inside(realStateDir, root) || inside(root, realStateDir)) {
-        throw new OperatorError(
-          'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP',
-          'Developer Worktree ownership state and authorized repository roots must not contain one another.'
-        );
-      }
-      if (inside(realWorktreeRoot, root) || inside(root, realWorktreeRoot)) {
-        throw new OperatorError(
-          'DEVELOPER_WORKTREE_ROOT_PROJECT_OVERLAP',
-          'Developer Worktree isolation root and source repository roots must not contain one another.'
-        );
-      }
-    }
-
     this.#initialized = true;
   }
 
@@ -728,6 +716,54 @@ function gitEnvironment(): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return env;
+}
+
+async function prospectivePhysicalPath(input: string): Promise<string> {
+  const requested = path.resolve(input);
+  let probe = requested;
+  const missing: string[] = [];
+
+  while (true) {
+    try {
+      await fs.lstat(probe);
+      const realAncestor = await fs.realpath(probe);
+      return path.resolve(realAncestor, ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(probe);
+      if (parent === probe) return requested;
+      missing.push(path.basename(probe));
+      probe = parent;
+    }
+  }
+}
+
+function assertControlBoundaries(
+  worktreeRoot: string,
+  stateDir: string,
+  allowedRepositoryRoots: string[]
+): void {
+  if (inside(stateDir, worktreeRoot) || inside(worktreeRoot, stateDir)) {
+    throw new OperatorError(
+      'DEVELOPER_WORKTREE_CONTROL_BOUNDARY_INVALID',
+      'stateDir and worktreeRoot must be separate non-nested directories.'
+    );
+  }
+
+  for (const root of allowedRepositoryRoots) {
+    if (inside(stateDir, root) || inside(root, stateDir)) {
+      throw new OperatorError(
+        'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP',
+        'Developer Worktree ownership state and authorized repository roots must not contain one another.'
+      );
+    }
+    if (inside(worktreeRoot, root) || inside(root, worktreeRoot)) {
+      throw new OperatorError(
+        'DEVELOPER_WORKTREE_ROOT_PROJECT_OVERLAP',
+        'Developer Worktree isolation root and source repository roots must not contain one another.'
+      );
+    }
+  }
 }
 
 function assertSameIntent(
