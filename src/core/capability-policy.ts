@@ -10,6 +10,7 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'project.command.run': 'dynamic',
   'project.transaction.run': 'destructive',
   'workspace.edit.transaction': 'write',
+  'workspace.edit.rollback': 'destructive',
   'workspace.edit.resolve_lsp': 'read',
   'file.read': 'read',
   'file.list': 'read',

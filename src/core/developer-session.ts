@@ -19,6 +19,7 @@ export interface DeveloperSession {
   artifactIds: string[];
   approvalIds: string[];
   checkpointIds: string[];
+  activeResourceKeys: string[];
   status: DeveloperSessionStatus;
   resumeSummary?: string;
   createdAt: string;
@@ -54,6 +55,7 @@ export function createDeveloperSession(input: {
     artifactIds: [],
     approvalIds: [],
     checkpointIds: [],
+    activeResourceKeys: [],
     status: 'PLANNING',
     createdAt: now,
     updatedAt: now
@@ -89,6 +91,7 @@ export function normalizeDeveloperSession(input: unknown): DeveloperSession {
     artifactIds: digestList(raw.artifactIds, 20_000, 'artifactIds'),
     approvalIds: idList(raw.approvalIds, 5000, 'approvalIds'),
     checkpointIds: idList(raw.checkpointIds, 5000, 'checkpointIds'),
+    activeResourceKeys: resourceKeyList(raw.activeResourceKeys ?? [], 20_000, 'activeResourceKeys'),
     status,
     ...(resumeSummary ? { resumeSummary } : {}),
     createdAt,
@@ -145,7 +148,7 @@ export class DeveloperSessionStore {
 
 export function updateDeveloperSession(
   sessionInput: DeveloperSession,
-  patch: Partial<Pick<DeveloperSession, 'workspaceGraphId' | 'planRef' | 'taskIds' | 'artifactIds' | 'approvalIds' | 'checkpointIds' | 'status' | 'resumeSummary'>>,
+  patch: Partial<Pick<DeveloperSession, 'workspaceGraphId' | 'planRef' | 'taskIds' | 'artifactIds' | 'approvalIds' | 'checkpointIds' | 'activeResourceKeys' | 'status' | 'resumeSummary'>>,
   now = new Date().toISOString()
 ): DeveloperSession {
   const session = normalizeDeveloperSession(sessionInput);
@@ -165,6 +168,22 @@ function normalizeStatus(input: unknown): DeveloperSessionStatus {
   const allowed: DeveloperSessionStatus[] = ['PLANNING','ACTIVE','PAUSED','BLOCKED','VERIFYING','COMPLETED','FAILED','CANCELLED'];
   if (typeof input !== 'string' || !allowed.includes(input as DeveloperSessionStatus)) throw invalid('Developer Session status is invalid.');
   return input as DeveloperSessionStatus;
+}
+
+function resourceKeyList(input: unknown, max: number, label: string): string[] {
+  if (!Array.isArray(input) || input.length > max) throw invalid(`${label} is invalid.`);
+  const values = input.map((item) => {
+    const value = String(item ?? '');
+    if (
+      !value ||
+      /[\0\r\n]/.test(value) ||
+      Buffer.byteLength(value, 'utf8') > 4096
+    ) {
+      throw invalid(`${label} contains an invalid resource key.`);
+    }
+    return value;
+  });
+  return [...new Set(values)].sort();
 }
 
 function idList(input: unknown, max: number, label: string): string[] {

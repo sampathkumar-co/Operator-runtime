@@ -27,6 +27,8 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     }
   } else if (action.capability === 'workspace.edit.resolve_lsp') {
     add('workspace', input.workspaceRoot, keys);
+  } else if (action.capability === 'workspace.edit.rollback') {
+    add('workspace', input.workspaceRoot, keys);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
     add('workspace', root, keys);
@@ -85,6 +87,8 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
   if (action.capability.startsWith('file.')) {
     addPath(input.path); addPath(input.source); addPath(input.destination);
   } else if (action.capability === 'workspace.edit.resolve_lsp') {
+    addPath(input.workspaceRoot);
+  } else if (action.capability === 'workspace.edit.rollback') {
     addPath(input.workspaceRoot);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
