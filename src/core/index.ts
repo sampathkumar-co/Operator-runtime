@@ -51,3 +51,4 @@ export * from './lsp-workspace-edit.ts';
 export * from './developer-worktree.ts';
 export * from './developer-runtime-ownership.ts';
 export * from './developer-verification.ts';
+export * from './developer-container.ts';
