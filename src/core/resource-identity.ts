@@ -52,8 +52,15 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
   } else if (action.capability === 'terminal.execute') {
     add('workspace', input.cwd, keys);
   } else if (action.capability === 'terminal.session') {
-    if (input.operation === 'start') add('workspace', input.cwd, keys);
-    else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
+    if (input.operation === 'start') {
+      add('workspace', input.cwd, keys);
+      if (Array.isArray(input.ports)) {
+        for (const value of input.ports.slice(0, 128)) {
+          const port = Number(value);
+          if (Number.isSafeInteger(port) && port >= 1 && port <= 65535) keys.add('network:tcp:' + String(port));
+        }
+      }
+    } else if (typeof input.sessionId === 'string') keys.add(`process:${input.sessionId.toLowerCase()}`);
   } else if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
     keys.add('process:windows');
   } else if (action.capability.startsWith('browser.')) {
