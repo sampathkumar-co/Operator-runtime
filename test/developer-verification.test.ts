@@ -313,3 +313,97 @@ test('finalization is idempotent after Evidence Pack publication', async (t) => 
   assert.equal(second.verified, true);
   assert.equal(second.session.status, 'COMPLETED');
 });
+
+
+test('verification receipt context must bind the same Developer Session', async (t) => {
+  const fx = await fixture(t);
+  const started = await fx.coordinator.start({
+    developerSessionId: fx.session.id,
+    requirements: [
+      { commandId: 'test', criterionIndexes: [0, 1] }
+    ],
+    now: '2026-10-06T00:00:02.000Z'
+  });
+
+  await assert.rejects(
+    () => fx.coordinator.recordAuthorizedCommandResult({
+      runId: started.run.id,
+      action: commandAction('test'),
+      result: commandResult('test', true),
+      executionContext: { schemaVersion: 1, sessionId: 'different-session' },
+      now: '2026-10-06T00:00:03.000Z'
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_VERIFICATION_CONTEXT_MISMATCH');
+      return true;
+    }
+  );
+});
+
+test('trusted provider result cannot be credited to a different command id', async (t) => {
+  const fx = await fixture(t);
+  const started = await fx.coordinator.start({
+    developerSessionId: fx.session.id,
+    requirements: [
+      { commandId: 'test', criterionIndexes: [0, 1] }
+    ],
+    now: '2026-10-06T00:00:02.000Z'
+  });
+
+  const mismatched = commandResult('lint', true);
+  await assert.rejects(
+    () => fx.coordinator.recordAuthorizedCommandResult({
+      runId: started.run.id,
+      action: commandAction('test'),
+      result: mismatched,
+      executionContext: context(fx.session.id),
+      now: '2026-10-06T00:00:03.000Z'
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_VERIFICATION_RESULT_MISMATCH');
+      return true;
+    }
+  );
+});
+
+test('run file identity must match the requested run id path', async (t) => {
+  const fx = await fixture(t);
+  const first = await fx.coordinator.start({
+    developerSessionId: fx.session.id,
+    requirements: [
+      { commandId: 'test', criterionIndexes: [0, 1] }
+    ],
+    now: '2026-10-06T00:00:02.000Z'
+  });
+
+  const secondSession = updateDeveloperSession(
+    createDeveloperSession({
+      objective: 'Second verification session',
+      acceptanceCriteria: ['Another criterion.'],
+      workspaceRootNodeId: 'workspace-root-2',
+      now: '2026-10-06T00:01:00.000Z'
+    }),
+    { status: 'ACTIVE' },
+    '2026-10-06T00:01:01.000Z'
+  );
+  await fx.store.put(secondSession);
+  const second = await fx.coordinator.start({
+    developerSessionId: secondSession.id,
+    requirements: [
+      { commandId: 'lint', criterionIndexes: [0] }
+    ],
+    now: '2026-10-06T00:01:02.000Z'
+  });
+
+  const root = path.join(fx.stateDir, 'developer-verification-runs');
+  const secondBytes = await fs.readFile(path.join(root, second.run.id + '.json'));
+  await fs.writeFile(path.join(root, first.run.id + '.json'), secondBytes);
+
+  await assert.rejects(
+    () => fx.coordinator.get(first.run.id),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_VERIFICATION_RUN_CORRUPT');
+      return true;
+    }
+  );
+});
