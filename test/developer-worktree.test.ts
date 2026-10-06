@@ -229,7 +229,7 @@ test('Developer Worktree control state cannot live inside an authorized source r
       baseCommit: fx.commit
     }),
     (error: unknown) => {
-      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_INSIDE_PROJECT');
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP');
       return true;
     }
   );
@@ -257,6 +257,66 @@ test('released Developer Worktree session IDs cannot be rebound or reused', asyn
     }),
     (error: unknown) => {
       assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_SESSION_REUSED');
+      return true;
+    }
+  );
+});
+
+test('Developer Worktree isolation root cannot contain an authorized source repository', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-worktree-overlap-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const isolationRoot = path.join(parent, 'isolation');
+  const repo = path.join(isolationRoot, 'source-repo');
+  const stateDir = path.join(parent, 'control');
+  await fs.mkdir(repo, { recursive: true });
+  await git(repo, ['init']);
+  await git(repo, ['config', 'user.name', 'Mecord Test']);
+  await git(repo, ['config', 'user.email', 'mecord-test@local.invalid']);
+  await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
+  await git(repo, ['add', 'a.txt']);
+  await git(repo, ['commit', '-m', 'initial']);
+  const commit = await git(repo, ['rev-parse', 'HEAD']);
+
+  const mgr = new DeveloperWorktreeManager({
+    allowedRepositoryRoots: [repo],
+    worktreeRoot: isolationRoot,
+    stateDir
+  });
+  await assert.rejects(
+    () => mgr.create({ sessionId: 'overlap', repositoryRoot: repo, baseCommit: commit }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_ROOT_PROJECT_OVERLAP');
+      return true;
+    }
+  );
+});
+
+test('Developer Worktree control root cannot contain an authorized source repository', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-worktree-overlap-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const stateDir = path.join(parent, 'control');
+  const repo = path.join(stateDir, 'source-repo');
+  const worktreeRoot = path.join(parent, 'worktrees');
+  await fs.mkdir(repo, { recursive: true });
+  await git(repo, ['init']);
+  await git(repo, ['config', 'user.name', 'Mecord Test']);
+  await git(repo, ['config', 'user.email', 'mecord-test@local.invalid']);
+  await fs.writeFile(path.join(repo, 'a.txt'), 'a\n');
+  await git(repo, ['add', 'a.txt']);
+  await git(repo, ['commit', '-m', 'initial']);
+  const commit = await git(repo, ['rev-parse', 'HEAD']);
+
+  const mgr = new DeveloperWorktreeManager({
+    allowedRepositoryRoots: [repo],
+    worktreeRoot,
+    stateDir
+  });
+  await assert.rejects(
+    () => mgr.create({ sessionId: 'overlap-state', repositoryRoot: repo, baseCommit: commit }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP');
       return true;
     }
   );
