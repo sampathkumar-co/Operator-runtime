@@ -210,6 +210,7 @@ export function createLocalAgentServer(options: {
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
   actionExecutions?: LocalActionExecutionStore;
+  beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
@@ -2203,7 +2204,10 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
-        const receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        let receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        if (options.agentKernel && receipt.status !== 'missing') {
+          receipt = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+        }
         if (receipt.status === 'missing') {
           send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND', message: 'No durable execution receipt exists for this exact action.' } });
           return;
@@ -2261,7 +2265,14 @@ export function createLocalAgentServer(options: {
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if (options.actionExecutions) {
-          const receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          let receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (options.agentKernel && receipt.status !== 'started') {
+            const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+            if (reconciled.status === 'missing') {
+              throw new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', 'Local action execution receipt disappeared during kernel reconciliation.', { retryable: false });
+            }
+            receipt = reconciled;
+          }
           if (receipt.status === 'completed') {
             send(res, receipt.result.ok ? 200 : 409, receipt.result);
             return;
@@ -2341,7 +2352,17 @@ export function createLocalAgentServer(options: {
         } catch (error) {
           result = resultWithAuditDegradation(result, error);
         }
-        if (options.actionExecutions) await options.actionExecutions.complete(action, result, approvalAuthority);
+        if (options.actionExecutions) {
+          await options.beforeActionReceiptCompletion?.({ action, result });
+          if (options.agentKernel && action.risk !== 'read' && result.ok) {
+            const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+            if (reconciled.status !== 'completed') {
+              throw new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', 'Kernel reported success without a durable completed mutation result.', { retryable: false });
+            }
+          } else {
+            await options.actionExecutions.complete(action, result, approvalAuthority);
+          }
+        }
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
+import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
 
 const token = 'x'.repeat(64);
 const action = {
@@ -103,4 +104,80 @@ test('unfinished durable receipt blocks duplicate mutation and reports processin
   const receipt = await post(base, '/v1/action-receipt', { action: processingAction });
   assert.equal(receipt.status, 202);
   assert.equal((await receipt.json() as any).receipt.status, 'processing');
+});
+
+test('restart repairs crash after kernel completion without replaying the provider mutation', async (t) => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-local-action-kernel-repair-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const journal = new ActionTransitionJournal(state);
+  const counter = { hits: 0 };
+  const kernelResult = {
+    ok: true,
+    capability: action.capability,
+    provider: 'test.runtime',
+    output: { execution: 1 },
+    evidence: [],
+    durationMs: 1
+  };
+  const agentKernel = {
+    journal,
+    async execute(request: typeof action) {
+      counter.hits += 1;
+      await journal.prepare({ action: request, ownerKind: 'local-api', ownerId: request.id, resourceKeys: ['path:receipt-http.txt'] });
+      await journal.markDispatched(request.id, kernelResult.provider);
+      await journal.observe(request.id, kernelResult);
+      await journal.complete(request.id, 'b'.repeat(64), kernelResult);
+      return kernelResult;
+    }
+  } as any;
+  let faulted = false;
+  const first = createLocalAgentServer({
+    runtime: runtime({ hits: 0 }), agentKernel, token,
+    permissions: { allowedCapabilities: ['file.*'], allowedRoots: [state] },
+    actionExecutions: new LocalActionExecutionStore(state),
+    beforeActionReceiptCompletion: () => {
+      if (!faulted) {
+        faulted = true;
+        throw new Error('fault after kernel completion before receipt completion');
+      }
+    }
+  });
+  const firstBound = await first.listen('127.0.0.1', 0);
+  const firstResponse = await post(`http://127.0.0.1:${firstBound.port}`, '/v1/execute', { action });
+  assert.equal(firstResponse.status, 400);
+  assert.equal(counter.hits, 1);
+  assert.equal((await new LocalActionExecutionStore(state).lookup(action)).status, 'processing');
+  assert.equal((await journal.inspect(action.id)).state, 'COMPLETED');
+  await first.close();
+
+  const restartedKernel = {
+    journal,
+    async execute() {
+      counter.hits += 1;
+      throw new Error('provider mutation must not replay during receipt repair');
+    }
+  } as any;
+  const restarted = createLocalAgentServer({
+    runtime: runtime({ hits: 0 }), agentKernel: restartedKernel, token,
+    permissions: { allowedCapabilities: ['file.*'], allowedRoots: [state] },
+    actionExecutions: new LocalActionExecutionStore(state)
+  });
+  t.after(() => restarted.close());
+  const restartedBound = await restarted.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${restartedBound.port}`;
+
+  const repaired = await post(base, '/v1/action-receipt', { action });
+  assert.equal(repaired.status, 200);
+  assert.deepEqual((await repaired.json() as any).result, kernelResult);
+  assert.equal(counter.hits, 1);
+
+  const duplicate = await post(base, '/v1/execute', { action });
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), kernelResult);
+  assert.equal(counter.hits, 1);
+
+  const repairedAgain = await post(base, '/v1/action-receipt', { action });
+  assert.equal(repairedAgain.status, 200);
+  assert.deepEqual((await repairedAgain.json() as any).result, kernelResult);
+  assert.equal(counter.hits, 1);
 });

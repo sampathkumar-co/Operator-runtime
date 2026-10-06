@@ -5,6 +5,7 @@ import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts'
 import { OperatorError } from '../../../src/core/errors.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
 import { approvalAuthorityFingerprint, type ApprovalAuthorityContext } from './approval-store.ts';
+import type { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
 
 const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_RECORDS = 256;
@@ -23,6 +24,11 @@ export type LocalActionExecutionRecord = {
   completedAt?: string;
   resultSha256?: string;
   result?: ActionResult;
+  kernelCompletion?: {
+    journalGeneration: number;
+    verificationDigest: string;
+    resultDigest: string;
+  };
 };
 
 type State = { version: 1; records: LocalActionExecutionRecord[] };
@@ -124,6 +130,93 @@ export class LocalActionExecutionStore {
     });
   }
 
+  async reconcileWithKernel(
+    action: ActionRequest,
+    authority: ApprovalAuthorityContext | undefined,
+    journal: ActionTransitionJournal
+  ): Promise<
+    | { status: 'missing' }
+    | { status: 'processing'; record: LocalActionExecutionRecord }
+    | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
+  > {
+    const local = await this.lookup(action, authority);
+    if (local.status === 'missing' || action.risk === 'read') return local;
+
+    let entry;
+    try {
+      entry = await journal.inspect(action.id);
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'ACTION_JOURNAL_NOT_FOUND') {
+        if (local.status === 'completed' && local.result.ok) throw reconciliationRequired('A successful local receipt has no authoritative kernel journal entry.');
+        return local;
+      }
+      throw error;
+    }
+
+    const expectedActionHash = actionHash(action);
+    if (entry.actionId !== action.id || entry.actionDigest !== expectedActionHash || entry.capability !== action.capability || entry.risk !== action.risk) {
+      throw reconciliationRequired('Local receipt identity does not match the authoritative kernel journal lineage.');
+    }
+    if (entry.state !== 'COMPLETED') {
+      if (local.status === 'completed' && local.result.ok) {
+        throw reconciliationRequired(`A successful local receipt conflicts with kernel journal state ${entry.state}.`);
+      }
+      return local.status === 'completed' ? local : { status: 'processing', record: local.record };
+    }
+
+    const completion = [...entry.transitions].reverse().find((transition) => transition.state === 'COMPLETED');
+    if (!completion?.verificationDigest || !completion.resultDigest) {
+      throw reconciliationRequired('Kernel completion is missing mutation verification or result lineage.');
+    }
+    const authoritativeResult = await journal.replayCompleted(action.id);
+    if (!authoritativeResult) throw reconciliationRequired('Kernel completion result is unavailable for deterministic receipt repair.');
+    const resultDigest = crypto.createHash('sha256').update(canonicalJson(authoritativeResult), 'utf8').digest('hex');
+    if (resultDigest !== completion.resultDigest || !authoritativeResult.ok || authoritativeResult.capability !== action.capability) {
+      throw reconciliationRequired('Kernel completion result does not match its authoritative journal lineage.');
+    }
+    const proof = {
+      journalGeneration: entry.generation,
+      verificationDigest: completion.verificationDigest,
+      resultDigest: completion.resultDigest
+    };
+    const record = await this.#completeFromKernel(action, authority, authoritativeResult, proof);
+    return { status: 'completed', record, result: cloneResult(record.result!) };
+  }
+
+  async #completeFromKernel(
+    action: ActionRequest,
+    authority: ApprovalAuthorityContext | undefined,
+    result: ActionResult,
+    proof: NonNullable<LocalActionExecutionRecord['kernelCompletion']>
+  ): Promise<LocalActionExecutionRecord> {
+    const identity = executionIdentity(action, authority);
+    const safeResult = validateResult(result);
+    const resultText = JSON.stringify(safeResult);
+    if (Buffer.byteLength(resultText, 'utf8') > MAX_RESULT_BYTES) {
+      throw new OperatorError('ACTION_EXECUTION_RESULT_TOO_LARGE', 'Kernel result exceeds the durable execution-receipt limit.', { retryable: false });
+    }
+    const resultSha256 = crypto.createHash('sha256').update(resultText, 'utf8').digest('hex');
+    return await this.#mutate((state) => {
+      prune(state, this.#clock().getTime());
+      const record = state.records.find((entry) => entry.actionId === action.id);
+      if (!record) throw reconciliationRequired('Local action execution receipt disappeared during kernel reconciliation.');
+      assertIdentity(record, identity);
+      if (record.status === 'completed') {
+        if (record.resultSha256 !== resultSha256 || (record.kernelCompletion && canonicalJson(record.kernelCompletion) !== canonicalJson(proof))) {
+          throw reconciliationRequired('Completed local receipt conflicts with authoritative kernel completion proof.');
+        }
+        record.kernelCompletion = { ...proof };
+        return clone(record);
+      }
+      record.status = 'completed';
+      record.completedAt = this.#clock().toISOString();
+      record.resultSha256 = resultSha256;
+      record.result = safeResult;
+      record.kernelCompletion = { ...proof };
+      return clone(record);
+    });
+  }
+
   async #read(): Promise<State> {
     try {
       const text = await readDurableStateText(this.#file, {
@@ -211,7 +304,8 @@ function validateRecord(input: unknown, ids: Set<string>): LocalActionExecutionR
   const completedAt = raw.completedAt === undefined ? undefined : validIso(raw.completedAt);
   const resultSha256 = raw.resultSha256 === undefined ? undefined : validSha(raw.resultSha256);
   const result = raw.result === undefined ? undefined : validateResult(raw.result);
-  if (status === 'processing' && (completedAt || resultSha256 || result)) throw corrupt();
+  const kernelCompletion = raw.kernelCompletion === undefined ? undefined : validateKernelCompletion(raw.kernelCompletion);
+  if (status === 'processing' && (completedAt || resultSha256 || result || kernelCompletion)) throw corrupt();
   if (status === 'completed' && (!completedAt || !resultSha256 || !result)) throw corrupt();
   if (completedAt && Date.parse(completedAt) < Date.parse(startedAt)) throw corrupt();
   if (result) {
@@ -221,7 +315,7 @@ function validateRecord(input: unknown, ids: Set<string>): LocalActionExecutionR
   return {
     actionId, actionHash: actionHashValue, authorityHash,
     risk: raw.risk as ActionRequest['risk'], status, startedAt, ownerId,
-    completedAt, resultSha256, result
+    completedAt, resultSha256, result, kernelCompletion
   };
 }
 
@@ -257,6 +351,16 @@ function validUuid(value: unknown): string {
 }
 function clone(record: LocalActionExecutionRecord): LocalActionExecutionRecord { return structuredClone(record); }
 function cloneResult(result: ActionResult): ActionResult { return structuredClone(result); }
+function validateKernelCompletion(input: unknown): NonNullable<LocalActionExecutionRecord['kernelCompletion']> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt();
+  const raw = input as Record<string, unknown>;
+  const journalGeneration = Number(raw.journalGeneration);
+  if (!Number.isSafeInteger(journalGeneration) || journalGeneration < 1) throw corrupt();
+  return { journalGeneration, verificationDigest: validSha(raw.verificationDigest), resultDigest: validSha(raw.resultDigest) };
+}
+function reconciliationRequired(message: string): OperatorError {
+  return new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', message, { retryable: false });
+}
 function corrupt(): OperatorError {
   return new OperatorError('ACTION_EXECUTION_STATE_INVALID', 'Local action execution receipt state is corrupt or inconsistent.', { retryable: false });
 }
