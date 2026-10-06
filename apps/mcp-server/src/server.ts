@@ -27,6 +27,7 @@ import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 import { TOOL_NAMES } from './tool-surface.ts';
 import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
+import { createMultiFileEditPlan } from '../../../src/core/multi-file-edit-plan.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -605,6 +606,64 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     commandId,
     expectedRisk
   }, path));
+
+  server.registerTool('workspace.edit', {
+    title: 'Apply transactional or verified multi-file workspace edit',
+    description: 'Build an immutable bounded edit plan server-side, then apply it through exact SHA preconditions. Transaction mode uses durable staging/rollback/reconciliation. Verified mode keeps backups until externally registered read-only verifier commands pass.',
+    inputSchema: z.object({
+      mode: z.enum(['transaction', 'verified']).default('transaction'),
+      workspaceRoot: z.string().min(1).max(4096),
+      files: z.array(z.object({
+        path: z.string().min(1).max(4096),
+        expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+        edits: z.array(z.object({
+          start: z.number().int().min(0).max(16 * 1024 * 1024),
+          end: z.number().int().min(0).max(16 * 1024 * 1024),
+          replacement: z.string().max(256 * 1024)
+        })).min(1).max(2000)
+      })).min(1).max(200),
+      trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
+      requiredTestPaths: z.array(z.string().min(1).max(4096)).max(1000).default([])
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  }, async ({ mode, workspaceRoot, files, trustedCommandIds, requiredTestPaths }) => {
+    if (mode === 'verified' && trustedCommandIds.length < 1) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit verified mode requires at least one trustedCommandId.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.edit.verified',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'VERIFIED_WORKSPACE_EDIT_VERIFIERS_REQUIRED', message: 'At least one trusted verifier command is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    let plan;
+    try {
+      plan = createMultiFileEditPlan({
+        files,
+        verification: { trustedCommandIds, requiredTestPaths }
+      });
+    } catch {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit: edit plan is invalid.' }],
+        structuredContent: {
+          ok: false,
+          capability: mode === 'verified' ? 'workspace.edit.verified' : 'workspace.edit.transaction',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'WORKSPACE_EDIT_PLAN_INVALID', message: 'Edit plan is invalid.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    const capability = mode === 'verified' ? 'workspace.edit.verified' : 'workspace.edit.transaction';
+    return invoke(capability, 'write', { workspaceRoot, plan }, workspaceRoot);
+  });
 
   server.registerTool('file.read', {
     title: 'Read project file',
