@@ -248,10 +248,12 @@ export class FilesystemProvider implements CapabilityProvider {
       await this.#pathLeaseHook?.(action.capability, filePath);
       const snapshot = await stableFileObservation(filePath, this.#maxReadBytes, this.#observationHook);
       const { stat, bytes: fullBytes, identity } = snapshot;
+      const size = typeof stat.size === 'bigint' ? Number(stat.size) : stat.size;
+      if (!Number.isSafeInteger(size) || size < 0) throw new OperatorError('FILE_SIZE_INVALID', 'Observed file size exceeds the safe numeric range.');
       const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
-      const offset = boundedInteger(action.input.offset, 0, 0, Math.max(0, stat.size));
+      const offset = boundedInteger(action.input.offset, 0, 0, size);
       const maxBytes = boundedInteger(action.input.maxBytes, 48 * 1024, 1024, encoding === 'base64' ? 96 * 1024 : 128 * 1024);
-      const returnedBytes = Math.min(maxBytes, Math.max(0, stat.size - offset));
+      const returnedBytes = Math.min(maxBytes, Math.max(0, size - offset));
       const data = fullBytes.subarray(offset, offset + returnedBytes);
       const digest = sha256(fullBytes);
       const nextOffset = offset + returnedBytes;
@@ -259,8 +261,8 @@ export class FilesystemProvider implements CapabilityProvider {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { path: filePath, size: stat.size, sha256: digest, identity, offset, returnedBytes, content: data.toString(encoding), truncated: nextOffset < stat.size, ...(nextOffset < stat.size ? { nextOffset } : {}) },
-        evidence: [evidence('file_read', 'pass', 'A stable, handle-bound file snapshot was read from authorized scope.', { path: filePath, size: stat.size, offset, returnedBytes, sha256: digest, identityDigest: identity.digest })],
+        output: { path: filePath, size, sha256: digest, identity, offset, returnedBytes, content: data.toString(encoding), truncated: nextOffset < size, ...(nextOffset < size ? { nextOffset } : {}) },
+        evidence: [evidence('file_read', 'pass', 'A stable, handle-bound file snapshot was read from authorized scope.', { path: filePath, size, offset, returnedBytes, sha256: digest, identityDigest: identity.digest })],
         durationMs: Math.round(performance.now() - started)
       };
     });

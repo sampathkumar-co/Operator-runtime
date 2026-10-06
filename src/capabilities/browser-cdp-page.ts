@@ -681,7 +681,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const desired = normalized(focus.text);
       const structural = structuralContextOf(element);
-      const actual = normalized([text, structural.groupName, structural.semanticPath].filter(Boolean).join(' '));
+      const actual = normalized([text, structural.groupName, structural.ancestorPath].filter(Boolean).join(' '));
       if (actual.includes(desired)) score += 350;
       const desiredTokens = new Set(desired.split(' ').filter(Boolean));
       const actualTokens = new Set(actual.split(' ').filter(Boolean));

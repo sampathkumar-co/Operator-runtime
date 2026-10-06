@@ -893,7 +893,7 @@ export class TaskOrchestrator {
         }
       }
       if (recoveryShadow) {
-        task.evidence.push(evidence('adaptive_recovery_shadow', 'info', 'Recorded a non-executable recovery recommendation; production recovery remained authoritative.', recoveryShadow));
+        task.evidence.push(evidence('adaptive_recovery_shadow', 'info', 'Recorded a non-executable recovery recommendation; production recovery remained authoritative.', { ...recoveryShadow }));
       } else if (recoveryShadowUnavailable) {
         task.evidence.push(evidence('adaptive_recovery_shadow_unavailable', 'info', 'Recovery shadow evaluation was unavailable; production recovery remained authoritative.', {
           mode: 'SHADOW', actionId, productionFailureCode: recoveryFailure?.code
@@ -917,7 +917,7 @@ export class TaskOrchestrator {
         }
       }
       if (modalityShadow) {
-        task.evidence.push(evidence('adaptive_modality_shadow', 'info', 'Recorded a non-executable modality comparison; production routing remained authoritative.', modalityShadow));
+        task.evidence.push(evidence('adaptive_modality_shadow', 'info', 'Recorded a non-executable modality comparison; production routing remained authoritative.', { ...modalityShadow }));
       } else if (modalityShadowUnavailable) {
         task.evidence.push(evidence('adaptive_modality_shadow_unavailable', 'info', 'Modality shadow evaluation was unavailable; production routing remained authoritative.', { mode: 'SHADOW', actionId }));
       }
@@ -940,7 +940,7 @@ export class TaskOrchestrator {
         }
       }
       if (strategyShadow) {
-        task.evidence.push(evidence('adaptive_strategy_shadow', 'info', 'Recorded a non-executable strategy comparison; production planner control remained authoritative.', strategyShadow));
+        task.evidence.push(evidence('adaptive_strategy_shadow', 'info', 'Recorded a non-executable strategy comparison; production planner control remained authoritative.', { ...strategyShadow }));
       } else if (strategyShadowUnavailable) {
         task.evidence.push(evidence('adaptive_strategy_shadow_unavailable', 'info', 'Strategy shadow evaluation was unavailable; production planner control remained authoritative.', { mode: 'SHADOW', actionId }));
       }

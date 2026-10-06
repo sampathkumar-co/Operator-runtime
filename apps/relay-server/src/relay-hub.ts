@@ -669,14 +669,15 @@ export class RelayHub {
       if (readOnly && connection.inFlight.size >= connection.readConcurrency) return;
       if (heavy && [...connection.inFlight.values()].some((item) => item.heavy)) return;
 
+      const authority = next.authority;
       const requiredCapabilities = next.requiredCapabilities;
       const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
-      const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
+      const unroutable = !authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
       if (unroutable) {
         // Never retire a delivery behind an in-flight prefix. Wait until it
         // becomes the durable head so expiry remains contiguous.
         if (connection.inFlight.size > 0) return;
-        if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+        if (authority) await this.#assertDispatchAuthority(authority, connection.sessionId);
         const capabilitySnapshot = [...connection.capabilities];
         const isCurrentSnapshot = () => {
           const active = this.#connections.get(deviceId);
@@ -695,7 +696,7 @@ export class RelayHub {
         return;
       }
 
-      await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
+      await this.#assertDispatchAuthority(authority, connection.sessionId, requiredCapabilities);
       connection.inFlight.set(next.seq, { readOnly, heavy });
       try {
         send(connection.socket, {

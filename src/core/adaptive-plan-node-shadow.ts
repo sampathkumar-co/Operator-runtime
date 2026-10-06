@@ -131,7 +131,9 @@ function planCandidates(
     }
   }
   return [...confidenceByCapability.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([capability, scores]) => {
-    const risk = capability === input.decision.capability ? input.risk : staticLowRisk(capability)!;
+    const risk: 'read' | 'write' = capability === input.decision.capability && isLowRisk(input.risk)
+      ? input.risk
+      : staticLowRisk(capability)!;
     const read = risk === 'read';
     return {
       id: `node:${capability}`,

@@ -466,6 +466,7 @@ export class RelayControlService {
         if (!(error instanceof OperatorError) || error.code !== 'ROUTE_PROJECT_UNBOUND') throw error;
       }
       const requirements = validOperationResourceRequirements(body.resourceRequirements);
+      if (!operation.request) throw new OperatorError('RELAY_CONTROL_INPUT_INVALID', 'Submit operation request is missing.');
       const requiredCapabilities = operationRequiredCapabilities(operation.request);
       reservation = await activeReservationFor(boundDeviceId ?? requestedDeviceId);
       if (reservation) {
