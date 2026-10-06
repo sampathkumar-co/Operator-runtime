@@ -22,6 +22,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'developer-session', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'developer-worktree', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'developer-runtime-ownership', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'developer-container', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'control-center-model', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'operation-trace', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
   { name: 'agent-gateway-proposal', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
