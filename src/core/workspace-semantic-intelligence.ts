@@ -492,7 +492,7 @@ function braceDeclarationEnd(lines: string[], start: number): number {
       }
       if (!sawBrace && ch === ';') return index + 1;
     }
-    if (lexical === 'line-comment') lexical = 'code';
+    if ((lexical as LexicalState) === 'line-comment') lexical = 'code';
     if (!sawBrace && index > start && !line.trim().endsWith(',')) return index + 1;
   }
   return Math.max(start + 1, lines.length);
