@@ -21,7 +21,7 @@ export function createTaskCohortManifest(taskIdsInput:string[]):TaskCohortManife
     throw new Error('task cohort task ids must be unique.');
   }
   taskIds.sort();
-  const base={
+  const base:Omit<TaskCohortManifest,'cohortDigest'>={
     schema:TASK_COHORT_SCHEMA,
     version:TASK_COHORT_VERSION,
     taskIds,
