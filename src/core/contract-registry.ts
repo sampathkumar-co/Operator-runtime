@@ -9,6 +9,20 @@ export interface ContractRegistration {
 }
 
 export const CONTRACT_REGISTRY = Object.freeze([
+  { name: 'principal', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'delegation', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'goal', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
+  { name: 'plan-revision', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'plan-node', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'action-attempt', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'authority-envelope', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'resource-identity', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'resource-revision', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'resource-lease', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'fence-token', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'verification-receipt', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'event', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
+  { name: 'evaluation-run', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'evaluation' },
   { name: 'release-truth', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'release' },
   { name: 'intent-binding', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'task-capsule', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
