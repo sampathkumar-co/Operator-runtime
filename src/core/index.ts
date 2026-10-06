@@ -32,3 +32,7 @@ export * from './execution-context-identity.ts';
 export * from './intelligence-adapters.ts';
 export * from './shadow-decision-store.ts';
 export * from './adaptive-planning-shadow.ts';
+export * from './artifact-store.ts';
+export * from './evidence-pack.ts';
+export * from './workspace-graph.ts';
+export * from './developer-session.ts';
