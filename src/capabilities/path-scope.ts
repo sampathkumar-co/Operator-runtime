@@ -89,7 +89,12 @@ export class PathScope {
     if (this.roots.length !== 1) {
       throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative paths require exactly one authorized root.');
     }
-    return path.resolve(this.roots[0]!, syntax.value);
+    const root = this.roots[0]!;
+    const resolved = path.resolve(root, syntax.value);
+    if (!lexicalInside(resolved, root)) {
+      throw new OperatorError('PATH_OUTSIDE_SCOPE', 'Relative path escapes the authorized root.');
+    }
+    return resolved;
   }
 
   #lexicalRoot(absolute: string): string {
