@@ -3,8 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { OperatorError } from './errors.ts';
 import { appendDurableStateText, readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { containsRestrictedString, isRestrictedDataKey } from './public-restricted-data.ts';
 
-const SECRET_KEY = /(token|password|secret|authorization|cookie|private.?key|api.?key)/i;
 const AUDIT_CHAIN_VERSION = 1 as const;
 const HASH_RE = /^[0-9a-f]{64}$/;
 const MAX_AUDIT_BYTES = 256 * 1024 * 1024;
@@ -39,12 +39,15 @@ function redact(value: unknown, depth = 0): unknown {
     const output: Record<string, unknown> = {};
     const entries = Object.entries(value as Record<string, unknown>);
     for (const [key, child] of entries.slice(0, MAX_REDACT_COLLECTION_ITEMS)) {
-      output[key] = SECRET_KEY.test(key) ? '[REDACTED]' : redact(child, depth + 1);
+      output[key] = isRestrictedDataKey(key) ? '[REDACTED]' : redact(child, depth + 1);
     }
     if (entries.length > MAX_REDACT_COLLECTION_ITEMS) output.__operatorTruncatedEntries = entries.length - MAX_REDACT_COLLECTION_ITEMS;
     return output;
   }
-  if (typeof value === 'string' && value.length > 16_384) return `${value.slice(0, 16_384)}…[TRUNCATED]`;
+  if (typeof value === 'string') {
+    if (containsRestrictedString(value)) return '[REDACTED]';
+    if (value.length > 16_384) return `${value.slice(0, 16_384)}…[TRUNCATED]`;
+  }
   return value;
 }
 
@@ -349,7 +352,7 @@ export class AuditLog {
   async #migrateLegacy(events: AuditEvent[]): Promise<AuditEvent[]> {
     let previousHash: string | null = null;
     const migrated = events.map((event) => {
-      const chained = chainEvent(stripChain(event), previousHash);
+      const chained = chainEvent(stripChain(redact(event) as AuditEvent), previousHash);
       previousHash = chained.hash!;
       return chained;
     });
