@@ -1,0 +1,112 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  initializeNodeStates, revisePlan, selectChoiceBranch, validatePlanGraph
+} from '../src/index.ts';
+import { goal, graph } from './fixtures.ts';
+
+function choiceGraph(){
+  const g=graph();
+  const act=g.nodes.find(n=>n.id==='act')!;
+  act.choiceGroup='write-path';
+  const alt={
+    ...structuredClone(act),id:'act-alt',title:'Alternative write path',choiceGroup:'write-path',
+    allowedCapabilities:['browser.alt-write']
+  };
+  const verifyAlt={
+    ...structuredClone(g.nodes.find(n=>n.id==='verify')!),
+    id:'verify-alt',title:'Verify alternative',dependsOn:['act-alt']
+  };
+  g.nodes.push(alt,verifyAlt);
+  return g;
+}
+
+test('choice selection skips only the non-selected exclusive branch',()=>{
+  const p=validatePlanGraph(goal(),choiceGraph());
+  const states=initializeNodeStates(p,'2026-10-05T10:00:00.000Z');
+  states.find(s=>s.nodeId==='observe')!.status='SUCCEEDED';
+  states.find(s=>s.nodeId==='act')!.status='READY';
+  states.find(s=>s.nodeId==='act-alt')!.status='READY';
+  const out=selectChoiceBranch(p,states,'write-path','act','2026-10-05T10:01:00.000Z');
+  assert.deepEqual(out.skippedNodeIds,['act-alt','verify-alt']);
+  assert.equal(out.states.find(s=>s.nodeId==='act')?.status,'READY');
+  assert.equal(out.states.find(s=>s.nodeId==='act-alt')?.status,'SKIPPED');
+});
+
+test('choice cannot switch away from a successful committed alternative',()=>{
+  const p=validatePlanGraph(goal(),choiceGraph());
+  const states=initializeNodeStates(p);
+  states.find(s=>s.nodeId==='act-alt')!.status='SUCCEEDED';
+  assert.throws(()=>selectChoiceBranch(p,states,'write-path','act'),/already committed/);
+});
+
+test('plan revision preserves unaffected successful work and resets changed dependency cone',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous,'2026-10-05T10:00:00.000Z');
+  states.find(s=>s.nodeId==='observe')!.status='SUCCEEDED';
+  states.find(s=>s.nodeId==='act')!.status='SUCCEEDED';
+  states.find(s=>s.nodeId==='verify')!.status='PENDING';
+
+  const next=graph();
+  next.version=2;
+  next.nodes.find(n=>n.id==='act')!.expectedCost=9;
+  const revision=revisePlan(goal(),previous,states,next,'2026-10-05T10:02:00.000Z');
+  assert.deepEqual(revision.changedNodeIds,['act']);
+  assert.deepEqual(revision.resetNodeIds,['act','verify']);
+  assert.deepEqual(revision.preservedSucceededNodeIds,['observe']);
+  assert.equal(revision.states.find(s=>s.nodeId==='act')?.attempts,0);
+});
+
+test('plan revision cannot silently reuse a version or occur while action is running',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous);
+  const same=graph();
+  assert.throws(()=>revisePlan(goal(),previous,states,same),/advance exactly by one/);
+  const next=graph(); next.version=2;
+  states.find(s=>s.nodeId==='observe')!.status='RUNNING';
+  assert.throws(()=>revisePlan(goal(),previous,states,next),/while an execution node is running/);
+});
+
+test('choice groups require at least two alternatives with one hierarchical parent',()=>{
+  const one=graph(); one.nodes.find(n=>n.id==='act')!.choiceGroup='x';
+  assert.throws(()=>validatePlanGraph(goal(),one),/at least two alternatives/);
+
+  const bad=choiceGraph();
+  bad.nodes.find(n=>n.id==='act-alt')!.parentId=undefined;
+  assert.throws(()=>validatePlanGraph(goal(),bad),/same hierarchical parent/);
+});
+
+test('choice cannot switch while sibling awaits verification or has uncertain side effects',()=>{
+  const p=validatePlanGraph(goal(),choiceGraph());
+  const waiting=initializeNodeStates(p);
+  waiting.find(s=>s.nodeId==='act-alt')!.status='BLOCKED';
+  waiting.find(s=>s.nodeId==='act-alt')!.lastExecutionDigest='a'.repeat(64);
+  assert.throws(()=>selectChoiceBranch(p,waiting,'write-path','act'),/awaiting verification/);
+
+  const uncertain=initializeNodeStates(p);
+  uncertain.find(s=>s.nodeId==='act-alt')!.status='FAILED';
+  uncertain.find(s=>s.nodeId==='act-alt')!.lastReason='mutation-side-effects-uncertain-reconciliation-required';
+  assert.throws(()=>selectChoiceBranch(p,uncertain,'write-path','act'),/uncertain side effects/);
+});
+
+test('plan revision cannot occur while an execution awaits verification',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous);
+  const act=states.find(s=>s.nodeId==='act')!;
+  act.status='BLOCKED';
+  act.lastExecutionDigest='a'.repeat(64);
+  const next=graph(); next.version=2;
+  assert.throws(()=>revisePlan(goal(),previous,states,next),/awaiting verification/);
+});
+
+test('revision proof binds source and destination plan digests',()=>{
+  const previous=validatePlanGraph(goal(),graph());
+  const states=initializeNodeStates(previous);
+  const next=graph(); next.version=2; next.nodes.find(n=>n.id==='verify')!.expectedCost=7;
+  const revision=revisePlan(goal(),previous,states,next,'2026-10-05T10:02:00.000Z');
+  assert.equal(revision.proof.fromVersion,1);
+  assert.equal(revision.proof.toVersion,2);
+  assert.match(revision.proof.fromPlanDigest,/^[0-9a-f]{64}$/);
+  assert.match(revision.proof.toPlanDigest,/^[0-9a-f]{64}$/);
+  assert.notEqual(revision.proof.fromPlanDigest,revision.proof.toPlanDigest);
+});
