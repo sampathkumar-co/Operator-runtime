@@ -164,7 +164,14 @@ export class DeveloperVerificationCoordinator {
     const runId = digest(runIdInput, 'runId');
     await this.#init();
     try {
-      return normalizeRun(JSON.parse(await readDurableStateText(this.#file(runId), RUN_OPTIONS)));
+      const normalized = normalizeRun(JSON.parse(await readDurableStateText(this.#file(runId), RUN_OPTIONS)));
+      if (normalized.id !== runId) {
+        throw new OperatorError(
+          'DEVELOPER_VERIFICATION_RUN_CORRUPT',
+          'Developer verification run file identity does not match the requested run id.'
+        );
+      }
+      return normalized;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new OperatorError('DEVELOPER_VERIFICATION_RUN_NOT_FOUND', 'Developer verification run was not found.');
@@ -194,6 +201,12 @@ export class DeveloperVerificationCoordinator {
     );
     try {
       const run = await this.get(runId);
+      if (executionContext.sessionId !== run.developerSessionId) {
+        throw new OperatorError(
+          'DEVELOPER_VERIFICATION_CONTEXT_MISMATCH',
+          'Verification receipt execution context must bind the same Developer Session.'
+        );
+      }
       if (run.status !== 'VERIFYING') {
         throw new OperatorError(
           'DEVELOPER_VERIFICATION_ALREADY_FINAL',
@@ -508,6 +521,13 @@ function validateAuthorizedProjectCommandResult(
     throw new OperatorError(
       'DEVELOPER_VERIFICATION_RESULT_UNTRUSTED',
       'Command result does not prove execution through the trusted project-command provider.'
+    );
+  }
+  const resultCommandId = (result.output as { command?: { id?: unknown } } | undefined)?.command?.id;
+  if (resultCommandId !== commandId) {
+    throw new OperatorError(
+      'DEVELOPER_VERIFICATION_RESULT_MISMATCH',
+      'Trusted command result identity does not match the command action being credited.'
     );
   }
   return commandId;
