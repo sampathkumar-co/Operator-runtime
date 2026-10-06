@@ -196,7 +196,7 @@ export class DeveloperContainerManager {
         } else {
           const result = await this.#run(
             context,
-            buildCreateArgs(record, command),
+            buildDeveloperContainerCreateArgs(record, command),
             60_000,
             input.signal
           );
@@ -610,7 +610,7 @@ type DockerInspectPayload = {
   }>;
 };
 
-function buildCreateArgs(record: DeveloperContainerRecord, command: string[]): string[] {
+export function buildDeveloperContainerCreateArgs(record: DeveloperContainerRecord, command: string[]): string[] {
   return [
     'create',
     '--pull', 'never',
@@ -718,6 +718,21 @@ function validateRecord(input: unknown): DeveloperContainerRecord {
   if (typeof raw.phase !== 'string' || !phases.includes(raw.phase as DeveloperContainerPhase)) throw corrupt('Developer container phase is invalid.');
   if (['CREATED', 'ACTIVE', 'RELEASING'].includes(String(raw.phase)) && !containerId) {
     throw corrupt('Committed Developer container phase requires containerId.');
+  }
+  const immutableIdentity = {
+    schemaVersion: 1 as const,
+    sessionId,
+    worktreePath: canonicalPath(worktreePath),
+    expectedWorktreeFingerprint,
+    image: image.toLowerCase(),
+    commandDigest,
+    memoryMb,
+    cpu,
+    pidsLimit
+  };
+  const recomputedId = sha256(Buffer.from(canonicalJson(immutableIdentity), 'utf8'));
+  if (id !== recomputedId || containerName !== 'mecord-dev-' + id.slice(0, 24)) {
+    throw corrupt('Developer container record identity does not match immutable environment intent.');
   }
   const createdAt = canonicalIso(raw.createdAt, 'createdAt');
   const updatedAt = canonicalIso(raw.updatedAt, 'updatedAt');
@@ -850,10 +865,6 @@ function canonicalIso(value: unknown, label: string): string {
     throw new OperatorError('DEVELOPER_CONTAINER_INPUT_INVALID', label + ' must be canonical ISO.');
   }
   return text;
-}
-
-function buildOwnedLabel(record: DeveloperContainerRecord): string {
-  return 'io.mecord.developer-container=' + record.id;
 }
 
 async function localDockerContext(
