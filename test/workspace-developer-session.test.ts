@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -70,4 +71,83 @@ test('Developer Session requires acceptance criteria', () => {
     workspaceRootNodeId: 'workspace:root',
     now: '2026-10-06T00:00:00.000Z'
   }), /acceptanceCriteria is invalid/);
+});
+
+
+test('Developer Session storage hashes path-like IDs instead of using them as filenames', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-session-storage-'));
+  t.after(async () => fs.rm(stateDir, { recursive: true, force: true }));
+
+  const store = new DeveloperSessionStore(stateDir);
+  const base = createDeveloperSession({
+    objective: 'Verify storage path isolation.',
+    acceptanceCriteria: ['Session remains retrievable.'],
+    workspaceRootNodeId: 'workspace:root',
+    now: '2026-10-06T00:00:00.000Z'
+  });
+  const session = {
+    ...base,
+    id: '../escape/session'
+  };
+  await store.put(session);
+
+  const expectedName = crypto.createHash('sha256')
+    .update(session.id, 'utf8')
+    .digest('hex') + '.json';
+  const sessionDir = path.join(stateDir, 'developer-sessions');
+  assert.deepEqual(await fs.readdir(sessionDir), [expectedName]);
+  assert.equal((await store.get(session.id)).id, session.id);
+  await assert.rejects(
+    fs.stat(path.join(stateDir, 'escape')),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
+});
+
+test('Developer Session storage remains backward-readable for safe legacy filenames', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-session-legacy-'));
+  t.after(async () => fs.rm(stateDir, { recursive: true, force: true }));
+
+  const sessionDir = path.join(stateDir, 'developer-sessions');
+  await fs.mkdir(sessionDir, { recursive: true });
+  const base = createDeveloperSession({
+    objective: 'Read a legacy session.',
+    acceptanceCriteria: ['Legacy state remains readable.'],
+    workspaceRootNodeId: 'workspace:root',
+    now: '2026-10-06T00:00:00.000Z'
+  });
+  const legacy = { ...base, id: 'legacy-session-1' };
+  await fs.writeFile(
+    path.join(sessionDir, legacy.id + '.json'),
+    JSON.stringify(legacy),
+    'utf8'
+  );
+
+  const store = new DeveloperSessionStore(stateDir);
+  const restored = await store.get(legacy.id);
+  assert.equal(restored.id, legacy.id);
+  assert.equal(restored.objective, legacy.objective);
+});
+
+test('Developer Session list reads hashed records by content identity', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-session-list-'));
+  t.after(async () => fs.rm(stateDir, { recursive: true, force: true }));
+
+  const store = new DeveloperSessionStore(stateDir);
+  const first = createDeveloperSession({
+    objective: 'First',
+    acceptanceCriteria: ['A'],
+    workspaceRootNodeId: 'workspace:root',
+    now: '2026-10-06T00:00:00.000Z'
+  });
+  const second = createDeveloperSession({
+    objective: 'Second',
+    acceptanceCriteria: ['B'],
+    workspaceRootNodeId: 'workspace:root',
+    now: '2026-10-06T00:01:00.000Z'
+  });
+  await store.put(first);
+  await store.put(second);
+
+  const listed = await store.list();
+  assert.deepEqual(listed.map((item) => item.id), [second.id, first.id]);
 });
