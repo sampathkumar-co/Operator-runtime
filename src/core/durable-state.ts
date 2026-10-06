@@ -19,13 +19,16 @@ class DurableStateReadRace extends Error {}
 export async function readDurableStateBytes(file: string, options: DurableStateOptions): Promise<Buffer> {
   validateOptions(options);
   let lastRace: DurableStateReadRace | undefined;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  const retryDelaysMs = [5, 10, 20, 40, 80, 160] as const;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
       return await readDurableStateBytesOnce(file, options);
     } catch (error) {
       if (!(error instanceof DurableStateReadRace)) throw error;
       lastRace = error;
-      if (attempt < 4) await new Promise<void>((resolve) => setTimeout(resolve, 1 << attempt));
+      if (attempt < retryDelaysMs.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+      }
     }
   }
   try {
