@@ -133,9 +133,10 @@ test('Developer Worktree creation recovery promotes an exact Git-created worktre
   if (!supportedGitAvailable()) { t.skip('supported Git unavailable'); return; }
   const fx = await fixture(t);
   const sessionId = 'session-create-recovery';
-  const ownedPath = worktreePath(fx.worktreeRoot, sessionId);
   await fs.mkdir(fx.worktreeRoot, { recursive: true });
   await fs.mkdir(fx.stateDir, { recursive: true });
+  const canonicalWorktreeRoot = await fs.realpath(fx.worktreeRoot);
+  const ownedPath = worktreePath(canonicalWorktreeRoot, sessionId);
 
   const now = '2026-10-06T00:00:00.000Z';
   const record: DeveloperWorktreeRecord = {
