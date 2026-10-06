@@ -6,7 +6,9 @@ import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContex
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
-import { inspectProcessInstance } from '../core/process-instance.ts';
+import { inspectProcessInstance, sameProcessInstance, type ProcessInstanceIdentity } from '../core/process-instance.ts';
+import { DeveloperSessionStore } from '../core/developer-session.ts';
+import { DeveloperRuntimeOwnershipStore, type DeveloperRuntimeOwnershipRecord } from '../core/developer-runtime-ownership.ts';
 import { PathScope } from './path-scope.ts';
 
 const SCORE: CapabilityScore = {
@@ -62,6 +64,10 @@ type ManagedSession = {
   nextCursor: number;
   droppedBeforeCursor: number;
   bufferedBytes: number;
+  developerSessionId?: string;
+  processInstance?: ProcessInstanceIdentity;
+  ports: number[];
+  ownsProcessGroup: boolean;
 };
 
 export class ProcessProvider implements CapabilityProvider {
@@ -72,6 +78,9 @@ export class ProcessProvider implements CapabilityProvider {
   #requiredRisk?: ActionRisk;
   #environmentOverrides: Readonly<Record<string, string>>;
   #sessions = new Map<string, ManagedSession>();
+  #ownership?: DeveloperRuntimeOwnershipStore;
+  #developerSessions?: DeveloperSessionStore;
+  #ownershipRecovered?: Promise<void>;
 
   constructor(options: {
     allowedRoots: string[];
@@ -79,12 +88,17 @@ export class ProcessProvider implements CapabilityProvider {
     maxOutputBytes?: number;
     requiredRisk?: ActionRisk;
     environmentOverrides?: Readonly<Record<string, string>>;
+    stateDir?: string;
   }) {
     this.#scope = new PathScope(options.allowedRoots);
     this.#allowedExecutables = new Set(options.allowedExecutables.map((item) => item.trim().toLowerCase()).filter(Boolean));
     this.#maxOutputBytes = boundedInteger(options.maxOutputBytes, DEFAULT_MAX_OUTPUT_BYTES, 1024, MAX_OUTPUT_BYTES);
     this.#requiredRisk = options.requiredRisk;
     this.#environmentOverrides = validateEnvironmentOverrides(options.environmentOverrides);
+    if (options.stateDir) {
+      this.#ownership = new DeveloperRuntimeOwnershipStore(options.stateDir);
+      this.#developerSessions = new DeveloperSessionStore(options.stateDir);
+    }
   }
 
   supports(action: ActionRequest): boolean {
