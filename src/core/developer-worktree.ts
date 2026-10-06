@@ -453,16 +453,16 @@ export class DeveloperWorktreeManager {
 
     const allowed = await this.#canonicalAllowedRepositoryRoots();
     for (const root of allowed) {
-      if (inside(realStateDir, root)) {
+      if (inside(realStateDir, root) || inside(root, realStateDir)) {
         throw new OperatorError(
-          'DEVELOPER_WORKTREE_STATE_INSIDE_PROJECT',
-          'Developer Worktree ownership state must live outside authorized repository roots.'
+          'DEVELOPER_WORKTREE_STATE_PROJECT_OVERLAP',
+          'Developer Worktree ownership state and authorized repository roots must not contain one another.'
         );
       }
-      if (inside(realWorktreeRoot, root)) {
+      if (inside(realWorktreeRoot, root) || inside(root, realWorktreeRoot)) {
         throw new OperatorError(
-          'DEVELOPER_WORKTREE_ROOT_INSIDE_PROJECT',
-          'Developer Worktree isolation root must live outside source repository roots.'
+          'DEVELOPER_WORKTREE_ROOT_PROJECT_OVERLAP',
+          'Developer Worktree isolation root and source repository roots must not contain one another.'
         );
       }
     }
