@@ -59,8 +59,6 @@ test('running Developer Session process owns declared ports durably', async (t) 
     }
   );
 
-  const stateText = await fs.readFile(path.join((store as unknown as { '#file'?: string }).constructor ? '' : '', 'x')).catch(() => '');
-  assert.equal(String(stateText).includes('args'), false);
 });
 
 test('PID reuse marks prior ownership EXITED and releases its ports', async (t) => {
