@@ -99,10 +99,7 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     const pid = Number(input.pid);
     keys.add(Number.isSafeInteger(pid) && pid > 0 ? `process:windows/${pid}` : 'process:windows');
   } else if (action.capability.startsWith('browser.')) {
-    const session = requiredSegment(input.sessionId, 'default');
-    const target = requiredSegment(input.targetId, 'global');
-    const frame = input.frameId === undefined ? '' : `/frame:${requiredSegment(input.frameId, 'global')}`;
-    keys.add(`browser:session:${session}/target:${target}${frame}`);
+    keys.add(browserResourceKey(action));
   } else if (action.capability.startsWith('app.') || action.capability === 'visual.capture' || action.capability === 'input.operate') {
     keys.add('desktop:windows');
   } else if (action.capability === 'perception.observe' || action.capability === 'perception.ground') {
@@ -132,13 +129,6 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
     if (rootPath) keys.add(`database:${rootPath.slice('fs-path:'.length)}/profile:${escapeSegment(String(input.profileId ?? 'profiles').toLowerCase())}`);
   }
 
-  if (action.capability.startsWith('browser.')) {
-    const session = escapeSegment(String(input.sessionId ?? 'default').toLowerCase());
-    const target = escapeSegment(String(input.targetId ?? 'global').toLowerCase());
-    const frame = input.frameId === undefined ? undefined : escapeSegment(String(input.frameId).toLowerCase());
-    keys.add(`browser:session:${session}/target:${target}${frame ? `/frame:${frame}` : ''}`);
-  }
-
   if (action.capability === 'process.inspect' || action.capability === 'process.manage') {
     keys.add(`process:windows/${escapeSegment(String(input.pid ?? 'global'))}`);
   }
@@ -150,15 +140,49 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
 }
 
 export function resourceKeysConflict(left: string, right: string): boolean {
-  if (left === right) return true;
+  const normalizedLeft = normalizeLegacyResourceKey(left);
+  const normalizedRight = normalizeLegacyResourceKey(right);
+  if (normalizedLeft === normalizedRight) return true;
   const hierarchicalPrefixes = ['fs-path:', 'browser:', 'database:', 'process:', 'desktop:'];
   for (const prefix of hierarchicalPrefixes) {
-    if (!left.startsWith(prefix) || !right.startsWith(prefix)) continue;
-    const a = left.slice(prefix.length);
-    const b = right.slice(prefix.length);
+    if (!normalizedLeft.startsWith(prefix) || !normalizedRight.startsWith(prefix)) continue;
+    const a = normalizedLeft.slice(prefix.length);
+    const b = normalizedRight.slice(prefix.length);
     return isHierarchyPrefix(a, b) || isHierarchyPrefix(b, a);
   }
   return false;
+}
+
+/** Canonicalizes persisted resource keys across compatible identity schema upgrades. */
+export function canonicalResourceKeys(keys: readonly string[]): string[] {
+  return [...new Set(keys.map(normalizeLegacyResourceKey))].sort();
+}
+
+function browserResourceKey(action: ActionRequest): string {
+  const input = action.input;
+  const instance = requiredSegment(input.sessionId, 'default');
+  const targets = `browser:instance:${instance}/targets`;
+  const requestedTarget = action.capability === 'browser.navigate' && input.newTab === true
+    ? undefined
+    : typeof input.targetId === 'string' && input.targetId.trim()
+      ? requiredSegment(input.targetId, 'target')
+      : undefined;
+  if (!requestedTarget) return targets;
+  const target = `${targets}/${requestedTarget}`;
+  const frame = typeof input.frameId === 'string' && input.frameId.trim()
+    ? requiredSegment(input.frameId, 'frame')
+    : undefined;
+  return frame ? `${target}/frames/${frame}` : target;
+}
+
+function normalizeLegacyResourceKey(key: string): string {
+  const legacy = /^browser:session:([^/]+)\/target:([^/]+)(?:\/frame:([^/]+))?$/.exec(key);
+  if (!legacy) return key;
+  const [, instance, target, frame] = legacy;
+  const targets = `browser:instance:${instance}/targets`;
+  if (target === 'global') return targets;
+  const concrete = `${targets}/${target}`;
+  return frame ? `${concrete}/frames/${frame}` : concrete;
 }
 
 async function physicalPathIdentity(input: string): Promise<{ pathKey: string; objectKey?: string }> {

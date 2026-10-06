@@ -6,6 +6,7 @@ import test from 'node:test';
 import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
 import { CAPABILITY_RISK_RULES } from '../src/core/capability-policy.ts';
 import { RESOURCE_EXTRACTOR_CAPABILITIES, resolvePhysicalResourceKeysForAction, resourceKeysConflict, resourceKeysForAction, validateResourceExtractorCoverage } from '../src/core/resource-identity.ts';
+import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-resource-lease-'));
@@ -156,7 +157,94 @@ test('canonical resource identities are deterministic across scheduler layers', 
     input: { targetId: 'ABC' },
     provenance: { kind: 'runtime' }
   });
-  assert.deepEqual(browserKeys, ['browser:session:default/target:abc']);
+  assert.deepEqual(browserKeys, ['browser:instance:default/targets/abc']);
+});
+
+test('untargeted browser identity covers every target in only its browser instance', () => {
+  const action = (id: string, input: Record<string, unknown>) => resourceKeysForAction({
+    id,
+    capability: 'browser.navigate',
+    risk: 'write',
+    input: { url: 'https://example.test/', ...input },
+    provenance: { kind: 'runtime' }
+  })[0]!;
+  const anyDefault = action('any-default', {});
+  const tabOne = action('tab-one', { targetId: 'tab-1' });
+  const tabOneAgain = action('tab-one-again', { targetId: 'TAB-1' });
+  const tabTwo = action('tab-two', { targetId: 'tab-2' });
+  const anySeparate = action('any-separate', { sessionId: 'browser-b' });
+  const separateTab = action('separate-tab', { sessionId: 'browser-b', targetId: 'tab-1' });
+
+  assert.equal(anyDefault, 'browser:instance:default/targets');
+  assert.equal(resourceKeysConflict(anyDefault, tabOne), true);
+  assert.equal(resourceKeysConflict(tabOne, tabOneAgain), true);
+  assert.equal(resourceKeysConflict(tabOne, tabTwo), false);
+  assert.equal(resourceKeysConflict(anyDefault, separateTab), false);
+  assert.equal(resourceKeysConflict(anySeparate, separateTab), true);
+});
+
+test('untargeted browser lease remains authoritative until target resolution', async (t) => {
+  const store = new ResourceLeaseStore(await temp(t));
+  const anyTarget = resourceKeysForAction({
+    id: 'select-target', capability: 'browser.navigate', risk: 'write',
+    input: { url: 'https://example.test/' }, provenance: { kind: 'runtime' }
+  });
+  const tabOne = resourceKeysForAction({
+    id: 'tab-one', capability: 'browser.interact', risk: 'external',
+    input: { targetId: 'tab-1' }, provenance: { kind: 'runtime' }
+  });
+  const tabTwo = resourceKeysForAction({
+    id: 'tab-two', capability: 'browser.interact', risk: 'external',
+    input: { targetId: 'tab-2' }, provenance: { kind: 'runtime' }
+  });
+
+  const unresolved = await store.acquire('selector', anyTarget, 'exclusive');
+  await assert.rejects(() => store.acquire('tab-one', tabOne, 'exclusive'), (error: any) => error?.code === 'RESOURCE_BUSY');
+  await unresolved.release();
+
+  const resolvedOne = await store.acquire('tab-one', tabOne, 'exclusive');
+  const resolvedTwo = await store.acquire('tab-two', tabTwo, 'exclusive');
+  await resolvedTwo.release();
+  await resolvedOne.release();
+});
+
+test('untargeted browser quarantine blocks concrete targets and accepts same-action reconciliation', async (t) => {
+  const store = new ResourceLeaseStore(await temp(t));
+  const anyTarget = 'browser:instance:default/targets';
+  const concreteTarget = 'browser:instance:default/targets/tab-1';
+  await store.quarantine('uncertain-browser-action', [anyTarget]);
+
+  await assert.rejects(
+    () => store.acquire('different-action', [concreteTarget], 'exclusive', { mutationActionId: 'different-action' }),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === 'uncertain-browser-action'
+  );
+  const reconciler = await store.acquire('reconciler', [concreteTarget], 'exclusive', { mutationActionId: 'uncertain-browser-action' });
+  await reconciler.release();
+
+  const otherInstance = await store.acquire('other-browser', ['browser:instance:browser-b/targets/tab-1'], 'exclusive', { mutationActionId: 'other-action' });
+  await otherInstance.release();
+});
+
+test('legacy browser global quarantine conflicts with new concrete target identity after upgrade', async (t) => {
+  const store = new ResourceLeaseStore(await temp(t));
+  await store.quarantine('legacy-uncertain', ['browser:session:default/target:global']);
+  await assert.rejects(
+    () => store.acquire('new-action', ['browser:instance:default/targets/tab-1'], 'exclusive', { mutationActionId: 'new-action' }),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === 'legacy-uncertain'
+  );
+});
+
+test('legacy browser journal identity remains retry-compatible with canonical target hierarchy', async (t) => {
+  const state = await temp(t);
+  const action = {
+    id: 'browser-upgrade-retry', capability: 'browser.navigate', risk: 'write' as const,
+    input: { url: 'https://example.test/' }, provenance: { kind: 'runtime' as const }
+  };
+  const journal = new ActionTransitionJournal(state);
+  await journal.prepare({ action, ownerKind: 'test', ownerId: action.id, resourceKeys: ['browser:session:default/target:global'] });
+  const retried = await journal.prepare({ action, ownerKind: 'test', ownerId: action.id, resourceKeys: resourceKeysForAction(action) });
+  assert.equal(retried.actionId, action.id);
+  assert.deepEqual(retried.resourceKeys, ['browser:session:default/target:global']);
 });
 
 test('canonical resource extractor registry covers every policy capability and mutations never fall back to cap-global keys', () => {

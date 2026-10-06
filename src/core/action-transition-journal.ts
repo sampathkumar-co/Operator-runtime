@@ -4,6 +4,7 @@ import path from 'node:path';
 import { actionHash, canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { canonicalResourceKeys } from './resource-identity.ts';
 import type { ActionRequest, ActionResult, IntentBinding, ProviderReconciliationResult } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
 
@@ -99,7 +100,7 @@ export class ActionTransitionJournal {
         if (existing.actionDigest !== digest || existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId
           || existing.capability !== input.action.capability || existing.risk !== input.action.risk
           || canonicalJson(existing.intent ?? null) !== canonicalJson(input.action.intent ?? null)
-          || canonicalJson(existing.resourceKeys) !== canonicalJson(uniqueKeys(input.resourceKeys))) {
+          || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(uniqueKeys(input.resourceKeys)))) {
           throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Action id is already bound to a different durable execution identity.');
         }
         if (existing.state === 'COMPLETED' && input.action.risk === 'read') {

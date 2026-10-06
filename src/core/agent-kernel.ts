@@ -5,7 +5,7 @@ import { kernelVerificationEvidence, verifyActionOutcome } from './action-verifi
 import { evidence } from './evidence.ts';
 import { IntentRegistry } from './intent-registry.ts';
 import { OperatorError } from './errors.ts';
-import { resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
+import { canonicalResourceKeys, resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type {
@@ -331,7 +331,7 @@ export class AgentKernel {
     const resourceKeys = await resolvePhysicalResourceKeysForAction(action);
     const existing = await this.#journal.inspect(action.id);
     if (existing.actionDigest !== actionHash(action)
-      || canonicalJson(existing.resourceKeys) !== canonicalJson(resourceKeys)) {
+      || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(resourceKeys))) {
       throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Reconciliation action does not match the durable action journal identity.');
     }
     if (!['DISPATCHED', 'OBSERVED', 'UNCERTAIN', 'RECONCILED', 'COMPLETED'].includes(existing.state)) {
