@@ -13,6 +13,8 @@ import type {
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { readDurableStateText, writeDurableStateText } from '../core/durable-state.ts';
+import { ArtifactStore } from '../core/artifact-store.ts';
+import { canonicalJson } from '../core/action-identity.ts';
 import {
   applyMultiFileEditPlan,
   validateMultiFileEditPlan,
@@ -61,6 +63,7 @@ export interface WorkspaceEditTransactionRecord {
   actionId: string;
   workspaceRoot: string;
   planId: string;
+  rollbackArtifactId?: string;
   phase: WorkspaceEditTransactionPhase;
   files: WorkspaceEditTransactionFileRecord[];
   createdAt: string;
@@ -77,6 +80,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
   #scope: PathScope;
   #stateDir: string;
   #clock: () => Date;
+  #artifacts: ArtifactStore;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -91,6 +95,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     });
     this.#stateDir = path.resolve(options.stateDir);
     this.#clock = options.clock ?? (() => new Date());
+    this.#artifacts = new ArtifactStore(this.#stateDir);
   }
 
   supports(action: ActionRequest): boolean {
@@ -144,6 +149,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
         parsed.workspaceRootInput,
         workspaceRoot,
         parsed.plan,
+        parsed.retainRollback,
         context
       );
       await this.#writeRecord(prepared);
@@ -364,6 +370,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     workspaceRootInput: string,
     workspaceRoot: string,
     plan: MultiFileEditPlan,
+    retainRollback: boolean,
     context: CapabilityExecutionContext
   ): Promise<WorkspaceEditTransactionRecord> {
     const currentContent: Record<string, string> = {};
@@ -440,12 +447,45 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       throw error;
     }
 
+    let rollbackArtifactId: string | undefined;
+    if (retainRollback) {
+      const rollback = {
+        schemaVersion: 1 as const,
+        transactionActionId: action.id,
+        planId: plan.id,
+        workspaceRootDigest: sha256(Buffer.from(canonicalPath(workspaceRoot), 'utf8')),
+        files: files.map((file) => ({
+          path: file.path,
+          beforeSha256: file.beforeSha256,
+          afterSha256: file.afterSha256,
+          mode: file.mode,
+          beforeText: currentContent[file.path]!
+        }))
+      };
+      const artifact = await this.#artifacts.put({
+        bytes: JSON.stringify(rollback, null, 2),
+        kind: 'patch',
+        mediaType: 'application/json',
+        privacy: 'sensitive',
+        metadata: {
+          rollbackType: 'workspace-edit',
+          transactionActionId: action.id,
+          planId: plan.id,
+          workspaceRootDigest: rollback.workspaceRootDigest,
+          fileCount: files.length
+        },
+        now: this.#now()
+      });
+      rollbackArtifactId = artifact.id;
+    }
+
     const now = this.#now();
     return validateRecord({
       schemaVersion: 1,
       actionId: action.id,
       workspaceRoot,
       planId: plan.id,
+      ...(rollbackArtifactId ? { rollbackArtifactId } : {}),
       phase: 'PREPARED',
       files,
       createdAt: now,
@@ -621,14 +661,15 @@ export function workspaceEditTransactionJournalPath(stateDir: string, actionId: 
   return path.join(path.resolve(stateDir), 'workspace-edit-transactions', digestValue + '.json');
 }
 
-function parseAction(action: ActionRequest): { workspaceRootInput: string; plan: MultiFileEditPlan } {
+function parseAction(action: ActionRequest): { workspaceRootInput: string; plan: MultiFileEditPlan; retainRollback: boolean } {
   const workspaceRootInput = String(action.input.workspaceRoot ?? '');
   if (!workspaceRootInput || workspaceRootInput.includes('\0')) {
     throw new OperatorError('WORKSPACE_EDIT_ROOT_REQUIRED', 'workspaceRoot is required.');
   }
   return {
     workspaceRootInput,
-    plan: validateMultiFileEditPlan(action.input.plan as MultiFileEditPlan)
+    plan: validateMultiFileEditPlan(action.input.plan as MultiFileEditPlan),
+    retainRollback: action.input.retainRollback === true
   };
 }
 
@@ -654,6 +695,9 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
   const actionId = boundedString(raw.actionId, 1024, 'actionId');
   const workspaceRoot = absolutePath(raw.workspaceRoot, 'workspaceRoot');
   const planId = digestField(raw.planId, 'planId');
+  const rollbackArtifactId = raw.rollbackArtifactId === undefined
+    ? undefined
+    : digestField(raw.rollbackArtifactId, 'rollbackArtifactId');
   const phases = new Set<WorkspaceEditTransactionPhase>([
     'PREPARED', 'APPLYING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
   ]);
@@ -671,6 +715,7 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
     actionId,
     workspaceRoot,
     planId,
+    ...(rollbackArtifactId ? { rollbackArtifactId } : {}),
     phase: raw.phase as WorkspaceEditTransactionPhase,
     files,
     createdAt,
@@ -761,7 +806,9 @@ function successResult(
         beforeSha256: file.beforeSha256,
         afterSha256: file.afterSha256
       })),
-      reconciled
+      reconciled,
+      rollbackAvailable: Boolean(record.rollbackArtifactId),
+      ...(record.rollbackArtifactId ? { rollbackArtifactId: record.rollbackArtifactId } : {})
     },
     evidence: [
       evidence(
