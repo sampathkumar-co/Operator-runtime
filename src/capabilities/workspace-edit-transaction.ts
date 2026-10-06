@@ -40,6 +40,7 @@ const STATE_OPTIONS = {
 export type WorkspaceEditTransactionPhase =
   | 'PREPARED'
   | 'APPLYING'
+  | 'VERIFICATION_PENDING'
   | 'COMMITTED_CLEANUP'
   | 'COMMITTED'
   | 'ROLLBACK_REQUIRED'
@@ -112,6 +113,76 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     return await this.#enqueue(async () => await this.#reconcileSerial(request.action));
   }
 
+  async finalizeDeferred(action: ActionRequest): Promise<ActionResult> {
+    return await this.#enqueue(async () => {
+      const started = performance.now();
+      const parsed = parseAction(action);
+      const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
+      const record = await this.#readRecord(action.id);
+      if (!record) {
+        return transactionControlFailure(action, 'WORKSPACE_EDIT_TRANSACTION_MISSING', 'Deferred transaction journal is missing.', started, 'none');
+      }
+      assertRecordMatchesAction(record, workspaceRoot, parsed.plan);
+      if (record.phase === 'COMMITTED') return successResult(action, record, started, true, false);
+      if (record.phase !== 'VERIFICATION_PENDING') {
+        return transactionControlFailure(
+          action,
+          'WORKSPACE_EDIT_FINALIZE_STATE_INVALID',
+          'Deferred transaction is not pending verification.',
+          started,
+          'uncertain'
+        );
+      }
+      try {
+        const cleanup = { ...record, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
+        await this.#writeRecord(cleanup);
+        await this.#cleanupCommitted(cleanup);
+        const committed = { ...cleanup, phase: 'COMMITTED' as const, updatedAt: this.#now() };
+        await this.#writeRecord(committed);
+        return successResult(action, committed, started, false, false);
+      } catch (error) {
+        const op = asOperatorError(error, 'WORKSPACE_EDIT_FINALIZE_FAILED');
+        return transactionControlFailure(action, op.code, op.message, started, 'known');
+      }
+    });
+  }
+
+  async rollbackDeferred(action: ActionRequest): Promise<ActionResult> {
+    return await this.#enqueue(async () => {
+      const started = performance.now();
+      const parsed = parseAction(action);
+      const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
+      const record = await this.#readRecord(action.id);
+      if (!record) {
+        return transactionControlFailure(action, 'WORKSPACE_EDIT_TRANSACTION_MISSING', 'Deferred transaction journal is missing.', started, 'none');
+      }
+      assertRecordMatchesAction(record, workspaceRoot, parsed.plan);
+      if (record.phase === 'ROLLED_BACK') {
+        return rollbackControlSuccess(action, record, started, true);
+      }
+      if (record.phase !== 'VERIFICATION_PENDING' && record.phase !== 'ROLLBACK_REQUIRED') {
+        return transactionControlFailure(
+          action,
+          'WORKSPACE_EDIT_ROLLBACK_STATE_INVALID',
+          'Deferred transaction is not safely rollbackable from its current phase.',
+          started,
+          'uncertain'
+        );
+      }
+      try {
+        const rollbackRequired = { ...record, phase: 'ROLLBACK_REQUIRED' as const, updatedAt: this.#now() };
+        await this.#writeRecord(rollbackRequired);
+        await this.#rollback(rollbackRequired);
+        const rolledBack = { ...rollbackRequired, phase: 'ROLLED_BACK' as const, updatedAt: this.#now() };
+        await this.#writeRecord(rolledBack);
+        return rollbackControlSuccess(action, rolledBack, started, false);
+      } catch (error) {
+        const op = asOperatorError(error, 'WORKSPACE_EDIT_ROLLBACK_FAILED');
+        return transactionControlFailure(action, op.code, op.message, started, 'uncertain');
+      }
+    });
+  }
+
   async #executeSerial(action: ActionRequest, context: CapabilityExecutionContext): Promise<ActionResult> {
     const started = performance.now();
     try {
@@ -121,6 +192,13 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       if (context.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Workspace edit was cancelled.');
 
       const parsed = parseAction(action);
+      const deferFinalization = action.input.deferFinalization === true;
+      if (deferFinalization && action.provenance.kind !== 'trusted_policy' && action.provenance.kind !== 'runtime') {
+        throw new OperatorError(
+          'WORKSPACE_EDIT_DEFERRED_FINALIZATION_DENIED',
+          'Deferred finalization is reserved for trusted runtime verification orchestration.'
+        );
+      }
       const workspaceRoot = await this.#resolveWorkspaceRoot(parsed.workspaceRootInput);
       const existing = await this.#readRecord(action.id);
       if (existing) {
@@ -156,12 +234,17 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
           if (context.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Workspace edit was cancelled during apply.');
           await this.#applyOne(file);
         }
+        if (deferFinalization) {
+          const pending = { ...applying, phase: 'VERIFICATION_PENDING' as const, updatedAt: this.#now() };
+          await this.#writeRecord(pending);
+          return successResult(action, pending, started, false, true);
+        }
         const cleanup = { ...applying, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
         await this.#writeRecord(cleanup);
         await this.#cleanupCommitted(cleanup);
         const committed = { ...cleanup, phase: 'COMMITTED' as const, updatedAt: this.#now() };
         await this.#writeRecord(committed);
-        return successResult(action, committed, started, false);
+        return successResult(action, committed, started, false, false);
       } catch (error) {
         const rollbackRequired = { ...applying, phase: 'ROLLBACK_REQUIRED' as const, updatedAt: this.#now() };
         await this.#writeRecord(rollbackRequired);
@@ -294,6 +377,19 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
     const allAfter = states.every((item) =>
       item.target.kind === 'regular' && item.target.sha256 === item.file.afterSha256
     );
+    if (allAfter && record.phase === 'VERIFICATION_PENDING') {
+      return {
+        status: 'completed',
+        result: successResult(action, record, 0, true, true),
+        evidence: [evidence(
+          'workspace_edit_reconciliation',
+          'pass',
+          'Every target exactly matches the planned post-edit hash and remains held for verification.',
+          { planId: record.planId }
+        )]
+      };
+    }
+
     if (allAfter) {
       const cleanup = { ...record, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
       await this.#writeRecord(cleanup);
@@ -302,7 +398,7 @@ export class WorkspaceEditTransactionProvider implements CapabilityProvider {
       await this.#writeRecord(committed);
       return {
         status: 'completed',
-        result: successResult(action, committed, 0, true),
+        result: successResult(action, committed, 0, true, false),
         evidence: [evidence(
           'workspace_edit_reconciliation',
           'pass',
@@ -655,7 +751,7 @@ function validateRecord(input: unknown): WorkspaceEditTransactionRecord {
   const workspaceRoot = absolutePath(raw.workspaceRoot, 'workspaceRoot');
   const planId = digestField(raw.planId, 'planId');
   const phases = new Set<WorkspaceEditTransactionPhase>([
-    'PREPARED', 'APPLYING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
+    'PREPARED', 'APPLYING', 'VERIFICATION_PENDING', 'COMMITTED_CLEANUP', 'COMMITTED', 'ROLLBACK_REQUIRED', 'ROLLED_BACK'
   ]);
   if (!phases.has(raw.phase as WorkspaceEditTransactionPhase)) throw corrupt('Transaction phase is invalid.');
   if (!Array.isArray(raw.files) || raw.files.length < 1 || raw.files.length > 1000) throw corrupt('Transaction file list is invalid.');
@@ -747,7 +843,8 @@ function successResult(
   action: ActionRequest,
   record: WorkspaceEditTransactionRecord,
   started: number,
-  reconciled: boolean
+  reconciled: boolean,
+  pendingVerification: boolean
 ): ActionResult {
   return {
     ok: true,
@@ -761,15 +858,20 @@ function successResult(
         beforeSha256: file.beforeSha256,
         afterSha256: file.afterSha256
       })),
-      reconciled
+      reconciled,
+      pendingVerification
     },
     evidence: [
       evidence(
         'workspace_edit_transaction',
         'pass',
         reconciled
-          ? 'Transaction completion was re-established from exact target hashes.'
-          : 'All targets were staged before mutation and committed with exact hash verification.',
+          ? (pendingVerification
+              ? 'Held edit state was re-established from exact target hashes and remains pending verification.'
+              : 'Transaction completion was re-established from exact target hashes.')
+          : (pendingVerification
+              ? 'All targets were staged and applied with exact hash verification; backups remain held pending verification.'
+              : 'All targets were staged before mutation and committed with exact hash verification.'),
         { planId: record.planId, fileCount: record.files.length }
       ),
       evidence('postcondition', 'pass', 'Every edited file matches the planned post-edit SHA-256.', {
@@ -777,6 +879,55 @@ function successResult(
       })
     ],
     durationMs: started === 0 ? 0 : Math.round(performance.now() - started)
+  };
+}
+
+function transactionControlFailure(
+  action: ActionRequest,
+  code: string,
+  message: string,
+  started: number,
+  sideEffectState: 'none' | 'known' | 'uncertain'
+): ActionResult {
+  return {
+    ok: false,
+    capability: action.capability,
+    provider: 'workspace.edit.transaction',
+    evidence: [evidence('workspace_edit_transaction_control', 'fail', message, { code })],
+    error: {
+      code,
+      message,
+      retryable: false,
+      sideEffectState,
+      executionPhase: sideEffectState === 'none' ? 'pre_dispatch' : 'effect_observed'
+    },
+    durationMs: Math.round(performance.now() - started)
+  };
+}
+
+function rollbackControlSuccess(
+  action: ActionRequest,
+  record: WorkspaceEditTransactionRecord,
+  started: number,
+  reconciled: boolean
+): ActionResult {
+  return {
+    ok: true,
+    capability: action.capability,
+    provider: 'workspace.edit.transaction',
+    output: {
+      planId: record.planId,
+      workspaceRoot: record.workspaceRoot,
+      rollbackPerformed: true,
+      reconciled
+    },
+    evidence: [evidence(
+      'workspace_edit_rollback',
+      'pass',
+      'Deferred workspace edit was restored to exact pre-edit hashes.',
+      { planId: record.planId }
+    )],
+    durationMs: Math.round(performance.now() - started)
   };
 }
 
