@@ -408,3 +408,34 @@ test('release requires a fresh container fingerprint', async (t) => {
   );
   assert.ok(docker.container);
 });
+
+
+test('exact owned container stopped by host reboot is safely restarted', async (t) => {
+  const fx = await gitFixture(t);
+  if (!fx) return;
+  const docker = new FakeDocker();
+  const first = new DeveloperContainerManager({
+    allowedRepositoryRoots: [fx.repo],
+    worktreeRoot: fx.worktreeRoot,
+    stateDir: fx.stateDir,
+    runner: docker.runner
+  });
+  const active = await first.create(fx.input);
+  assert.equal(active.record.phase, 'ACTIVE');
+  assert.equal(docker.container?.state, 'running');
+
+  // Simulate Docker restoring the exact container after a machine restart,
+  // but leaving it stopped because no restart policy is granted.
+  docker.container!.state = 'exited';
+
+  const restarted = new DeveloperContainerManager({
+    allowedRepositoryRoots: [fx.repo],
+    worktreeRoot: fx.worktreeRoot,
+    stateDir: fx.stateDir,
+    runner: docker.runner
+  });
+  const recovered = await restarted.create(fx.input);
+  assert.equal(recovered.record.phase, 'ACTIVE');
+  assert.equal(recovered.state, 'running');
+  assert.equal(recovered.record.containerId, active.record.containerId);
+});
