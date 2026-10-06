@@ -147,6 +147,25 @@ export function validateDeveloperChangeQualificationPlan(
     throw new OperatorError('DEVELOPER_QUALIFICATION_PLAN_INVALID', 'Qualification plan arrays are invalid.');
   }
   const steps = input.steps.map((step, index) => normalizeStep(step, index + 1));
+  const seenCommands = new Set<string>();
+  let previousKind = -1;
+  for (const step of steps) {
+    if (seenCommands.has(step.commandId)) {
+      throw new OperatorError(
+        'DEVELOPER_QUALIFICATION_PLAN_INVALID',
+        'Qualification command ids must be unique.'
+      );
+    }
+    seenCommands.add(step.commandId);
+    const currentKind = KIND_ORDER.indexOf(step.kind);
+    if (currentKind < previousKind) {
+      throw new OperatorError(
+        'DEVELOPER_QUALIFICATION_PLAN_INVALID',
+        'Qualification steps must preserve format, lint, test, build phase order.'
+      );
+    }
+    previousKind = currentKind;
+  }
   const identity = {
     schemaVersion: 1 as const,
     editPlanId: input.editPlanId,
