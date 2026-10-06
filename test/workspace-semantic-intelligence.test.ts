@@ -26,6 +26,14 @@ test('semantic intelligence builds declaration tree and resolves unique call edg
     '}',
     ''
   ].join('\n'));
+  await fs.mkdir(path.join(root, 'test'));
+  await fs.writeFile(path.join(root, 'test', 'main.test.ts'), [
+    "import { run } from '../src/main';",
+    'export function mainTest() {',
+    '  return run();',
+    '}',
+    ''
+  ].join('\n'));
 
   const indexer = new WorkspaceCodeIndexer(root, {
     clock: () => new Date('2026-10-06T00:00:00.000Z')
@@ -49,6 +57,13 @@ test('semantic intelligence builds declaration tree and resolves unique call edg
 
   const callees = semantic.callees(snapshot, run[0]!.id);
   assert.equal(callees.some((edge) => edge.resolvedNodeId === helper[0]!.id), true);
+
+  const impact = semantic.impactForSymbols(snapshot, index, [helper[0]!.id]);
+  assert.ok(impact.impactedNodeIds.includes(run[0]!.id));
+  assert.ok(impact.impactedPaths.includes('src/util.ts'));
+  assert.ok(impact.impactedPaths.includes('src/main.ts'));
+  assert.ok(impact.impactedPaths.includes('test/main.test.ts'));
+  assert.deepEqual(impact.suggestedTestPaths, ['test/main.test.ts']);
 });
 
 test('semantic intelligence refuses stale source bytes after code-index observation', async (t) => {
