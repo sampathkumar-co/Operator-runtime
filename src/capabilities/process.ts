@@ -822,6 +822,21 @@ function boundedInteger(value: unknown, fallback: number, min: number, max: numb
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
 
+function normalizeDeclaredPorts(value: unknown): number[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 128) {
+    throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'ports must be an array with at most 128 entries.');
+  }
+  const ports = value.map((item) => {
+    const port = Number(item);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new OperatorError('DEVELOPER_RUNTIME_PORT_INVALID', 'Declared ports must be integers from 1 to 65535.');
+    }
+    return port;
+  });
+  return [...new Set(ports)].sort((a, b) => a - b);
+}
+
 function safeChildEnvironment(source: NodeJS.ProcessEnv = process.env, overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const safe: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
@@ -954,7 +969,116 @@ function requiredSessionId(value: unknown): string {
   return sessionId;
 }
 
-async function terminateProcessTree(child: ChildProcess, pid: number, signal?: AbortSignal): Promise<void> {
+async function waitForProcessInstance(
+  pid: number,
+  signal?: AbortSignal,
+  waitMs = 2_000
+): Promise<ProcessInstanceIdentity | null> {
+  const deadline = performance.now() + waitMs;
+  while (performance.now() < deadline) {
+    if (signal?.aborted) {
+      throw new OperatorError('EXECUTION_ABORTED', 'Process identity establishment was cancelled.');
+    }
+    const identity = await inspectProcessInstance(pid);
+    if (identity) return identity;
+    if (!processAlive(pid)) return null;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return await inspectProcessInstance(pid);
+}
+
+async function terminateOwnedProcessInstance(
+  identity: ProcessInstanceIdentity
+): Promise<void> {
+  const liveBefore = await inspectProcessInstance(identity.pid);
+  if (!sameProcessInstance(identity, liveBefore)) return;
+
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const killer = spawn(taskkill, ['/PID', String(identity.pid), '/T', '/F'], {
+        shell: false,
+        windowsHide: true,
+        stdio: 'ignore',
+        env: safeChildEnvironment(process.env)
+      });
+      killer.once('error', reject);
+      killer.once('close', resolve);
+    });
+    const liveAfter = await inspectProcessInstance(identity.pid);
+    if (exitCode !== 0 && sameProcessInstance(identity, liveAfter)) {
+      throw new OperatorError(
+        'PROCESS_TREE_TERMINATION_FAILED',
+        'taskkill failed while the exact owned process instance remained alive.',
+        { details: { sideEffectState: 'uncertain' } }
+      );
+    }
+    await waitForProcessInstanceExit(identity);
+    return;
+  }
+
+  const sendGroup = (signal: NodeJS.Signals) => {
+    try {
+      process.kill(-identity.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  };
+
+  sendGroup('SIGTERM');
+  try {
+    await waitForProcessGroupExit(identity.pid, 1_000);
+  } catch {
+    const live = await inspectProcessInstance(identity.pid);
+    if (sameProcessInstance(identity, live)) sendGroup('SIGKILL');
+    await waitForProcessGroupExit(identity.pid, 5_000);
+  }
+  await waitForProcessInstanceExit(identity);
+}
+
+async function waitForProcessInstanceExit(
+  identity: ProcessInstanceIdentity,
+  waitMs = 5_000
+): Promise<void> {
+  const deadline = performance.now() + waitMs;
+  while (sameProcessInstance(identity, await inspectProcessInstance(identity.pid))) {
+    if (performance.now() >= deadline) {
+      throw new OperatorError(
+        'PROCESS_TERMINATE_POSTCONDITION_FAILED',
+        'Exact owned process instance remained alive after termination.',
+        { details: { sideEffectState: 'uncertain' } }
+      );
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, waitMs: number): Promise<void> {
+  const deadline = performance.now() + waitMs;
+  while (processGroupAlive(pid)) {
+    if (performance.now() >= deadline) {
+      throw new OperatorError(
+        'PROCESS_TERMINATE_POSTCONDITION_FAILED',
+        'Owned process group remained alive after termination.',
+        { details: { sideEffectState: 'uncertain' } }
+      );
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function processGroupAlive(pid: number): boolean {
+  if (process.platform === 'win32') return processAlive(pid);
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+async function terminateProcessTree(child: ChildProcess, pid: number, signal?: AbortSignal, ownsProcessGroup = false): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Owned process PID is invalid.', { details: { sideEffectState: 'uncertain' } });
   if (process.platform === 'win32') {
     const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
@@ -968,11 +1092,22 @@ async function terminateProcessTree(child: ChildProcess, pid: number, signal?: A
     await waitForPidExit(pid, signal);
     return;
   }
-  try { child.kill('SIGTERM'); } catch {}
-  try { await waitForPidExit(pid, signal, 1_000); }
-  catch {
-    try { child.kill('SIGKILL'); } catch {}
-    await waitForPidExit(pid, signal);
+  const send = (terminationSignal: NodeJS.Signals) => {
+    try {
+      if (ownsProcessGroup) process.kill(-pid, terminationSignal);
+      else child.kill(terminationSignal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  };
+  send('SIGTERM');
+  try {
+    if (ownsProcessGroup) await waitForProcessGroupExit(pid, 1_000);
+    else await waitForPidExit(pid, signal, 1_000);
+  } catch {
+    send('SIGKILL');
+    if (ownsProcessGroup) await waitForProcessGroupExit(pid, 5_000);
+    else await waitForPidExit(pid, signal);
   }
 }
 
