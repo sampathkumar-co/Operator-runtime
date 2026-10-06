@@ -1,10 +1,10 @@
 # R3 Developer Workstation OS Certification
 
-Status: **IMPLEMENTED_NOT_CERTIFIED**
+Status: **CERTIFIED**
 
-Branch: `program/r3-final-closeout`
+Branch: `program/r1-r3-closeout-20261006`
 
-This document is the release-evidence ledger for R3. Documentation is not proof by itself. R3 may move to **CERTIFIED** only when the exact closeout head passes the repository qualification lanes and the exit-gate test below.
+This document is the release-evidence ledger for R3. Certification subject: `9f55093d1e8c93fe9b51db0251c4184c2ede4c9a`. Documentation is not proof by itself; the workflow results recorded below are the qualification proof.
 
 ## R3-DEV-01 — Workspace Graph
 
@@ -147,14 +147,15 @@ No skipped/failed mandatory lane may be represented as certification.
 
 ## Certification record
 
-Head: pending
+Head: `9f55093d1e8c93fe9b51db0251c4184c2ede4c9a`
 
 Qualification:
-- CI: pending
-- Platform Matrix: pending
-- Windows Signing Smoke: pending
-- NPM Remote Runtime CI: pending
-- Adaptive Intelligence Core: inherited roadmap qualification; final integrated roadmap head must re-run
-- Verified Plan Runtime: inherited roadmap qualification; final integrated roadmap head must re-run
+- CI: **success** — run `37495183741`
+- Platform Matrix: **success** on Ubuntu, macOS and Windows — run `37495183707`
+- Windows Signing Smoke: **success** — run `37495183772`
+- NPM Remote Runtime CI: **success** — run `37495183802`
+- Adaptive Intelligence Core: **success** — R2 run `37495183718`
+- Verified Plan Runtime: **success** — R2 run `37495183718`
+- R1 canonical source/type/evidence qualification: **success** — run `37495183715`
 
-R3 remains **IMPLEMENTED_NOT_CERTIFIED** until this section is updated from actual workflow results.
+The R3 end-to-end developer-objective exit test is included in the green core/runtime qualification. R3 is **CERTIFIED** for the subject head above.
