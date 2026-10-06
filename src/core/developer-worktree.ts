@@ -470,8 +470,7 @@ export class DeveloperWorktreeManager {
   }
 
   #recordPath(sessionId: string): string {
-    const key = sha256(Buffer.from(sessionId, 'utf8'));
-    return path.join(this.#stateDir, 'developer-worktrees', key + '.json');
+    return developerWorktreeRecordPath(this.#stateDir, sessionId);
   }
 
   async #readRecord(sessionId: string): Promise<DeveloperWorktreeRecord | undefined> {
@@ -534,6 +533,12 @@ export class DeveloperWorktreeManager {
       release();
     }
   }
+}
+
+export function developerWorktreeRecordPath(stateDir: string, sessionIdInput: string): string {
+  const sessionId = normalizeSessionId(sessionIdInput);
+  const key = sha256(Buffer.from(sessionId, 'utf8'));
+  return path.join(path.resolve(stateDir), 'developer-worktrees', key + '.json');
 }
 
 function validateRecord(
