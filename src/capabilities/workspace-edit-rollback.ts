@@ -151,6 +151,7 @@ export class WorkspaceEditRollbackProvider implements CapabilityProvider {
 
   async #executeSerial(action: ActionRequest, context: CapabilityExecutionContext): Promise<ActionResult> {
     const started = performance.now();
+    let dispatched = false;
     try {
       if (action.risk !== 'destructive') {
         throw new OperatorError(
@@ -180,6 +181,7 @@ export class WorkspaceEditRollbackProvider implements CapabilityProvider {
       await this.#writeJournal(prepared);
       const applying = { ...prepared, phase: 'APPLYING' as const, updatedAt: this.#now() };
       await this.#writeJournal(applying);
+      dispatched = true;
       await this.#resumeApply(applying, parsed.payload, context);
       const cleanup = { ...applying, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
       await this.#writeJournal(cleanup);
@@ -198,12 +200,12 @@ export class WorkspaceEditRollbackProvider implements CapabilityProvider {
           code: op.code,
           message: op.message,
           retryable: op.retryable,
-          sideEffectState:
+          sideEffectState: dispatched ||
             op.code === 'WORKSPACE_EDIT_ROLLBACK_RECONCILIATION_REQUIRED' ||
             op.code === 'WORKSPACE_EDIT_ROLLBACK_AMBIGUOUS'
               ? 'uncertain'
               : 'none',
-          executionPhase:
+          executionPhase: dispatched ||
             op.code === 'WORKSPACE_EDIT_ROLLBACK_RECONCILIATION_REQUIRED' ||
             op.code === 'WORKSPACE_EDIT_ROLLBACK_AMBIGUOUS'
               ? 'effect_observed'
@@ -504,6 +506,8 @@ export class WorkspaceEditRollbackProvider implements CapabilityProvider {
       };
     }
 
+    assertRollbackStatesRecoverable(states);
+
     try {
       await this.#resumeApply(journal, parsed.payload, {});
       const cleanup = { ...journal, phase: 'COMMITTED_CLEANUP' as const, updatedAt: this.#now() };
@@ -704,6 +708,48 @@ function assertJournalMatches(
       'WORKSPACE_EDIT_ROLLBACK_ACTION_REUSE_INVALID',
       'Rollback action id is already bound to different immutable rollback intent.'
     );
+  }
+}
+
+function assertRollbackStatesRecoverable(
+  states: Array<{
+    file: RollbackFileRecord;
+    target: PathState;
+    temp: PathState;
+    discard: PathState;
+  }>
+): void {
+  for (const item of states) {
+    const { file, target, temp, discard } = item;
+    const targetBefore = target.kind === 'regular' && target.sha256 === file.beforeSha256;
+    const targetAfter = target.kind === 'regular' && target.sha256 === file.afterSha256;
+    const tempBefore = temp.kind === 'regular' && temp.sha256 === file.beforeSha256;
+    const discardAfter = discard.kind === 'regular' && discard.sha256 === file.afterSha256;
+
+    const recoverable =
+      (
+        targetBefore &&
+        (temp.kind === 'missing' || tempBefore) &&
+        (discard.kind === 'missing' || discardAfter)
+      ) ||
+      (
+        targetAfter &&
+        tempBefore &&
+        discard.kind === 'missing'
+      ) ||
+      (
+        target.kind === 'missing' &&
+        discardAfter &&
+        (temp.kind === 'missing' || tempBefore)
+      );
+
+    if (!recoverable) {
+      throw new OperatorError(
+        'WORKSPACE_EDIT_ROLLBACK_AMBIGUOUS',
+        'Rollback journal contains a file state that cannot be resumed without overwriting unknown bytes.',
+        { details: { path: file.path } }
+      );
+    }
   }
 }
 
