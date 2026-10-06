@@ -31,6 +31,7 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'workspace-code-index', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'multi-file-edit-plan', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'workspace-edit-transaction', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'lsp-workspace-edit', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'action-request', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'evidence', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' }
 ] satisfies readonly ContractRegistration[]);
