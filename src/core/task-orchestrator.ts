@@ -31,7 +31,9 @@ import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
 import type {
   AppPhysicalFallback,
   AtomicSemanticTaskGoal,
+  AutonomousTaskAction,
   AutonomousTaskStep,
+  PhysicalInputTaskOperation,
   PlannerDecision,
   PostgresTaskFilter,
   PostgresTaskOrder,
@@ -47,7 +49,8 @@ import type {
   TaskPlanningInfluenceProvider,
   TaskRunAuthorization,
   UiaTaskOperation,
-  UiaTaskSelector
+  UiaTaskSelector,
+  VisualTaskSelector
 } from './task-orchestrator-contracts.ts';
 export type {
   AppPhysicalFallback,
