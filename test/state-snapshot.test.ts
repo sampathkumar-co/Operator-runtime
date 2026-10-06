@@ -8,6 +8,7 @@ import { StateSnapshotManager, currentSnapshotCatalogDigest, recoverPendingSnaps
 import { runOfflineStateSnapshot } from '../apps/local-agent/src/state-maintenance.ts';
 import { acquireLocalAgentStateInstanceLock } from '../apps/local-agent/src/state-instance-lock.ts';
 import { EnterprisePolicyStore } from '../src/core/enterprise-policy.ts';
+import { AuditLog } from '../src/core/audit.ts';
 
 async function temp(t: test.TestContext, prefix: string): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -131,6 +132,26 @@ test('snapshot restore cannot cross an A-B-A enterprise policy generation', asyn
     (error: any) => error?.code === 'SNAPSHOT_AUTHORITY_STALE'
   );
   assert.equal((await new EnterprisePolicyStore(state).inspect()).generation, 3);
+});
+
+test('snapshot restore cannot lower audit freshness and never snapshots its monotonic anchor', async (t) => {
+  const state = await temp(t, 'operator-snapshot-audit-state-');
+  const snapshots = await temp(t, 'operator-snapshot-audit-output-');
+  const authenticator = testAuthenticator();
+  const audit = new AuditLog(state, { authenticator });
+  await audit.append({ capability: 'audit.one', result: 'success', risk: 'read' });
+  const manager = new StateSnapshotManager(state, snapshots, { authenticator });
+  const manifest = await manager.create({ epoch: 'audit-generation-one', withQuiescence: quiescent });
+  assert.equal(manifest.stores.some((store) => store.id === 'audit-freshness'), false);
+
+  await audit.append({ capability: 'audit.two', result: 'success', risk: 'read' });
+  await assert.rejects(
+    manager.restore({ epoch: 'audit-generation-one', withQuiescence: quiescent }),
+    (error: any) => error?.code === 'SNAPSHOT_AUTHORITY_STALE'
+  );
+  const freshness = JSON.parse(await fs.readFile(path.join(state, 'audit-freshness.json'), 'utf8'));
+  assert.equal(freshness.generation, 2);
+  assert.equal((await new AuditLog(state, { authenticator }).verifyIntegrity()).count, 2);
 });
 
 test('snapshot manifest remains tamper-evident when an attacker recomputes the public digest', async (t) => {

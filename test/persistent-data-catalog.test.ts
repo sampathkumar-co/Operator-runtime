@@ -8,7 +8,7 @@ test('persistent data catalog is unique and covers execution, learning, identity
   assert.doesNotThrow(() => validatePersistentDataCatalog());
   const ids = new Set(PERSISTENT_DATA_CATALOG.map((item) => item.id));
   for (const required of [
-    'audit-active', 'relay-session-credential', 'action-journal', 'action-results', 'sagas', 'compensation',
+    'audit-active', 'audit-freshness', 'relay-session-credential', 'action-journal', 'action-results', 'sagas', 'compensation',
     'intent-registry', 'world-model', 'procedure-memory', 'studio-teach', 'team-missions', 'evaluations',
     'approvals', 'device-identity', 'device-registry'
   ]) assert.ok(ids.has(required), required);
@@ -18,6 +18,9 @@ test('persistent data catalog is unique and covers execution, learning, identity
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.lifecycle.corruptionBehavior.includes('fail closed')));
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.lifecycle.restartBehavior.length > 20));
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.restore.length > 0));
+  const auditFreshness = PERSISTENT_DATA_CATALOG.find((item) => item.id === 'audit-freshness')!;
+  assert.equal(auditFreshness.restore, 'never');
+  assert.notEqual(auditFreshness.backup, 'include');
 });
 
 test('source-declared durable store locations are automatically covered by the authoritative catalog', async () => {
@@ -29,7 +32,7 @@ test('source-declared durable store locations are automatically covered by the a
   const discovered = new Set<string>();
   for (const file of files) {
     const source = await fs.readFile(file, 'utf8');
-    for (const match of source.matchAll(/this\.#(?:file|stateFile|journalFile|resultDir|segmentDir|workflowDir|dir|leaseDir|lockDir|lockFile|outbox)\s*=\s*path\.join\([^;\n]*?['"]([^'"]+)['"]/g)) {
+    for (const match of source.matchAll(/this\.#(?:file|stateFile|freshnessFile|journalFile|resultDir|segmentDir|workflowDir|dir|leaseDir|lockDir|lockFile|outbox)\s*=\s*path\.join\([^;\n]*?['"]([^'"]+)['"]/g)) {
       discovered.add(match[1]!);
     }
     for (const match of source.matchAll(/(?:lockPath|relayTokenFile)\s*=\s*(?:path\.resolve\([^\n]*?)?path\.join\([^;\n]*?['"]([^'"]+)['"]/g)) {
