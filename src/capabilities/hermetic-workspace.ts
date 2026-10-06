@@ -149,6 +149,7 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
         const op = error instanceof OperatorError
           ? error
           : new OperatorError('HERMETIC_WORKSPACE_ERROR', error instanceof Error ? error.message : String(error));
+        const sideEffectState = hermeticFailureSideEffect(action.capability, op.code);
         return {
           ok: false,
           capability: action.capability,
@@ -158,8 +159,8 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
             code: op.code,
             message: op.message,
             retryable: op.retryable,
-            sideEffectState: action.capability === 'workspace.hermetic.inspect' ? 'none' : 'uncertain',
-            executionPhase: 'pre_dispatch'
+            sideEffectState,
+            executionPhase: sideEffectState === 'none' ? 'pre_dispatch' : 'dispatched'
           },
           durationMs: Math.round(performance.now() - started)
         };
@@ -384,11 +385,16 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
       throw new OperatorError('HERMETIC_WORKSPACE_RISK_MISMATCH', 'Release requires destructive risk.');
     }
     const sessionId = sessionIdFrom(action);
+    const sourceInput = requiredString(action.input.sourceRoot, 'sourceRoot');
     const expectedManifestId = digestField(action.input.expectedManifestId, 'expectedManifestId');
     const record = await this.#readRecord(sessionId);
     if (!record) throw new OperatorError('HERMETIC_WORKSPACE_NOT_FOUND', 'Hermetic workspace session was not found.');
     if (record.manifest.id !== expectedManifestId) {
       throw new OperatorError('HERMETIC_WORKSPACE_MANIFEST_CHANGED', 'Release precondition does not match current manifest.');
+    }
+    const sourceRoot = await this.#resolveSourceRoot(sourceInput);
+    if (canonicalPath(sourceRoot) !== canonicalPath(record.manifest.sourceRoot)) {
+      throw new OperatorError('HERMETIC_WORKSPACE_SOURCE_CHANGED', 'Release sourceRoot does not match the durable workspace manifest.');
     }
     if (record.state === 'RELEASED') return workspaceSuccess(action, record.manifest, 'release', started, true);
 
@@ -493,6 +499,31 @@ export class HermeticWorkspaceProvider implements CapabilityProvider {
       release();
     }
   }
+}
+
+function hermeticFailureSideEffect(
+  capability: string,
+  code: string
+): 'none' | 'uncertain' {
+  if (capability === 'workspace.hermetic.inspect') return 'none';
+  const preflight = new Set([
+    'HERMETIC_WORKSPACE_RISK_MISMATCH',
+    'HERMETIC_WORKSPACE_SESSION_INVALID',
+    'HERMETIC_WORKSPACE_INPUT_INVALID',
+    'HERMETIC_WORKSPACE_REVISION_INVALID',
+    'HERMETIC_WORKSPACE_SESSION_CONFLICT',
+    'HERMETIC_WORKSPACE_HEAD_CHANGED',
+    'HERMETIC_WORKSPACE_ROOT_OVERLAP',
+    'HERMETIC_WORKSPACE_OWNED_ROOT_UNSAFE',
+    'HERMETIC_WORKSPACE_SOURCE_INVALID',
+    'HERMETIC_WORKSPACE_SOURCE_NOT_ROOT',
+    'HERMETIC_WORKSPACE_DESTINATION_EXISTS',
+    'HERMETIC_WORKSPACE_CONTENT_FILTER_DENIED',
+    'HERMETIC_WORKSPACE_NOT_FOUND',
+    'HERMETIC_WORKSPACE_MANIFEST_CHANGED',
+    'HERMETIC_WORKSPACE_SOURCE_CHANGED'
+  ]);
+  return preflight.has(code) ? 'none' : 'uncertain';
 }
 
 function createManifest(input: Omit<HermeticWorkspaceManifest, 'schemaVersion' | 'id'>): HermeticWorkspaceManifest {
