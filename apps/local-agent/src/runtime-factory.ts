@@ -65,7 +65,8 @@ export function createRuntime(config: {
     .register(new ProcessProvider({
       allowedRoots: config.allowedRoots,
       allowedExecutables: config.terminalAllowedExecutables ?? [],
-      requiredRisk: 'destructive'
+      requiredRisk: 'destructive',
+      stateDir: config.stateDir
     }))
     .register(new ManagedBrowserProvider({
       endpoint: config.cdpEndpoint,
