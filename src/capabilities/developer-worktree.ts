@@ -3,7 +3,9 @@ import type {
   ActionRequest,
   ActionResult,
   CapabilityProvider,
-  CapabilityScore
+  CapabilityScore,
+  ProviderReconciliationRequest,
+  ProviderReconciliationResult
 } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
@@ -66,6 +68,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();
+    let mutationDispatched = false;
     try {
       const sessionId = boundedId(action.input.sessionId, 'sessionId');
       const repositoryRootInput = boundedPath(action.input.repositoryRoot, 'repositoryRoot');
@@ -86,6 +89,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           );
         }
         const baseCommit = boundedCommit(action.input.baseCommit);
+        mutationDispatched = true;
         const created = await this.#manager.create({
           sessionId,
           repositoryRoot: repositoryRootInput,
@@ -127,6 +131,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           action.input.expectedFingerprint,
           'expectedFingerprint'
         );
+        mutationDispatched = true;
         const released = await this.#manager.release({
           sessionId,
           expectedFingerprint
@@ -157,11 +162,172 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
         error: {
           code: op.code,
           message: op.message,
-          retryable: op.retryable,
-          sideEffectState: 'none',
-          executionPhase: 'pre_dispatch'
+          retryable: mutationDispatched ? false : op.retryable,
+          sideEffectState: mutationDispatched ? 'uncertain' : 'none',
+          executionPhase: mutationDispatched ? 'dispatched' : 'pre_dispatch'
         },
         durationMs: Math.round(performance.now() - started)
+      };
+    }
+  }
+
+  async reconcile(
+    request: ProviderReconciliationRequest
+  ): Promise<ProviderReconciliationResult> {
+    const action = request.action;
+    if (!this.supports(action)) {
+      return {
+        status: 'uncertain',
+        evidence: [
+          evidence(
+            'developer_worktree_reconciliation',
+            'info',
+            'Unsupported Developer Worktree capability cannot be reconciled by this provider.'
+          )
+        ]
+      };
+    }
+
+    try {
+      const sessionId = boundedId(action.input.sessionId, 'sessionId');
+      const repositoryRoot = boundedPath(action.input.repositoryRoot, 'repositoryRoot');
+      const inspected = await this.#manager.inspect(sessionId);
+      assertRepositoryMatch(inspected, repositoryRoot);
+
+      if (action.capability === 'developer.worktree.create') {
+        if (inspected.record.phase === 'ACTIVE' && inspected.exists) {
+          const session = await this.#optionalSession(sessionId);
+          const result = ok(action, 0, inspected, {
+            operation: 'create',
+            reconciled: true,
+            ...(session ? { sessionStatus: session.status } : { sessionStatus: 'MISSING' })
+          });
+          return {
+            status: 'completed',
+            result,
+            evidence: [
+              evidence(
+                'developer_worktree_reconciliation',
+                'pass',
+                'Developer Worktree creation is proven complete from the durable ownership record and exact Git worktree identity.',
+                { sessionId, phase: inspected.record.phase }
+              )
+            ]
+          };
+        }
+        if (inspected.record.phase === 'CREATING' && !inspected.exists) {
+          return {
+            status: 'not_applied',
+            evidence: [
+              evidence(
+                'developer_worktree_reconciliation',
+                'pass',
+                'Creation journal exists but no owned Git worktree exists or is registered.',
+                { sessionId }
+              )
+            ]
+          };
+        }
+      }
+
+      if (action.capability === 'developer.worktree.release') {
+        if (inspected.record.phase === 'RELEASED' && !inspected.exists) {
+          const session = await this.#optionalSession(sessionId);
+          const result = ok(action, 0, inspected, {
+            operation: 'release',
+            reconciled: true,
+            ...(session ? { sessionStatus: session.status } : { sessionStatus: 'MISSING' })
+          });
+          return {
+            status: 'completed',
+            result,
+            evidence: [
+              evidence(
+                'developer_worktree_reconciliation',
+                'pass',
+                'Developer Worktree release is proven complete: the owned path and Git registration are absent.',
+                { sessionId }
+              )
+            ]
+          };
+        }
+        if (inspected.exists) {
+          return {
+            status: 'not_applied',
+            evidence: [
+              evidence(
+                'developer_worktree_reconciliation',
+                'info',
+                'The owned Developer Worktree still exists, so release has not completed.',
+                { sessionId, phase: inspected.record.phase }
+              )
+            ]
+          };
+        }
+      }
+
+      if (action.capability === 'developer.worktree.inspect') {
+        const session = await this.#optionalSession(sessionId);
+        const result = ok(action, 0, inspected, {
+          operation: 'inspect',
+          reconciled: true,
+          ...(session ? { sessionStatus: session.status } : { sessionStatus: 'MISSING' })
+        });
+        return {
+          status: 'completed',
+          result,
+          evidence: [
+            evidence(
+              'developer_worktree_reconciliation',
+              'pass',
+              'Read-only Developer Worktree inspection was re-established from current state.',
+              { sessionId }
+            )
+          ]
+        };
+      }
+
+      return {
+        status: 'uncertain',
+        evidence: [
+          evidence(
+            'developer_worktree_reconciliation',
+            'info',
+            'Developer Worktree state does not prove the requested lifecycle transition.',
+            { sessionId, phase: inspected.record.phase, exists: inspected.exists }
+          )
+        ]
+      };
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'DEVELOPER_WORKTREE_NOT_FOUND') {
+        return {
+          status: action.capability === 'developer.worktree.create' ? 'not_applied' : 'uncertain',
+          evidence: [
+            evidence(
+              'developer_worktree_reconciliation',
+              'info',
+              action.capability === 'developer.worktree.create'
+                ? 'No ownership journal exists, proving creation did not reach the journal-before-mutation boundary.'
+                : 'No ownership journal exists for this Developer Worktree lifecycle request.',
+              { code: error.code }
+            )
+          ]
+        };
+      }
+      return {
+        status: 'uncertain',
+        evidence: [
+          evidence(
+            'developer_worktree_reconciliation',
+            'info',
+            'Developer Worktree lifecycle state could not be reconciled safely.',
+            {
+              code: error instanceof OperatorError
+                ? error.code
+                : 'DEVELOPER_WORKTREE_RECONCILIATION_FAILED'
+            }
+          )
+        ]
       };
     }
   }
