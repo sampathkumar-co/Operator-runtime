@@ -289,7 +289,8 @@ export class DeveloperContainerManager {
           { retryable: true }
         );
       }
-      if (!record.containerId) throw corrupt('Owned container id is missing.');
+      const containerId = record.containerId;
+      if (!containerId) throw corrupt('Owned container id is missing.');
 
       record = {
         ...record,
@@ -301,12 +302,12 @@ export class DeveloperContainerManager {
       const context = await localDockerContext(this.#runner, input.signal);
       const removed = await this.#run(
         context,
-        ['rm', '--force', record.containerId],
+        ['rm', '--force', containerId],
         60_000,
         input.signal
       );
       if (removed.code !== 0) {
-        const stillThere = await this.#tryInspect(context, record.containerId, input.signal);
+        const stillThere = await this.#tryInspect(context, containerId, input.signal);
         if (stillThere) {
           throw new OperatorError(
             'DEVELOPER_CONTAINER_RELEASE_FAILED',
@@ -316,7 +317,7 @@ export class DeveloperContainerManager {
         }
       }
 
-      if (await this.#tryInspect(context, record.containerId, input.signal)) {
+      if (await this.#tryInspect(context, containerId, input.signal)) {
         throw new OperatorError(
           'DEVELOPER_CONTAINER_RELEASE_POSTCONDITION_FAILED',
           'Owned container still exists after docker rm --force.'
