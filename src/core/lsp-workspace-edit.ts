@@ -343,13 +343,6 @@ async function resolveDocumentUri(
   } catch {
     throw invalid('LSP document URI is not a valid file URI.', { uri });
   }
-  if (!inside(lexical, workspaceRoot)) {
-    throw new OperatorError(
-      'LSP_DOCUMENT_OUTSIDE_WORKSPACE',
-      'LSP WorkspaceEdit targets a file outside workspaceRoot.',
-      { details: { uri } }
-    );
-  }
   const stat = await fs.lstat(lexical);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
     throw new OperatorError(
