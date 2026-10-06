@@ -44,13 +44,5 @@
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",
-  "workspaces": [
-    "apps/mcp-server",
-    "apps/relay-server",
-    "deploy/auth-portal",
-    "packages/adaptive-intelligence",
-    "packages/mecord-connect",
-    "packages/operator-runtime-cli",
-    "packages/verified-plan-runtime"
-  ]
+  "mecordWorkspaceLayout": "./workspace-layout.json"
 }
