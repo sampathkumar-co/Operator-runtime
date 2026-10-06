@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import { ProcessProvider } from '../src/capabilities/process.ts';
 import {
   createDeveloperSession,
@@ -12,7 +13,7 @@ import {
 import { resourceKeysForAction } from '../src/core/resource-identity.ts';
 import type { ActionRequest } from '../src/core/types.ts';
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: TestContext) {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-dev-process-'));
   t.after(async () => fs.rm(parent, { recursive: true, force: true }));
   const root = path.join(parent, 'workspace');
@@ -47,8 +48,6 @@ function sessionAction(
     provenance: { kind: 'runtime' }
   };
 }
-
-import crypto from 'node:crypto';
 
 test('Developer Session process survives provider restart as detached durable ownership and can be terminated exactly', async (t) => {
   const fx = await fixture(t);
