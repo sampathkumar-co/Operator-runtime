@@ -64,8 +64,8 @@ const terminalAllowedExecutables = (process.env.OPERATOR_TERMINAL_ALLOWED_EXECUT
   .map((item) => item.trim())
   .filter(Boolean);
 
-const token = process.env.OPERATOR_AGENT_TOKEN;
-if (!token || token.length < 32) {
+const token = process.env.OPERATOR_AGENT_TOKEN ?? '';
+if (token.length < 32) {
   console.error('[operator] OPERATOR_AGENT_TOKEN must be set to a secret of at least 32 characters.');
   process.exit(2);
 }
