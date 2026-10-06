@@ -1,10 +1,12 @@
 # R1 Canonical Trusted Runtime Certification
 
-Status: **IMPLEMENTED_NOT_CERTIFIED**
+Status: **CERTIFIED**
 
 Branch: `program/r1-r3-closeout-20261006`
 
-R1 is implemented. It moves to **CERTIFIED** only when the exact closeout head passes the mandatory R1 and repository qualification lanes.
+Certification subject: `9f55093d1e8c93fe9b51db0251c4184c2ede4c9a`.
+
+R1 is **CERTIFIED** for that source head. The certification ledger commit may follow the subject head; it does not alter runtime source.
 
 ## R1-FND-01 — Canonical source reconciliation
 
@@ -72,4 +74,14 @@ R1 certification requires:
 - schema compatibility tests: green;
 - rollback/hardening tests: green.
 
-Certification head and workflow results are recorded only after the exact final head completes those gates.
+Certification subject: `9f55093d1e8c93fe9b51db0251c4184c2ede4c9a`
+
+Qualification:
+- R1 Canonical Runtime: **success** — run `37495183715`
+- CI: **success** — run `37495183741`
+- Platform Matrix (Ubuntu/macOS/Windows): **success** — run `37495183707`
+- Windows Signing Smoke: **success** — run `37495183772`
+- NPM Remote Runtime CI: **success** — run `37495183802`
+- R2 Adaptive Planning Runtime integration dependencies: **success** — run `37495183718`
+
+The scheduled nightly/fault R1 job is intentionally not a push-time mandatory lane; its push run is recorded as skipped by design.
