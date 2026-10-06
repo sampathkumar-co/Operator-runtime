@@ -1,5 +1,5 @@
 import { OperatorRuntime } from '../../../src/core/runtime.ts';
-import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider, WorkspaceEditTransactionProvider } from '../../../src/capabilities/index.ts';
+import { FilesystemProvider, GitProvider, GitCheckpointProvider, GitWriteProvider, ProcessProvider, ProjectInspectProvider, ProjectCommandProvider, ProjectTransactionProvider, DockerProvider, PostgresProvider, VsCodeProvider, SystemInspectProvider, ManagedBrowserProvider, WindowsUiaProvider, SandboxedComputeProvider, PerceptionProvider, WorkspaceEditTransactionProvider, VerifiedWorkspaceEditProvider } from '../../../src/capabilities/index.ts';
 import { ProviderLearningStore } from '../../../src/core/provider-learning.ts';
 import type { PerceptionGraphStore } from '../../../src/core/perception-graph.ts';
 
@@ -73,11 +73,20 @@ export function createRuntime(config: {
       executablePath: config.browserPath,
       dataDir: config.browserDataDir
     }));
-  if (config.stateDir) runtime.register(new WorkspaceEditTransactionProvider({
-    allowedRoots: config.allowedRoots,
-    stateDir: config.stateDir,
-    windowsPathLeaseExecutable: config.windowsPathLeasePath
-  }));
+  if (config.stateDir) {
+    runtime.register(new WorkspaceEditTransactionProvider({
+      allowedRoots: config.allowedRoots,
+      stateDir: config.stateDir,
+      windowsPathLeaseExecutable: config.windowsPathLeasePath
+    }));
+    runtime.register(new VerifiedWorkspaceEditProvider({
+      allowedRoots: config.allowedRoots,
+      allowedExecutables: config.allowedExecutables,
+      stateDir: config.stateDir,
+      registryPath: config.projectCommandRegistryPath,
+      windowsPathLeaseExecutable: config.windowsPathLeasePath
+    }));
+  }
   if (config.perception) runtime.register(new PerceptionProvider(config.perception));
   return runtime.register(new WindowsUiaProvider({ binaryPath: config.windowsUiaPath }));
 }
