@@ -606,6 +606,60 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedRisk
   }, path));
 
+  server.registerTool('workspace.hermetic', {
+    title: 'Manage exact-commit hermetic workspace',
+    description: 'Provision a Mecord-owned detached Git worktree at an exact source commit, inspect its immutable commit and dependency-lock manifest, or release it with an exact manifest precondition. Repository-local content filters are denied before checkout.',
+    inputSchema: z.object({
+      operation: z.enum(['provision', 'inspect', 'release']),
+      sessionId: z.string().regex(/^[A-Za-z0-9._:@-]{1,256}$/),
+      sourceRoot: z.string().min(1).max(4096).optional(),
+      expectedHead: z.string().regex(/^[0-9a-f]{40,64}$/i).optional(),
+      expectedManifestId: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ operation, sessionId, sourceRoot, expectedHead, expectedManifestId }) => {
+    if (operation === 'provision') {
+      if (!sourceRoot || !expectedHead) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'workspace.hermetic provision requires sourceRoot and expectedHead.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'workspace.hermetic.provision',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'HERMETIC_WORKSPACE_INPUT_REQUIRED', message: 'sourceRoot and expectedHead are required.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      return invoke('workspace.hermetic.provision', 'write', { sourceRoot, sessionId, expectedHead }, sourceRoot);
+    }
+    if (operation === 'inspect') {
+      return invoke('workspace.hermetic.inspect', 'read', { sessionId }, 'workspace-session:' + sessionId);
+    }
+    if (!sourceRoot || !expectedManifestId) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.hermetic release requires sourceRoot and expectedManifestId.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.hermetic.release',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'HERMETIC_WORKSPACE_INPUT_REQUIRED', message: 'sourceRoot and expectedManifestId are required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke(
+      'workspace.hermetic.release',
+      'destructive',
+      { sourceRoot, sessionId, expectedManifestId },
+      sourceRoot
+    );
+  });
+
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
