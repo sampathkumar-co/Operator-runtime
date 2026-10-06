@@ -11,7 +11,7 @@
     "test:red-team": "node --experimental-strip-types scripts/run-test-suite.ts security",
     "test:performance": "node --experimental-strip-types scripts/run-test-suite.ts performance",
     "verify:release-checkout": "node scripts/verify-release-checkout.mjs",
-    "check": "node --experimental-strip-types scripts/check.ts && npm test",
+    "check": "node --experimental-strip-types scripts/check.ts && npm run verify:release-truth && npm test",
     "dev:agent": "node --experimental-strip-types apps/local-agent/src/main.ts",
     "state:snapshot": "node --experimental-strip-types apps/local-agent/src/state-maintenance.ts",
     "test:stage3": "node --experimental-strip-types scripts/run-test-suite.ts test/task-stage3.test.ts test/task-orchestrator.test.ts test/windows-uia.test.ts test/companion-api.test.ts",
@@ -35,7 +35,8 @@
     "test:stage18": "node --experimental-strip-types scripts/run-test-suite.ts test/evaluation.test.ts",
     "test:stage19": "node --experimental-strip-types scripts/run-test-suite.ts test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/studio-desired-api.test.ts test/control-center-evolution.test.ts",
     "test:stage20": "node --experimental-strip-types scripts/run-test-suite.ts test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts test/control-center-evolution.test.ts",
-    "test:evolution": "node --experimental-strip-types scripts/run-test-suite.ts test/perception-graph.test.ts test/perception-provider.test.ts test/perception-publication.test.ts test/perception-api.test.ts test/sandboxed-compute.test.ts test/event-runtime.test.ts test/event-ticker.test.ts test/event-api.test.ts test/world-history.test.ts test/semantic-checkpoint.test.ts test/migration-proofs.test.ts test/semantic-migration-api.test.ts test/enterprise-policy.test.ts test/capability-sdk.test.ts test/evaluation.test.ts test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts test/control-center-evolution.test.ts"
+    "test:evolution": "node --experimental-strip-types scripts/run-test-suite.ts test/perception-graph.test.ts test/perception-provider.test.ts test/perception-publication.test.ts test/perception-api.test.ts test/sandboxed-compute.test.ts test/event-runtime.test.ts test/event-ticker.test.ts test/event-api.test.ts test/world-history.test.ts test/semantic-checkpoint.test.ts test/migration-proofs.test.ts test/semantic-migration-api.test.ts test/enterprise-policy.test.ts test/capability-sdk.test.ts test/evaluation.test.ts test/studio-teach.test.ts test/studio-executor.test.ts test/studio-executor-api.test.ts test/desired-state.test.ts test/desired-state-reconciler.test.ts test/studio-desired-api.test.ts test/control-center-evolution.test.ts",
+    "verify:release-truth": "node --experimental-strip-types scripts/verify-release-truth.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT."
