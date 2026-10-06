@@ -61,8 +61,8 @@ test('LSP WorkspaceEdit resolves UTF-16 ranges into immutable SHA-bound multi-fi
           textDocument: { uri: utilUri, version: 7 },
           edits: [{
             range: {
-              start: { line: 1, character: 34 },
-              end: { line: 1, character: 35 }
+              start: { line: 1, character: 33 },
+              end: { line: 1, character: 34 }
             },
             newText: '2'
           }]
