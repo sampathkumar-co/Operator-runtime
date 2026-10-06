@@ -47,3 +47,4 @@ export * from './distributed-placement.ts';
 export * from './autonomous-objective-certification.ts';
 export * from './workspace-code-index.ts';
 export * from './multi-file-edit-plan.ts';
+export * from './developer-worktree.ts';
