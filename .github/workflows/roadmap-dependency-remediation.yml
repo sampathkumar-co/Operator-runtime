@@ -21,7 +21,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
-          cache: false
 
       - name: Regenerate dependency locks with npm advisory data
         shell: bash
