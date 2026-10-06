@@ -46,6 +46,7 @@ import { IntentRegistry } from '../../../src/core/intent-registry.ts';
 import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
 import { createLocalStateComponents } from './state-components.ts';
+import { LocalRuntimeLifecycle } from './runtime-lifecycle.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -254,39 +255,31 @@ let relayConnectionStatus: Record<string, unknown> = {
   state: relayUrl ? 'STARTING' : 'DISABLED',
   updatedAt: new Date().toISOString()
 };
-let shuttingDown = false;
-let shutdownPromise: Promise<void> | null = null;
-
 function stopRelay(): void {
   relayRunner?.stop();
   relaySessionCredentials?.stop();
 }
 
+const lifecycle = new LocalRuntimeLifecycle({
+  stopRelay,
+  pendingRelay: () => relayRun,
+  stopServices: () => [
+    desiredStateReconciler.stop(),
+    eventTicker.stop(),
+    agent.close(),
+    runtime.close()
+  ],
+  releaseStateLock: () => stateInstanceLock.release(),
+  setExitCode: (code) => { process.exitCode = code; },
+  log: (message) => console.error(message)
+});
+
 async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
-  if (shutdownPromise) return await shutdownPromise;
-  shuttingDown = true;
-  shutdownPromise = (async () => {
-    console.error(`[operator] shutting down (${reason})`);
-    stopRelay();
-    // Fatal relay shutdown is invoked from relayRun's own rejection chain. Do
-    // not make that path wait on itself; signal/launcher shutdown still drains
-    // the independent active relay promise before releasing durable state.
-    const pendingRelay = options.awaitRelay === false ? null : relayRun;
-    await Promise.allSettled([
-      pendingRelay,
-      desiredStateReconciler.stop(),
-      eventTicker.stop(),
-      agent.close(),
-      runtime.close()
-    ].filter(Boolean) as Array<Promise<unknown>>);
-    await stateInstanceLock.release();
-    process.exitCode = exitCode;
-  })();
-  return await shutdownPromise;
+  await lifecycle.shutdown(exitCode, reason, options);
 }
 
 async function failRequiredRelay(error: unknown): Promise<void> {
-  if (!relayRequired || shuttingDown) return;
+  if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
   await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
@@ -294,7 +287,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
 }
 
 function startRelay(): void {
-  if (!relayUrl || shuttingDown || relayRun) return;
+  if (!relayUrl || lifecycle.shuttingDown || relayRun) return;
   const enrollment = new RelayEnrollmentClient({
     relayUrl, resultUrl: relayResultUrl, identity: deviceIdentity,
     allowLoopbackInsecure: relayAllowInsecureLoopback,
@@ -354,7 +347,7 @@ function startRelay(): void {
   const runner = relayRunner;
   relayRun = runner.run()
     .then(async () => {
-      if (relayRequired && !shuttingDown) {
+      if (relayRequired && !lifecycle.shuttingDown) {
         await failRequiredRelay(new OperatorError('RELAY_REQUIRED_STOPPED', 'The required relay connection stopped.'));
       }
     })
@@ -551,7 +544,7 @@ if (relayUrl && emergencyStatus.engaged) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
+    if (lifecycle.shuttingDown) return;
     void shutdownRuntime(0, signal.toLowerCase()).finally(() => process.exit(0));
   });
 }
