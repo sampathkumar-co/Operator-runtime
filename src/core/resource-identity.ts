@@ -32,8 +32,6 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
       keys.add(`developer-worktree:${String(input.sessionId).toLowerCase()}`);
     }
     add('repo', input.repositoryRoot, keys);
-  } else if (action.capability.startsWith('developer.worktree.')) {
-    addPath(input.repositoryRoot);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
     add('workspace', root, keys);
@@ -86,6 +84,8 @@ export async function resolvePhysicalResourceKeysForAction(action: ActionRequest
     addPath(input.path); addPath(input.source); addPath(input.destination);
   } else if (action.capability === 'workspace.edit.resolve_lsp') {
     addPath(input.workspaceRoot);
+  } else if (action.capability.startsWith('developer.worktree.')) {
+    addPath(input.repositoryRoot);
   } else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
     addPath(root);
