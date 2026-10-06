@@ -166,7 +166,7 @@ export class DeveloperWorktreeProvider implements CapabilityProvider {
           sideEffectState: mutationDispatched ? 'uncertain' : 'none',
           executionPhase: mutationDispatched ? 'dispatched' : 'pre_dispatch'
         },
-        durationMs: Math.round(performance.now() - started)
+        durationMs: started === 0 ? 0 : Math.round(performance.now() - started)
       };
     }
   }
