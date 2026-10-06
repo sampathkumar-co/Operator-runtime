@@ -26,6 +26,7 @@ import {
   taskPlanComplete, verifySubgoal, type DurableTaskPlan
 } from './task-plan.ts';
 import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
+import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
 
 export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
 export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
@@ -127,6 +128,31 @@ export interface TaskIntelligenceProvider {
   retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
 }
 
+export interface TaskPlanningInfluence {
+  command: RuntimeAdvisoryCommand;
+  effect: 'SHADOW_ONLY' | 'ADVISORY_ONLY' | 'CONTROL_ALLOWED' | 'CONTROL_BLOCKED';
+  reason: string;
+  proposalDigest?: string;
+  grantsAuthority: false;
+  runtimeVetoRequired: true;
+}
+
+export interface TaskPlanningInfluenceRequest {
+  proposalDigest: string;
+  task: TaskCapsule;
+  goal: SemanticTaskGoal;
+  decision: Extract<PlannerDecision, { type: 'step' }>;
+  risk: ActionRisk;
+  budget: TaskPlannerContext['budget'];
+  recentEvents: TaskPlannerEvent[];
+  intelligence: TaskIntelligenceContext;
+  decisionBudget: TaskDecisionBudget;
+}
+
+export interface TaskPlanningInfluenceProvider {
+  review(request: TaskPlanningInfluenceRequest): Promise<TaskPlanningInfluence | undefined>;
+}
+
 /** Stable semantic observation boundary. A future visual provider can populate the
  * same contract with channel="visual" without changing planner control flow. */
 export interface TaskObservation {
@@ -192,6 +218,7 @@ export class TaskOrchestrator {
   #wallNow: () => number;
   #monotonicNow: () => number;
   #intelligence?: TaskIntelligenceProvider;
+  #planningInfluence?: TaskPlanningInfluenceProvider;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -205,6 +232,7 @@ export class TaskOrchestrator {
     wallNow?: () => number;
     monotonicNow?: () => number;
     intelligence?: TaskIntelligenceProvider;
+    planningInfluence?: TaskPlanningInfluenceProvider;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -218,6 +246,7 @@ export class TaskOrchestrator {
     this.#wallNow = options.wallNow ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#intelligence = options.intelligence;
+    this.#planningInfluence = options.planningInfluence;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -489,6 +518,70 @@ export class TaskOrchestrator {
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
       catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
+
+      const proposalDigest = sha256(canonicalJson({
+        taskId: task.id,
+        stepKey: decision.key,
+        capability: decision.capability,
+        target: decision.target ?? null,
+        inputHash,
+        risk
+      }));
+      if (this.#planningInfluence) {
+        let influence: TaskPlanningInfluence | undefined;
+        try {
+          influence = await this.#planningInfluence.review({
+            proposalDigest,
+            task: structuredClone(task),
+            goal: structuredClone(goal),
+            decision: structuredClone(decision),
+            risk,
+            budget: structuredClone(budget),
+            recentEvents: structuredClone(recentEvents),
+            intelligence: structuredClone(intelligence),
+            decisionBudget: structuredClone(decisionBudget)
+          });
+        } catch (error) {
+          return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        }
+        if (influence) {
+          task.evidence.push(evidence('adaptive_planning_influence', 'info', 'Adaptive planning recommendation was evaluated without granting execution authority.', {
+            command: influence.command,
+            effect: influence.effect,
+            reason: influence.reason.slice(0, 512),
+            proposalDigest
+          }));
+          if (influence.effect === 'CONTROL_ALLOWED') {
+            if (influence.grantsAuthority !== false || influence.runtimeVetoRequired !== true || influence.proposalDigest !== proposalDigest) {
+              return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_INVALID', 'Adaptive control influence was not bound to the exact current proposal and runtime veto.', assertLease);
+            }
+            if (influence.command === 'FAIL_SAFE') {
+              return await this.#fail(task, 'TASK_ADAPTIVE_FAIL_SAFE', 'Adaptive control requested fail-safe termination.', assertLease);
+            }
+            if (influence.command === 'ESCALATE' || influence.command === 'WAIT' || influence.command === 'RECONCILE') {
+              task.state = 'BLOCKED';
+              task.evidence.push(evidence('adaptive_planning_block', 'info', 'Adaptive control deferred execution for authoritative review or reconciliation.', {
+                command: influence.command,
+                proposalDigest
+              }));
+              await this.#persistRunState(task, assertLease);
+              return task;
+            }
+            current.preDispatchReobserves = (current.preDispatchReobserves ?? 0) + 1;
+            current.plannerEvents ??= [];
+            current.plannerEvents.push(plannerEventFromAdaptiveInfluence(influence.command, influence.reason));
+            if (current.plannerEvents.length > 100) current.plannerEvents.splice(0, current.plannerEvents.length - 100);
+            task.evidence.push(evidence('adaptive_planning_replan', 'info', 'Adaptive control vetoed the current proposal and returned bounded control to the existing planner.', {
+              command: influence.command,
+              proposalDigest,
+              preDispatchReobserves: current.preDispatchReobserves
+            }));
+            await this.#persistRunState(task, assertLease);
+            continue;
+          }
+        }
+      }
+
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const replayRecord = blockedReplay ?? recoveryReplay;
       const attempt = replayRecord?.attempt ?? priorAttempts + 1;
@@ -1646,6 +1739,25 @@ function autonomousPlan(task: TaskCapsule, goal: Extract<SemanticTaskGoal, { kin
   if (plan.taskId !== task.id) throw new OperatorError('TASK_PLAN_INVALID', 'Durable task plan belongs to a different task.');
   task.execution!.plannerState.durablePlan = plan;
   return plan;
+}
+
+function plannerEventFromAdaptiveInfluence(command: RuntimeAdvisoryCommand, reason: string): TaskPlannerEvent {
+  const decision: TaskPlannerEvent['decision'] =
+    command === 'REPLAN' ? 'REPLAN' :
+    command === 'REPAIR' ? 'REPAIR' :
+    command === 'RECONCILE' ? 'RECONCILE' :
+    command === 'WAIT' ? 'WAIT' :
+    command === 'FAIL_SAFE' || command === 'ESCALATE' ? 'FAIL' :
+    'REOBSERVE';
+  return {
+    kind: command === 'RECONCILE' ? 'RECONCILIATION_REQUIRED' : command === 'WAIT' ? 'RESOURCE_BUSY' : 'STATE_CHANGED',
+    decision,
+    code: 'ADAPTIVE_' + command,
+    at: new Date().toISOString(),
+    provider: 'adaptive-planning-control',
+    capability: 'planner',
+    reason: reason.slice(0, 1024)
+  };
 }
 
 function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {
