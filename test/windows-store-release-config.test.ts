@@ -67,6 +67,7 @@ test('Windows package includes runtime workspace packages imported by core sourc
   const build = text('packaging/windows/build-release.ps1');
   assert.match(build, /packages\\adaptive-intelligence\\src/);
   assert.match(build, /packages\\verified-plan-runtime\\src/);
+  assert.match(build, /apps\\local-agent\\control-center/);
 });
 
 
