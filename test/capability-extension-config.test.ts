@@ -21,9 +21,9 @@ function receipts(manifest:any){
 
 test('third-party provider loads from config without core changes and live publisher disable revokes it',async(t)=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'r6-extension-config-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
-  const moduleText=`export function createCapabilityProvider(){return {name:'configured-third-party',supports:a=>a.capability==='file.read',score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'configured-third-party',output:{configured:true},evidence:[],durationMs:1}}}}`;
+  const moduleText=`export function createCapabilityProvider(){return {name:'configured-third-party',supports:a=>a.capability==='ext.configured.files.echo',score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'configured-third-party',output:{configured:true},evidence:[],durationMs:1}}}}`;
   const modulePath=path.join(root,'extension.mjs');await fs.writeFile(modulePath,moduleText);
-  const manifest={sdkVersion:1 as const,id:'configured.files',version:'1.0.0',displayName:'Configured Files',provenance:{source:'file:extension.mjs',packageDigest:crypto.createHash('sha256').update(moduleText).digest('hex')},capabilities:[{capability:'file.read',risk:'read' as const,deterministic:true,reversible:true,verification:'runtime' as const,reconciliation:'not-required' as const,inputSchemaVersion:1 as const,inputMaxBytes:4096,outputMaxBytes:4096,cancellation:'required' as const,resourceKinds:['file']}]};
+  const manifest={sdkVersion:1 as const,id:'configured.files',version:'1.0.0',displayName:'Configured Files',provenance:{source:'file:extension.mjs',packageDigest:crypto.createHash('sha256').update(moduleText).digest('hex')},capabilities:[{capability:'ext.configured.files.echo',risk:'read' as const,deterministic:true,reversible:true,verification:'runtime' as const,reconciliation:'not-required' as const,inputSchemaVersion:1 as const,inputMaxBytes:4096,outputMaxBytes:4096,cancellation:'required' as const,resourceKinds:['file']}]};
   const cert=certifyCapabilityExtension({manifest,receipts:receipts(manifest),certifiedAt:'2026-10-07T00:01:00.000Z'});
   const keys=crypto.generateKeyPairSync('ed25519');
   const pkg=signCapabilityPackage({
@@ -39,12 +39,12 @@ test('third-party provider loads from config without core changes and live publi
   const loaded=await loadCapabilityExtensionsFromConfig({configPath,allowedModuleRoots:[root],runtime});
   assert.equal(loaded.loaded,1);
   await runtime.initialize();
-  assert.deepEqual(await runtime.supportedCapabilities(['file.read']),['file.read']);
-  const result=await runtime.execute({id:'configured-read',capability:'file.read',risk:'read',input:{},provenance:{kind:'runtime'}},{allowedCapabilities:['file.read'],allowedRoots:[root],maxRisk:'read'});
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),['ext.configured.files.echo']);
+  const result=await runtime.execute({id:'configured-read',capability:'ext.configured.files.echo',risk:'read',input:{},provenance:{kind:'runtime'}},{allowedCapabilities:['ext.*'],allowedRoots:[root],maxRisk:'read'});
   assert.equal(result.ok,true);
 
   await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[{...publisher,enabled:false}],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
   await loaded.refreshGovernance();
-  assert.deepEqual(await runtime.supportedCapabilities(['file.read']),[]);
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
   await runtime.close();
 });
