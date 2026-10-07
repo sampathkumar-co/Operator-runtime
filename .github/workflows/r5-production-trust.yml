@@ -10,6 +10,7 @@ on:
       - 'src/core/agent-kernel.ts'
       - 'apps/local-agent/src/main.ts'
       - 'src/core/production-trust-platform.ts'
+      - 'src/core/r5-operational-campaign.ts'
       - 'src/core/release-update.ts'
       - 'src/core/artifact-store.ts'
       - 'src/core/artifact-object-store.ts'
@@ -30,10 +31,13 @@ on:
       - 'test/artifact-object-store.test.ts'
       - 'test/control-plane-store.test.ts'
       - 'test/r5-fault-lab.test.ts'
+      - 'test/r5-operational-campaign.test.ts'
       - 'apps/relay-server/test/r5-cluster-composition.test.ts'
       - 'package.json'
       - 'scripts/r5-production-soak.ts'
       - 'scripts/generate-r5-certification.ts'
+      - 'scripts/evaluate-r5-operational-campaign.ts'
+      - 'certification/r5/**'
       - '.github/workflows/r5-production-trust.yml'
   workflow_dispatch:
 
@@ -64,6 +68,8 @@ jobs:
         run: npm run test:r5
       - name: R5 bounded soak smoke
         run: npm run test:r5-soak:smoke
+      - name: R5 operational certification evaluator
+        run: node --experimental-strip-types --test test/r5-operational-campaign.test.ts
       - name: Generate R5 exact-head evidence
         run: npm run evidence:r5
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
