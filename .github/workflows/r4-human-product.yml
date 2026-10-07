@@ -26,8 +26,12 @@ on:
       - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
+      - 'src/core/r4-human-study.ts'
       - 'src/core/contract-registry.ts'
       - 'test/control-center-*.test.ts'
+      - 'test/r4-human-study.test.ts'
+      - 'scripts/evaluate-r4-human-study.ts'
+      - 'certification/r4/**'
       - 'package.json'
       - '.github/workflows/r4-human-product.yml'
   workflow_dispatch:
