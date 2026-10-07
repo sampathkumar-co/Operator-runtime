@@ -10,8 +10,12 @@ on:
       - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
+      - 'src/core/r4-human-study.ts'
       - 'src/core/contract-registry.ts'
       - 'test/control-center-*.test.ts'
+      - 'test/r4-human-study.test.ts'
+      - 'scripts/evaluate-r4-human-study.ts'
+      - 'certification/r4/**'
       - 'package.json'
       - '.github/workflows/r4-human-product.yml'
   pull_request:
@@ -50,6 +54,8 @@ jobs:
       - run: npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck:production
       - run: npm run test:r4
+      - name: R4 external-human certification evaluator
+        run: npm run test:r4:human-study
       - name: Control Center security invariants
         run: node --experimental-strip-types --test test/session-private-surface.test.ts test/approval-lifecycle.test.ts test/session-approval.test.ts
       - name: Inherited Developer Session restart ownership invariant
