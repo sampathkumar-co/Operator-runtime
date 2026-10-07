@@ -36,24 +36,24 @@ export async function loadGovernedCapabilityModule(input: {
     for (const release of riskReleases.reverse()) release();
     throw error;
   }
-  const modulePath = await resolveAllowedExisting(input.modulePath, input.allowedRoots);
-  const bytes = await fs.readFile(modulePath);
-  const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-  if (digest !== input.package.manifest.provenance.packageDigest) {
-    throw new OperatorError('CAPABILITY_MODULE_DIGEST_MISMATCH', 'Capability module bytes do not match the signed manifest package digest.');
-  }
-  const namespace = await import(pathToFileURL(modulePath).href + `?sha256=${digest}`) as CapabilityModuleFactory;
-  const factory = typeof namespace.createCapabilityProvider === 'function'
-    ? namespace.createCapabilityProvider
-    : typeof namespace.default === 'function'
-      ? namespace.default as CapabilityModuleFactory['createCapabilityProvider']
-      : undefined;
-  if (!factory) throw new OperatorError('CAPABILITY_MODULE_FACTORY_MISSING', 'Capability module must export createCapabilityProvider(manifest) or a default factory.');
-  const provider = await factory({ manifest: structuredClone(input.package.manifest) });
-  if (!provider || typeof provider.name !== 'string' || typeof provider.execute !== 'function') {
-    throw new OperatorError('CAPABILITY_MODULE_PROVIDER_INVALID', 'Capability module factory returned an invalid provider.');
-  }
   try {
+    const modulePath = await resolveAllowedExisting(input.modulePath, input.allowedRoots);
+    const bytes = await fs.readFile(modulePath);
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (digest !== input.package.manifest.provenance.packageDigest) {
+      throw new OperatorError('CAPABILITY_MODULE_DIGEST_MISMATCH', 'Capability module bytes do not match the signed manifest package digest.');
+    }
+    const namespace = await import(pathToFileURL(modulePath).href + `?sha256=${digest}`) as CapabilityModuleFactory;
+    const factory = typeof namespace.createCapabilityProvider === 'function'
+      ? namespace.createCapabilityProvider
+      : typeof namespace.default === 'function'
+        ? namespace.default as CapabilityModuleFactory['createCapabilityProvider']
+        : undefined;
+    if (!factory) throw new OperatorError('CAPABILITY_MODULE_FACTORY_MISSING', 'Capability module must export createCapabilityProvider(manifest) or a default factory.');
+    const provider = await factory({ manifest: structuredClone(input.package.manifest) });
+    if (!provider || typeof provider.name !== 'string' || typeof provider.execute !== 'function') {
+      throw new OperatorError('CAPABILITY_MODULE_PROVIDER_INVALID', 'Capability module factory returned an invalid provider.');
+    }
     return new RiskPolicyBoundProvider(input.governance.wrap(input.package, provider), riskReleases);
   } catch (error) {
     for (const release of riskReleases.reverse()) release();
