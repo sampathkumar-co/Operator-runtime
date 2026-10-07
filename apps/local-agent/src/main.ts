@@ -3,6 +3,7 @@ import path from 'node:path';
 import { AuditLog } from '../../../src/core/audit.ts';
 import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
 import { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
+import { loadCapabilityExtensionsFromConfig } from '../../../src/core/capability-extension-config.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { TaskStore } from '../../../src/core/task-store.ts';
@@ -187,7 +188,32 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+let capabilityGovernanceRefreshTimer: NodeJS.Timeout | null = null;
+const capabilityExtensionConfigPath = process.env.OPERATOR_CAPABILITY_EXTENSION_CONFIG?.trim();
+let capabilityExtensionRuntime: Awaited<ReturnType<typeof loadCapabilityExtensionsFromConfig>> | null = null;
+if (capabilityExtensionConfigPath) {
+  const moduleRoots = (process.env.OPERATOR_CAPABILITY_EXTENSION_ROOTS ?? '')
+    .split(path.delimiter)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  capabilityExtensionRuntime = await loadCapabilityExtensionsFromConfig({
+    configPath: capabilityExtensionConfigPath,
+    allowedModuleRoots: moduleRoots,
+    runtime
+  });
+  console.error(`[operator] loaded ${capabilityExtensionRuntime.loaded} governed capability extension(s)`);
+}
 await runtime.initialize();
+if (capabilityExtensionRuntime) {
+  const configured = Number(process.env.OPERATOR_CAPABILITY_GOVERNANCE_REFRESH_MS ?? 30_000);
+  const refreshMs = Number.isSafeInteger(configured) && configured >= 5_000 && configured <= 60 * 60_000 ? configured : 30_000;
+  capabilityGovernanceRefreshTimer = setInterval(() => {
+    void capabilityExtensionRuntime!.refreshGovernance().catch((error) => {
+      console.error(`[operator] capability governance refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, refreshMs);
+  capabilityGovernanceRefreshTimer.unref();
+}
 const operationTrace = new OperationTraceStore(stateDir);
 const agentKernel = new AgentKernel({
   stateDir,
@@ -321,6 +347,7 @@ const lifecycle = new LocalRuntimeLifecycle({
   stopRelay,
   pendingRelay: () => relayRun,
   stopServices: () => [
+    stopCapabilityGovernanceRefresh(),
     desiredStateReconciler.stop(),
     eventTicker.stop(),
     agent.close(),
@@ -330,6 +357,11 @@ const lifecycle = new LocalRuntimeLifecycle({
   setExitCode: (code) => { process.exitCode = code; },
   log: (message) => console.error(message)
 });
+
+async function stopCapabilityGovernanceRefresh(): Promise<void> {
+  if (capabilityGovernanceRefreshTimer) clearInterval(capabilityGovernanceRefreshTimer);
+  capabilityGovernanceRefreshTimer = null;
+}
 
 async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
   await lifecycle.shutdown(exitCode, reason, options);
