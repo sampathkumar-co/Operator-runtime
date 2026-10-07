@@ -26,6 +26,7 @@
       <nav class="sidebar" aria-label="Control Center">
         <button class="nav active" data-view="home" aria-current="page">Home</button>
         <button class="nav" data-view="sessions">Sessions</button>
+        <button class="nav" data-view="teams">Teams</button>
         <button class="nav" data-view="studio" data-tab="studio">Studio</button>
         <button class="nav" data-view="desired" data-tab="desired">Desired State</button>
         <button class="nav" data-view="approvals">Approval Center</button>
@@ -46,7 +47,18 @@
         </section>
         <section id="view-sessions" class="view" aria-labelledby="sessions-title">
           <div class="view-head"><div><h1 id="sessions-title">Sessions</h1><p>Objectives, progress, blockers, verification, and preserved work.</p></div></div>
+          <article class="card" data-endpoint="/v1/goals">
+            <h2>New goal</h2>
+            <label><span class="row-meta">Objective</span><input id="objective" aria-label="Objective" placeholder="What should Mecord accomplish?"></label>
+            <label><span class="row-meta">Success conditions · one per line</span><textarea id="success" class="code" rows="4" aria-label="Success conditions" placeholder="Build passes&#10;Requested state is independently verified"></textarea></label>
+            <label><span class="row-meta">Goal JSON</span><textarea id="goalJson" class="code" rows="6" aria-label="Goal JSON" spellcheck="false" placeholder='{"kind":"project-quality-gate","root":"C:\\path","checks":["lint","test","build"],"requireAll":true}'></textarea></label>
+            <div class="actions"><button id="submitGoal" class="primary">Submit &amp; run</button><button id="queueGoal">Queue only</button></div>
+          </article>
           <div id="sessions"></div>
+        </section>
+        <section id="view-teams" class="view" aria-labelledby="teams-title">
+          <div class="view-head"><div><h1 id="teams-title">Teams</h1><p>Durable multi-worker missions, ownership, blockers, and controls.</p></div></div>
+          <div id="teams"></div>
         </section>
         <section id="view-studio" class="view" aria-labelledby="studio-title">
           <div class="view-head"><div><h1 id="studio-title">Studio</h1><p>Run verified taught workflows without leaving the Control Center.</p></div></div>
@@ -70,7 +82,7 @@
           <div id="desiredList"></div>
         </section>
         <section id="view-approvals" class="view" aria-labelledby="approvals-title">
-          <div class="view-head"><div><h1 id="approvals-title">Approval Center</h1><p>Plain-language scope, risk, reversibility, expiry, and recovery guidance.</p></div><button id="approvalProbe" class="secondary">Run approval practice</button></div>
+          <div class="view-head"><div><h1 id="approvals-title">Approval Center</h1><p>Plain-language scope, risk, reversibility, expiry, and recovery guidance. For blocked task continuations, an approval can <strong>Approve &amp; resume</strong> the exact waiting action.</p></div><button id="approvalProbe" class="secondary">Run approval practice</button></div>
           <div class="split"><article class="card"><h2>Pending & active</h2><div id="approvals"></div></article><article class="card"><h2>Recovery</h2><div id="recovery"></div></article></div>
         </section>
         <section id="view-activity" class="view" aria-labelledby="activity-title"><div class="view-head"><div><h1 id="activity-title">Activity</h1><p>Causal runtime events without raw secrets.</p></div></div><div id="activity"></div></section>
