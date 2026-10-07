@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
-import { normalizeTraceEvent, type OperationTraceEvent } from './operation-trace.ts';
+import { normalizeTraceEvent, type OperationSloSummary, type OperationTraceEvent } from './operation-trace.ts';
 import { RELEASE_TRUTH } from './release-truth.ts';
 import { OperatorError } from './errors.ts';
 
@@ -34,6 +34,38 @@ export interface OtlpTraceExportJson {
     scopeSpans: Array<{
       scope: { name: string; version: string };
       spans: OtlpSpanJson[];
+    }>;
+  }>;
+}
+
+export interface OtlpLogExportJson {
+  resourceLogs: Array<{
+    resource: { attributes: OtlpKeyValue[] };
+    scopeLogs: Array<{
+      scope: { name: string; version: string };
+      logRecords: Array<{
+        timeUnixNano: string;
+        severityNumber: number;
+        severityText: string;
+        body: { stringValue: string };
+        traceId: string;
+        spanId: string;
+        attributes: OtlpKeyValue[];
+      }>;
+    }>;
+  }>;
+}
+
+export interface OtlpMetricExportJson {
+  resourceMetrics: Array<{
+    resource: { attributes: OtlpKeyValue[] };
+    scopeMetrics: Array<{
+      scope: { name: string; version: string };
+      metrics: Array<{
+        name: string;
+        unit: string;
+        gauge: { dataPoints: Array<{ timeUnixNano: string; asInt?: string; asDouble?: number; attributes: OtlpKeyValue[] }> };
+      }>;
     }>;
   }>;
 }
@@ -86,19 +118,9 @@ export function operationTraceToOtlp(
     .sort((a, b) => a.at.localeCompare(b.at) || a.traceId.localeCompare(b.traceId) || a.id.localeCompare(b.id))
     .map((event) => toSpan(event, allowlist));
 
-  const serviceName = bounded(options.serviceName ?? 'mecord-connect', 128, 'serviceName');
-  const resourceAttributes: OtlpKeyValue[] = [
-    kv('service.name', serviceName),
-    kv('service.version', RELEASE_TRUTH.product.publicSurfaceVersion),
-    kv('mecord.runtime.package.version', RELEASE_TRUTH.source.runtimePackageVersion)
-  ];
-  if (options.environment !== undefined) {
-    resourceAttributes.push(kv('deployment.environment.name', bounded(options.environment, 128, 'environment')));
-  }
-
   return {
     resourceSpans: [{
-      resource: { attributes: resourceAttributes },
+      resource: { attributes: resourceAttributes(options) },
       scopeSpans: [{
         scope: {
           name: 'mecord.operation-trace',
@@ -110,9 +132,115 @@ export function operationTraceToOtlp(
   };
 }
 
+
+export function operationTraceToOtlpLogs(
+  eventsInput: OperationTraceEvent[],
+  options: { serviceName?: string; environment?: string; attributeAllowlist?: string[] } = {}
+): OtlpLogExportJson {
+  if (!Array.isArray(eventsInput) || eventsInput.length > 100_000) throw invalid('Operation log export collection is invalid.');
+  const allowlist = options.attributeAllowlist === undefined
+    ? DEFAULT_SAFE_ATTRIBUTE_KEYS
+    : new Set(options.attributeAllowlist.map(normalizeAttributeKey));
+  const events = eventsInput.map(normalizeTraceEvent).sort((a,b)=>a.at.localeCompare(b.at)||a.traceId.localeCompare(b.traceId)||a.id.localeCompare(b.id));
+  return {
+    resourceLogs: [{
+      resource: { attributes: resourceAttributes(options) },
+      scopeLogs: [{
+        scope: { name: 'mecord.operation-log', version: RELEASE_TRUTH.product.publicSurfaceVersion },
+        logRecords: events.map((event) => ({
+          timeUnixNano: millisToNanos(Date.parse(event.at)),
+          severityNumber: logSeverity(event),
+          severityText: event.outcome,
+          body: { stringValue: `${event.stage}:${event.outcome}` },
+          traceId: otelTraceId(event.traceId),
+          spanId: otelSpanId(event.id),
+          attributes: [
+            kv('mecord.stage', event.stage),
+            kv('mecord.outcome', event.outcome),
+            kv('mecord.execution_context_digest', event.executionContextDigest),
+            ...(event.code ? [kv('mecord.code', event.code)] : []),
+            ...Object.entries(event.attributes)
+              .sort(([a],[b])=>a.localeCompare(b))
+              .filter(([key])=>allowlist.has(key))
+              .map(([key,value])=>kv(`mecord.attr.${key}`,value))
+          ]
+        }))
+      }]
+    }]
+  };
+}
+
+export function operationSloToOtlpMetrics(
+  summary: OperationSloSummary,
+  options: { serviceName?: string; environment?: string; at?: string } = {}
+): OtlpMetricExportJson {
+  if (!summary || !Number.isSafeInteger(summary.traces) || summary.traces < 0) throw invalid('Operation SLO metrics summary is invalid.');
+  const at = options.at ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at) throw invalid('OTLP metric timestamp is invalid.');
+  const t = millisToNanos(Date.parse(at));
+  const intMetric = (name:string,value:number,unit='1') => ({
+    name, unit, gauge: { dataPoints: [{ timeUnixNano: t, asInt: String(safeInteger(value,name)), attributes: [] as OtlpKeyValue[] }] }
+  });
+  const doubleMetric = (name:string,value:number,unit='1') => ({
+    name, unit, gauge: { dataPoints: [{ timeUnixNano: t, asDouble: safeNumber(value,name), attributes: [] as OtlpKeyValue[] }] }
+  });
+  const metrics = [
+    intMetric('mecord.operation.traces',summary.traces),
+    intMetric('mecord.operation.completed',summary.completed),
+    intMetric('mecord.operation.verified',summary.verified),
+    intMetric('mecord.operation.blocked',summary.blocked),
+    intMetric('mecord.operation.failed',summary.failed),
+    intMetric('mecord.operation.uncertain',summary.uncertain),
+    intMetric('mecord.operation.false_completion',summary.falseCompletionCount),
+    doubleMetric('mecord.operation.completion_rate',summary.completionRate),
+    doubleMetric('mecord.operation.verification_rate',summary.verificationRate),
+    doubleMetric('mecord.operation.completion.p50',summary.p50CompletionMs,'ms'),
+    doubleMetric('mecord.operation.completion.p95',summary.p95CompletionMs,'ms')
+  ];
+  return {
+    resourceMetrics: [{
+      resource: { attributes: resourceAttributes(options) },
+      scopeMetrics: [{ scope: { name: 'mecord.operation-metrics', version: RELEASE_TRUTH.product.publicSurfaceVersion }, metrics }]
+    }]
+  };
+}
+
+export function otlpLogExportDigest(payload: OtlpLogExportJson): string {
+  return crypto.createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+}
+
+export function otlpMetricExportDigest(payload: OtlpMetricExportJson): string {
+  return crypto.createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+}
+
 export function otlpTraceExportDigest(payload: OtlpTraceExportJson): string {
   if (!payload || !Array.isArray(payload.resourceSpans)) throw invalid('OTLP trace payload is invalid.');
   return crypto.createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+}
+
+
+function resourceAttributes(options: { serviceName?: string; environment?: string }): OtlpKeyValue[] {
+  const attrs: OtlpKeyValue[] = [
+    kv('service.name', bounded(options.serviceName ?? 'mecord-connect', 128, 'serviceName')),
+    kv('service.version', RELEASE_TRUTH.product.publicSurfaceVersion),
+    kv('mecord.runtime.package.version', RELEASE_TRUTH.source.runtimePackageVersion)
+  ];
+  if (options.environment !== undefined) attrs.push(kv('deployment.environment.name', bounded(options.environment,128,'environment')));
+  return attrs;
+}
+
+function logSeverity(event: OperationTraceEvent): number {
+  if (event.outcome === 'FAILED') return 17;
+  if (event.outcome === 'UNCERTAIN' || event.outcome === 'BLOCKED') return 13;
+  if (event.outcome === 'CANCELLED') return 9;
+  return 9;
+}
+
+function safeInteger(value: unknown, label: string): number {
+  const n=Number(value); if(!Number.isSafeInteger(n)||n<0) throw invalid(label+' is invalid.'); return n;
+}
+function safeNumber(value: unknown, label: string): number {
+  const n=Number(value); if(!Number.isFinite(n)||n<0) throw invalid(label+' is invalid.'); return n;
 }
 
 function toSpan(event: OperationTraceEvent, allowlist: Set<string>): OtlpSpanJson {
