@@ -66,10 +66,15 @@ test('relay ownership fence prevents split-brain and rotates generation after ex
   await store.assertCurrent({ resourceKey:first.resourceKey, ownerInstanceId:first.ownerInstanceId, generation:first.generation, token:first.token, now:'2026-10-07T00:00:04.000Z' });
   now = new Date('2026-10-07T00:00:06.000Z');
   const second = await store.acquire({ resourceKey: 'device:abc', ownerInstanceId: 'relay:b', leaseMs: 5000 });
-  assert.equal(second.generation, 1);
-  // Expired rows are pruned; a resource returning after full expiry gets a fresh
-  // token. Split-brain safety is still carried by exact token ownership.
+  assert.equal(second.generation, 2);
   assert.notEqual(second.token, first.token);
+  await assert.rejects(() => store.assertCurrent({
+    resourceKey: first.resourceKey,
+    ownerInstanceId: first.ownerInstanceId,
+    generation: first.generation,
+    token: first.token,
+    now: '2026-10-07T00:00:06.000Z'
+  }), /stale|no longer active/i);
 });
 
 test('staged update rollout completes healthy waves and demands rollback on health regression', () => {
