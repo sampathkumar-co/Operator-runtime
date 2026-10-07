@@ -7,6 +7,9 @@ import type { EnterpriseAuthorizationContext } from '../../../src/core/enterpris
 import type { ApprovalAuthorityContext } from './approval-store.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_JSON_DEPTH = 64;
+const MAX_JSON_NODES = 100_000;
+const JSON_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 const ACTION_RISKS = new Set(['read', 'write', 'external', 'system', 'destructive']);
 const PROVENANCE_KINDS = new Set(['user', 'chatgpt', 'trusted_policy', 'runtime', 'website', 'file', 'application', 'terminal']);
 
@@ -32,7 +35,56 @@ export async function readJson(req: http.IncomingMessage): Promise<unknown> {
     chunks.push(buffer);
   }
   if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  let text: string;
+  try {
+    text = JSON_UTF8_DECODER.decode(Buffer.concat(chunks));
+  } catch {
+    throw new Error('REQUEST_INVALID_UTF8');
+  }
+  assertJsonTextDepth(text);
+  const parsed = JSON.parse(text) as unknown;
+  assertJsonComplexity(parsed);
+  return parsed;
+}
+
+function assertJsonTextDepth(text: string): void {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{' || char === '[') {
+      depth += 1;
+      if (depth > MAX_JSON_DEPTH) throw new Error('REQUEST_JSON_TOO_DEEP');
+    } else if (char === '}' || char === ']') {
+      depth -= 1;
+    }
+  }
+}
+
+function assertJsonComplexity(root: unknown): void {
+  const stack: unknown[] = [root];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    nodes += 1;
+    if (nodes > MAX_JSON_NODES) throw new Error('REQUEST_JSON_TOO_COMPLEX');
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+    } else if (current !== null && typeof current === 'object') {
+      for (const item of Object.values(current as Record<string, unknown>)) stack.push(item);
+    }
+  }
 }
 
 export function validateActionEnvelope(value: unknown): ActionRequest {
