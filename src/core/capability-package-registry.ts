@@ -10,8 +10,10 @@ import {
 import {
   capabilityManifestDigest,
   validateManifest,
-  type CapabilityExtensionManifest
+  type CapabilityExtensionManifest,
+  CapabilityExtensionRegistry
 } from './capability-sdk.ts';
+import type { CapabilityProvider } from './types.ts';
 import { OperatorError } from './errors.ts';
 
 export interface CapabilityPublisherIdentity {
@@ -161,6 +163,28 @@ export function admitCapabilityPackage(input: {
   return admission.allowed
     ? { allowed: true, reason: 'ADMITTED', entry }
     : { allowed: false, reason: 'REVOKED', entry };
+}
+
+
+export function registerAdmittedCapabilityPackage(input:{
+  package:SignedCapabilityPackage;
+  publishers:CapabilityPublisherIdentity[];
+  revocations?:CapabilityRevocationRecord[];
+  provider:CapabilityProvider;
+  registry:CapabilityExtensionRegistry;
+}):{admission:CapabilityRegistryAdmission;provider:CapabilityProvider}{
+  const admission=admitCapabilityPackage({
+    package:input.package,
+    publishers:input.publishers,
+    revocations:input.revocations
+  });
+  if(!admission.allowed){
+    throw new OperatorError('CAPABILITY_PACKAGE_ADMISSION_DENIED', 'Capability package cannot enter production runtime.', {
+      details:{reason:admission.reason}
+    });
+  }
+  const provider=input.registry.register(input.package.manifest,input.provider,{trust:'certified'});
+  return {admission,provider};
 }
 
 function normalizePackage(input: SignedCapabilityPackage): SignedCapabilityPackage {
