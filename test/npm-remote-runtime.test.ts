@@ -334,7 +334,7 @@ test('npm release uses immutable first-release artifact and staged future public
 
 test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
   const source = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
-  assert.match(source, /gitText\(\['status', '--porcelain=v1', '--untracked-files=no'/);
+  assert.match(source, /gitText\(\[\s*'status', '--porcelain=v1', '--untracked-files=no'/);
   assert.match(source, /resolveTrustedGitExecutable\(process\.env\)/);
   assert.match(source, /execFileSync\(gitExecutable, args/);
   assert.match(source, /execFileSync\(gitExecutable, \['ls-files'/);
@@ -344,6 +344,8 @@ test('runtime payload builder copies only tracked clean sources bound to HEAD', 
   assert.match(source, /contains tracked changes/);
   assert.match(source, /compileTrackedTree\('src'/);
   assert.match(source, /compileTrackedTree\('apps\/local-agent\/src'/);
+  assert.match(source, /compileTrackedTree\('packages\/adaptive-intelligence\/src'/);
+  assert.match(source, /compileTrackedTree\('packages\/verified-plan-runtime\/src'/);
   assert.match(source, /stripTypeScriptTypes/);
   assert.ok(source.includes(".replace(/\\.ts$/, '.js')"));
   assert.doesNotMatch(source, /copyTree\(path\.join\(repoRoot/);

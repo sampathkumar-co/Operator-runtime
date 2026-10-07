@@ -148,6 +148,9 @@ Copy-Item -LiteralPath (Join-Path $repo 'package.json') -Destination (Join-Path 
 Copy-Item -LiteralPath (Join-Path $repo 'src') -Destination (Join-Path $stage 'app\src') -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\apps\local-agent') | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'apps\local-agent\src') -Destination (Join-Path $stage 'app\apps\local-agent\src') -Recurse
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\packages\adaptive-intelligence'), (Join-Path $stage 'app\packages\verified-plan-runtime') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'packages\adaptive-intelligence\src') -Destination (Join-Path $stage 'app\packages\adaptive-intelligence\src') -Recurse
+Copy-Item -LiteralPath (Join-Path $repo 'packages\verified-plan-runtime\src') -Destination (Join-Path $stage 'app\packages\verified-plan-runtime\src') -Recurse
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app\apps\mcp-server') | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\src') -Destination (Join-Path $stage 'app\apps\mcp-server\src') -Recurse
 Copy-Item -LiteralPath (Join-Path $repo 'apps\mcp-server\package.json') -Destination (Join-Path $stage 'app\apps\mcp-server\package.json')

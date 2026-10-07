@@ -239,7 +239,7 @@ test('engaging emergency stop aborts an already-dispatched local provider reques
 
 
 test('local-agent boot freezes mutable recovery and periodic orchestration behind persisted emergency-stop authority', async () => {
-  const source = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  const source = (await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8')).replace(/\r\n/g, '\n');
   const statusRead = source.indexOf('const startupEmergencyStatus = await emergencyStop.status()');
   const kernelAbortBinding = source.indexOf('globalAbortSignal: () => emergencyExecutionGeneration.signal');
   const organizationRecovery = source.indexOf('organizationRecovery = await organizations.recoverPendingCompensations()');
