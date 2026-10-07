@@ -8,6 +8,8 @@ import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
+import type { ControlPlaneStore } from '../../../src/core/control-plane-store.ts';
+import { RelayClusterCoordinator } from '../../../src/core/relay-cluster-control.ts';
 import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayControlService } from './control-service.ts';
@@ -95,13 +97,28 @@ function createRelayStores(stateDir: string) {
   };
 }
 
-export async function runRelayService(config = readRelayServiceConfig()): Promise<RelayHub> {
+export interface RelayServiceRuntimeOptions {
+  controlPlaneStore?: ControlPlaneStore;
+  instanceId?: string;
+  clusterLeaseMs?: number;
+}
+
+export async function runRelayService(
+  config = readRelayServiceConfig(),
+  runtimeOptions: RelayServiceRuntimeOptions = {}
+): Promise<RelayHub> {
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   let lockOwned = true;
   try {
     const stores = createRelayStores(config.stateDir);
     const { identity, devices, sessions, deliveries, accounts } = stores;
-    const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
+    const cluster = runtimeOptions.controlPlaneStore ? new RelayClusterCoordinator(runtimeOptions.controlPlaneStore) : undefined;
+    const hub = new RelayHub({
+      stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries,
+      ...(cluster ? { cluster } : {}),
+      ...(runtimeOptions.instanceId ? { instanceId: runtimeOptions.instanceId } : {}),
+      ...(runtimeOptions.clusterLeaseMs ? { clusterLeaseMs: runtimeOptions.clusterLeaseMs } : {})
+    });
     stores.attachHub(hub);
     await accounts.recoverReleases();
     await accounts.recoverErasures();
