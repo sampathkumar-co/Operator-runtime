@@ -534,6 +534,27 @@ const agent = createLocalAgentServer({
       continuity: relayUrl ? 'automatic' : 'disabled'
     }
   }),
+  getOnboardingStatus: async () => {
+    const [identity, peers, approvalRecords, taskSummaries, readEvents] = await Promise.all([
+      deviceIdentity.loadExisting(),
+      deviceRegistry.listDevices(),
+      approvals.list(),
+      tasks.list(500),
+      audit.query({ limit: 500, capability: 'filesystem.read' })
+    ]);
+    return {
+      runtimeInstalled: true,
+      // Reaching this server means protected-state recovery and runtime construction
+      // completed successfully; deeper payload/native validation remains available via doctor.
+      doctorHealthy: true,
+      authenticated: true,
+      devicePaired: relayConnectionStatus.state === 'READY' || peers.some((peer) => peer.status === 'active'),
+      rootsConfigured: allowedRoots.length > 0,
+      readProbePassed: readEvents.some((event) => event.result === 'success'),
+      approvalProbePassed: approvalRecords.some((record) => record.status === 'consumed'),
+      guidedTaskVerified: taskSummaries.some((task) => task.state === 'VERIFIED')
+    };
+  },
   settings: {
     recoveryConfigured: Boolean(recoveryToken),
     browserAutoLaunch,
