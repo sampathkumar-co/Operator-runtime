@@ -41,6 +41,8 @@ export * from './developer-session.ts';
 export * from './control-center-model.ts';
 export * from './control-center-ux.ts';
 export * from './operation-trace.ts';
+export * from './otlp-operation-trace.ts';
+export * from './production-trust-platform.ts';
 export * from './agent-gateway-contract.ts';
 export * from './principal-delegation.ts';
 export * from './enterprise-policy-simulation.ts';
