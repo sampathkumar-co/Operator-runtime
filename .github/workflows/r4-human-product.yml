@@ -54,3 +54,22 @@ jobs:
         run: node --experimental-strip-types --test test/session-private-surface.test.ts test/approval-lifecycle.test.ts test/session-approval.test.ts
       - name: Inherited Developer Session restart ownership invariant
         run: node --experimental-strip-types --test test/developer-session-process-ownership.test.ts
+
+  r4-windows-restart-ownership:
+    name: R4 Windows restart ownership invariant
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Build exact process-identity helper
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          ./native/windows-path-lease/build.ps1
+          $pathLease = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$pathLease" >> $env:GITHUB_ENV
+      - run: node --experimental-strip-types --test test/developer-session-process-ownership.test.ts
