@@ -52,7 +52,7 @@ export function readRelayServiceConfig(env: NodeJS.ProcessEnv = process.env): Re
   return { stateDir, host, port, resultHost, resultPort, controlHost: CONTROL_HOST, controlPort, controlToken };
 }
 
-function createRelayStores(stateDir: string) {
+function createRelayStores(stateDir: string, controlPlaneStore?: ControlPlaneStore) {
   let liveHub: RelayHub | null = null;
   const identity = new DeviceIdentityStore(stateDir);
   const devices = new DeviceRegistryStore(stateDir, {
@@ -61,8 +61,8 @@ function createRelayStores(stateDir: string) {
   const sessions = new DeviceSessionTokenStore(stateDir, identity, devices, {
     onRevoke: async (jti) => { liveHub?.invalidateSession(jti, 'session revoked'); }
   });
-  const deliveries = new RelayDeliveryStore(stateDir);
-  const results = new RelayResultStore(stateDir);
+  const deliveries = new RelayDeliveryStore(stateDir, controlPlaneStore ? { sharedStore: controlPlaneStore, sharedNamespace: 'relay-delivery-streams' } : {});
+  const results = new RelayResultStore(stateDir, controlPlaneStore ? { sharedStore: controlPlaneStore, sharedNamespace: 'relay-result-streams' } : {});
   const reservationReconciliations = new RelayReservationReconciliationStore(stateDir);
   const enrollments = new DeviceEnrollmentStore(stateDir);
   const accounts = new AccountDeviceRegistry(stateDir, devices, {
@@ -110,7 +110,7 @@ export async function runRelayService(
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   let lockOwned = true;
   try {
-    const stores = createRelayStores(config.stateDir);
+    const stores = createRelayStores(config.stateDir, runtimeOptions.controlPlaneStore);
     const { identity, devices, sessions, deliveries, accounts } = stores;
     const cluster = runtimeOptions.controlPlaneStore ? new RelayClusterCoordinator(runtimeOptions.controlPlaneStore) : undefined;
     const hub = new RelayHub({
@@ -132,11 +132,16 @@ export async function runRelayService(
   }
 }
 
-export async function runRelayResultService(config = readRelayServiceConfig()): Promise<RelayResultService> {
+export async function runRelayResultService(
+  config = readRelayServiceConfig(),
+  runtimeOptions: RelayServiceRuntimeOptions = {}
+): Promise<RelayResultService> {
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   let lockOwned = true;
   try {
-    const service = new RelayResultService({ stateDir: config.stateDir });
+    const deliveries = new RelayDeliveryStore(config.stateDir, runtimeOptions.controlPlaneStore ? { sharedStore: runtimeOptions.controlPlaneStore, sharedNamespace: 'relay-delivery-streams' } : {});
+    const results = new RelayResultStore(config.stateDir, runtimeOptions.controlPlaneStore ? { sharedStore: runtimeOptions.controlPlaneStore, sharedNamespace: 'relay-result-streams' } : {});
+    const service = new RelayResultService({ stateDir: config.stateDir, deliveries, results });
     const listening = await service.listen(config.resultHost, config.resultPort);
     logListening('operator-relay-results', listening.host, listening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     releaseLockWhenServiceCloses(service, instanceLock);
