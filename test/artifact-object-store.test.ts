@@ -18,8 +18,8 @@ test('presigned object backend verifies content address on upload and download',
     return response(200,objects.get(url.replace('/get/','/put/'))??Buffer.alloc(0));
   };
   const backend=new PresignedHttpsArtifactBlobBackend({
-    putUrl:({digest})=>'https://objects.example.invalid/put/'+digest+'?sig=x',
-    getUrl:({digest})=>'https://objects.example.invalid/get/'+digest+'?sig=x'
+    putUrl:({digest})=>'https://objects.vendor.com/put/'+digest+'?sig=x',
+    getUrl:({digest})=>'https://objects.vendor.com/get/'+digest+'?sig=x'
   },fetchImpl);
   const bytes=Buffer.from('immutable artifact payload');
   const digest=crypto.createHash('sha256').update(bytes).digest('hex');
@@ -31,17 +31,64 @@ test('object backend rejects insecure URLs and tampered downloads',async()=>{
   const bytes=Buffer.from('expected');
   const digest=crypto.createHash('sha256').update(bytes).digest('hex');
   const insecure=new PresignedHttpsArtifactBlobBackend({
-    putUrl:()=> 'http://objects.example.invalid/blob',
-    getUrl:()=> 'https://objects.example.invalid/blob'
+    putUrl:()=> 'http://objects.vendor.com/blob',
+    getUrl:()=> 'https://objects.vendor.com/blob'
   },async()=>response(200,bytes));
   await assert.rejects(insecure.put(digest,bytes),(e:any)=>e?.code==='ARTIFACT_OBJECT_URL_INVALID');
 
   const tampered=new PresignedHttpsArtifactBlobBackend({
-    putUrl:()=> 'https://objects.example.invalid/blob',
-    getUrl:()=> 'https://objects.example.invalid/blob'
+    putUrl:()=> 'https://objects.vendor.com/blob',
+    getUrl:()=> 'https://objects.vendor.com/blob'
   },async(_url,init)=>init?.method==='GET'?response(200,Buffer.from('tampered')):response(200));
   await tampered.put(digest,bytes);
   await assert.rejects(tampered.get(digest),(e:any)=>e?.code==='ARTIFACT_INTEGRITY_FAILED');
+});
+
+test('object backend bounds streamed downloads before buffering and rejects non-public targets',async()=>{
+  const digest='a'.repeat(64);
+  let reads=0,cancelled=false,arrayBufferCalled=false;
+  const chunk=new Uint8Array(1024*1024);
+  const backend=new PresignedHttpsArtifactBlobBackend({
+    putUrl:()=> 'https://objects.vendor.com/blob',
+    getUrl:()=> 'https://objects.vendor.com/blob'
+  },async()=>({
+    ok:true,status:200,headers:{get:()=>null},
+    body:{getReader:()=>({
+      async read(){reads+=1;return reads<=65?{done:false,value:chunk}:{done:true};},
+      async cancel(){cancelled=true;}
+    })},
+    async arrayBuffer(){arrayBufferCalled=true;return new ArrayBuffer(0);}
+  }));
+  await assert.rejects(backend.get(digest),(e:any)=>e?.code==='ARTIFACT_SIZE_INVALID');
+  assert.equal(cancelled,true);
+  assert.equal(arrayBufferCalled,false);
+  assert.ok(reads<=65);
+
+  const internal=new PresignedHttpsArtifactBlobBackend({
+    putUrl:()=> 'https://169.254.169.254/blob',
+    getUrl:()=> 'https://metadata.internal/blob'
+  },async()=>response(200,Buffer.from('x')));
+  await assert.rejects(internal.put(crypto.createHash('sha256').update('x').digest('hex'),Buffer.from('x')),(e:any)=>e?.code==='ARTIFACT_OBJECT_URL_INVALID');
+
+  // Private object storage is allowed only through an exact, explicit HTTPS
+  // origin trust decision. The presigned path/query can vary, the origin cannot.
+  const privateBytes=Buffer.from('private-vpc-object');
+  const privateDigest=crypto.createHash('sha256').update(privateBytes).digest('hex');
+  const privateBackend=new PresignedHttpsArtifactBlobBackend({
+    putUrl:()=> 'https://10.20.30.40:9443/bucket/object?sig=one',
+    getUrl:()=> 'https://10.20.30.40:9443/bucket/object?sig=two'
+  },async(_url,init)=>init?.method==='GET'?response(200,privateBytes):response(200),{
+    targetPolicy:{mode:'approved-origins',origins:['https://10.20.30.40:9443']}
+  });
+  await privateBackend.put(privateDigest,privateBytes);
+  assert.deepEqual(await privateBackend.get(privateDigest),privateBytes);
+  const escapedOrigin=new PresignedHttpsArtifactBlobBackend({
+    putUrl:()=> 'https://10.20.30.41:9443/bucket/object',
+    getUrl:()=> 'https://10.20.30.41:9443/bucket/object'
+  },async()=>response(200),{
+    targetPolicy:{mode:'approved-origins',origins:['https://10.20.30.40:9443']}
+  });
+  await assert.rejects(escapedOrigin.put(privateDigest,privateBytes),(e:any)=>e?.code==='ARTIFACT_OBJECT_URL_INVALID');
 });
 
 test('ArtifactStore can keep immutable records locally while blob bytes live in object storage',async(t)=>{

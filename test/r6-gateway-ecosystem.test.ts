@@ -47,12 +47,14 @@ test('request-bound gateway authority rejects principal spoofing',async()=>{
 
 test('signed webhook envelopes are tamper evident and subscriptions reject private endpoints',()=>{
   const subscription=createGatewayWebhookSubscription({
-    id:'sub:1',endpoint:'https://events.example.com/mecord',eventKinds:['operation.completed'],createdAt:'2026-10-07T00:00:00.000Z'
+    id:'sub:1',endpoint:'https://events.vendor.com/mecord',eventKinds:['operation.completed'],createdAt:'2026-10-07T00:00:00.000Z'
   });
   assert.equal(subscription.enabled,true);
-  assert.throws(()=>createGatewayWebhookSubscription({
-    id:'sub:bad',endpoint:'https://127.0.0.1/hook',eventKinds:['operation.completed']
-  }),/private hosts/);
+  for(const endpoint of ['https://127.0.0.1/hook','https://[fe80::1]/hook','https://metadata.internal/hook']){
+    assert.throws(()=>createGatewayWebhookSubscription({
+      id:'sub:bad',endpoint,eventKinds:['operation.completed']
+    }),(error:any)=>error?.code==='GATEWAY_WEBHOOK_INVALID');
+  }
   const event=createGatewayEvent({kind:'operation.completed',occurredAt:'2026-10-07T00:00:01.000Z',subjectId:'task:1',data:{status:'verified'}});
   const signed=signGatewayEvent(event,'s'.repeat(32));
   assert.equal(verifyGatewayEventSignature(signed.body,signed.signature,'s'.repeat(32)),true);
