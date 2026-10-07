@@ -26,6 +26,8 @@
       <nav class="sidebar" aria-label="Control Center">
         <button class="nav active" data-view="home" aria-current="page">Home</button>
         <button class="nav" data-view="sessions">Sessions</button>
+        <button class="nav" data-view="studio" data-tab="studio">Studio</button>
+        <button class="nav" data-view="desired" data-tab="desired">Desired State</button>
         <button class="nav" data-view="approvals">Approval Center</button>
         <button class="nav" data-view="activity">Activity</button>
         <button class="nav" data-view="devices">Devices</button>
@@ -45,6 +47,27 @@
         <section id="view-sessions" class="view" aria-labelledby="sessions-title">
           <div class="view-head"><div><h1 id="sessions-title">Sessions</h1><p>Objectives, progress, blockers, verification, and preserved work.</p></div></div>
           <div id="sessions"></div>
+        </section>
+        <section id="view-studio" class="view" aria-labelledby="studio-title">
+          <div class="view-head"><div><h1 id="studio-title">Studio</h1><p>Run verified taught workflows without leaving the Control Center.</p></div></div>
+          <article class="card">
+            <h2>Create workflow run</h2>
+            <div class="split">
+              <label><span class="row-meta">Compiled workflow ID</span><input id="studioWorkflowId" aria-label="Compiled workflow ID" placeholder="Workflow UUID"></label>
+              <label><span class="row-meta">Values JSON</span><input id="studioValues" aria-label="Workflow values JSON" value="{}" spellcheck="false"></label>
+            </div>
+            <div class="actions"><button id="createStudioRun" class="primary">Create run</button></div>
+          </article>
+          <div id="studioList"></div>
+        </section>
+        <section id="view-desired" class="view" aria-labelledby="desired-title">
+          <div class="view-head"><div><h1 id="desired-title">Desired State</h1><p>Inspect and reconcile governed continuous objectives.</p></div></div>
+          <article class="card">
+            <h2>Create desired-state contract</h2>
+            <textarea id="desiredJson" class="code" rows="8" aria-label="Desired-state contract JSON" placeholder="Paste a desired-state contract JSON object"></textarea>
+            <div class="actions"><button id="createDesired" class="primary">Create contract</button></div>
+          </article>
+          <div id="desiredList"></div>
         </section>
         <section id="view-approvals" class="view" aria-labelledby="approvals-title">
           <div class="view-head"><div><h1 id="approvals-title">Approval Center</h1><p>Plain-language scope, risk, reversibility, expiry, and recovery guidance.</p></div><button id="approvalProbe" class="secondary">Run approval practice</button></div>
