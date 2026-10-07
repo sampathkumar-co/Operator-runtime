@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "sdk": {
+    "typescript": {
+      "package": "@mecord/capability-sdk",
+      "version": "1.0.0",
+      "manifestSchemaVersion": 1
+    },
+    "python": {
+      "package": "mecord-capability-sdk",
+      "version": "1.0.0",
+      "manifestSchemaVersion": 1
+    }
+  },
+  "runtime": {
+    "minimumProductVersion": "2.0.5",
+    "capabilitySdkVersion": 1
+  },
+  "transports": [
+    "mcp",
+    "openai",
+    "automation",
+    "local-sdk",
+    "enterprise-sdk"
+  ],
+  "requiredConformanceSuites": [
+    "SANDBOX",
+    "CONTRACT",
+    "ADVERSARIAL",
+    "PERFORMANCE"
+  ]
+}
