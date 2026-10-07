@@ -7,6 +7,7 @@ import {
   createUpdateRollout,
   evaluateProductionPlatformSlo,
   evaluateProductionSlo,
+  recordUpdateRollbackResult,
   recordUpdateWaveResult,
   RelayOwnershipFenceStore,
   startUpdateRollout
@@ -109,8 +110,20 @@ test('staged update rollout completes healthy waves and demands rollback on heal
     slo: bad,
     now: '2026-10-07T00:03:00.000Z'
   });
-  assert.equal(rollout.state, 'ROLLBACK_REQUIRED');
+  assert.equal(rollout.state, 'ROLLING_BACK');
+  assert.ok(rollout.rollbackStartedAt);
   assert.match(rollout.reason ?? '', /CRASH_FREE_SESSION_RATE_LOW/);
+
+  rollout = recordUpdateRollbackResult({
+    state: rollout,
+    healthyTargets: 20,
+    failedTargets: 0,
+    slo: healthySlo(),
+    now: '2026-10-07T00:04:00.000Z'
+  });
+  assert.equal(rollout.state, 'ROLLED_BACK');
+  assert.equal(rollout.rollbackFailedTargets, 0);
+  assert.equal(rollout.reason, 'AUTOMATIC_ROLLBACK_COMPLETED');
 });
 
 
@@ -191,4 +204,32 @@ test('platform SLO accepts healthy operational recovery objectives', () => {
   });
   assert.equal(decision.healthy, true);
   assert.deepEqual(decision.reasons, []);
+});
+
+
+test('automatic rollback halts when rollback targets or health fail', () => {
+  let rollout = startUpdateRollout(createUpdateRollout({
+    version:'2.2.0',
+    channel:'canary',
+    waves:[{id:'canary',targetCount:2,minHealthyCount:2}],
+    now:'2026-10-07T01:00:00.000Z'
+  }),'2026-10-07T01:00:01.000Z');
+  rollout = recordUpdateWaveResult({
+    state:rollout,
+    completedTargets:2,
+    healthyTargets:1,
+    rollbackAvailable:true,
+    slo:{...healthySlo(),healthy:false,reasons:['P95_DISPATCH_LATENCY_HIGH']},
+    now:'2026-10-07T01:00:02.000Z'
+  });
+  assert.equal(rollout.state,'ROLLING_BACK');
+  rollout = recordUpdateRollbackResult({
+    state:rollout,
+    healthyTargets:1,
+    failedTargets:1,
+    slo:healthySlo(),
+    now:'2026-10-07T01:00:03.000Z'
+  });
+  assert.equal(rollout.state,'HALTED');
+  assert.equal(rollout.reason,'AUTOMATIC_ROLLBACK_TARGET_FAILED');
 });
