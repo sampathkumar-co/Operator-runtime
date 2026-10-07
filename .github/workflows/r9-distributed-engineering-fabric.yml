@@ -1,0 +1,56 @@
+name: R9 Distributed Autonomous Engineering Fabric
+
+on:
+  push:
+    branches: ['main', 'program/r9-*', 'program/r9-r10-*']
+  pull_request:
+    paths:
+      - 'src/core/distributed-placement.ts'
+      - 'src/core/distributed-engineering-fabric.ts'
+      - 'src/core/control-plane-store.ts'
+      - 'src/core/enterprise-authority-lease.ts'
+      - 'src/core/principal-delegation.ts'
+      - 'src/core/index.ts'
+      - 'test/r9-distributed-engineering-fabric.test.ts'
+      - 'scripts/generate-r9-certification.ts'
+      - 'package.json'
+      - '.github/workflows/r9-distributed-engineering-fabric.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r9-distributed-fabric-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R9 distributed fabric certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R9 exact-head suite
+        run: npm run test:r9
+      - name: Generate R9 exact-head evidence
+        env:
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run evidence:r9
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r9-distributed-fabric-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/r9/*
+          if-no-files-found: error
+          retention-days: 30
