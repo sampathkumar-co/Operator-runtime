@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import type { ControlPlaneStore } from './control-plane-store.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_STREAMS = 10_000;
@@ -61,18 +62,24 @@ export class RelayDeliveryStore {
   #maxDeliveriesPerStream: number;
   #terminalReplayWindow: number;
   #queue: Promise<void> = Promise.resolve();
+  #shared?: ControlPlaneStore;
+  #sharedNamespace: string;
 
   constructor(stateDir: string, options: {
     clock?: Clock;
     retentionMs?: number;
     maxDeliveriesPerStream?: number;
     terminalReplayWindow?: number;
+    sharedStore?: ControlPlaneStore;
+    sharedNamespace?: string;
   } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'relay-deliveries.json');
     this.#clock = options.clock ?? (() => new Date());
     this.#retentionMs = boundedRetention(options.retentionMs);
     this.#maxDeliveriesPerStream = boundedMaxDeliveries(options.maxDeliveriesPerStream);
     this.#terminalReplayWindow = boundedReplayWindow(options.terminalReplayWindow, this.#maxDeliveriesPerStream);
+    this.#shared = options.sharedStore;
+    this.#sharedNamespace = validSharedNamespace(options.sharedNamespace ?? 'relay-delivery-streams');
   }
 
   async enqueue(deviceIdInput: string, kindInput: string, payloadInput: JsonObject, authorityInput?: RelayDeliveryAuthority, idempotencyKeyInput?: string, requiredCapabilitiesInput: readonly string[] = []): Promise<StoredRelayDelivery> {
@@ -307,6 +314,7 @@ export class RelayDeliveryStore {
   }
 
   async #read(): Promise<RelayDeliveryState> {
+    if (this.#shared) return (await this.#readShared()).state;
     try {
       const text = await readDurableStateText(this.#file, {
         maxBytes: 128 * 1024 * 1024,
@@ -322,6 +330,7 @@ export class RelayDeliveryStore {
   }
 
   async #write(stateInput: RelayDeliveryState): Promise<void> {
+    if (this.#shared) throw new OperatorError('RELAY_QUEUE_SHARED_WRITE_INVALID', 'Shared relay state must commit through compare-and-swap mutation.');
     const state = validateState(stateInput);
     await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), {
       maxBytes: 128 * 1024 * 1024,
@@ -331,6 +340,7 @@ export class RelayDeliveryStore {
   }
 
   async #mutate<T>(mutator: (state: RelayDeliveryState) => T | Promise<T>): Promise<T> {
+    if (this.#shared) return await this.#mutateShared(mutator);
     let release!: () => void;
     const previous = this.#queue;
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
@@ -344,6 +354,91 @@ export class RelayDeliveryStore {
       release();
     }
   }
+
+  async #readShared(): Promise<{
+    state: RelayDeliveryState;
+    generations: Map<string, number>;
+    epochGeneration: number | null;
+    epochCounter: number;
+  }> {
+    const records = await this.#shared!.list(this.#sharedNamespace);
+    const streams: DeviceDeliveryStream[] = [];
+    const generations = new Map<string, number>();
+    let epochGeneration: number | null = null;
+    let epochCounter = 0;
+    for (const record of records) {
+      if (record.key === '__epoch') {
+        epochGeneration = record.generation;
+        const counter = Number(record.value.counter ?? 0);
+        if (!Number.isSafeInteger(counter) || counter < 0) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery epoch is invalid.');
+        epochCounter = counter;
+        continue;
+      }
+      const stream = (record.value as Record<string, unknown>).stream;
+      if (!stream || typeof stream !== 'object' || Array.isArray(stream)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery stream is invalid.');
+      streams.push(structuredClone(stream) as DeviceDeliveryStream);
+      generations.set(record.key, record.generation);
+    }
+    return {
+      state: validateState({ version: 2, streams }),
+      generations,
+      epochGeneration,
+      epochCounter
+    };
+  }
+
+  async #mutateShared<T>(mutator: (state: RelayDeliveryState) => T | Promise<T>): Promise<T> {
+    for (let attempt = 0; attempt < 32; attempt += 1) {
+      const snapshot = await this.#readShared();
+      const before = new Map(snapshot.state.streams.map((stream) => [stream.deviceId, JSON.stringify(stream)]));
+      const value = await mutator(snapshot.state);
+      const normalized = validateState(snapshot.state);
+      const after = new Map(normalized.streams.map((stream) => [stream.deviceId, stream]));
+      const keys = new Set([...before.keys(), ...after.keys()]);
+      const mutations = [];
+      for (const key of [...keys].sort()) {
+        const prior = before.get(key);
+        const next = after.get(key);
+        if (prior !== undefined && next !== undefined && prior === JSON.stringify(next)) continue;
+        if (next === undefined) {
+          const generation = snapshot.generations.get(key);
+          if (generation === undefined) continue;
+          mutations.push({ namespace: this.#sharedNamespace, key, expectedGeneration: generation, value: null });
+          continue;
+        }
+        const generation = snapshot.generations.get(key);
+        mutations.push({
+          namespace: this.#sharedNamespace,
+          key,
+          expectedGeneration: generation ?? null,
+          value: { stateVersion: 2, stream: structuredClone(next) }
+        });
+      }
+      if (mutations.length === 0) return value;
+      mutations.push({
+        namespace: this.#sharedNamespace,
+        key: '__epoch',
+        expectedGeneration: snapshot.epochGeneration,
+        value: { counter: snapshot.epochCounter + 1 }
+      });
+      try {
+        await this.#shared!.transact(mutations, this.#clock().toISOString());
+        return value;
+      } catch (error) {
+        if (error instanceof OperatorError && error.code === 'CONTROL_PLANE_CAS_MISMATCH') continue;
+        throw error;
+      }
+    }
+    throw new OperatorError('RELAY_QUEUE_CONTENTION', 'Shared relay delivery state remained contended after bounded retries.', { retryable: true });
+  }
+}
+
+function validSharedNamespace(value: string): string {
+  const text = String(value ?? '');
+  if (!/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(text) || text === '__epoch') {
+    throw new OperatorError('RELAY_QUEUE_SHARED_NAMESPACE_INVALID', 'Shared relay delivery namespace is invalid.');
+  }
+  return text;
 }
 
 function boundedMaxDeliveries(value: number | undefined): number {
