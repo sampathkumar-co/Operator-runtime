@@ -1,0 +1,50 @@
+name: R4 Human-Centered Product
+
+on:
+  push:
+    branches: ['main', 'program/r4-**']
+    paths:
+      - 'apps/local-agent/src/control-center.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'src/core/control-center-model.ts'
+      - 'src/core/control-center-ux.ts'
+      - 'src/core/contract-registry.ts'
+      - 'test/control-center-*.test.ts'
+      - 'package.json'
+      - '.github/workflows/r4-human-product.yml'
+  pull_request:
+    paths:
+      - 'apps/local-agent/src/control-center.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'src/core/control-center-model.ts'
+      - 'src/core/control-center-ux.ts'
+      - 'src/core/contract-registry.ts'
+      - 'test/control-center-*.test.ts'
+      - 'package.json'
+      - '.github/workflows/r4-human-product.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r4-human-product-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  r4-contracts:
+    name: R4 product contracts and safety UX
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - run: npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck:production
+      - run: npm run test:r4
+      - name: Control Center security invariants
+        run: node --experimental-strip-types --test test/session-private-surface.test.ts test/approval-lifecycle.test.ts test/session-approval.test.ts
