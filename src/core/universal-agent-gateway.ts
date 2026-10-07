@@ -48,9 +48,7 @@ export class UniversalAgentGateway {
     permissions: PermissionProfile,
     expectedPrincipalId?: string
   ): Promise<AgentGatewayExecutionReceipt> {
-    const proposal = 'digest' in (input as any)
-      ? input as NormalizedAgentGatewayProposal
-      : this.normalize(input);
+    const proposal = this.normalize(input);
     if (expectedPrincipalId !== undefined && proposal.principalId !== expectedPrincipalId) {
       throw new OperatorError('AGENT_GATEWAY_PRINCIPAL_MISMATCH', 'Gateway proposal principal does not match the authenticated request principal.');
     }
