@@ -9,6 +9,7 @@ from mecord_sdk import (
     CapabilityManifest,
     CapabilityManifestEntry,
     GatewayProposal,
+    MecordGatewayClient,
     sign_webhook_body,
     verify_webhook_signature,
 )
@@ -45,6 +46,17 @@ class SdkTests(unittest.TestCase):
             adapter_version="1.0.0",
         )
         self.assertEqual(proposal.schemaVersion, 1)
+
+
+    def test_gateway_client_rejects_loopback_prefix_spoofing(self):
+        with self.assertRaises(ValueError):
+            MecordGatewayClient("http://localhost.evil.example", "t" * 32)
+        with self.assertRaises(ValueError):
+            MecordGatewayClient("http://127.0.0.1.evil.example", "t" * 32)
+        with self.assertRaises(ValueError):
+            MecordGatewayClient("http://user:pass@localhost", "t" * 32)
+        MecordGatewayClient("http://127.0.0.1:9999", "t" * 32)
+        MecordGatewayClient("https://gateway.example.com", "t" * 32)
 
     def test_webhook_signature_is_tamper_evident(self):
         secret = "s" * 32
