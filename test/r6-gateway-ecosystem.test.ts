@@ -10,7 +10,7 @@ const permissions:PermissionProfile={allowedCapabilities:['file.read'],allowedRo
 const action:ActionRequest={id:'gateway-action',capability:'file.read',risk:'read',input:{path:'x'},provenance:{kind:'runtime'}};
 const context={schemaVersion:1 as const,principalId:'principal:test',actionId:action.id};
 
-test('MCP OpenAI and automation adapters share identical authority and execution semantics',async()=>{
+test('all five R6 transports share identical authority and execution semantics',async()=>{
   const seen:Array<{principal:string;capabilities:string[]}>=[];  
   const executor={
     async execute(a:ActionRequest,p:PermissionProfile):Promise<ActionResult>{
@@ -23,14 +23,14 @@ test('MCP OpenAI and automation adapters share identical authority and execution
     authorizer:{permissionsFor(principal){assert.equal(principal,'principal:test');return permissions;}}
   });
   const receipts=[];
-  for(const transport of ['mcp','openai','automation'] as const){
+  for(const transport of ['mcp','openai','automation','local-sdk','enterprise-sdk'] as const){
     receipts.push(await gateway.execute(createAgentGatewayProposal({
       transport,principalId:'principal:test',executionContext:context,action,adapterVersion:'1.0.0',proposedAt:'2026-10-07T00:00:00.000Z'
     })));
   }
-  assert.equal(receipts.length,3);
+  assert.equal(receipts.length,5);
   assert.ok(receipts.every(r=>r.result.ok&&r.actionId===action.id));
-  assert.deepEqual(seen.map(x=>x.capabilities),[['file.read'],['file.read'],['file.read']]);
+  assert.deepEqual(seen.map(x=>x.capabilities),Array.from({length:5},()=>['file.read']));
 });
 
 test('request-bound gateway authority rejects principal spoofing',async()=>{
