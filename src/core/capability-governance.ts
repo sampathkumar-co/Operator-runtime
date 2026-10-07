@@ -131,7 +131,10 @@ class LiveGovernedProvider implements CapabilityProvider {
 
   resolveRisk(action: ActionRequest) {
     this.#assertAdmitted();
-    return this.#provider.resolveRisk?.(action);
+    if (!this.#provider.resolveRisk) {
+      throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Governed extension provider has no dynamic-risk resolver.');
+    }
+    return this.#provider.resolveRisk(action);
   }
 
   async execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult> {
