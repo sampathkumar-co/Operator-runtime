@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
+import { requirePublicHttpsUrl } from './network-authority.ts';
 
 export type GatewayEventKind =
   | 'operation.started'
@@ -40,11 +41,9 @@ export function createGatewayWebhookSubscription(input: {
   enabled?: boolean;
   createdAt?: string;
 }): GatewayWebhookSubscription {
-  const endpoint = new URL(input.endpoint);
-  if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.hash) {
-    throw invalid('Webhook endpoint must be credential-free HTTPS.');
-  }
-  if (isPrivateHost(endpoint.hostname)) throw invalid('Webhook endpoint cannot target loopback or private hosts.');
+  let endpoint: URL;
+  try { endpoint = requirePublicHttpsUrl(input.endpoint, 'Webhook endpoint'); }
+  catch { throw invalid('Webhook endpoint must be credential-free HTTPS on a public DNS hostname.'); }
   const eventKinds = [...new Set(input.eventKinds.map(kind))].sort();
   if (eventKinds.length < 1) throw invalid('Webhook subscription requires at least one event kind.');
   return {
@@ -117,11 +116,4 @@ function safeData(input:unknown):Record<string,unknown>{
 function kind(input:unknown):GatewayEventKind{if(!KINDS.includes(input as GatewayEventKind))throw invalid('Gateway event kind is invalid.');return input as GatewayEventKind;}
 function id(input:unknown,label:string):string{const v=String(input??'');if(!/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(v))throw invalid(label+' is invalid.');return v;}
 function iso(input:unknown,label:string):string{const v=String(input??'');if(!v||!Number.isFinite(Date.parse(v))||new Date(v).toISOString()!==v)throw invalid(label+' must be canonical ISO.');return v;}
-function isPrivateHost(host:string):boolean{
-  const h=host.toLowerCase();
-  if(h==='localhost'||h==='::1'||h.endsWith('.localhost'))return true;
-  if(/^127./.test(h)||/^10./.test(h)||/^192.168./.test(h))return true;
-  const m=h.match(/^172.(\d+)\./); if(m&&Number(m[1])>=16&&Number(m[1])<=31)return true;
-  return false;
-}
 function invalid(message:string):OperatorError{return new OperatorError('GATEWAY_WEBHOOK_INVALID',message);}

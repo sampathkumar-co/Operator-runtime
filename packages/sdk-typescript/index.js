@@ -46,11 +46,19 @@ export const automationGatewayAdapter=(version)=>new FixedGatewayTransportAdapte
 export const localSdkGatewayAdapter=(version)=>new FixedGatewayTransportAdapter('local-sdk',version);
 export const enterpriseGatewayAdapter=(version)=>new FixedGatewayTransportAdapter('enterprise-sdk',version);
 
-export function gatewayWebhookSubscription(input){
-  const endpoint=new URL(input.endpoint);
+function publicWebhookEndpoint(input){
+  const endpoint=new URL(input);
   if(endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.hash) throw new Error('Webhook endpoint must be credential-free HTTPS.');
-  const h=endpoint.hostname.toLowerCase();
-  if(h==='localhost'||h==='::1'||h.endsWith('.localhost')||/^127\./.test(h)||/^10\./.test(h)||/^192\.168\./.test(h)||(()=>{const m=h.match(/^172\.(\d+)\./);return !!(m&&Number(m[1])>=16&&Number(m[1])<=31);})()) throw new Error('Webhook endpoint cannot target loopback or private hosts.');
+  const h=endpoint.hostname.toLowerCase().replace(/\.$/,'');
+  if(!h||h.length>253||h.includes(':')||/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)||!h.includes('.')) throw new Error('Webhook endpoint must use a public DNS hostname.');
+  const labels=h.split('.');
+  if(labels.some(part=>part.length<1||part.length>63||!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(part))) throw new Error('Webhook endpoint hostname is invalid.');
+  const reserved=['localhost','local','internal','invalid','test','onion'];
+  if(reserved.some(suffix=>h===suffix||h.endsWith('.'+suffix))||h==='home.arpa'||h.endsWith('.home.arpa')) throw new Error('Webhook endpoint must use a public DNS hostname.');
+  return endpoint;
+}
+export function gatewayWebhookSubscription(input){
+  const endpoint=publicWebhookEndpoint(input.endpoint);
   if(!Array.isArray(input.eventKinds)||input.eventKinds.length<1) throw new Error('Webhook subscription requires at least one event kind.');
   return {schemaVersion:1,id:input.id,endpoint:endpoint.toString(),eventKinds:[...new Set(input.eventKinds)].sort(),enabled:input.enabled??true,createdAt:input.createdAt??new Date().toISOString()};
 }
