@@ -21,12 +21,28 @@ export interface CapabilityPublisherIdentity {
   enabled: boolean;
 }
 
+export interface CapabilityBuildMetadata {
+  sourceDigest: string;
+  buildRecipeDigest: string;
+  builderId: string;
+  builtAt: string;
+  reproducible: boolean;
+}
+
+export interface CapabilityLifecyclePolicy {
+  deprecatedAt?: string;
+  sunsetAt?: string;
+  vulnerabilityChannel: string;
+}
+
 export interface SignedCapabilityPackage {
   schemaVersion: 1;
   publisherId: string;
   manifest: CapabilityExtensionManifest;
   certification: CapabilityCertification;
   publishedAt: string;
+  build?: CapabilityBuildMetadata;
+  lifecycle?: CapabilityLifecyclePolicy;
   signatureBase64: string;
 }
 
@@ -40,6 +56,9 @@ export interface CapabilityRegistryEntry {
   certificationId: string;
   publishedAt: string;
   status: 'ADMITTED' | 'REVOKED';
+  buildDigest?: string;
+  deprecated?: boolean;
+  sunsetAt?: string;
   revocationId?: string;
 }
 
@@ -61,6 +80,8 @@ export function signCapabilityPackage(input: {
   certification: CapabilityCertification;
   publishedAt?: string;
   privateKeyPem: string;
+  build?: CapabilityBuildMetadata;
+  lifecycle?: CapabilityLifecyclePolicy;
 }): SignedCapabilityPackage {
   const publisherId = id(input.publisherId, 'publisherId');
   const manifest = validateManifest(input.manifest);
@@ -73,7 +94,9 @@ export function signCapabilityPackage(input: {
     throw invalid('Capability package certification does not certify the exact manifest.');
   }
   const publishedAt = iso(input.publishedAt ?? new Date().toISOString(), 'publishedAt');
-  const payload = unsignedPackage({ publisherId, manifest, certification, publishedAt });
+  const build = input.build === undefined ? undefined : normalizeBuild(input.build);
+  const lifecycle = input.lifecycle === undefined ? undefined : normalizeLifecycle(input.lifecycle, publishedAt);
+  const payload = unsignedPackage({ publisherId, manifest, certification, publishedAt, ...(build ? { build } : {}), ...(lifecycle ? { lifecycle } : {}) });
   let signature: Buffer;
   try {
     const key = crypto.createPrivateKey(input.privateKeyPem);
@@ -88,6 +111,8 @@ export function signCapabilityPackage(input: {
     manifest,
     certification,
     publishedAt,
+    ...(build ? { build } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
     signatureBase64: signature.toString('base64')
   };
 }
@@ -156,6 +181,9 @@ export function admitCapabilityPackage(input: {
     certificationId: pkg.certification.id,
     publishedAt: pkg.publishedAt,
     status: admission.allowed ? 'ADMITTED' : 'REVOKED',
+    ...(pkg.build ? { buildDigest: sha256(canonicalJson(pkg.build)) } : {}),
+    ...(pkg.lifecycle?.deprecatedAt ? { deprecated: Date.parse(pkg.lifecycle.deprecatedAt) <= Date.parse(pkg.publishedAt) } : {}),
+    ...(pkg.lifecycle?.sunsetAt ? { sunsetAt: pkg.lifecycle.sunsetAt } : {}),
     ...(admission.revocationId ? { revocationId: admission.revocationId } : {})
   };
   return admission.allowed
@@ -169,6 +197,8 @@ function normalizePackage(input: SignedCapabilityPackage): SignedCapabilityPacka
   const manifest = validateManifest(input.manifest);
   const certification = validateCapabilityCertification(input.certification);
   const publishedAt = iso(input.publishedAt, 'publishedAt');
+  const build = input.build === undefined ? undefined : normalizeBuild(input.build);
+  const lifecycle = input.lifecycle === undefined ? undefined : normalizeLifecycle(input.lifecycle, publishedAt);
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(String(input.signatureBase64 ?? '')) ||
       Buffer.from(input.signatureBase64, 'base64').length !== 64) throw invalid('Capability package signature is invalid.');
   return {
@@ -177,6 +207,8 @@ function normalizePackage(input: SignedCapabilityPackage): SignedCapabilityPacka
     manifest,
     certification,
     publishedAt,
+    ...(build ? { build } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
     signatureBase64: input.signatureBase64
   };
 }
@@ -202,14 +234,49 @@ function unsignedPackage(input: {
   manifest: CapabilityExtensionManifest;
   certification: CapabilityCertification;
   publishedAt: string;
+  build?: CapabilityBuildMetadata;
+  lifecycle?: CapabilityLifecyclePolicy;
 }) {
   return {
     schemaVersion: 1,
     publisherId: input.publisherId,
     manifest: input.manifest,
     certification: input.certification,
-    publishedAt: input.publishedAt
+    publishedAt: input.publishedAt,
+    ...(input.build ? { build: input.build } : {}),
+    ...(input.lifecycle ? { lifecycle: input.lifecycle } : {})
   };
+}
+
+function normalizeBuild(input: CapabilityBuildMetadata): CapabilityBuildMetadata {
+  if (!input || typeof input !== 'object') throw invalid('Capability build metadata is invalid.');
+  if (typeof input.reproducible !== 'boolean') throw invalid('Capability reproducible-build flag is invalid.');
+  return {
+    sourceDigest: digest(input.sourceDigest, 'build.sourceDigest'),
+    buildRecipeDigest: digest(input.buildRecipeDigest, 'build.buildRecipeDigest'),
+    builderId: id(input.builderId, 'build.builderId'),
+    builtAt: iso(input.builtAt, 'build.builtAt'),
+    reproducible: input.reproducible
+  };
+}
+
+function normalizeLifecycle(input: CapabilityLifecyclePolicy, publishedAt: string): CapabilityLifecyclePolicy {
+  if (!input || typeof input !== 'object') throw invalid('Capability lifecycle policy is invalid.');
+  const deprecatedAt = input.deprecatedAt === undefined ? undefined : iso(input.deprecatedAt, 'lifecycle.deprecatedAt');
+  const sunsetAt = input.sunsetAt === undefined ? undefined : iso(input.sunsetAt, 'lifecycle.sunsetAt');
+  if (deprecatedAt && sunsetAt && Date.parse(sunsetAt) < Date.parse(deprecatedAt)) throw invalid('Capability sunset cannot precede deprecation.');
+  if (sunsetAt && Date.parse(sunsetAt) < Date.parse(publishedAt)) throw invalid('Capability sunset cannot precede publication.');
+  const channel = String(input.vulnerabilityChannel ?? '');
+  let parsed: URL;
+  try { parsed = new URL(channel); } catch { throw invalid('Capability vulnerability channel must be a URL.'); }
+  if (!['https:','mailto:'].includes(parsed.protocol)) throw invalid('Capability vulnerability channel must use HTTPS or mailto.');
+  return { ...(deprecatedAt ? { deprecatedAt } : {}), ...(sunsetAt ? { sunsetAt } : {}), vulnerabilityChannel: parsed.toString() };
+}
+
+function digest(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(value)) throw invalid(label + ' must be SHA-256.');
+  return value;
 }
 
 function id(input: unknown, label: string): string {
