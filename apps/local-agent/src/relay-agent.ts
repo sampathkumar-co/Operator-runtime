@@ -651,7 +651,7 @@ function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
   return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
 }
 
-function containsRestrictedPublicActionResult(capability: string, body: unknown): boolean {
+export function containsRestrictedPublicActionResult(capability: string, body: unknown): boolean {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return containsRestrictedData(body);
   if (capability !== 'file.read' && capability !== 'file.info') return containsRestrictedData(body);
 
