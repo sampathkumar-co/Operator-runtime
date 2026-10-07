@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
+import type { ArtifactBlobBackend } from './artifact-object-store.ts';
 import {
   createDurableStateBytes,
   readDurableStateBytes,
@@ -65,18 +66,18 @@ export class ArtifactStore {
   #root: string;
   #blobRoot: string;
   #recordRoot: string;
+  #blobBackend?: ArtifactBlobBackend;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { blobBackend?: ArtifactBlobBackend } = {}) {
     this.#root = path.join(path.resolve(stateDir), 'artifacts');
     this.#blobRoot = path.join(this.#root, 'blobs', 'sha256');
     this.#recordRoot = path.join(this.#root, 'records');
+    this.#blobBackend = options.blobBackend;
   }
 
   async init(): Promise<void> {
-    await Promise.all([
-      this.#ensureDirectory(this.#blobRoot),
-      this.#ensureDirectory(this.#recordRoot)
-    ]);
+    await this.#ensureDirectory(this.#recordRoot);
+    if (!this.#blobBackend) await this.#ensureDirectory(this.#blobRoot);
   }
 
   async put(input: ArtifactPutInput): Promise<ArtifactRecord> {
@@ -128,7 +129,9 @@ export class ArtifactStore {
 
   async read(idInput: string): Promise<{ record: ArtifactRecord; bytes: Buffer }> {
     const record = await this.get(idInput);
-    const blob = await readDurableStateBytes(this.#blobPath(record.blobDigest), BLOB_OPTIONS);
+    const blob = this.#blobBackend
+      ? await this.#blobBackend.get(record.blobDigest)
+      : await readDurableStateBytes(this.#blobPath(record.blobDigest), BLOB_OPTIONS);
     if (blob.byteLength !== record.bytes || sha256(blob) !== record.blobDigest) {
       throw new OperatorError('ARTIFACT_INTEGRITY_FAILED', 'Artifact blob digest or size does not match its immutable record.', {
         details: { artifactId: record.id, blobDigest: record.blobDigest }
@@ -151,6 +154,10 @@ export class ArtifactStore {
   }
 
   async #putBlob(digest: string, bytes: Buffer): Promise<void> {
+    if (this.#blobBackend) {
+      await this.#blobBackend.put(digest, bytes);
+      return;
+    }
     const file = this.#blobPath(digest);
     await this.#ensureDirectory(path.dirname(file));
     try {
