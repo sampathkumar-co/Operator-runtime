@@ -202,8 +202,8 @@ export function buildGuidedOnboardingModel(input: OnboardingStateInput): GuidedO
 
   let firstIncomplete = ordered.findIndex(([, complete]) => !complete);
   if (firstIncomplete < 0) firstIncomplete = ordered.length;
-  const steps: OnboardingStep[] = ordered.map(([id, complete], index) => {
-    if (complete) return { id, status: 'COMPLETE' };
+  const steps: OnboardingStep[] = ordered.map(([id], index) => {
+    if (index < firstIncomplete) return { id, status: 'COMPLETE' };
     if (index === firstIncomplete) return { id, status: 'READY' };
     return { id, status: 'BLOCKED', blockingStep: ordered[firstIncomplete]![0] };
   });
