@@ -3,6 +3,7 @@ import { canonicalJson } from './action-identity.ts';
 import { normalizeTraceEvent, type OperationSloSummary, type OperationTraceEvent } from './operation-trace.ts';
 import { RELEASE_TRUTH } from './release-truth.ts';
 import { OperatorError } from './errors.ts';
+import type { ProductionPlatformSloDecision } from './production-trust-platform.ts';
 
 export interface OtlpAnyValue {
   stringValue?: string;
@@ -201,6 +202,48 @@ export function operationSloToOtlpMetrics(
     resourceMetrics: [{
       resource: { attributes: resourceAttributes(options) },
       scopeMetrics: [{ scope: { name: 'mecord.operation-metrics', version: RELEASE_TRUTH.product.publicSurfaceVersion }, metrics }]
+    }]
+  };
+}
+
+
+export function productionPlatformSloToOtlpMetrics(
+  decision: ProductionPlatformSloDecision,
+  options: { serviceName?: string; environment?: string; at?: string } = {}
+): OtlpMetricExportJson {
+  if (!decision || !decision.metrics || !Array.isArray(decision.reasons)) throw invalid('Production platform SLO decision is invalid.');
+  const at = options.at ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at) throw invalid('OTLP metric timestamp is invalid.');
+  const t = millisToNanos(Date.parse(at));
+  const intMetric = (name:string,value:number,unit='1') => ({
+    name, unit, gauge: { dataPoints: [{ timeUnixNano: t, asInt: String(safeInteger(value,name)), attributes: [] as OtlpKeyValue[] }] }
+  });
+  const doubleMetric = (name:string,value:number,unit='1') => ({
+    name, unit, gauge: { dataPoints: [{ timeUnixNano: t, asDouble: safeNumber(value,name), attributes: [] as OtlpKeyValue[] }] }
+  });
+  const m = decision.metrics;
+  const metrics = [
+    doubleMetric('mecord.platform.control_plane.availability',m.controlPlaneAvailability),
+    doubleMetric('mecord.platform.device.reconnect_success_rate',m.reconnectSuccessRate),
+    doubleMetric('mecord.platform.dispatch.p95',m.p95DispatchMs,'ms'),
+    doubleMetric('mecord.platform.verification.p95',m.p95VerificationMs,'ms'),
+    intMetric('mecord.platform.queue.depth',m.queueDepth),
+    doubleMetric('mecord.platform.delivery_age.p95',m.p95DeliveryAgeMs,'ms'),
+    doubleMetric('mecord.platform.reconciliation.p95',m.p95ReconciliationMs,'ms'),
+    intMetric('mecord.platform.state.bytes',m.stateBytes,'By'),
+    intMetric('mecord.platform.retention.violations',m.retentionViolationCount),
+    doubleMetric('mecord.platform.crash_free_session_rate',m.crashFreeSessionRate),
+    doubleMetric('mecord.platform.update_success_rate',m.updateSuccessRate),
+    doubleMetric('mecord.platform.verification_rate',m.verificationRate),
+    doubleMetric('mecord.platform.false_completion_rate',m.falseCompletionRate),
+    doubleMetric('mecord.platform.uncertain_rate',m.uncertainRate),
+    doubleMetric('mecord.platform.completion.p95',m.p95CompletionMs,'ms'),
+    intMetric('mecord.platform.slo.healthy',decision.healthy ? 1 : 0)
+  ];
+  return {
+    resourceMetrics: [{
+      resource: { attributes: resourceAttributes(options) },
+      scopeMetrics: [{ scope: { name: 'mecord.production-platform-metrics', version: RELEASE_TRUTH.product.publicSurfaceVersion }, metrics }]
     }]
   };
 }
