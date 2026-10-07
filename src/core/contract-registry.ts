@@ -49,6 +49,8 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'capability-conformance-receipt', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'capability-certification', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'capability-revocation', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'signed-capability-package', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
+  { name: 'capability-registry-entry', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'agent-gateway-proposal', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'principal-delegation-graph', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'counterfactual-twin-manifest', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
