@@ -24,6 +24,10 @@
       "lockfile": null
     },
     {
+      "path": "packages/mecord-capability-sdk",
+      "lockfile": null
+    },
+    {
       "path": "packages/operator-runtime-cli",
       "lockfile": null
     },
