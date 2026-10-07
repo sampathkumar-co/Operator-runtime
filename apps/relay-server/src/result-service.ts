@@ -8,6 +8,8 @@ import { DeviceRegistryStore, type PairingResponse } from '../../../src/core/dev
 import { DeviceEnrollmentStore, enrollmentPollBinding } from '../../../src/core/device-enrollment.ts';
 import { DeviceResetStore } from '../../../src/core/device-reset.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { executionContextDigest, executionContextIdentityFrom } from '../../../src/core/execution-context-identity.ts';
+import { OperationTraceStore, type OperationTraceOutcome } from '../../../src/core/operation-trace.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
 import { RelayDeliveryStore, type RelayDeliveryAuthority } from '../../../src/core/relay-delivery-store.ts';
@@ -37,6 +39,7 @@ export interface RelayResultServiceOptions {
   gcIntervalMs?: number;
   requestLimitPerMinute?: number;
   deviceLimitPerMinute?: number;
+  operationTrace?: OperationTraceStore;
 }
 
 export class RelayResultService {
@@ -54,6 +57,7 @@ export class RelayResultService {
   #requestLimiter: FixedWindowRateLimiter;
   #deviceLimiter: FixedWindowRateLimiter;
   #server: http.Server | null = null;
+  #operationTrace?: OperationTraceStore;
 
   constructor(options: RelayResultServiceOptions) {
     const stateDir = path.resolve(options.stateDir);
@@ -74,6 +78,7 @@ export class RelayResultService {
     const deviceLimit = boundedPositiveInt(options.deviceLimitPerMinute, DEFAULT_DEVICE_LIMIT_PER_MINUTE, 'deviceLimitPerMinute');
     this.#requestLimiter = new FixedWindowRateLimiter({ limit: requestLimit, windowMs: 60_000 });
     this.#deviceLimiter = new FixedWindowRateLimiter({ limit: deviceLimit, windowMs: 60_000 });
+    this.#operationTrace = options.operationTrace;
   }
 
   async listen(host = '127.0.0.1', port = 0): Promise<{ host: string; port: number }> {
@@ -272,6 +277,7 @@ export class RelayResultService {
             throw error;
           }
         }
+        await this.#traceResult(expected, session.subjectDeviceId, seq, stored.duplicate, body.result);
         send(response, 200, {
           ok: true,
           accepted: { deviceId: session.subjectDeviceId, seq, deliveryId, duplicate: stored.duplicate, resultSha256: stored.result.resultSha256 }
@@ -302,6 +308,36 @@ export class RelayResultService {
     return { host, port: address.port };
   }
 
+  async #traceResult(
+    delivery: Awaited<ReturnType<RelayDeliveryStore['retained']>> extends infer T ? NonNullable<T> : never,
+    deviceId: string,
+    seq: number,
+    duplicate: boolean,
+    result: unknown
+  ): Promise<void> {
+    if (!this.#operationTrace) return;
+    const traceId = deliveryTraceId(delivery);
+    try {
+      await this.#operationTrace.append({
+        traceId,
+        executionContextDigest: executionContextDigest(executionContextIdentityFrom({
+          deviceId,
+          ...deliveryActionIdentity(delivery)
+        })),
+        stage: 'COMPLETE',
+        outcome: relayResultTraceOutcome(result),
+        at: new Date().toISOString(),
+        attributes: {
+          transport: 'relay-result',
+          deliverySeq: seq,
+          duplicate
+        }
+      });
+    } catch {
+      // Result persistence remains authoritative if observability storage degrades.
+    }
+  }
+
   async #assertActiveReplayAuthority(authority: RelayDeliveryAuthority): Promise<void> {
     const active = await this.#accounts.activeMembershipForDevice(authority.deviceId);
     if (!active || active.accountId !== authority.accountId || active.authorityGeneration !== authority.generation) {
@@ -324,6 +360,41 @@ export class RelayResultService {
     if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+function deliveryTraceId(delivery: { id: string; payload: Record<string, unknown> }): string {
+  const explicit = typeof delivery.payload.traceId === 'string' ? delivery.payload.traceId : undefined;
+  if (explicit && /^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(explicit)) return explicit;
+  const action = delivery.payload.action && typeof delivery.payload.action === 'object' && !Array.isArray(delivery.payload.action)
+    ? delivery.payload.action as Record<string, unknown>
+    : undefined;
+  for (const candidate of [action?.taskId, action?.id, delivery.id]) {
+    if (typeof candidate === 'string' && /^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(candidate)) return candidate;
+  }
+  return delivery.id;
+}
+
+function deliveryActionIdentity(delivery: { payload: Record<string, unknown> }): { taskId?: string; actionId?: string } {
+  const action = delivery.payload.action && typeof delivery.payload.action === 'object' && !Array.isArray(delivery.payload.action)
+    ? delivery.payload.action as Record<string, unknown>
+    : undefined;
+  const taskId = typeof action?.taskId === 'string' ? action.taskId : undefined;
+  const actionId = typeof action?.id === 'string' ? action.id : undefined;
+  return {
+    ...(taskId ? { taskId } : {}),
+    ...(actionId ? { actionId } : {})
+  };
+}
+
+function relayResultTraceOutcome(input: unknown): OperationTraceOutcome {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'FAILED';
+  const raw=input as Record<string, unknown>;
+  if (raw.ok === true) return 'OK';
+  const error=raw.error && typeof raw.error === 'object' && !Array.isArray(raw.error) ? raw.error as Record<string, unknown> : undefined;
+  if (error?.sideEffectState === 'uncertain') return 'UNCERTAIN';
+  if (error?.code === 'APPROVAL_REQUIRED') return 'BLOCKED';
+  if (error?.code === 'CANCELLED' || error?.code === 'EMERGENCY_STOPPED') return 'CANCELLED';
+  return 'FAILED';
 }
 
 function isPendingReadDelivery(delivery: Awaited<ReturnType<RelayDeliveryStore['pending']>>[number]): boolean {
