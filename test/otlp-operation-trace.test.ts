@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   operationSloToOtlpMetrics,
   operationTraceToOtlp,
+  productionPlatformSloToOtlpMetrics,
   operationTraceToOtlpLogs,
   otlpLogExportDigest,
   otlpMetricExportDigest,
@@ -184,5 +185,44 @@ test('OTLP metrics export verification false-completion uncertainty and latency 
     'mecord.operation.traces','mecord.operation.verified','mecord.operation.false_completion',
     'mecord.operation.uncertain','mecord.operation.verification_rate','mecord.operation.completion.p95'
   ]) assert.ok(names.has(required),required);
+  assert.match(otlpMetricExportDigest(payload),/^[0-9a-f]{64}$/);
+});
+
+
+test('OTLP platform metrics expose the complete R5 operational SLO surface', () => {
+  const payload = productionPlatformSloToOtlpMetrics({
+    healthy: true,
+    reasons: [],
+    metrics: {
+      verificationRate: 1,
+      falseCompletionRate: 0,
+      uncertainRate: 0,
+      p95CompletionMs: 200,
+      crashFreeSessionRate: 1,
+      updateSuccessRate: 1,
+      controlPlaneAvailability: 0.9999,
+      reconnectSuccessRate: 0.999,
+      p95DispatchMs: 100,
+      p95VerificationMs: 400,
+      queueDepth: 5,
+      p95DeliveryAgeMs: 250,
+      p95ReconciliationMs: 900,
+      stateBytes: 123456,
+      retentionViolationCount: 0
+    }
+  }, { at:'2026-10-06T00:00:00.000Z', environment:'test' });
+  const names = new Set(payload.resourceMetrics[0]!.scopeMetrics[0]!.metrics.map((metric)=>metric.name));
+  for (const required of [
+    'mecord.platform.control_plane.availability',
+    'mecord.platform.device.reconnect_success_rate',
+    'mecord.platform.dispatch.p95',
+    'mecord.platform.verification.p95',
+    'mecord.platform.queue.depth',
+    'mecord.platform.delivery_age.p95',
+    'mecord.platform.reconciliation.p95',
+    'mecord.platform.state.bytes',
+    'mecord.platform.retention.violations',
+    'mecord.platform.slo.healthy'
+  ]) assert.ok(names.has(required), required);
   assert.match(otlpMetricExportDigest(payload),/^[0-9a-f]{64}$/);
 });
