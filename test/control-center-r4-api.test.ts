@@ -31,9 +31,7 @@ test('R4 Control Center APIs project authenticated runtime truth without leaking
   const deviceIdentity = new DeviceIdentityStore(state, { platform: 'linux' });
   await deviceIdentity.loadOrCreate('R4 Test Device');
 
-  const approvals = new ApprovalStore(state, {
-    clock: () => new Date('2026-10-07T08:00:00.000Z')
-  });
+  const approvals = new ApprovalStore(state);
   await approvals.register({
     id: 'r4-pending-action',
     capability: 'file.replace',
