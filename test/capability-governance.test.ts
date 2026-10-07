@@ -23,7 +23,7 @@ function makeReceipts(manifest:any){
 
 test('digest-bound module loads only after strict governance and live revocation disables it without restart',async(t)=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'r6-cap-module-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
-  const moduleText=`export function createCapabilityProvider(){return {name:'third-party-probe',supports:a=>a.capability==='file.read',score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'third-party-probe',output:{thirdParty:true},evidence:[],durationMs:1}}}}`;
+  const moduleText=`export function createCapabilityProvider(){return {name:'third-party-probe',supports:a=>a.capability==='file.read',score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'third-party-probe',output:{thirdParty:true,moduleUrl:import.meta.url},evidence:[],durationMs:1}}}}`;
   const modulePath=path.join(root,'provider.mjs');await fs.writeFile(modulePath,moduleText);
   const packageDigest=crypto.createHash('sha256').update(moduleText).digest('hex');
   const manifest={sdkVersion:1 as const,id:'external.files',version:'1.0.0',displayName:'External Files',provenance:{source:'file:provider.mjs',packageDigest},capabilities:[{capability:'file.read',risk:'read' as const,deterministic:true,reversible:true,verification:'runtime' as const,reconciliation:'not-required' as const,inputSchemaVersion:1 as const,inputMaxBytes:4096,outputMaxBytes:4096,cancellation:'required' as const,resourceKinds:['file']}]};
@@ -38,9 +38,31 @@ test('digest-bound module loads only after strict governance and live revocation
   });
   const governance=new CapabilityGovernanceRegistry();
   governance.upsertPublisher({id:'publisher:r6',displayName:'R6 Publisher',publicKeyPem:keys.publicKey.export({format:'pem',type:'spki'}).toString(),enabled:true});
-  const provider=await loadGovernedCapabilityModule({modulePath,allowedRoots:[root],package:pkg,governance});
+
+  // Deterministically replace the pathname after the loader reads the signed
+  // bytes but before a pathname-based import could reopen it. The executed
+  // provider must still come from the exact bytes whose digest was verified.
+  const originalReadFile=fs.readFile.bind(fs);
+  const maliciousModuleText=`export function createCapabilityProvider(){return {name:'third-party-probe',supports:()=>true,score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'third-party-probe',output:{thirdParty:false,maliciousReplacement:true,moduleUrl:import.meta.url},evidence:[],durationMs:1}}}}`;
+  let swapped=false;
+  (fs as any).readFile=async (...args:any[])=>{
+    const bytes=await (originalReadFile as any)(...args);
+    if(!swapped&&path.resolve(String(args[0]))===path.resolve(modulePath)){
+      swapped=true;
+      await fs.writeFile(modulePath,maliciousModuleText);
+    }
+    return bytes;
+  };
+  let provider:any;
+  try{provider=await loadGovernedCapabilityModule({modulePath,allowedRoots:[root],package:pkg,governance});}
+  finally{(fs as any).readFile=originalReadFile;}
+  assert.equal(swapped,true);
   const action={id:'read',capability:'file.read',risk:'read' as const,input:{},provenance:{kind:'runtime' as const}};
-  assert.equal((await provider.execute(action)).ok,true);
+  const firstResult=await provider.execute(action);
+  assert.equal(firstResult.ok,true);
+  assert.equal((firstResult.output as any)?.thirdParty,true);
+  assert.equal((firstResult.output as any)?.maliciousReplacement,undefined);
+  assert.match(String((firstResult.output as any)?.moduleUrl),/^data:text\/javascript;base64,/);
   governance.revokePackage(pkg,{reasonCode:'VULNERABILITY_CONFIRMED',evidenceArtifactIds:['f'.repeat(64)],revokedAt:'2026-10-07T00:03:00.000Z'});
   assert.equal(await provider.supports(action),false);
   await assert.rejects(()=>provider.execute(action),(e:any)=>e?.code==='CAPABILITY_PACKAGE_REVOKED');
