@@ -25,6 +25,7 @@ on:
       - 'test/r5-relay-composition.test.ts'
       - 'package.json'
       - 'scripts/r5-production-soak.ts'
+      - 'scripts/generate-r5-certification.ts'
       - '.github/workflows/r5-production-trust.yml'
   workflow_dispatch:
 
@@ -55,3 +56,11 @@ jobs:
         run: npm run test:r5
       - name: R5 bounded soak smoke
         run: npm run test:r5-soak:smoke
+      - name: Generate R5 exact-head evidence
+        run: npm run evidence:r5
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r5-production-trust-evidence-${{ github.sha }}
+          path: artifacts/r5/*
+          if-no-files-found: error
+          retention-days: 30
