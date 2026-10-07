@@ -19,6 +19,7 @@ on:
       - 'apps/local-agent/src/control-center.ts'
       - 'apps/control-center/**'
       - 'apps/local-agent/src/server.ts'
+      - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
       - 'src/core/contract-registry.ts'
