@@ -80,6 +80,11 @@ test('R1 production TypeScript config is strict and spans all runtime sources', 
   ]) assert.equal(config.include?.includes(required), true, `missing typecheck boundary: ${required}`);
 });
 
+test('R1 release evidence does not make stale cross-program certification claims', async () => {
+  const generator = await fs.readFile(new URL('../scripts/generate-r1-release-evidence.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(generator, /R2 GENERAL control remains unpromoted/);
+});
+
 
 test('R1 schema compatibility explicitly accepts the current task observation schema and its supported previous version', () => {
   assert.equal(contractReadCompatibility('task-observation-summary', 2), 'current');

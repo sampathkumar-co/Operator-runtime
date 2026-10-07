@@ -77,8 +77,7 @@ const evidence = {
     qualificationMustMatchHead: true,
     generatedEvidenceDoesNotByItselfCertifyRelease: true,
     knownLimitations: [
-      'Production deployment remains an explicitly promoted state distinct from the source release candidate.',
-      'R2 GENERAL control remains unpromoted until representative non-benchmark empirical evidence satisfies its separate gate.'
+      'Production deployment remains an explicitly promoted state distinct from the source release candidate.'
     ],
     unresolvedFindings: []
   },
