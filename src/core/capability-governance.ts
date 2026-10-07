@@ -8,6 +8,7 @@ import {
 } from './capability-package-registry.ts';
 import {
   createCapabilityRevocation,
+  validateCapabilityRevocation,
   type CapabilityRevocationRecord
 } from './capability-conformance.ts';
 import { OperatorError } from './errors.ts';
@@ -72,6 +73,12 @@ export class CapabilityGovernanceRegistry {
 
   listRevocations(): CapabilityRevocationRecord[] {
     return this.#revocations.map((item) => structuredClone(item));
+  }
+
+  importRevocation(input: CapabilityRevocationRecord): void {
+    const revocation = validateCapabilityRevocation(input);
+    if (this.#revocations.some((item) => item.id === revocation.id)) return;
+    this.#revocations.push(revocation);
   }
 
   wrap(pkg: SignedCapabilityPackage, provider: CapabilityProvider): CapabilityProvider {
