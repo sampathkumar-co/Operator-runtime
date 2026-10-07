@@ -70,6 +70,10 @@ export interface CapabilityRegistryAdmission {
     | 'PUBLISHER_DISABLED'
     | 'SIGNATURE_INVALID'
     | 'CERTIFICATION_INVALID'
+    | 'BUILD_METADATA_MISSING'
+    | 'BUILD_NOT_REPRODUCIBLE'
+    | 'LIFECYCLE_POLICY_MISSING'
+    | 'PACKAGE_SUNSET'
     | 'REVOKED';
   entry?: CapabilityRegistryEntry;
 }
@@ -121,6 +125,8 @@ export function admitCapabilityPackage(input: {
   package: SignedCapabilityPackage;
   publishers: CapabilityPublisherIdentity[];
   revocations?: CapabilityRevocationRecord[];
+  requireGovernanceMetadata?: boolean;
+  now?: string;
 }): CapabilityRegistryAdmission {
   let pkg: SignedCapabilityPackage;
   try {
@@ -153,6 +159,16 @@ export function admitCapabilityPackage(input: {
     signatureValid = false;
   }
   if (!signatureValid) return { allowed: false, reason: 'SIGNATURE_INVALID' };
+
+  if (input.requireGovernanceMetadata) {
+    if (!pkg.build) return { allowed: false, reason: 'BUILD_METADATA_MISSING' };
+    if (!pkg.build.reproducible) return { allowed: false, reason: 'BUILD_NOT_REPRODUCIBLE' };
+    if (!pkg.lifecycle) return { allowed: false, reason: 'LIFECYCLE_POLICY_MISSING' };
+    const now = iso(input.now ?? new Date().toISOString(), 'now');
+    if (pkg.lifecycle.sunsetAt && Date.parse(pkg.lifecycle.sunsetAt) <= Date.parse(now)) {
+      return { allowed: false, reason: 'PACKAGE_SUNSET' };
+    }
+  }
 
   const manifestDigest = capabilityManifestDigest(pkg.manifest);
   if (
