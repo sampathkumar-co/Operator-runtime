@@ -61,3 +61,8 @@ export * from './adaptive-planning-control.ts';
 export * from './control-center-ux.ts';
 export * from './otlp-operation-trace.ts';
 export * from './capability-conformance.ts';
+export * from './enterprise-control-plane.ts';
+export * from './proof-bundle.ts';
+export * from './counterfactual-twin-execution.ts';
+export * from './distributed-fabric.ts';
+export * from './autonomous-engineering-os.ts';
