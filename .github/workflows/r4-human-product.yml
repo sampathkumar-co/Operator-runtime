@@ -7,6 +7,7 @@ on:
       - 'apps/local-agent/src/control-center.ts'
       - 'apps/control-center/**'
       - 'apps/local-agent/src/server.ts'
+      - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
       - 'src/core/contract-registry.ts'
@@ -50,3 +51,5 @@ jobs:
       - run: npm run test:r4
       - name: Control Center security invariants
         run: node --experimental-strip-types --test test/session-private-surface.test.ts test/approval-lifecycle.test.ts test/session-approval.test.ts
+      - name: Inherited Developer Session restart ownership invariant
+        run: node --experimental-strip-types --test test/developer-session-process-ownership.test.ts
