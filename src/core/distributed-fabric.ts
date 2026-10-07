@@ -115,7 +115,7 @@ export class DistributedWorkFenceStore {
         expiresAt: new Date(now.getTime() + leaseMs).toISOString(),
         state: 'ACTIVE' as const
       };
-      result = { ...body, id: sha256(canonicalJson(body)) };
+      result = { ...body, id: fenceId(body) };
       state.fences.push(result);
       await this.#write(state);
     });
@@ -281,8 +281,8 @@ function validateState(input: unknown): FenceState {
   const ids = new Set<string>();
   const activeWork = new Set<string>();
   for (const fence of state.fences) {
-    const expected = sha256(canonicalJson({
-      schemaVersion: 1,
+    const normalized = {
+      schemaVersion: 1 as const,
       objectiveId: id(fence.objectiveId, 'objectiveId'),
       workUnitId: id(fence.workUnitId, 'workUnitId'),
       role: fence.role,
@@ -292,11 +292,11 @@ function validateState(input: unknown): FenceState {
       sessionId: id(fence.sessionId, 'sessionId'),
       authorityDigest: digest(fence.authorityDigest, 'authorityDigest'),
       generation: integer(fence.generation, 1, Number.MAX_SAFE_INTEGER, 'generation'),
-      acquiredAt: iso(fence.acquiredAt, 'acquiredAt'),
-      heartbeatAt: iso(fence.heartbeatAt, 'heartbeatAt'),
-      expiresAt: iso(fence.expiresAt, 'expiresAt'),
-      state: fence.state
-    }));
+      acquiredAt: iso(fence.acquiredAt, 'acquiredAt')
+    };
+    iso(fence.heartbeatAt, 'heartbeatAt');
+    iso(fence.expiresAt, 'expiresAt');
+    const expected = fenceId(normalized);
     if (!['ACTIVE','RELEASED','EXPIRED'].includes(fence.state) || expected !== digest(fence.id, 'fence.id')) throw corrupt('Fence record integrity is invalid.');
     if (ids.has(fence.id)) throw corrupt('Fence ids must be unique.');
     ids.add(fence.id);
@@ -339,6 +339,34 @@ function iso(input: unknown, label: string): string {
   if (!value || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw invalid(label + ' must be canonical ISO.');
   return value;
 }
+function fenceId(input: {
+  schemaVersion: 1;
+  objectiveId: string;
+  workUnitId: string;
+  role: DistributedWorkerRole;
+  placementKey: string;
+  reservationId: string;
+  deviceId: string;
+  sessionId: string;
+  authorityDigest: string;
+  generation: number;
+  acquiredAt: string;
+}): string {
+  return sha256(canonicalJson({
+    schemaVersion: 1,
+    objectiveId: input.objectiveId,
+    workUnitId: input.workUnitId,
+    role: input.role,
+    placementKey: input.placementKey,
+    reservationId: input.reservationId,
+    deviceId: input.deviceId,
+    sessionId: input.sessionId,
+    authorityDigest: input.authorityDigest,
+    generation: input.generation,
+    acquiredAt: input.acquiredAt
+  }));
+}
+
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
