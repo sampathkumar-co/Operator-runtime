@@ -65,6 +65,8 @@ export const CONTRACT_REGISTRY = Object.freeze([
   { name: 'purpose-bound-authority-lease', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'enterprise-authority-path', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
   { name: 'enterprise-policy-rollout-delta', schemaVersion: 1, persistent: false, compatibility: 'exact', owner: 'runtime' },
+  { name: 'enterprise-fleet-device', schemaVersion: 1, persistent: true, compatibility: 'backward-readable', owner: 'runtime' },
+  { name: 'enterprise-fleet-assessment', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'machine-verifiable-proof-bundle', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'counterfactual-twin-receipt', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
   { name: 'distributed-work-fence', schemaVersion: 1, persistent: true, compatibility: 'exact', owner: 'runtime' },
