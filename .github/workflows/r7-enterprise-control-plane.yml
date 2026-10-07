@@ -12,11 +12,15 @@ on:
       - 'src/core/enterprise-policy-language.ts'
       - 'src/core/enterprise-policy-history.ts'
       - 'src/core/enterprise-admin.ts'
+      - 'src/core/r7-enterprise-acceptance.ts'
       - 'src/core/control-plane-store.ts'
       - 'src/core/audit.ts'
       - 'src/core/index.ts'
       - 'test/r7-enterprise-control-plane.test.ts'
+      - 'test/r7-enterprise-acceptance.test.ts'
       - 'scripts/generate-r7-certification.ts'
+      - 'scripts/evaluate-r7-enterprise-acceptance.ts'
+      - 'certification/r7/**'
       - 'package.json'
       - '.github/workflows/r7-enterprise-control-plane.yml'
   workflow_dispatch:
@@ -48,6 +52,8 @@ jobs:
           npm run typecheck:production
       - name: R7 exact-head suite
         run: npm run test:r7
+      - name: R7 independent enterprise acceptance evaluator
+        run: node --experimental-strip-types --test test/r7-enterprise-acceptance.test.ts
       - name: Generate R7 exact-head evidence
         env:
           GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
