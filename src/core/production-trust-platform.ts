@@ -33,6 +33,44 @@ export interface ProductionSloDecision {
   };
 }
 
+export interface ProductionPlatformSloPolicy extends ProductionSloPolicy {
+  minControlPlaneAvailability: number;
+  minReconnectSuccessRate: number;
+  maxP95DispatchMs: number;
+  maxP95VerificationMs: number;
+  maxQueueDepth: number;
+  maxP95DeliveryAgeMs: number;
+  maxP95ReconciliationMs: number;
+  maxStateBytes: number;
+  maxRetentionViolationCount: number;
+}
+
+export interface ProductionPlatformSloObservation extends ProductionSloObservation {
+  controlPlaneAvailability: number;
+  reconnectSuccessRate: number;
+  p95DispatchMs: number;
+  p95VerificationMs: number;
+  queueDepth: number;
+  p95DeliveryAgeMs: number;
+  p95ReconciliationMs: number;
+  stateBytes: number;
+  retentionViolationCount: number;
+}
+
+export interface ProductionPlatformSloDecision extends ProductionSloDecision {
+  metrics: ProductionSloDecision['metrics'] & {
+    controlPlaneAvailability: number;
+    reconnectSuccessRate: number;
+    p95DispatchMs: number;
+    p95VerificationMs: number;
+    queueDepth: number;
+    p95DeliveryAgeMs: number;
+    p95ReconciliationMs: number;
+    stateBytes: number;
+    retentionViolationCount: number;
+  };
+}
+
 export interface RelayOwnershipFence {
   schemaVersion: 1;
   resourceKey: string;
@@ -105,6 +143,51 @@ export function evaluateProductionSlo(
   if (metrics.crashFreeSessionRate < policy.minCrashFreeSessionRate) reasons.push('CRASH_FREE_SESSION_RATE_LOW');
   if (metrics.updateSuccessRate < policy.minUpdateSuccessRate) reasons.push('UPDATE_SUCCESS_RATE_LOW');
   return { healthy: reasons.length === 0, reasons, metrics };
+}
+
+
+export function evaluateProductionPlatformSlo(
+  observation: ProductionPlatformSloObservation,
+  policyInput: ProductionPlatformSloPolicy
+): ProductionPlatformSloDecision {
+  const base = evaluateProductionSlo(observation, policyInput);
+  const policy = {
+    minControlPlaneAvailability: boundedRatio(policyInput.minControlPlaneAvailability, 'minControlPlaneAvailability'),
+    minReconnectSuccessRate: boundedRatio(policyInput.minReconnectSuccessRate, 'minReconnectSuccessRate'),
+    maxP95DispatchMs: finite(policyInput.maxP95DispatchMs, 0, 24 * 60 * 60_000, 'maxP95DispatchMs'),
+    maxP95VerificationMs: finite(policyInput.maxP95VerificationMs, 0, 24 * 60 * 60_000, 'maxP95VerificationMs'),
+    maxQueueDepth: integer(policyInput.maxQueueDepth, 0, 100_000_000, 'maxQueueDepth'),
+    maxP95DeliveryAgeMs: finite(policyInput.maxP95DeliveryAgeMs, 0, 30 * 24 * 60 * 60_000, 'maxP95DeliveryAgeMs'),
+    maxP95ReconciliationMs: finite(policyInput.maxP95ReconciliationMs, 0, 30 * 24 * 60 * 60_000, 'maxP95ReconciliationMs'),
+    maxStateBytes: integer(policyInput.maxStateBytes, 1, Number.MAX_SAFE_INTEGER, 'maxStateBytes'),
+    maxRetentionViolationCount: integer(policyInput.maxRetentionViolationCount, 0, 100_000_000, 'maxRetentionViolationCount')
+  };
+  const platform = {
+    controlPlaneAvailability: boundedRatio(observation.controlPlaneAvailability, 'controlPlaneAvailability'),
+    reconnectSuccessRate: boundedRatio(observation.reconnectSuccessRate, 'reconnectSuccessRate'),
+    p95DispatchMs: finite(observation.p95DispatchMs, 0, 24 * 60 * 60_000, 'p95DispatchMs'),
+    p95VerificationMs: finite(observation.p95VerificationMs, 0, 24 * 60 * 60_000, 'p95VerificationMs'),
+    queueDepth: integer(observation.queueDepth, 0, 100_000_000, 'queueDepth'),
+    p95DeliveryAgeMs: finite(observation.p95DeliveryAgeMs, 0, 30 * 24 * 60 * 60_000, 'p95DeliveryAgeMs'),
+    p95ReconciliationMs: finite(observation.p95ReconciliationMs, 0, 30 * 24 * 60 * 60_000, 'p95ReconciliationMs'),
+    stateBytes: integer(observation.stateBytes, 0, Number.MAX_SAFE_INTEGER, 'stateBytes'),
+    retentionViolationCount: integer(observation.retentionViolationCount, 0, 100_000_000, 'retentionViolationCount')
+  };
+  const reasons = [...base.reasons];
+  if (platform.controlPlaneAvailability < policy.minControlPlaneAvailability) reasons.push('CONTROL_PLANE_AVAILABILITY_LOW');
+  if (platform.reconnectSuccessRate < policy.minReconnectSuccessRate) reasons.push('RECONNECT_SUCCESS_RATE_LOW');
+  if (platform.p95DispatchMs > policy.maxP95DispatchMs) reasons.push('P95_DISPATCH_LATENCY_HIGH');
+  if (platform.p95VerificationMs > policy.maxP95VerificationMs) reasons.push('P95_VERIFICATION_LATENCY_HIGH');
+  if (platform.queueDepth > policy.maxQueueDepth) reasons.push('QUEUE_DEPTH_HIGH');
+  if (platform.p95DeliveryAgeMs > policy.maxP95DeliveryAgeMs) reasons.push('P95_DELIVERY_AGE_HIGH');
+  if (platform.p95ReconciliationMs > policy.maxP95ReconciliationMs) reasons.push('P95_RECONCILIATION_LATENCY_HIGH');
+  if (platform.stateBytes > policy.maxStateBytes) reasons.push('STATE_GROWTH_HIGH');
+  if (platform.retentionViolationCount > policy.maxRetentionViolationCount) reasons.push('RETENTION_COMPLIANCE_FAILED');
+  return {
+    healthy: reasons.length === 0,
+    reasons,
+    metrics: { ...base.metrics, ...platform }
+  };
 }
 
 export class RelayOwnershipFenceStore {
