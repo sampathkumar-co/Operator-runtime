@@ -38,6 +38,7 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
+import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   boundedString,
@@ -663,6 +664,154 @@ export function createLocalAgentServer(options: {
         ok: true,
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
         configured: Boolean(options.tasks)
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/approvals' && req.method === 'GET') {
+      const records = options.approvals ? await options.approvals.list() : [];
+      send(res, 200, {
+        ok: true,
+        model: buildApprovalCenterModel(records),
+        session: options.sessionApprovals?.summary() ?? { active: false },
+        configured: Boolean(options.approvals)
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/recovery' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 200) : 100;
+      const [summaries, journal, approvals] = await Promise.all([
+        options.tasks ? options.tasks.list(limit) : [],
+        options.agentKernel ? options.agentKernel.journal.list(Math.min(1000, limit * 5)) : [],
+        options.approvals ? options.approvals.list() : []
+      ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
+      const projections = tasks.map((task) => projectTaskRuntime(task, { journal, approvals }));
+      const candidates: RecoveryCandidateInput[] = projections.flatMap((projection) => {
+        const current = projection.currentAction;
+        if (!current) return [];
+        const sideEffectState = current.sideEffectState === 'known' || current.sideEffectState === 'uncertain'
+          ? current.sideEffectState : 'none';
+        const executionPhase = ['pre_dispatch','dispatched','effect_observed','reconciled'].includes(String(current.executionPhase ?? ''))
+          ? current.executionPhase as RecoveryCandidateInput['executionPhase'] : undefined;
+        const verificationStatus: RecoveryCandidateInput['verificationStatus'] =
+          projection.verification.state === 'verified' ? 'passed'
+            : projection.verification.state === 'failed' ? 'failed' : 'unknown';
+        const retryable = sideEffectState === 'none'
+          && (current.state === 'FAILED' || current.state === 'BLOCKED' || Boolean(projection.blocker));
+        const reconciliationStatus: RecoveryCandidateInput['reconciliationStatus'] =
+          projection.reconciliationRequired ? undefined
+            : sideEffectState === 'none' ? 'not_applied'
+              : verificationStatus === 'passed' ? 'completed' : undefined;
+        return [{
+          actionId: current.actionId,
+          capability: current.capability,
+          retryable,
+          sideEffectState,
+          ...(executionPhase ? { executionPhase } : {}),
+          ...(reconciliationStatus ? { reconciliationStatus } : {}),
+          rollbackAvailable: projection.compensation.state === 'pending',
+          verificationStatus,
+          ...(current.errorCode || projection.blocker?.code ? { code: current.errorCode ?? projection.blocker!.code } : {}),
+          updatedAt: projection.active.updatedAt
+        }];
+      });
+      send(res, 200, {
+        ok: true,
+        model: buildRecoveryCenterModel(candidates),
+        configured: Boolean(options.tasks)
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/onboarding' && req.method === 'GET') {
+      const [local, summaries, approvals] = await Promise.all([
+        options.deviceIdentity ? options.deviceIdentity.loadExisting() : Promise.resolve(null),
+        options.tasks ? options.tasks.list(200) : Promise.resolve([]),
+        options.approvals ? options.approvals.list() : Promise.resolve([])
+      ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
+      const readProbePassed = tasks.some((task) =>
+        (task.execution?.records ?? []).some((record) => record.risk === 'read' && record.state === 'SUCCEEDED'));
+      const approvalProbePassed = approvals.some((record) => record.status === 'consumed' || record.status === 'denied');
+      const guidedTaskVerified = tasks.some((task) => task.state === 'VERIFIED');
+      send(res, 200, {
+        ok: true,
+        model: buildGuidedOnboardingModel({
+          runtimeInstalled: true,
+          doctorHealthy: true,
+          authenticated: true,
+          devicePaired: Boolean(local),
+          rootsConfigured: options.permissions.allowedRoots.length > 0,
+          readProbePassed,
+          approvalProbePassed,
+          guidedTaskVerified
+        }),
+        evidence: {
+          runtimeInstalled: 'local-agent-serving',
+          doctorHealthy: 'authenticated-health-boundary',
+          authenticated: 'bearer-token-accepted',
+          devicePaired: Boolean(local),
+          configuredRootCount: options.permissions.allowedRoots.length,
+          readProbePassed,
+          approvalProbePassed,
+          guidedTaskVerified
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/diagnostics' && req.method === 'GET') {
+      const [runtime, emergency, local, peers, summaries, approvals] = await Promise.all([
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({}),
+        options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ version: 1, engaged: false }),
+        options.deviceIdentity ? options.deviceIdentity.loadExisting() : Promise.resolve(null),
+        options.deviceRegistry ? options.deviceRegistry.listDevices() : Promise.resolve([]),
+        options.tasks ? options.tasks.list(500) : Promise.resolve([]),
+        options.approvals ? options.approvals.list() : Promise.resolve([])
+      ]);
+      const taskCounts = summaries.reduce<Record<string, number>>((acc, task) => {
+        acc[task.state] = (acc[task.state] ?? 0) + 1;
+        return acc;
+      }, {});
+      const approvalModel = buildApprovalCenterModel(approvals);
+      const relay = runtime && typeof runtime === 'object' && !Array.isArray(runtime)
+        ? (runtime as Record<string, unknown>).relay : undefined;
+      const relayState = relay && typeof relay === 'object' && !Array.isArray(relay)
+        ? String((relay as Record<string, unknown>).state ?? '') : '';
+      const issues: Array<{ code: string; severity: 'info' | 'warning' | 'critical'; guidance: string }> = [];
+      if (!options.recoveryToken) issues.push({ code: 'RECOVERY_NOT_CONFIGURED', severity: 'warning', guidance: 'Configure local recovery authority before approvals, emergency recovery, or protected administration.' });
+      if (!local) issues.push({ code: 'DEVICE_IDENTITY_MISSING', severity: 'warning', guidance: 'Pair this device before remote operation.' });
+      if (options.permissions.allowedRoots.length === 0) issues.push({ code: 'NO_AUTHORIZED_ROOTS', severity: 'warning', guidance: 'Choose at least one authorized workspace root.' });
+      if ((emergency as { engaged?: boolean }).engaged) issues.push({ code: 'EMERGENCY_STOP_ENGAGED', severity: 'critical', guidance: 'Review the stop reason and clear it only through local recovery authority.' });
+      if (relayState === 'DEGRADED' || relayState === 'OFFLINE') issues.push({ code: 'RELAY_DEGRADED', severity: 'warning', guidance: 'Remote continuity is degraded; local runtime remains authoritative.' });
+      if (approvalModel.counts.pending > 0) issues.push({ code: 'APPROVALS_PENDING', severity: 'info', guidance: 'Review pending effects in Approval Center.' });
+      send(res, 200, {
+        ok: true,
+        diagnostics: {
+          schemaVersion: 1,
+          service: 'operator-local-agent',
+          productVersion: PRODUCT_VERSION,
+          emergencyStopped: Boolean((emergency as { engaged?: boolean }).engaged),
+          recoveryConfigured: Boolean(options.recoveryToken),
+          authorizedRootCount: options.permissions.allowedRoots.length,
+          device: local ? { configured: true, deviceName: local.deviceName } : { configured: false },
+          peerCounts: {
+            total: peers.length,
+            online: peers.filter((peer) => peer.status === 'online').length,
+            revoked: peers.filter((peer) => peer.status === 'revoked').length
+          },
+          taskCounts,
+          approvalCounts: approvalModel.counts,
+          runtime,
+          issues
+        }
       });
       return;
     }
