@@ -31,8 +31,10 @@ export async function loadCapabilityExtensionsFromConfig(input:{
   if(!Array.isArray(input.allowedModuleRoots)||input.allowedModuleRoots.length<1||input.allowedModuleRoots.length>128)throw invalid('Capability extension module roots are required.');
   const governance=new CapabilityGovernanceRegistry();
   const applyGovernance=(next:CapabilityExtensionConfigV1)=>{
-    for(const publisher of next.publishers)governance.upsertPublisher(publisher);
-    for(const revocation of next.revocations??[])governance.importRevocation(revocation);
+    // Validate the whole trust snapshot before mutating live authority.
+    // Configured publishers replace the prior set exactly, while revocations
+    // remain monotonic safety facts across refreshes.
+    governance.replaceConfiguredState({publishers:next.publishers,revocations:next.revocations});
   };
   applyGovernance(config);
   let loaded=0;

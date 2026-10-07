@@ -4,7 +4,8 @@ import {
   admitCapabilityPackage,
   type CapabilityPublisherIdentity,
   type SignedCapabilityPackage,
-  type CapabilityRegistryAdmission
+  type CapabilityRegistryAdmission,
+  validateCapabilityPublisherIdentity
 } from './capability-package-registry.ts';
 import {
   createCapabilityRevocation,
@@ -19,8 +20,37 @@ export class CapabilityGovernanceRegistry {
   #revocations: CapabilityRevocationRecord[] = [];
 
   upsertPublisher(input: CapabilityPublisherIdentity): void {
-    if (!input || typeof input.id !== 'string') throw invalid('Publisher identity is required.');
-    this.#publishers.set(input.id, structuredClone(input));
+    const publisher = validateCapabilityPublisherIdentity(input);
+    this.#publishers.set(publisher.id, publisher);
+  }
+
+  replacePublishers(input: CapabilityPublisherIdentity[]): void {
+    this.replaceConfiguredState({ publishers: input });
+  }
+
+  replaceConfiguredState(input: {
+    publishers: CapabilityPublisherIdentity[];
+    revocations?: CapabilityRevocationRecord[];
+  }): void {
+    if (!Array.isArray(input.publishers) || input.publishers.length > 100_000) throw invalid('Publisher registry is invalid.');
+    if (input.revocations !== undefined && (!Array.isArray(input.revocations) || input.revocations.length > 100_000)) throw invalid('Revocation registry is invalid.');
+    const nextPublishers = new Map<string, CapabilityPublisherIdentity>();
+    for (const raw of input.publishers) {
+      const publisher = validateCapabilityPublisherIdentity(raw);
+      if (nextPublishers.has(publisher.id)) throw invalid('Publisher registry contains duplicate ids.');
+      nextPublishers.set(publisher.id, publisher);
+    }
+    const nextRevocations = this.#revocations.map((item) => structuredClone(item));
+    const revocationIds = new Set(nextRevocations.map((item) => item.id));
+    for (const raw of input.revocations ?? []) {
+      const revocation = validateCapabilityRevocation(raw);
+      if (!revocationIds.has(revocation.id)) {
+        revocationIds.add(revocation.id);
+        nextRevocations.push(revocation);
+      }
+    }
+    this.#publishers = nextPublishers;
+    this.#revocations = nextRevocations;
   }
 
   disablePublisher(publisherId: string): void {

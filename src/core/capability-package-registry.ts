@@ -229,6 +229,10 @@ function normalizePackage(input: SignedCapabilityPackage): SignedCapabilityPacka
   };
 }
 
+export function validateCapabilityPublisherIdentity(input: CapabilityPublisherIdentity): CapabilityPublisherIdentity {
+  return normalizePublisher(input);
+}
+
 function normalizePublisher(input: CapabilityPublisherIdentity): CapabilityPublisherIdentity {
   if (!input || typeof input !== 'object') throw invalid('Publisher identity is invalid.');
   const idValue = id(input.id, 'publisher.id');

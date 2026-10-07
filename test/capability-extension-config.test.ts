@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import { capabilityManifestDigest } from '../src/core/capability-sdk.ts';
-import { createCapabilityConformanceReceipt, certifyCapabilityExtension } from '../src/core/capability-conformance.ts';
+import { createCapabilityConformanceReceipt, certifyCapabilityExtension, createCapabilityRevocation } from '../src/core/capability-conformance.ts';
 import { signCapabilityPackage } from '../src/core/capability-package-registry.ts';
 import { loadCapabilityExtensionsFromConfig } from '../src/core/capability-extension-config.ts';
 
@@ -44,6 +44,44 @@ test('third-party provider loads from config without core changes and live publi
   assert.equal(result.ok,true);
 
   await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[{...publisher,enabled:false}],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
+
+  // Re-enable, then remove the publisher entirely. Refresh is an exact trust
+  // snapshot, so omission must revoke live authority rather than preserve a
+  // stale trusted publisher in memory.
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[publisher],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),['ext.configured.files.echo']);
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
+
+  // Key rotation invalidates packages signed by the prior key until a package
+  // signed by the new key is admitted.
+  const rotatedKeys=crypto.generateKeyPairSync('ed25519');
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[{...publisher,publicKeyPem:rotatedKeys.publicKey.export({format:'pem',type:'spki'}).toString()}],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
+
+  // Restore the original key, then prove a malformed refresh cannot partially
+  // replace live publisher trust before failing revocation validation.
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[publisher],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),['ext.configured.files.echo']);
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[{...publisher,enabled:false}],revocations:[{schemaVersion:1,id:'invalid'}],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await assert.rejects(()=>loaded.refreshGovernance());
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),['ext.configured.files.echo']);
+
+  // Revocations are monotonic across config snapshots. Omitting the revocation
+  // and later re-adding the correct publisher key must not resurrect a revoked package.
+  const revocation=createCapabilityRevocation({certificationId:pkg.certification.id,manifestDigest:pkg.certification.manifestDigest,reasonCode:'VULNERABILITY_CONFIRMED',evidenceArtifactIds:['f'.repeat(64)],revokedAt:'2026-10-07T00:03:00.000Z'});
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[publisher],revocations:[revocation],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[],revocations:[],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
+  await loaded.refreshGovernance();
+  await fs.writeFile(configPath,JSON.stringify({version:1,publishers:[publisher],extensions:[{modulePath:'extension.mjs',package:pkg}]},null,2));
   await loaded.refreshGovernance();
   assert.deepEqual(await runtime.supportedCapabilities(['ext.configured.files.echo']),[]);
   await runtime.close();
