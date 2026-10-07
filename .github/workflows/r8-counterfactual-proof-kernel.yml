@@ -1,0 +1,59 @@
+name: R8 Counterfactual Twin and Proof Kernel
+
+on:
+  push:
+    branches: ['main', 'program/r8-twin-proof-kernel-final-*']
+  pull_request:
+    paths:
+      - 'src/core/counterfactual-twin.ts'
+      - 'src/core/counterfactual-twin-runtime.ts'
+      - 'src/core/counterfactual-plan-evaluator.ts'
+      - 'src/core/proof-kernel.ts'
+      - 'src/core/proof-bundle.ts'
+      - 'src/core/proof-carrying-execution.ts'
+      - 'src/core/evidence-pack.ts'
+      - 'src/core/enterprise-authority-lease.ts'
+      - 'src/core/index.ts'
+      - 'test/r8-counterfactual-proof-kernel.test.ts'
+      - 'scripts/generate-r8-certification.ts'
+      - 'package.json'
+      - '.github/workflows/r8-counterfactual-proof-kernel.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r8-counterfactual-proof-kernel-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R8 twin and proof-kernel certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R8 exact-head suite
+        run: npm run test:r8
+      - name: Generate R8 exact-head evidence
+        env:
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run evidence:r8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r8-counterfactual-proof-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/r8/*
+          if-no-files-found: error
+          retention-days: 30
