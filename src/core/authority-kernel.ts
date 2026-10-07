@@ -3,6 +3,7 @@ import path from 'node:path';
 import { capabilityRiskRule, assertCanonicalRisk } from './capability-policy.ts';
 import { PolicyError } from './errors.ts';
 import { PolicyEngine } from './policy.ts';
+import { builtInCapabilityRiskRule, isExtensionCapability } from './capability-policy.ts';
 import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
 import { resourcePathOperandsForAction } from './resource-identity.ts';
 import type { ActionRequest, ActionRisk, PermissionProfile } from './types.ts';
@@ -130,8 +131,13 @@ export class AuthorityKernel {
     token?: CapabilityToken
   ): Promise<AuthorityDecision> {
     this.policy.authorizeBase(action, permissions);
-    const rule = capabilityRiskRule(action.capability);
-    const canonicalRisk = rule === 'dynamic' ? await resolveDynamicRisk(action) : rule;
+    const rule = builtInCapabilityRiskRule(action.capability);
+    if (rule === undefined && !isExtensionCapability(action.capability)) {
+      throw new PolicyError('CAPABILITY_RISK_UNREGISTERED', `Capability ${action.capability} has no canonical or certified extension risk policy.`);
+    }
+    const canonicalRisk = rule === undefined || rule === 'dynamic'
+      ? await resolveDynamicRisk(action)
+      : rule;
     assertCanonicalRisk(action, canonicalRisk);
     const canonicalAction = { ...action, risk: canonicalRisk };
     if (token) this.verifyToken(token, canonicalAction, permissions);
