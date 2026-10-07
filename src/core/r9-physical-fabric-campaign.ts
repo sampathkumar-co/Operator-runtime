@@ -8,6 +8,7 @@ export interface R9PhysicalMachineEvidence {
   platform: 'windows' | 'linux' | 'macos';
   hardwareAttestationDigest: string;
   runtimeInstanceId: string;
+  sourceCheckoutSha: string;
   evidenceDigests: string[];
 }
 
@@ -20,7 +21,8 @@ export interface R9DistributedFaultEvidence {
     | 'resource-conflict'
     | 'control-plane-restart'
     | 'stale-result'
-    | 'network-partition';
+    | 'network-partition'
+    | 'duplicate-delivery';
   exercised: boolean;
   recovered: boolean;
   splitBrainCount: number;
@@ -41,8 +43,14 @@ export interface R9PhysicalFabricCampaignBody {
   workUnitCount: number;
   verifiedWorkUnitCount: number;
   independentVerifierCount: number;
+  crossMachineVerificationCount: number;
   lineageCoverageRate: number;
   artifactRecoveryRate: number;
+  artifactOnlyExchange: boolean;
+  rawSecretExchangeCount: number;
+  leaseEpochMonotonic: boolean;
+  staleResultAcceptedCount: number;
+  unfencedResourceConflictCount: number;
   faultEvidence: R9DistributedFaultEvidence[];
   finalObjectiveVerified: boolean;
   externalEvidenceDigests: string[];
@@ -75,7 +83,7 @@ export interface R9PhysicalFabricReport {
 
 const REQUIRED_FAULTS:R9DistributedFaultEvidence['fault'][]=[
   'worker-disconnect','worker-crash','worker-replacement','lease-expiry',
-  'resource-conflict','control-plane-restart','stale-result','network-partition'
+  'resource-conflict','control-plane-restart','stale-result','network-partition','duplicate-delivery'
 ];
 
 export function createR9PhysicalFabricCampaign(input:R9PhysicalFabricCampaignBody):R9PhysicalFabricCampaign{
@@ -97,10 +105,20 @@ export function certifyR9PhysicalFabricCampaign(input:R9PhysicalFabricCampaign):
   const verifiedWorkUnitRate=rate(b.verifiedWorkUnitCount,b.workUnitCount);
   if(verifiedWorkUnitRate!==1)reasons.push('not every work unit reached independent verified completion');
   if(b.independentVerifierCount<1)reasons.push('no independent verifier participated');
+  if(b.crossMachineVerificationCount!==b.verifiedWorkUnitCount)reasons.push('not every verified work unit was independently checked on another physical machine');
   if(b.lineageCoverageRate!==1)reasons.push('distributed lineage coverage was below 100%');
   if(b.artifactRecoveryRate!==1)reasons.push('artifact recovery coverage was below 100%');
+  if(!b.artifactOnlyExchange)reasons.push('distributed exchange was not artifact-only');
+  if(b.rawSecretExchangeCount!==0)reasons.push('raw secret exchange occurred between workers');
+  if(!b.leaseEpochMonotonic)reasons.push('lease epochs were not monotonic across replacement/recovery');
+  if(b.staleResultAcceptedCount!==0)reasons.push('a stale distributed result was accepted');
+  if(b.unfencedResourceConflictCount!==0)reasons.push('a resource conflict escaped fencing');
   if(!b.finalObjectiveVerified)reasons.push('final distributed objective did not independently verify');
   if(b.externalEvidenceDigests.length<3)reasons.push('insufficient cross-machine evidence artifacts');
+  for(const machine of physical){
+    if(machine.sourceCheckoutSha!==b.sourceSha)reasons.push('physical machine '+machine.machineId+' did not run the certification source SHA');
+    if(machine.evidenceDigests.length<1)reasons.push('physical machine '+machine.machineId+' has no machine evidence artifact');
+  }
 
   const faultMap=new Map(b.faultEvidence.map((item)=>[item.fault,item]));
   let allRequiredFaultsPassed=true;
@@ -155,7 +173,11 @@ function normalize(input:R9PhysicalFabricCampaignBody):R9PhysicalFabricCampaignB
     machines,workerCount:integer(input.workerCount,0,100_000,'workerCount'),workUnitCount:integer(input.workUnitCount,1,10_000_000,'workUnitCount'),
     verifiedWorkUnitCount:integer(input.verifiedWorkUnitCount,0,input.workUnitCount,'verifiedWorkUnitCount'),
     independentVerifierCount:integer(input.independentVerifierCount,0,100_000,'independentVerifierCount'),
+    crossMachineVerificationCount:integer(input.crossMachineVerificationCount,0,input.workUnitCount,'crossMachineVerificationCount'),
     lineageCoverageRate:probability(input.lineageCoverageRate,'lineageCoverageRate'),artifactRecoveryRate:probability(input.artifactRecoveryRate,'artifactRecoveryRate'),
+    artifactOnlyExchange:bool(input.artifactOnlyExchange,'artifactOnlyExchange'),rawSecretExchangeCount:integer(input.rawSecretExchangeCount,0,1_000_000,'rawSecretExchangeCount'),
+    leaseEpochMonotonic:bool(input.leaseEpochMonotonic,'leaseEpochMonotonic'),staleResultAcceptedCount:integer(input.staleResultAcceptedCount,0,1_000_000,'staleResultAcceptedCount'),
+    unfencedResourceConflictCount:integer(input.unfencedResourceConflictCount,0,1_000_000,'unfencedResourceConflictCount'),
     faultEvidence,finalObjectiveVerified:bool(input.finalObjectiveVerified,'finalObjectiveVerified'),
     externalEvidenceDigests:digestList(input.externalEvidenceDigests,10_000,'externalEvidenceDigests')
   };
@@ -164,7 +186,7 @@ function normalizeMachine(input:R9PhysicalMachineEvidence):R9PhysicalMachineEvid
   const platform=String(input.platform??'') as R9PhysicalMachineEvidence['platform'];
   if(!['windows','linux','macos'].includes(platform))throw invalid('Machine platform is invalid.');
   return{machineId:id(input.machineId,'machineId'),physicalMachine:bool(input.physicalMachine,'physicalMachine'),platform,
-    hardwareAttestationDigest:digest(input.hardwareAttestationDigest,'hardwareAttestationDigest'),runtimeInstanceId:id(input.runtimeInstanceId,'runtimeInstanceId'),evidenceDigests:digestList(input.evidenceDigests,1000,'machine.evidenceDigests')};
+    hardwareAttestationDigest:digest(input.hardwareAttestationDigest,'hardwareAttestationDigest'),runtimeInstanceId:id(input.runtimeInstanceId,'runtimeInstanceId'),sourceCheckoutSha:gitSha(input.sourceCheckoutSha,'sourceCheckoutSha'),evidenceDigests:digestList(input.evidenceDigests,1000,'machine.evidenceDigests')};
 }
 function normalizeFault(input:R9DistributedFaultEvidence):R9DistributedFaultEvidence{
   if(!REQUIRED_FAULTS.includes(input.fault))throw invalid('Fault class is invalid.');
