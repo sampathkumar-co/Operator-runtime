@@ -100,13 +100,17 @@ export interface UpdateRolloutState {
   channel: 'canary' | 'beta' | 'stable';
   waves: UpdateRolloutWave[];
   currentWave: number;
-  state: 'READY' | 'RUNNING' | 'HALTED' | 'ROLLBACK_REQUIRED' | 'COMPLETED';
+  state: 'READY' | 'RUNNING' | 'HALTED' | 'ROLLBACK_REQUIRED' | 'ROLLING_BACK' | 'ROLLED_BACK' | 'COMPLETED';
   completedTargets: number;
   healthyTargets: number;
   failedTargets: number;
   startedAt?: string;
   updatedAt: string;
   reason?: string;
+  rollbackStartedAt?: string;
+  rollbackCompletedAt?: string;
+  rollbackHealthyTargets?: number;
+  rollbackFailedTargets?: number;
 }
 
 const FENCE_OPTIONS = {
@@ -366,8 +370,9 @@ export function recordUpdateWaveResult(input: {
       completedTargets: state.completedTargets + completedTargets,
       healthyTargets: state.healthyTargets + healthyTargets,
       failedTargets: state.failedTargets + failedTargets,
-      state: input.rollbackAvailable ? 'ROLLBACK_REQUIRED' : 'HALTED',
+      state: input.rollbackAvailable ? 'ROLLING_BACK' : 'HALTED',
       reason: input.slo.healthy ? 'UPDATE_WAVE_HEALTH_THRESHOLD_FAILED' : input.slo.reasons.join(','),
+      ...(input.rollbackAvailable ? { rollbackStartedAt: updatedAt } : {}),
       updatedAt
     };
   }
@@ -380,6 +385,46 @@ export function recordUpdateWaveResult(input: {
     failedTargets: state.failedTargets + failedTargets,
     state: nextWave >= state.waves.length ? 'COMPLETED' : 'RUNNING',
     updatedAt
+  };
+}
+
+
+export function startUpdateRollback(
+  stateInput: UpdateRolloutState,
+  nowInput = new Date().toISOString()
+): UpdateRolloutState {
+  const state = normalizeRollout(stateInput);
+  if (state.state !== 'ROLLBACK_REQUIRED') throw invalid('Only a rollback-required rollout can start rollback.');
+  const now = iso(nowInput, 'now');
+  return { ...state, state: 'ROLLING_BACK', rollbackStartedAt: now, updatedAt: now };
+}
+
+export function recordUpdateRollbackResult(input: {
+  state: UpdateRolloutState;
+  healthyTargets: number;
+  failedTargets: number;
+  slo: ProductionSloDecision;
+  now?: string;
+}): UpdateRolloutState {
+  const state = normalizeRollout(input.state);
+  if (state.state !== 'ROLLING_BACK') throw invalid('Only an active rollback accepts rollback results.');
+  const healthyTargets = integer(input.healthyTargets, 0, 100_000_000, 'healthyTargets');
+  const failedTargets = integer(input.failedTargets, 0, 100_000_000, 'failedTargets');
+  if (healthyTargets + failedTargets < 1) throw invalid('Rollback result must account for at least one target.');
+  const updatedAt = iso(input.now ?? new Date().toISOString(), 'now');
+  const healthy = failedTargets === 0 && input.slo.healthy;
+  return {
+    ...state,
+    state: healthy ? 'ROLLED_BACK' : 'HALTED',
+    rollbackHealthyTargets: healthyTargets,
+    rollbackFailedTargets: failedTargets,
+    rollbackCompletedAt: updatedAt,
+    updatedAt,
+    reason: healthy
+      ? 'AUTOMATIC_ROLLBACK_COMPLETED'
+      : input.slo.healthy
+        ? 'AUTOMATIC_ROLLBACK_TARGET_FAILED'
+        : 'AUTOMATIC_ROLLBACK_HEALTH_FAILED:' + input.slo.reasons.join(',')
   };
 }
 
@@ -411,7 +456,7 @@ function normalizeRollout(input: UpdateRolloutState): UpdateRolloutState {
   if (!input || input.schemaVersion !== 1) throw invalid('Update rollout is invalid.');
   const waves = normalizeWaves(input.waves);
   const state = String(input.state) as UpdateRolloutState['state'];
-  if (!['READY','RUNNING','HALTED','ROLLBACK_REQUIRED','COMPLETED'].includes(state)) throw invalid('Update rollout state is invalid.');
+  if (!['READY','RUNNING','HALTED','ROLLBACK_REQUIRED','ROLLING_BACK','ROLLED_BACK','COMPLETED'].includes(state)) throw invalid('Update rollout state is invalid.');
   const normalized: UpdateRolloutState = {
     schemaVersion: 1,
     id: digest(input.id, 'rollout.id'),
@@ -425,7 +470,11 @@ function normalizeRollout(input: UpdateRolloutState): UpdateRolloutState {
     failedTargets: integer(input.failedTargets, 0, 100_000_000, 'failedTargets'),
     ...(input.startedAt ? { startedAt: iso(input.startedAt, 'startedAt') } : {}),
     updatedAt: iso(input.updatedAt, 'updatedAt'),
-    ...(input.reason ? { reason: boundedText(input.reason, 2048, 'reason') } : {})
+    ...(input.reason ? { reason: boundedText(input.reason, 2048, 'reason') } : {}),
+    ...(input.rollbackStartedAt ? { rollbackStartedAt: iso(input.rollbackStartedAt, 'rollbackStartedAt') } : {}),
+    ...(input.rollbackCompletedAt ? { rollbackCompletedAt: iso(input.rollbackCompletedAt, 'rollbackCompletedAt') } : {}),
+    ...(input.rollbackHealthyTargets !== undefined ? { rollbackHealthyTargets: integer(input.rollbackHealthyTargets, 0, 100_000_000, 'rollbackHealthyTargets') } : {}),
+    ...(input.rollbackFailedTargets !== undefined ? { rollbackFailedTargets: integer(input.rollbackFailedTargets, 0, 100_000_000, 'rollbackFailedTargets') } : {})
   };
   const expected = sha256(canonicalJson({ version: normalized.version, channel: normalized.channel, waves: normalized.waves }));
   if (normalized.id !== expected) throw invalid('Update rollout id does not match its immutable definition.');
