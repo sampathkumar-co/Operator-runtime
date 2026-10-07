@@ -1,2 +1,3 @@
 export * from './gateway-client.ts';
-export * from './transport-adapters.ts';\nexport * from './webhook.ts';\n
+export * from './transport-adapters.ts';
+export * from './webhook.ts';
