@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { renderControlCenter } from '../apps/local-agent/src/control-center.ts';
+import { readControlCenterAsset, renderControlCenter } from '../apps/local-agent/src/control-center.ts';
 import type { ActionJournalEntry } from '../src/core/action-transition-journal.ts';
 import { projectTaskRuntime } from '../src/core/runtime-projection.ts';
 import { createTask } from '../src/core/task.ts';
@@ -117,8 +117,12 @@ test('runtime projection derives bounded operator state from authoritative task,
 });
 
 test('Control Center fetches and renders the authoritative runtime projection', () => {
-  const html = renderControlCenter('nonce_test');
-  assert.equal(html.includes('/v1/control-center/runtime?limit=200'), true);
-  assert.equal(html.includes('Authoritative runtime projection'), true);
-  assert.equal(html.includes('JSON.stringify(projection,null,2)'), true);
+  const html = renderControlCenter();
+  const app = readControlCenterAsset('app.js');
+  assert.equal(html.includes('id="sessions"'), true);
+  assert.equal(html.includes('id="sessionDetail"'), true);
+  assert.equal(app.includes('/v1/control-center/runtime?limit=100'), true);
+  assert.equal(app.includes('Inspect plan'), true);
+  assert.equal(app.includes('reconciliationRequired'), true);
+  assert.equal(app.includes('Plan & preserved work'), true);
 });

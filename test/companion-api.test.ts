@@ -58,11 +58,15 @@ test('companion read APIs expose authoritative task/device/settings state withou
   assert.equal(controlCenterResponse.status, 200);
   assert.match(controlCenterResponse.headers.get('content-type') ?? '', /^text\/html/);
   assert.match(controlCenterResponse.headers.get('content-security-policy') ?? '', /default-src 'none'/);
-  assert.match(controlCenterResponse.headers.get('content-security-policy') ?? '', /script-src 'nonce-/);
+  const controlCenterCsp = controlCenterResponse.headers.get('content-security-policy') ?? '';
+  assert.match(controlCenterCsp, /script-src 'self'/);
+  assert.equal(controlCenterCsp.includes("'unsafe-inline'"), false);
+  assert.equal(controlCenterCsp.includes("'unsafe-eval'"), false);
   const controlCenterHtml = await controlCenterResponse.text();
   assert.match(controlCenterHtml, /Mecord Control Center/);
   assert.match(controlCenterHtml, /\/v1\/goals/);
-  assert.match(controlCenterHtml, /Approve & resume/);
+  assert.match(controlCenterHtml, /Approve (?:&|&amp;) resume/);
+  assert.match(controlCenterHtml, /\/control-center\/app\.js/);
   assert.equal(controlCenterHtml.includes(token), false);
   assert.equal(controlCenterHtml.includes('PRIVATE KEY'), false);
 
