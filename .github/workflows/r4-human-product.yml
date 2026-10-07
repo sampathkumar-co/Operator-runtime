@@ -14,6 +14,8 @@ on:
       - 'test/runtime-projection.test.ts'
       - 'test/companion-api.test.ts'
       - 'packages/mecord-connect/scripts/build-runtime-payload.mjs'
+      - 'test/windows-store-release-config.test.ts'
+      - 'packaging/windows/build-release.ps1'
       - '.github/workflows/r4-human-product.yml'
   pull_request:
     paths:
@@ -27,6 +29,8 @@ on:
       - 'test/runtime-projection.test.ts'
       - 'test/companion-api.test.ts'
       - 'packages/mecord-connect/scripts/build-runtime-payload.mjs'
+      - 'test/windows-store-release-config.test.ts'
+      - 'packaging/windows/build-release.ps1'
       - '.github/workflows/r4-human-product.yml'
   workflow_dispatch:
 
