@@ -236,7 +236,7 @@ export class LocalAgentRelayRunner {
         details: { actionId: action.id, sideEffectState: 'uncertain' }
       });
     }
-    if (publicBoundary && containsRestrictedData(body)) return restrictedDataBlockedResult(action.capability);
+    if (publicBoundary && containsRestrictedPublicActionResult(action.capability, body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
       throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: true });
     }
@@ -649,6 +649,26 @@ function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
     throw new OperatorError('RELAY_APPROVAL_AUTHORITY_INVALID', 'Relay approval authority is invalid.');
   }
   return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
+}
+
+function containsRestrictedPublicActionResult(capability: string, body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return containsRestrictedData(body);
+  if (capability !== 'file.read' && capability !== 'file.info') return containsRestrictedData(body);
+
+  const safe = structuredClone(body as Record<string, unknown>);
+  const output = safe.output;
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const identity = (output as Record<string, unknown>).identity;
+    if (identity && typeof identity === 'object' && !Array.isArray(identity)) {
+      // These values are produced by trusted local fs.stat({ bigint:true }) calls.
+      // They are decimal machine identifiers/timestamps, not user content. A 13-19
+      // digit value can accidentally satisfy payment-card issuer + Luhn heuristics.
+      const scrubbed = { ...(identity as Record<string, unknown>) };
+      for (const key of ['device','inode','links','modifiedNs','changedNs','createdNs']) delete scrubbed[key];
+      (output as Record<string, unknown>).identity = scrubbed;
+    }
+  }
+  return containsRestrictedData(safe);
 }
 
 function restrictedDataBlockedResult(capability: string): JsonObject {
