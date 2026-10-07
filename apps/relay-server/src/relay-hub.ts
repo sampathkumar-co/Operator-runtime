@@ -166,7 +166,7 @@ export class RelayHub {
     const server = http.createServer((request, response) => {
       if (request.method === 'GET' && request.url === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1 }));
+        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1, clustered: Boolean(this.#cluster), instanceId: this.#instanceId }));
         return;
       }
       response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
