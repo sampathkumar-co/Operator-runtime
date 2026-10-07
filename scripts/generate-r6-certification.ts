@@ -8,6 +8,9 @@ const sha=(process.env.GITHUB_SHA||execFileSync('git',['rev-parse','HEAD'],{cwd:
 if(!/^[0-9a-f]{40}$/.test(sha)) throw new Error('R6 evidence source SHA is invalid.');
 
 const files=[
+  '.github/workflows/r6-universal-agent-gateway.yml',
+  'scripts/generate-r6-certification.ts',
+  'package.json',
   'src/core/agent-gateway-contract.ts',
   'src/core/universal-agent-gateway.ts',
   'src/core/capability-sdk.ts',
