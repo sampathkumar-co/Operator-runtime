@@ -53,20 +53,13 @@ test('Control Center product snapshot exposes approval, recovery and onboarding 
           evidence: []
         }],
         plannerEvents: [{
-          schemaVersion: 1,
-          taskId: 'task:1',
-          plannerId: 'planner',
-          iteration: 1,
-          decisionType: 'step',
+          kind: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+          decision: 'REPAIR',
           code: 'APPROVAL_REQUIRED',
-          reason: 'approval',
-          authorityState: 'TASK_SCOPE_BOUND',
-          resourceContext: { capability: 'git.commit' },
-          observationDigest: 'd'.repeat(64),
           at: '2026-10-07T00:59:00.000Z',
-          retryAllowed: true,
-          reobserveAllowed: true,
-          replanAllowed: true
+          provider: 'policy',
+          capability: 'git.commit',
+          reason: 'approval'
         }]
       }
     } as any],
