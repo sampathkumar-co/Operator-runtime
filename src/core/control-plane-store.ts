@@ -321,7 +321,9 @@ export async function purgeExpiredControlPlaneRecords(
   let removed = 0;
   for (const record of expiredRecords) {
     try {
-      await store.transact([{ namespace, key: record.key, expectedGeneration: record.generation, value: null }], now);
+      // Expired records are logically absent. expectedGeneration:null deletes only while
+      // they remain expired; a concurrent renewal becomes live and makes this fail closed.
+      await store.transact([{ namespace, key: record.key, expectedGeneration: null, value: null }], now);
       removed += 1;
     } catch (error) {
       if (error instanceof OperatorError && error.code === 'CONTROL_PLANE_CAS_MISMATCH') continue;
