@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  operationSloToOtlpMetrics,
   operationTraceToOtlp,
+  operationTraceToOtlpLogs,
+  otlpLogExportDigest,
+  otlpMetricExportDigest,
   otlpTraceExportDigest
 } from '../src/core/otlp-operation-trace.ts';
 import type { OperationTraceEvent } from '../src/core/operation-trace.ts';
@@ -150,4 +154,35 @@ test('explicit attribute allowlist remains bounded and opt-in', () => {
   const attrs = payload.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.attributes;
   assert.ok(attrs.some((item) => item.key === 'mecord.attr.customClass'));
   assert.equal(attrs.some((item) => item.key === 'mecord.attr.capability'), false);
+});
+
+
+test('OTLP logs preserve causal identity while redacting non-allowlisted attributes', () => {
+  const payload = operationTraceToOtlpLogs([
+    event({
+      id:'log-1', traceId:'trace-log', stage:'DISPATCH', outcome:'FAILED',
+      code:'PROVIDER_FAILED', at:'2026-10-06T00:00:00.000Z',
+      attributes:{ capability:'file.write', secret:'never-export-this' }
+    })
+  ]);
+  const log=payload.resourceLogs[0]!.scopeLogs[0]!.logRecords[0]!;
+  assert.equal(log.severityText,'FAILED');
+  assert.match(log.traceId,/^[0-9a-f]{32}$/);
+  assert.ok(log.attributes.some((item)=>item.key==='mecord.attr.capability'));
+  assert.equal(JSON.stringify(payload).includes('never-export-this'),false);
+  assert.match(otlpLogExportDigest(payload),/^[0-9a-f]{64}$/);
+});
+
+test('OTLP metrics export verification false-completion uncertainty and latency without raw operation data', () => {
+  const payload=operationSloToOtlpMetrics({
+    traces:10,completed:9,blocked:1,failed:1,uncertain:1,verified:8,
+    completionRate:.9,verificationRate:.8,falseCompletionCount:1,p50CompletionMs:120,p95CompletionMs:900
+  },{at:'2026-10-06T00:00:00.000Z',environment:'test'});
+  const metrics=payload.resourceMetrics[0]!.scopeMetrics[0]!.metrics;
+  const names=new Set(metrics.map((m)=>m.name));
+  for(const required of [
+    'mecord.operation.traces','mecord.operation.verified','mecord.operation.false_completion',
+    'mecord.operation.uncertain','mecord.operation.verification_rate','mecord.operation.completion.p95'
+  ]) assert.ok(names.has(required),required);
+  assert.match(otlpMetricExportDigest(payload),/^[0-9a-f]{64}$/);
 });
