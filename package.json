@@ -62,7 +62,9 @@
     "test:r9": "node --experimental-strip-types --test test/r9-distributed-engineering-fabric.test.ts",
     "evidence:r9": "node --experimental-strip-types scripts/generate-r9-certification.ts",
     "test:r10": "node --experimental-strip-types --test test/r10-verifiable-engineering-os.test.ts",
-    "evidence:r10": "node --experimental-strip-types scripts/generate-r10-certification.ts"
+    "evidence:r10": "node --experimental-strip-types scripts/generate-r10-certification.ts",
+    "test:r4:human-study": "node --experimental-strip-types --test test/r4-human-study.test.ts",
+    "evaluate:r4:human-study": "node --experimental-strip-types scripts/evaluate-r4-human-study.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",

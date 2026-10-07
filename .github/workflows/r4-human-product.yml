@@ -10,8 +10,12 @@ on:
       - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
+      - 'src/core/r4-human-study.ts'
       - 'src/core/contract-registry.ts'
       - 'test/control-center-*.test.ts'
+      - 'test/r4-human-study.test.ts'
+      - 'scripts/evaluate-r4-human-study.ts'
+      - 'certification/r4/**'
       - 'package.json'
       - '.github/workflows/r4-human-product.yml'
   pull_request:
@@ -22,8 +26,12 @@ on:
       - 'src/capabilities/process.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
+      - 'src/core/r4-human-study.ts'
       - 'src/core/contract-registry.ts'
       - 'test/control-center-*.test.ts'
+      - 'test/r4-human-study.test.ts'
+      - 'scripts/evaluate-r4-human-study.ts'
+      - 'certification/r4/**'
       - 'package.json'
       - '.github/workflows/r4-human-product.yml'
   workflow_dispatch:
@@ -50,6 +58,8 @@ jobs:
       - run: npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck:production
       - run: npm run test:r4
+      - name: R4 external-human certification evaluator
+        run: npm run test:r4:human-study
       - name: Control Center security invariants
         run: node --experimental-strip-types --test test/session-private-surface.test.ts test/approval-lifecycle.test.ts test/session-approval.test.ts
       - name: Inherited Developer Session restart ownership invariant
@@ -73,3 +83,41 @@ jobs:
           $pathLease = (Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path
           "OPERATOR_WINDOWS_PATH_LEASE_PATH=$pathLease" >> $env:GITHUB_ENV
       - run: node --experimental-strip-types --test test/developer-session-process-ownership.test.ts
+
+  r4-windows-first-use-preflight:
+    name: R4 Windows protected setup and verify preflight
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Build protected first-use helpers
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          cargo build --locked --release --manifest-path native/windows-dpapi/Cargo.toml
+          cargo build --locked --release --manifest-path native/windows-uia/Cargo.toml
+          ./native/windows-path-lease/build.ps1
+          "OPERATOR_WINDOWS_DPAPI_PATH=$((Resolve-Path native/windows-dpapi/target/release/operator-windows-dpapi.exe).Path)" >> $env:GITHUB_ENV
+          "OPERATOR_WINDOWS_UIA_PATH=$((Resolve-Path native/windows-uia/target/release/operator-windows-uia.exe).Path)" >> $env:GITHUB_ENV
+          "OPERATOR_WINDOWS_PATH_LEASE_PATH=$((Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path)" >> $env:GITHUB_ENV
+      - name: Install packaged runtime dependencies
+        shell: pwsh
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+      - name: Protected setup and doctor-style verification
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'r4-first-use-root'
+          $state = Join-Path $env:RUNNER_TEMP 'r4-first-use-state'
+          New-Item -ItemType Directory -Force $root,$state | Out-Null
+          $env:OPERATOR_STATE_DIR = $state
+          $env:OPERATOR_BROWSER_AUTO_LAUNCH = '0'
+          node --experimental-strip-types apps/local-agent/src/cli.ts setup --root $root --no-start
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --experimental-strip-types apps/local-agent/src/cli.ts verify
+
