@@ -1,20 +1,20 @@
 # Mecord Connect — Current Release State
 
-Status date: **2026-09-28**
+Status date: **2026-10-07**
 
 This file is the canonical human-readable current-state summary. Machine-readable values live in `docs/release-state.json`. Older certification and gate documents may preserve historical evidence, but they must not override this file for current production facts.
 
 ## Production
 
-- production source: `b73d699f3cdca4d6e372942f626012fb4909068b`
+- production source: `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`
 - public MCP: `https://operator.splcart.in/mcp`
 - public surface: exactly **9** tools
 - Developer MCP: `https://developer.operator.splcart.in/mcp`
-- Developer surface: exactly **32** grouped tools
+- Developer surface: exactly **36** grouped tools
 - Developer pairing route: **404** by design
-- npm: **`mecord-connect@2.0.1`** under `latest`
+- npm: **`mecord-connect@2.0.5`** under `latest`
 
-Live verification on 2026-09-28 confirmed both health endpoints report source `b73d699f3cdca4d6e372942f626012fb4909068b`, with public toolCount 9 and Developer toolCount 32. The deployed edge container is healthy, the Developer pairing route remains 404 by design, and the production activation retained an automatic rollback backup.
+Live verification on 2026-10-07 confirmed both health endpoints report source `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`, with public toolCount 9 and Developer toolCount 36. The deployed edge and gateway containers are healthy, the Developer pairing route remains 404 by design, the relay state volume was preserved, and the production activation retained an automatic rollback backup.
 
 ## Stage 1–20 production status
 
@@ -23,7 +23,7 @@ The hardened Stage-1–10 foundation and Stage-11–20 evolution successor are n
 Production now includes:
 
 - the unchanged public review-bounded **9-tool** MCP surface;
-- the **32-tool grouped private/Developer** MCP surface;
+- the **36-tool grouped private/Developer** MCP surface;
 - Windows RDC-parity primitives;
 - Stage 3 bounded autonomous execution;
 - Stage 4 durable shared-state multi-agent coordination;
@@ -44,18 +44,18 @@ Production now includes:
 - Stage 19 verified Teach Mode, durable Studio workflow execution, reconciliation and Control Center surface;
 - Stage 20 continuous desired-state reconciliation with bounded remediation and Control Center surface.
 
-The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed merged mainline source is `b73d699f3cdca4d6e372942f626012fb4909068b`, built at `2026-09-28T14:59:30Z`.
+The earlier Stage-5–10 certification head `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce` remains historical evidence; the current deployed certified source is `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`, built at `2026-10-07T01:19:39Z`.
 
-The npm runtime is `mecord-connect@2.0.1` under `latest`. Clean registry installation, `doctor`, `remote --help`, all 111 runtime-manifest hashes, all three Windows-native helpers, the fail-closed launcher guard and a zero-vulnerability production audit were verified after publication.
+The npm runtime is `mecord-connect@2.0.5` under `latest`. The trusted publication workflow, registry visibility, dist-tag, package integrity metadata, and final-main release gates were verified after publication.
 
-`mecord-connect@2.0.0` exists in registry history but is superseded and is not the `latest` tag. The released `2.0.1` runtime adds the certified exact-PID Windows process-inspection latency fix without changing the public 9-tool MCP schema.
+Earlier 2.0.x versions remain in registry history but are superseded and are not the `latest` tag. The released `2.0.5` runtime preserves the public 9-tool MCP schema while advancing the certified private runtime.
 
 ## Version policy
 
 The public product/plugin version and the local npm runtime version are deliberately related but not identical:
 
 - public product / plugin snapshot: **1.0.0**
-- npm runtime currently published: **2.0.1** under `latest`
+- npm runtime currently published: **2.0.5** under `latest`
 
 The public version tracks the stable public MCP schema/review snapshot. The npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged. Tests require the runtime candidate to be valid SemVer and never older than the actually published runtime.
 

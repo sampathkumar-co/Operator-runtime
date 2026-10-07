@@ -4,7 +4,7 @@ Operator is a semantic execution substrate for normal ChatGPT conversations to o
 
 ## Status: Stage 1–20 production live
 
-Production is live at source `b73d699f3cdca4d6e372942f626012fb4909068b`, with the public 9-tool review surface unchanged and the private/Developer surface remaining **32 grouped tools**. The deployed runtime includes the hardened Stage 1–10 foundation plus Stages 11–20: multimodal perception, bounded safe compute, durable events, temporal world history, semantic cross-device continuation, enterprise policy, capability SDK contracts, evaluation infrastructure, verified Studio/Teach workflows, and governed continuous desired-state operations. The npm runtime is `mecord-connect@2.0.1` under `latest`, published from the same certified source and verified by a clean registry install. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
+Production is live at source `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`, with the public 9-tool review surface unchanged and the private/Developer surface expanded to **36 grouped tools**. The deployed runtime includes the hardened Stage 1–20 foundation plus the certified R1 canonical runtime, R2 adaptive-planning shadow controls, and R3 Developer workstation capabilities. The npm runtime is `mecord-connect@2.0.5` under `latest`, published from the same certified source and verified by the release workflow. See [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md), [`docs/DEVELOPMENT_PROGRESS.md`](docs/DEVELOPMENT_PROGRESS.md), [`docs/MILESTONES.md`](docs/MILESTONES.md), and [`docs/RDC_VS_MECORD_CONNECT.md`](docs/RDC_VS_MECORD_CONNECT.md).
 
 ### Implemented and CI-certified
 
@@ -35,7 +35,7 @@ Production is live at source `b73d699f3cdca4d6e372942f626012fb4909068b`, with th
 - account-scoped multi-device registry, deterministic routing and project-to-device binding
 - durable relay delivery/ACK/reconnect semantics
 - real WebSocket relay server and production relay client
-- production full/private MCP runtime with **32 grouped semantic tools**
+- production full/private MCP runtime with **36 grouped semantic tools**
 - curated public Mecord Connect MCP surface with **9 review-bounded tools**; generic terminal, browser/UIA automation and arbitrary database-row access remain private-only
 - local and relay-backed private MCP execution modes with unchanged full-runtime tool schemas
 - OAuth-authenticated public MCP edge mode with per-principal relay account isolation and fail-closed TLS-proxy binding
@@ -71,7 +71,7 @@ The full root runtime/import suite is CI-gated alongside independent MCP transpo
 
 ## Remaining external gates
 
-The Stage-1–20 production deployment, public 9-tool path and Developer 32-tool endpoint are live. The only intentionally owner-authenticated release tasks left are npm 2.0.1 publication and OpenAI/ChatGPT plugin-directory work:
+The certified production deployment, public 9-tool path, Developer 36-tool endpoint, and npm 2.0.5 publication are live. The remaining owner-authenticated release work is limited to OpenAI/ChatGPT plugin-directory steps:
 
 - resolve OpenAI individual/developer verification;
 - create/attach the separate Developer ChatGPT connection after verification becomes available;
@@ -168,11 +168,11 @@ export OPERATOR_AGENT_TOKEN='same-secret-as-local-agent'
 npm run dev
 ```
 
-Local mode talks directly to the authenticated local agent. In production, relay mode preserves the same **32-tool private MCP surface** while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
+Local mode talks directly to the authenticated local agent. In production, relay mode preserves the same **36-tool private MCP surface** while routing execution through the relay control authority to a paired device. The relay-control credential is restricted to a loopback control service in the certified architecture.
 
-For private owner/developer automation, the 32-tool surface is served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
+For private owner/developer automation, the 36-tool surface is served by the separate OAuth-authenticated **Developer MCP edge**. That edge requires the dedicated `operator:developer` scope and an explicitly entitled Mecord account; the relay still intersects device-advertised capabilities with signed session-token scopes and independently rejects non-entitled Developer dispatches. The public ChatGPT app remains the separate 9-tool surface.
 
-The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The separate Developer endpoint reports exactly 32 grouped tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
+The OAuth-authenticated public MCP edge is live at the production endpoint, and a fresh ChatGPT OAuth reconnect imports the canonical nine-tool surface. The separate Developer endpoint reports exactly 36 grouped tools. The Developer endpoint intentionally does not expose the pairing route. See [`docs/PUBLIC_MCP_EDGE.md`](docs/PUBLIC_MCP_EDGE.md) and [`docs/CURRENT_RELEASE_STATE.md`](docs/CURRENT_RELEASE_STATE.md).
 
 ## Windows package model
 

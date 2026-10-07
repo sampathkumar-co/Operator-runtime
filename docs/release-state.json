@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "statusDate": "2026-09-28",
+  "statusDate": "2026-10-07",
   "production": {
-    "sourceCommit": "b73d699f3cdca4d6e372942f626012fb4909068b",
+    "sourceCommit": "ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2",
     "publicMcp": "https://operator.splcart.in/mcp",
     "developerMcp": "https://developer.operator.splcart.in/mcp",
     "publicToolCount": 9,
-    "developerToolCount": 32,
+    "developerToolCount": 36,
     "developerPairingRouteStatus": 404,
-    "buildTimestamp": "2026-09-28T14:59:30Z"
+    "buildTimestamp": "2026-10-07T01:19:39Z"
   },
   "versions": {
     "publicProduct": "1.0.0",
-    "runtimePackage": "2.0.1",
+    "runtimePackage": "2.0.5",
     "runtimeTag": "latest",
     "policy": "public-schema-stable-runtime-semver-independent"
   },
@@ -24,9 +24,9 @@
   "notes": [
     "The public product/plugin version tracks the stable public MCP review/schema snapshot.",
     "The Windows npm runtime follows independent SemVer and may advance major/minor/patch versions without forcing a public plugin version change when the public 9-tool schema/review contract itself is unchanged.",
-    "The certified npm runtime 2.0.1 is published under latest with the exact-PID Windows process-inspection hotfix. Version 2.0.0 exists in registry history but is superseded and is not latest.",
-    "The public ChatGPT surface remains exactly 9 tools; the separate Developer MCP endpoint exposes exactly 32 grouped tools.",
-    "The hardened Stage 1-10 foundation plus Stages 11-20 are live in production at source b73d699f3cdca4d6e372942f626012fb4909068b.",
-    "OpenAI/plugin portal and npm publication steps remain owner-authenticated external actions and do not change the deployed production/runtime status."
+    "The certified npm runtime 2.0.5 is published under latest from the same source now deployed to production.",
+    "The public ChatGPT surface remains exactly 9 tools; the separate Developer MCP endpoint exposes exactly 36 grouped tools.",
+    "The certified final release is live in production at source ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2.",
+    "OpenAI/plugin portal steps remain owner-authenticated external actions and do not change the deployed production/runtime status."
   ]
 }

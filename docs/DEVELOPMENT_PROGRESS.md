@@ -1,6 +1,6 @@
 # Mecord Connect — Development Progress
 
-Status date: **2026-09-27**
+Status date: **2026-10-07**
 
 This document answers "what is actually finished in source?" For deployed production facts, use `docs/CURRENT_RELEASE_STATE.md`.
 
@@ -14,7 +14,7 @@ This document answers "what is actually finished in source?" For deployed produc
 | Git / project / Docker / PostgreSQL / VS Code adapters | ✅ Complete + CI-certified | Existing private runtime |
 | Relay / pairing / multi-device identity + routing | ✅ Complete + CI-certified | Deployed architecture |
 | Public MCP surface | ✅ 9 tools | ✅ 9 tools deployed |
-| Deployed Developer MCP | ✅ 32 grouped tools | ✅ 32 grouped tools live |
+| Deployed Developer MCP | ✅ 36 grouped tools | ✅ 36 grouped tools live |
 | Windows RDC parity | ✅ Complete + CI-certified | ✅ Deployed |
 | Stage 3 bounded autonomous loop | ✅ Complete + CI-certified | ✅ Deployed |
 | Stage 4 shared-state multi-agent runtime | ✅ Complete + CI-certified | ✅ Deployed |
@@ -24,7 +24,7 @@ This document answers "what is actually finished in source?" For deployed produc
 | Stage 8 organization-scale execution | ✅ Complete + CI-certified | ✅ Deployed |
 | Stage 9 bounded self-optimization | ✅ Complete + CI-certified | ✅ Deployed |
 | Stage 10 autonomous digital operations layer | ✅ Complete + CI-certified | ✅ Deployed |
-| Private/Developer surface | ✅ **32 grouped tools** | ✅ **32 grouped tools live** |
+| Private/Developer surface | ✅ **36 grouped tools** | ✅ **36 grouped tools live** |
 | Linux/macOS runtime regression | ✅ Green | Runtime supported; advanced GUI parity not claimed |
 | OpenAI directory verification/submission | External | Not completed |
 
@@ -32,7 +32,7 @@ This document answers "what is actually finished in source?" For deployed produc
 
 Runtime-certified Stage-5–10 code head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`
 
-Merged/deployed production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`
+Current deployed production source: `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`
 
 The deployed runtime is gated together with the predecessor runtime: Stage 3 autonomous certification, Windows RDC parity, Stage 4 multi-agent, Stage 5–10 certification, core runtime, MCP/Inspector, relay WebSocket E2E, security red-team, performance regression, Windows UIA/path authority/native packaging, and the Windows/macOS/Linux platform matrix.
 
@@ -114,21 +114,20 @@ The deployed runtime is gated together with the predecessor runtime: Stage 3 aut
 ## Current source vs production
 
 ### Production now
-- production source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
+- production source: `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`;
 - public tools: **9**;
-- Developer tools: **32 grouped tools**;
-- npm: `mecord-connect@2.0.1` is published under `latest` from the certified Stage-1–20 runtime source and passed clean-registry verification.
+- Developer tools: **36 grouped tools**;
+- npm: `mecord-connect@2.0.5` is published under `latest` from the certified final source and passed the trusted release workflow.
 
 ### Certified runtime lineage
 - Stage-5–10 runtime certification head: `83fbcf68cfe97bb4fe4b15b66b76f1f54dad6dce`;
-- merged/deployed mainline source: `3361b2f77d2b04028d514b178bd4a246fc863e6c`;
+- certified/deployed final source: `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`;
 - Windows RDC parity + Stages 3–10: complete, CI-certified and deployed.
 
 ## Remaining release work
 
-1. publish the separately authenticated npm 2.0.1 release so `npx mecord-connect@latest` installs the Stage-1–10 runtime;
-2. run fresh real paired-Windows Stage-10 workflows through the live ChatGPT/Developer path when the external OpenAI verification path is available;
-3. continue the external OpenAI verification/app-directory process separately.
+1. run any reviewer-specific live ChatGPT/Developer workflows required after the external OpenAI verification path becomes available;
+2. continue the external OpenAI verification/app-directory process separately.
 
 There is no known Stage-1–10 repository or production-edge implementation blocker.
 
@@ -137,7 +136,7 @@ There is no known Stage-1–10 repository or production-edge implementation bloc
 
 Branch: `evolution/stage1-20-hardening`
 
-This successor is intentionally not described as production until it is merged, deployed, and `CURRENT_RELEASE_STATE.md` is updated. The implementation currently preserves the deployed public 9-tool / Developer 32-tool MCP split while extending the private runtime.
+This section preserves the implementation history of the Stage 11–20 successor. That successor has since merged and deployed; current production truth is maintained in `CURRENT_RELEASE_STATE.md` and now exposes the public 9-tool / Developer 36-tool MCP split.
 
 ### Stage 1–10 hardening
 

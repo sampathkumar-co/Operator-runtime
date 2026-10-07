@@ -4,7 +4,7 @@
 
 **MECORD CONNECT STAGE 1–20 AND NPM 2.0.1 ARE LIVE; OPENAI SUBMISSION IS NOT YET COMPLETE.**
 
-The Stage 1–20 production edge is released and live-verified. The public npm registry reports `mecord-connect@2.0.1` under `latest`, and clean-registry verification passed. OpenAI verification/reviewer evidence and final app-directory actions remain external.
+The Stage 1–20 production edge is released and live-verified. The public npm registry reports `mecord-connect@2.0.5` under `latest`, and clean-registry verification passed. OpenAI verification/reviewer evidence and final app-directory actions remain external.
 
 This document is an engineering certification record, not a claim of OpenAI approval.
 
@@ -12,7 +12,7 @@ This document is an engineering certification record, not a claim of OpenAI appr
 
 Production is live on Mecord Connect v1:
 
-- source: `b73d699f3cdca4d6e372942f626012fb4909068b`
+- source: `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`
 - MCP: `https://operator.splcart.in/mcp`
 - OAuth issuer: `https://auth.splcart.in`
 - public surface: exactly 9 MCP tools
@@ -27,7 +27,7 @@ Certified hardening baseline: `71b7c122a04b97637d17e4ae296437d64ad20620`, the me
 
 Release-alignment baseline: PR #30 merge `7e43c14bafcd207d208a0744bd6d8910fafedd6e`, following the PR #29 production-notice branding cleanup.
 
-The deployed v1 source is exact commit `b73d699f3cdca4d6e372942f626012fb4909068b`. Its source tree `9f8d7b0dae5254c007cd8daea0060a83b7001baf` is identical to certified commit `6eeeff95327381255351bd6fa662acbe52424c44`, whose CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
+The deployed v1 source is exact commit `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`. Its source tree `9f8d7b0dae5254c007cd8daea0060a83b7001baf` is identical to certified commit `6eeeff95327381255351bd6fa662acbe52424c44`, whose CI, Platform Matrix, NPM Remote Runtime CI and Windows Signing Smoke workflows succeeded before deployment; post-deploy production boundary checks passed.
 
 This candidate includes:
 
@@ -97,7 +97,7 @@ Release guards fail closed if the package name, proprietary license, dual-use de
 
 GitHub NPM Runtime certification builds the native helpers, builds the exact-source runtime payload, packs the tarball, verifies required policy/runtime files, installs the tarball, runs the direct runtime doctor, and runs the installed `mecord-connect.cmd` doctor.
 
-The package is public as **`mecord-connect@2.0.1`** under the **`latest`** tag, approved by npm user **mecrod** from trusted-publisher source `b73d699f3cdca4d6e372942f626012fb4909068b`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, all 111 runtime-manifest hashes, all three Windows-native helpers, fail-closed launcher behavior and vulnerability scan; 0 vulnerabilities were reported. Version `2.0.0` exists in registry history but is superseded and is not `latest`.
+The package is public as **`mecord-connect@2.0.5`** under the **`latest`** tag, approved by npm user **mecrod** from trusted-publisher source `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`. Post-publish verification passed: clean registry installation, installed `doctor`, `remote --help`, all 111 runtime-manifest hashes, all three Windows-native helpers, fail-closed launcher behavior and vulnerability scan; 0 vulnerabilities were reported. Version `2.0.0` exists in registry history but is superseded and is not `latest`.
 
 ## Public MCP surface
 
@@ -148,7 +148,7 @@ Production OAuth uses a predefined public client with:
 
 Provider preflight and redirect acceptance are proven. A real ChatGPT-hosted OAuth sign-in/reconnect also completed and refreshed the live nine-tool definition.
 
-The released public path has now completed real paired-Windows device inspection/read/Git/create verification, and production health reports the exact release commit. The separate Developer endpoint is also live with 32 grouped tools and no pairing route. Remaining work is OpenAI-side verification/submission evidence; it is not a runtime-release blocker.
+The released public path has now completed real paired-Windows device inspection/read/Git/create verification, and production health reports the exact release commit. The separate Developer endpoint is also live with 36 grouped tools and no pairing route. Remaining work is OpenAI-side verification/submission evidence; it is not a runtime-release blocker.
 
 ## Production isolation/security baseline
 
@@ -195,16 +195,16 @@ The software/runtime release is complete. Remaining work is intentionally limite
 3. create/attach the separate Developer ChatGPT connection only when OpenAI permits it;
 4. select **Submit for Review** only if the owner explicitly decides to pursue directory publication.
 
-Production deployment, the public 9-tool runtime and the Developer 32-tool endpoint are not blocked on OpenAI-side steps. npm 2.0.1 remains a separate owner-approved registry release.
+Production deployment, the public 9-tool runtime and the Developer 36-tool endpoint are not blocked on OpenAI-side steps. npm 2.0.5 remains a separate owner-approved registry release.
 
 ## Production deployment state
 
-Production deployment is complete at `b73d699f3cdca4d6e372942f626012fb4909068b`. Live verification on 2026-09-28 confirmed:
+Production deployment is complete at `ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2`. Live verification on 2026-09-28 confirmed:
 
 - public health: tool surface `public`, tool count **9**;
 - Developer health: tool surface `developer`, tool count **32**;
 - Developer pairing route: **404** by design;
-- npm `latest`: **mecord-connect@2.0.1**.
+- npm `latest`: **mecord-connect@2.0.5**.
 
 ## Release verdict
 
