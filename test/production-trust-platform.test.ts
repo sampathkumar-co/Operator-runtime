@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   createUpdateRollout,
+  evaluateProductionPlatformSlo,
   evaluateProductionSlo,
   recordUpdateWaveResult,
   RelayOwnershipFenceStore,
@@ -110,4 +111,84 @@ test('staged update rollout completes healthy waves and demands rollback on heal
   });
   assert.equal(rollout.state, 'ROLLBACK_REQUIRED');
   assert.match(rollout.reason ?? '', /CRASH_FREE_SESSION_RATE_LOW/);
+});
+
+
+test('platform SLO fails closed on infrastructure recovery and retention regressions', () => {
+  const platformPolicy = {
+    ...policy,
+    minControlPlaneAvailability: 0.999,
+    minReconnectSuccessRate: 0.995,
+    maxP95DispatchMs: 1_000,
+    maxP95VerificationMs: 5_000,
+    maxQueueDepth: 1_000,
+    maxP95DeliveryAgeMs: 10_000,
+    maxP95ReconciliationMs: 30_000,
+    maxStateBytes: 1024 * 1024 * 1024,
+    maxRetentionViolationCount: 0
+  };
+  const decision = evaluateProductionPlatformSlo({
+    operation: {
+      traces: 100, completed: 100, blocked: 0, failed: 0, uncertain: 0, verified: 100,
+      completionRate: 1, verificationRate: 1, falseCompletionCount: 0,
+      p50CompletionMs: 100, p95CompletionMs: 200
+    },
+    crashFreeSessionRate: 1,
+    updateSuccessRate: 1,
+    controlPlaneAvailability: 0.98,
+    reconnectSuccessRate: 0.90,
+    p95DispatchMs: 1_500,
+    p95VerificationMs: 6_000,
+    queueDepth: 1_500,
+    p95DeliveryAgeMs: 12_000,
+    p95ReconciliationMs: 45_000,
+    stateBytes: 2 * 1024 * 1024 * 1024,
+    retentionViolationCount: 2
+  }, platformPolicy);
+  assert.equal(decision.healthy, false);
+  for (const reason of [
+    'CONTROL_PLANE_AVAILABILITY_LOW',
+    'RECONNECT_SUCCESS_RATE_LOW',
+    'P95_DISPATCH_LATENCY_HIGH',
+    'P95_VERIFICATION_LATENCY_HIGH',
+    'QUEUE_DEPTH_HIGH',
+    'P95_DELIVERY_AGE_HIGH',
+    'P95_RECONCILIATION_LATENCY_HIGH',
+    'STATE_GROWTH_HIGH',
+    'RETENTION_COMPLIANCE_FAILED'
+  ]) assert.ok(decision.reasons.includes(reason), reason);
+});
+
+test('platform SLO accepts healthy operational recovery objectives', () => {
+  const decision = evaluateProductionPlatformSlo({
+    operation: {
+      traces: 100, completed: 100, blocked: 0, failed: 0, uncertain: 0, verified: 100,
+      completionRate: 1, verificationRate: 1, falseCompletionCount: 0,
+      p50CompletionMs: 100, p95CompletionMs: 200
+    },
+    crashFreeSessionRate: 1,
+    updateSuccessRate: 1,
+    controlPlaneAvailability: 1,
+    reconnectSuccessRate: 1,
+    p95DispatchMs: 100,
+    p95VerificationMs: 500,
+    queueDepth: 10,
+    p95DeliveryAgeMs: 200,
+    p95ReconciliationMs: 1_000,
+    stateBytes: 1024 * 1024,
+    retentionViolationCount: 0
+  }, {
+    ...policy,
+    minControlPlaneAvailability: 0.999,
+    minReconnectSuccessRate: 0.995,
+    maxP95DispatchMs: 1_000,
+    maxP95VerificationMs: 5_000,
+    maxQueueDepth: 1_000,
+    maxP95DeliveryAgeMs: 10_000,
+    maxP95ReconciliationMs: 30_000,
+    maxStateBytes: 1024 * 1024 * 1024,
+    maxRetentionViolationCount: 0
+  });
+  assert.equal(decision.healthy, true);
+  assert.deepEqual(decision.reasons, []);
 });
