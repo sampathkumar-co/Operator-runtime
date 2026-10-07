@@ -67,3 +67,4 @@ export * from './counterfactual-twin-execution.ts';
 export * from './distributed-fabric.ts';
 export * from './autonomous-engineering-os.ts';
 export * from './capability-package-registry.ts';
+export * from './production-trust-platform.ts';
