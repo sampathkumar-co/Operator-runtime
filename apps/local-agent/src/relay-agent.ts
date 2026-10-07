@@ -30,6 +30,7 @@ export interface LocalAgentRelayRunnerOptions {
   identity: DeviceIdentityStore;
   localAgentBaseUrl: string;
   agentToken: string;
+  relayInternalToken: string;
   supportedCapabilities?: readonly string[];
   getSupportedCapabilities?: () => Promise<readonly string[]>;
   allowLoopbackInsecure?: boolean;
@@ -50,6 +51,7 @@ export class LocalAgentRelayRunner {
   #localExecuteUrl: string;
   #localActionReceiptUrl: string;
   #agentToken: string;
+  #relayInternalToken: string;
   #localRequestTimeoutMs: number;
   #resultSubmitTimeoutMs: number;
 
@@ -67,6 +69,10 @@ export class LocalAgentRelayRunner {
     this.#localExecuteUrl = new URL('/v1/execute', this.#localAgentBaseUrl).toString();
     this.#localActionReceiptUrl = new URL('/v1/action-receipt', this.#localAgentBaseUrl).toString();
     this.#agentToken = options.agentToken;
+    if (typeof options.relayInternalToken !== 'string' || Buffer.byteLength(options.relayInternalToken, 'utf8') < 32) {
+      throw new OperatorError('RELAY_INTERNAL_AUTH_INVALID', 'Relay internal authentication secret is invalid.');
+    }
+    this.#relayInternalToken = options.relayInternalToken;
     this.#localRequestTimeoutMs = boundedLocalRequestTimeout(options.localRequestTimeoutMs ?? LOCAL_ACTION_DEFAULT_TIMEOUT_MS);
     this.#resultSubmitTimeoutMs = boundedResultSubmitTimeout(options.resultSubmitTimeoutMs ?? RESULT_SUBMIT_TIMEOUT_MS);
     this.#client = new RelayClient({
@@ -170,7 +176,7 @@ export class LocalAgentRelayRunner {
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${this.#agentToken}`,
-            ...relayRequestHeaders(enterpriseContext)
+            ...relayRequestHeaders(enterpriseContext, this.#relayInternalToken)
           },
           body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
         }, Math.min(LOCAL_ACTION_RECEIPT_TIMEOUT_MS, Math.max(50, deadline - Date.now())), 'local action receipt');
@@ -213,7 +219,7 @@ export class LocalAgentRelayRunner {
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${this.#agentToken}`,
-          ...relayRequestHeaders(enterpriseContext)
+          ...relayRequestHeaders(enterpriseContext, this.#relayInternalToken)
         },
         body: JSON.stringify({ action, ...(approvalAuthority ? { approvalAuthority } : {}) })
       }, actionRequestTimeoutMs(action, this.#localRequestTimeoutMs), 'local action execution');
@@ -287,7 +293,7 @@ export class LocalAgentRelayRunner {
   async #callAbsoluteOperationApi(url: URL, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
     const response = await fetchWithDeadline(url.toString(), {
       redirect: 'error', method,
-      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext, this.#relayInternalToken) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
     }, this.#localRequestTimeoutMs, 'local knowledge/operation request');
     let bodyValue: unknown;
@@ -322,7 +328,7 @@ export class LocalAgentRelayRunner {
   async #callTaskApi(pathname: string, method: 'GET' | 'POST', body?: unknown, enterpriseContext?: RelayEnterpriseContext): Promise<JsonObject> {
     const response = await fetchWithDeadline(new URL(pathname, this.#localAgentBaseUrl).toString(), {
       redirect: 'error', method,
-      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext) },
+      headers: { ...(method === 'POST' ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${this.#agentToken}`, ...relayRequestHeaders(enterpriseContext, this.#relayInternalToken) },
       ...(method === 'POST' ? { body: JSON.stringify(body ?? {}) } : {})
     }, this.#localRequestTimeoutMs, 'local durable task request');
     let bodyValue: unknown;
@@ -629,9 +635,10 @@ function validateRelayEnterpriseContext(input: unknown, authority: ApprovalAutho
   return { principalId, deviceId: authority.deviceId, ...(projectKey ? { projectKey } : {}) };
 }
 
-function relayRequestHeaders(context?: RelayEnterpriseContext): Record<string, string> {
+function relayRequestHeaders(context: RelayEnterpriseContext | undefined, relayInternalToken: string): Record<string, string> {
   return {
     'x-operator-relay-request': '1',
+    'x-operator-relay-auth': relayInternalToken,
     ...(context ? { 'x-operator-enterprise-context': Buffer.from(JSON.stringify(context), 'utf8').toString('base64url') } : {})
   };
 }

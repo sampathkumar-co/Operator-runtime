@@ -72,11 +72,13 @@ test('relay action executes through the real local policy boundary and returns a
   await fs.writeFile(tokenFile, `${token}\n`, { mode: 0o600 });
 
   const agentToken = 'a'.repeat(64);
+  const relayInternalToken = 'r'.repeat(64);
   const runtime = createRuntime({ allowedRoots: [projectRoot], allowedExecutables: ['node'], browserAutoLaunch: false });
   const audit = new AuditLog(deviceState);
   const agent = createLocalAgentServer({
     runtime,
     token: agentToken,
+    relayInternalToken,
     audit,
     permissions: {
       allowedCapabilities: ['computer.inspect', 'browser.interact'],
@@ -97,6 +99,7 @@ test('relay action executes through the real local policy boundary and returns a
     identity: deviceIdentity,
     localAgentBaseUrl: `http://127.0.0.1:${agentBound.port}`,
     agentToken,
+    relayInternalToken,
     supportedCapabilities: ['computer.inspect', 'browser.interact'],
     allowLoopbackInsecure: true
   });
@@ -187,6 +190,7 @@ gitTest('session rotation reconnect preserves and executes public filesystem and
   await fs.writeFile(tokenFile, `${initial.token}\n`, { mode: 0o600 });
 
   const agentToken = 'c'.repeat(64);
+  const relayInternalToken = 'r'.repeat(64);
   const runtime = createRuntime({
     allowedRoots: [projectRoot],
     allowedExecutables: ['node'],
@@ -197,6 +201,7 @@ gitTest('session rotation reconnect preserves and executes public filesystem and
   const agent = createLocalAgentServer({
     runtime,
     token: agentToken,
+    relayInternalToken,
     audit,
     permissions: {
       allowedCapabilities: [...capabilities],
@@ -217,6 +222,7 @@ gitTest('session rotation reconnect preserves and executes public filesystem and
     identity: deviceIdentity,
     localAgentBaseUrl: `http://127.0.0.1:${agentBound.port}`,
     agentToken,
+    relayInternalToken,
     getSupportedCapabilities: () => runtime.supportedCapabilities(capabilities),
     allowLoopbackInsecure: true
   });
