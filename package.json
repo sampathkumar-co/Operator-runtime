@@ -44,7 +44,7 @@
     "evidence:r1": "node --experimental-strip-types scripts/generate-r1-release-evidence.ts",
     "test:r2": "node --experimental-strip-types --test test/adaptive-planning-shadow.test.ts test/adaptive-planning-control.test.ts test/r2-promotion-evidence-bridge.test.ts",
     "build:control-center": "npm --prefix apps/control-center run build",
-    "test:r4": "npm run build:control-center && git diff --exit-code -- apps/local-agent/src/control-center.ts && node --experimental-strip-types --test test/control-center-ux.test.ts test/control-center-evolution.test.ts"
+    "test:r4": "npm run build:control-center && git diff --exit-code -- apps/local-agent/src/control-center.ts && node --experimental-strip-types --test test/control-center-ux.test.ts test/control-center-evolution.test.ts test/control-center-r4-api.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",
