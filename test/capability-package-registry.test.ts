@@ -18,7 +18,7 @@ const manifest = {
   displayName: 'Example Inspect',
   provenance: { source: 'https://example.invalid/source', packageDigest: 'a'.repeat(64) },
   capabilities: [{
-    capability: 'filesystem.read',
+    capability: 'file.read',
     risk: 'read' as const,
     deterministic: true,
     reversible: true,
