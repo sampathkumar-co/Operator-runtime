@@ -5,6 +5,7 @@ on:
     branches: ['main', 'program/r4-**']
     paths:
       - 'apps/local-agent/src/control-center.ts'
+      - 'apps/control-center/**'
       - 'apps/local-agent/src/server.ts'
       - 'src/core/control-center-model.ts'
       - 'src/core/control-center-ux.ts'
