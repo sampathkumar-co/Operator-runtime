@@ -1065,6 +1065,9 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnvironment
     });
+    const rootIdentityPromise = child.pid
+      ? observeProcessInstance(child.pid)
+      : Promise.resolve({ status: 'unknown' } as const);
 
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -1099,7 +1102,11 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     child.once('error', rejectOnce);
 
     const terminateChild = () => {
-      terminationPromise ??= terminateProcessTree(child, child.pid ?? 0).catch((error) => {
+      terminationPromise ??= (async () => {
+        const observation = await rootIdentityPromise;
+        const expectedIdentity = observation.status === 'live' ? observation.identity : undefined;
+        await terminateProcessTree(child, child.pid ?? 0, undefined, expectedIdentity);
+      })().catch((error) => {
         throw error instanceof OperatorError
           ? error
           : new OperatorError('PROCESS_TREE_TERMINATION_FAILED', error instanceof Error ? error.message : String(error), { retryable: false, details: { sideEffectState: 'uncertain' } });
@@ -1173,6 +1180,44 @@ async function terminateProcessTree(
 ): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Owned process PID is invalid.', { details: { sideEffectState: 'uncertain' } });
   if (process.platform === 'win32') {
+    const nativeHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+    const windowsIdentity = expectedIdentity ? /^windows-filetime:(\d{15,20})$/.exec(expectedIdentity.started) : null;
+    if (nativeHelper && path.isAbsolute(nativeHelper) && windowsIdentity) {
+      const nativeExit = await new Promise<number | null>((resolve, reject) => {
+        const killer = spawn(nativeHelper, ['terminate-tree', String(pid), windowsIdentity[1]!], {
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'ignore', 'pipe'],
+          env: safeChildEnvironment(process.env)
+        });
+        const stderr: Buffer[] = [];
+        let stderrBytes = 0;
+        killer.stderr?.on('data', (chunk: Buffer) => {
+          if (stderrBytes >= 64 * 1024) return;
+          const sliced = chunk.subarray(0, Math.max(0, 64 * 1024 - stderrBytes));
+          stderr.push(sliced);
+          stderrBytes += sliced.byteLength;
+        });
+        killer.once('error', reject);
+        killer.once('close', (code) => {
+          if (code !== 0) {
+            reject(new OperatorError(
+              'PROCESS_TREE_TERMINATION_FAILED',
+              Buffer.concat(stderr).toString('utf8').trim() || `native Windows process containment exited with ${String(code)}`,
+              { retryable: false, details: { sideEffectState: 'uncertain' } }
+            ));
+            return;
+          }
+          resolve(code);
+        });
+      });
+      if (nativeExit !== 0) {
+        throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Native Windows process containment did not complete successfully.', { retryable: false, details: { sideEffectState: 'uncertain' } });
+      }
+      await waitForExactProcessExit(expectedIdentity, observer, signal);
+      return;
+    }
+
     const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
     const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
     const exitCode = await new Promise<number | null>((resolve, reject) => {
