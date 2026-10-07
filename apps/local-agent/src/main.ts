@@ -110,7 +110,7 @@ if (remoteLauncherIpc) {
   });
 }
 const permissions = {
-  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*'],
+  allowedCapabilities: ['computer.inspect', 'project.inspect', 'project.command.*', 'project.transaction.*', 'docker.*', 'compute.run', 'postgres.*', 'vscode.*', 'file.*', 'git.*', 'terminal.execute', 'terminal.session', 'process.inspect', 'process.manage', 'browser.inspect', 'browser.verify', 'browser.navigate', 'browser.interact', 'browser.tab.focus', 'browser.tab.close', 'app.inspect', 'app.operate', 'visual.capture', 'input.operate', 'perception.*', 'ext.*'],
   allowedRoots,
   allowExternalWrites: false,
   allowSystemChanges: false,
