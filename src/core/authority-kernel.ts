@@ -130,8 +130,17 @@ export class AuthorityKernel {
     token?: CapabilityToken
   ): Promise<AuthorityDecision> {
     this.policy.authorizeBase(action, permissions);
-    const rule = capabilityRiskRule(action.capability);
-    const canonicalRisk = rule === 'dynamic' ? await resolveDynamicRisk(action) : rule;
+    let canonicalRisk: ActionRisk;
+    try {
+      const rule = capabilityRiskRule(action.capability);
+      canonicalRisk = rule === 'dynamic' ? await resolveDynamicRisk(action) : rule;
+    } catch (error) {
+      // R6 extension capabilities are not added to the built-in risk table.
+      // Their risk is resolved only through registered providers; the router
+      // requires one unambiguous trusted risk across all supporting providers.
+      if (!(error instanceof PolicyError) || error.code !== 'CAPABILITY_RISK_UNREGISTERED') throw error;
+      canonicalRisk = await resolveDynamicRisk(action);
+    }
     assertCanonicalRisk(action, canonicalRisk);
     const canonicalAction = { ...action, risk: canonicalRisk };
     if (token) this.verifyToken(token, canonicalAction, permissions);
