@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AuditLog } from '../../../src/core/audit.ts';
 import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
+import { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { TaskStore } from '../../../src/core/task-store.ts';
@@ -225,6 +226,17 @@ const agentKernel = new AgentKernel({
         details: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'PERCEPTION_PUBLICATION_FAILED' }
       });
       throw error;
+    }
+  }
+});
+const universalGateway = new UniversalAgentGateway({
+  executor: agentKernel,
+  authorizer: {
+    permissionsFor(principalId) {
+      if (principalId !== 'local-user') {
+        throw new OperatorError('AGENT_GATEWAY_PRINCIPAL_MISMATCH', 'Standalone local gateway authorizer accepts only local-user.');
+      }
+      return permissions;
     }
   }
 });
@@ -477,6 +489,7 @@ const taskOrchestrator = new TaskOrchestrator({
 const agent = createLocalAgentServer({
   runtime,
   agentKernel,
+  gateway: universalGateway,
   intentRegistry,
   sagas,
   token,
