@@ -1214,6 +1214,10 @@ async function waitForExactProcessExit(
     const observation = await observer(identity.pid);
     if (observation.status === 'dead') return;
     if (observation.status === 'live' && observation.identity && !sameProcessInstance(identity, observation.identity)) return;
+    if (observation.status === 'unknown' && process.platform === 'win32') {
+      const absent = await windowsPidDefinitelyAbsent(identity.pid, _signal);
+      if (absent === true) return;
+    }
     if (performance.now() >= deadline) {
       throw new OperatorError(
         'PROCESS_TERMINATE_POSTCONDITION_FAILED',
@@ -1224,6 +1228,30 @@ async function waitForExactProcessExit(
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function windowsPidDefinitelyAbsent(pid: number, signal?: AbortSignal): Promise<boolean | undefined> {
+  try {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const executable = path.join(systemRoot, 'System32', 'tasklist.exe');
+    const output = await runProcess(
+      executable,
+      ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+      process.cwd(),
+      5_000,
+      64 * 1024,
+      {},
+      signal
+    );
+    if (output.exitCode !== 0) return undefined;
+    for (const line of output.stdout.split(/\r?\n/).filter(Boolean)) {
+      const cols = parseCsvLine(line);
+      if (cols.length >= 2 && Number(cols[1]) === pid) return false;
+    }
+    return true;
+  } catch {
+    return undefined;
   }
 }
 
