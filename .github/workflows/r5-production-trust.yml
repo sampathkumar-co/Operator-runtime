@@ -19,6 +19,7 @@ on:
       - 'test/control-plane-store.test.ts'
       - 'test/r5-fault-lab.test.ts'
       - 'package.json'
+      - 'scripts/r5-production-soak.ts'
       - '.github/workflows/r5-production-trust.yml'
   workflow_dispatch:
 
@@ -47,3 +48,5 @@ jobs:
           npm run typecheck:production
       - name: R5 exact-head suite
         run: npm run test:r5
+      - name: R5 bounded soak smoke
+        run: npm run test:r5-soak:smoke
