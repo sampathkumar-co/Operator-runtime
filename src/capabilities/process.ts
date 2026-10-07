@@ -1217,24 +1217,35 @@ async function runWindowsTaskkill(pid: number): Promise<number | null> {
   });
 }
 
-async function terminateCapturedWindowsProcess(
-  identity: ProcessInstanceIdentity,
-  observer: ProcessInstanceObserver,
-  signal?: AbortSignal
-): Promise<void> {
-  const before = await observer(identity.pid);
-  if (before.status === 'dead') return;
-  if (before.status === 'live' && before.identity && !sameProcessInstance(identity, before.identity)) return;
-  if (before.status !== 'live' || !before.identity) {
-    throw new OperatorError(
-      'PROCESS_TREE_TERMINATION_FAILED',
-      'A captured Windows descendant could not be revalidated before termination.',
-      { retryable: false, details: { sideEffectState: 'uncertain', pid: identity.pid } }
-    );
+async function nativeWindowsTreeRoot(identity: ProcessInstanceIdentity): Promise<ProcessInstanceIdentity | undefined> {
+  const tree = await captureWindowsProcessTree(identity.pid);
+  return tree.find((entry) => entry.identity.pid === identity.pid && entry.depth === 0)?.identity;
+}
+
+async function waitForNativeWindowsProcessExit(identity: ProcessInstanceIdentity, waitMs = 5_000): Promise<void> {
+  const deadline = performance.now() + waitMs;
+  while (true) {
+    const current = await nativeWindowsTreeRoot(identity);
+    if (!current || !sameProcessInstance(identity, current)) return;
+    if (performance.now() >= deadline) {
+      throw new OperatorError(
+        'PROCESS_TERMINATE_POSTCONDITION_FAILED',
+        'Exact captured Windows process instance remained after termination.',
+        { retryable: false, details: { sideEffectState: 'uncertain', pid: identity.pid } }
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
+}
+
+async function terminateCapturedWindowsProcess(
+  identity: ProcessInstanceIdentity
+): Promise<void> {
+  const before = await nativeWindowsTreeRoot(identity);
+  if (!before || !sameProcessInstance(identity, before)) return;
   const exitCode = await runWindowsTaskkill(identity.pid);
   try {
-    await waitForExactProcessExit(identity, observer, signal);
+    await waitForNativeWindowsProcessExit(identity);
   } catch (error) {
     throw new OperatorError(
       'PROCESS_TREE_TERMINATION_FAILED',
@@ -1283,7 +1294,7 @@ async function terminateProcessTree(
 
     if (snapshotError) throw snapshotError;
     for (const entry of capturedTree.filter((item) => item.identity.pid !== pid).sort((a, b) => b.depth - a.depth || b.identity.pid - a.identity.pid)) {
-      await terminateCapturedWindowsProcess(entry.identity, observer, signal);
+      await terminateCapturedWindowsProcess(entry.identity);
     }
     return;
   }
