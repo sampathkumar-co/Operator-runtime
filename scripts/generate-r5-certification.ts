@@ -7,15 +7,24 @@ const root=process.cwd();
 const sha=(process.env.GITHUB_SHA||execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'})).trim();
 if(!/^[0-9a-f]{40}$/.test(sha)) throw new Error('R5 evidence source SHA is invalid.');
 const files=[
+  'src/core/operation-trace.ts',
   'src/core/otlp-operation-trace.ts',
+  'src/core/agent-kernel.ts',
   'src/core/production-trust-platform.ts',
   'src/core/control-plane-store.ts',
   'src/core/relay-cluster-control.ts',
+  'src/core/relay-delivery-store.ts',
+  'src/core/relay-result-store.ts',
   'src/core/release-update.ts',
   'src/core/artifact-object-store.ts',
   'src/core/artifact-store.ts',
+  'src/core/persistent-data-catalog.ts',
+  'apps/local-agent/src/main.ts',
   'apps/relay-server/src/relay-hub.ts',
+  'apps/relay-server/src/result-service.ts',
   'apps/relay-server/src/main.ts',
+  'test/operation-trace-coverage.test.ts',
+  'test/agent-kernel-operation-trace.test.ts',
   'test/otlp-operation-trace.test.ts',
   'test/production-trust-platform.test.ts',
   'test/control-plane-store.test.ts',
@@ -23,7 +32,7 @@ const files=[
   'test/artifact-object-store.test.ts',
   'apps/relay-server/test/r5-cluster-composition.test.ts',
   'scripts/r5-production-soak.ts'
-];
+]
 const fileDigests:Record<string,string>={};
 for(const file of files){
   const bytes=await fs.readFile(path.join(root,file));
@@ -42,12 +51,19 @@ const evidence={
   },
   capabilities:{
     otlpTracesMetricsLogs:true,
+    liveEndToEndOperationTracing:true,
+    traceCoverageGate:true,
+    fullOperationalSloSurface:true,
     productionSloGates:true,
     transactionalCasControlPlaneStore:true,
     postgresCompatibleControlPlaneAdapter:true,
     leaseRetentionMigrationSnapshotRestore:true,
     relayClusterFencing:true,
+    sharedRelayDeliveryState:true,
+    sharedRelayResultState:true,
+    idempotentCrossInstanceReplay:true,
     stagedSignedUpdater:true,
+    automaticRollbackLifecycle:true,
     objectStorageArtifactBackend:true
   },
   externalAcceptance:{
