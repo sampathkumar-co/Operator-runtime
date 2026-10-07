@@ -56,3 +56,36 @@ test('document provider fails closed on out-of-scope and unsupported formats',as
   await assert.rejects(()=>provider.execute(action('document.inspect',path.join(root,'bad.bin'))),(e:any)=>e?.code==='DOCUMENT_FORMAT_UNSUPPORTED');
   await assert.rejects(()=>provider.execute(action('structured.extract',path.join(outside,'data.csv'))),(e:any)=>e?.code==='PATH_OUTSIDE_SCOPE');
 });
+
+
+test('document provider fails closed when source identity changes during bounded read',async(t)=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'r6-doc-race-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const file=path.join(root,'data.csv');
+  await fs.writeFile(file,'name,value\nalpha,1\n');
+  let mutated=false;
+  const provider=new DocumentDataProvider({
+    allowedRoots:[root],
+    observationHook:async(_file,phase)=>{
+      if(phase==='before-verify'&&!mutated){
+        mutated=true;
+        await fs.writeFile(file,'name,value\nalpha,999\nbeta,2\n');
+      }
+    }
+  });
+  await assert.rejects(
+    ()=>provider.execute(action('structured.extract',file)),
+    (e:any)=>e?.code==='DOCUMENT_SOURCE_CHANGED'&&e?.retryable===true
+  );
+});
+
+test('document provider enforces the hard read bound before allocation/read',async(t)=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'r6-doc-bound-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const file=path.join(root,'oversized.pdf');
+  const handle=await fs.open(file,'w');
+  try{await handle.truncate(32*1024*1024+1);}finally{await handle.close();}
+  const provider=new DocumentDataProvider({allowedRoots:[root]});
+  await assert.rejects(
+    ()=>provider.execute(action('document.inspect',file)),
+    (e:any)=>e?.code==='DOCUMENT_TOO_LARGE'
+  );
+});
