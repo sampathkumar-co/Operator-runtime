@@ -9,15 +9,15 @@ function fixture() {
     bootstrapManifest: { name: 'operator-runtime-cli', version: '1.0.0' },
     releaseState: {
       schemaVersion: 1,
-      statusDate: '2026-09-28',
+      statusDate: '2026-10-07',
       production: {
-        sourceCommit: 'b73d699f3cdca4d6e372942f626012fb4909068b',
+        sourceCommit: 'ef3bcdc2fcbc56b1b42f7a7a6f09ceabfc5a2bf2',
         publicMcp: 'https://operator.splcart.in/mcp',
         developerMcp: 'https://developer.operator.splcart.in/mcp'
       },
       versions: {
         publicProduct: '1.0.0',
-        runtimePackage: '2.0.1',
+        runtimePackage: '2.0.5',
         runtimeTag: 'latest'
       }
     },
@@ -25,10 +25,10 @@ function fixture() {
   };
 }
 
-test('release truth preserves the distinction between source package state and deployed production state', () => {
+test('release truth records the deployed production state independently from the current documentation head', () => {
   const evidence = validateReleaseTruthEvidence(fixture());
   assert.equal(evidence.source.runtimePackageVersion, '2.0.5');
-  assert.equal(evidence.production.runtimePackageVersion, '2.0.1');
+  assert.equal(evidence.production.runtimePackageVersion, '2.0.5');
   assert.equal(evidence.production.sourceCommit, RELEASE_TRUTH.production.sourceCommit);
   assert.notEqual(evidence.source.headCommit, evidence.production.sourceCommit);
 });
