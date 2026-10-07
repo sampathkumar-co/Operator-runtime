@@ -126,6 +126,75 @@ export function normalizeTraceEvent(input: unknown): OperationTraceEvent {
   };
 }
 
+
+export interface OperationTraceCoverageExpectation {
+  requiresPlan?: boolean;
+  requiresApproval?: boolean;
+  requiresLease?: boolean;
+  requiresReconciliation?: boolean;
+  requiresArtifact?: boolean;
+}
+
+export interface OperationTraceCoverage {
+  traceId: string;
+  complete: boolean;
+  requiredStages: OperationTraceStage[];
+  missingStages: OperationTraceStage[];
+  outOfOrderStages: OperationTraceStage[];
+  terminalOutcome?: OperationTraceOutcome;
+}
+
+export function evaluateOperationTraceCoverage(
+  eventsInput: OperationTraceEvent[],
+  expectation: OperationTraceCoverageExpectation = {}
+): OperationTraceCoverage {
+  const events = eventsInput.map(normalizeTraceEvent);
+  if (events.length < 1) throw invalid('Trace coverage requires at least one event.');
+  const traceIds = new Set(events.map((event) => event.traceId));
+  if (traceIds.size !== 1) throw invalid('Trace coverage can evaluate exactly one traceId at a time.');
+  const requiredStages: OperationTraceStage[] = [
+    'REQUEST',
+    'ROUTE',
+    ...(expectation.requiresPlan ? ['PLAN' as const] : []),
+    'POLICY',
+    ...(expectation.requiresApproval ? ['APPROVAL' as const] : []),
+    ...(expectation.requiresLease ? ['LEASE' as const] : []),
+    'DISPATCH',
+    ...(expectation.requiresReconciliation ? ['RECONCILE' as const] : []),
+    'VERIFY',
+    ...(expectation.requiresArtifact ? ['ARTIFACT' as const] : []),
+    'COMPLETE'
+  ];
+  const ordered = events.slice().sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
+  const firstIndex = new Map<OperationTraceStage, number>();
+  for (let i=0;i<ordered.length;i+=1) {
+    const stage=ordered[i]!.stage;
+    if (!firstIndex.has(stage)) firstIndex.set(stage,i);
+  }
+  const missingStages = requiredStages.filter((stage)=>!firstIndex.has(stage));
+  const outOfOrderStages: OperationTraceStage[] = [];
+  let prior=-1;
+  for (const stage of requiredStages) {
+    const index=firstIndex.get(stage);
+    if (index===undefined) continue;
+    if (index<prior) outOfOrderStages.push(stage);
+    prior=Math.max(prior,index);
+  }
+  const terminal=[...ordered].reverse().find((event)=>event.stage==='COMPLETE');
+  const verify=[...ordered].reverse().find((event)=>event.stage==='VERIFY');
+  if (terminal?.outcome==='OK' && verify?.outcome!=='OK' && !missingStages.includes('VERIFY')) {
+    outOfOrderStages.push('VERIFY');
+  }
+  return {
+    traceId: ordered[0]!.traceId,
+    complete: missingStages.length===0 && outOfOrderStages.length===0,
+    requiredStages,
+    missingStages,
+    outOfOrderStages:[...new Set(outOfOrderStages)],
+    ...(terminal ? { terminalOutcome: terminal.outcome } : {})
+  };
+}
+
 export interface OperationSloSummary {
   traces: number;
   completed: number;
