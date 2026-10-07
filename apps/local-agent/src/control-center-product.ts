@@ -56,13 +56,13 @@ export function buildControlCenterProductSnapshot(input: {
     if (!record) continue;
     if (!['FAILED','INTERRUPTED','BLOCKED'].includes(record.state) && record.sideEffectState !== 'uncertain') continue;
     const latestPlanner = [...(task.execution?.plannerEvents ?? [])].reverse()
-      .find((event) => event.resourceContext.capability === record.capability);
+      .find((event) => event.capability === record.capability);
     const sideEffectState = record.sideEffectState
       ?? (record.executionPhase === 'pre_dispatch' ? 'none' : 'uncertain');
     recoveryCandidates.push({
       actionId: record.actionId,
       capability: record.capability,
-      retryable: latestPlanner?.retryAllowed === true,
+      retryable: latestPlanner?.decision === 'REPAIR',
       sideEffectState,
       ...(record.executionPhase ? { executionPhase: record.executionPhase } : {}),
       ...(sideEffectState === 'none' ? { reconciliationStatus: 'not_applied' as const } : {}),
