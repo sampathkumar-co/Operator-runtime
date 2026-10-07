@@ -52,4 +52,6 @@ jobs:
         run: |
           ./native/windows-path-lease/build.ps1
       - run: npm run test:r4
+      - name: Install pinned TypeScript toolchain
+        run: npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck:production
