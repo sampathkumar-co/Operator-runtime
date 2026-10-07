@@ -11,11 +11,15 @@ on:
       - 'src/core/proof-kernel.ts'
       - 'src/core/proof-bundle.ts'
       - 'src/core/proof-carrying-execution.ts'
+      - 'src/core/r8-independent-proof-campaign.ts'
       - 'src/core/evidence-pack.ts'
       - 'src/core/enterprise-authority-lease.ts'
       - 'src/core/index.ts'
       - 'test/r8-counterfactual-proof-kernel.test.ts'
+      - 'test/r8-independent-proof-campaign.test.ts'
       - 'scripts/generate-r8-certification.ts'
+      - 'scripts/evaluate-r8-independent-proof.ts'
+      - 'certification/r8/**'
       - 'package.json'
       - '.github/workflows/r8-counterfactual-proof-kernel.yml'
   workflow_dispatch:
@@ -47,6 +51,8 @@ jobs:
           npm run typecheck:production
       - name: R8 exact-head suite
         run: npm run test:r8
+      - name: R8 independent twin/proof acceptance evaluator
+        run: node --experimental-strip-types --test test/r8-independent-proof-campaign.test.ts
       - name: Generate R8 exact-head evidence
         env:
           GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
