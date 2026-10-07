@@ -12,7 +12,7 @@ import { executionContextDigest, executionContextIdentityFrom } from '../../../s
 import { OperationTraceStore, type OperationTraceOutcome } from '../../../src/core/operation-trace.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
-import { RelayDeliveryStore, type RelayDeliveryAuthority } from '../../../src/core/relay-delivery-store.ts';
+import { RelayDeliveryStore, type RelayDeliveryAuthority, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from '../../../src/core/public-plugin-surface.ts';
@@ -309,7 +309,7 @@ export class RelayResultService {
   }
 
   async #traceResult(
-    delivery: Awaited<ReturnType<RelayDeliveryStore['retained']>> extends infer T ? NonNullable<T> : never,
+    delivery: StoredRelayDelivery,
     deviceId: string,
     seq: number,
     duplicate: boolean,
