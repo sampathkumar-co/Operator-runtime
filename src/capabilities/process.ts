@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
+import { promisify } from 'node:util';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
@@ -11,6 +12,8 @@ import { TerminalSessionStore, terminalSessionIsActive, type DurableTerminalSess
 import { DeveloperSessionStore } from '../core/developer-session.ts';
 import { DeveloperRuntimeOwnershipStore, type DeveloperRuntimeOwnershipRecord } from '../core/developer-runtime-ownership.ts';
 import { PathScope } from './path-scope.ts';
+
+const execFileAsync = promisify(execFile);
 
 const SCORE: CapabilityScore = {
   reliability: 0.95,
@@ -1164,6 +1167,83 @@ async function waitForProcessIdentity(pid: number, observer: ProcessInstanceObse
   return undefined;
 }
 
+type WindowsTreeIdentity = { identity: ProcessInstanceIdentity; depth: number };
+
+async function captureWindowsProcessTree(pid: number): Promise<WindowsTreeIdentity[]> {
+  const nativeHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  if (!nativeHelper || !path.isAbsolute(nativeHelper)) return [];
+  try {
+    const { stdout } = await execFileAsync(nativeHelper, ['process-tree', String(pid)], {
+      windowsHide: true,
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+      encoding: 'utf8',
+      env: safeChildEnvironment(process.env)
+    });
+    const rows = stdout.split(/\r?\n/).filter(Boolean);
+    if (rows.length > 4096) throw new Error('process tree snapshot exceeded the bounded row limit');
+    return rows.map((row) => {
+      const match = /^(\d{1,10}):(\d{15,20}):(\d{1,4})$/.exec(row);
+      if (!match) throw new Error('process tree snapshot row is malformed');
+      const processPid = Number(match[1]);
+      const depth = Number(match[3]);
+      if (!Number.isSafeInteger(processPid) || processPid < 1 || processPid > 0x7fff_ffff
+        || !Number.isSafeInteger(depth) || depth < 0 || depth > 4096) {
+        throw new Error('process tree snapshot row is out of bounds');
+      }
+      return { identity: { pid: processPid, started: 'windows-filetime:' + match[2] }, depth };
+    });
+  } catch (error) {
+    throw new OperatorError(
+      'PROCESS_TREE_SNAPSHOT_FAILED',
+      'Exact Windows process-tree ownership could not be snapshotted before termination.',
+      { retryable: false, details: { sideEffectState: 'uncertain', cause: error instanceof Error ? error.message : String(error) } }
+    );
+  }
+}
+
+async function runWindowsTaskkill(pid: number): Promise<number | null> {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+  return await new Promise<number | null>((resolve, reject) => {
+    const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore',
+      env: safeChildEnvironment(process.env)
+    });
+    killer.once('error', reject);
+    killer.once('close', resolve);
+  });
+}
+
+async function terminateCapturedWindowsProcess(
+  identity: ProcessInstanceIdentity,
+  observer: ProcessInstanceObserver,
+  signal?: AbortSignal
+): Promise<void> {
+  const before = await observer(identity.pid);
+  if (before.status === 'dead') return;
+  if (before.status === 'live' && before.identity && !sameProcessInstance(identity, before.identity)) return;
+  if (before.status !== 'live' || !before.identity) {
+    throw new OperatorError(
+      'PROCESS_TREE_TERMINATION_FAILED',
+      'A captured Windows descendant could not be revalidated before termination.',
+      { retryable: false, details: { sideEffectState: 'uncertain', pid: identity.pid } }
+    );
+  }
+  const exitCode = await runWindowsTaskkill(identity.pid);
+  try {
+    await waitForExactProcessExit(identity, observer, signal);
+  } catch (error) {
+    throw new OperatorError(
+      'PROCESS_TREE_TERMINATION_FAILED',
+      'A captured Windows descendant could not be proven quiescent.',
+      { retryable: false, details: { sideEffectState: 'uncertain', pid: identity.pid, taskkillExitCode: exitCode, cause: error instanceof Error ? error.message : String(error) } }
+    );
+  }
+}
+
 async function terminateProcessTree(
   child: ChildProcess | undefined,
   pid: number,
@@ -1173,13 +1253,20 @@ async function terminateProcessTree(
 ): Promise<void> {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Owned process PID is invalid.', { details: { sideEffectState: 'uncertain' } });
   if (process.platform === 'win32') {
-    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-    const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore', env: safeChildEnvironment(process.env) });
-      killer.once('error', reject);
-      killer.once('close', resolve);
-    });
+    let capturedTree: WindowsTreeIdentity[] = [];
+    let snapshotError: unknown;
+    try {
+      capturedTree = await captureWindowsProcessTree(pid);
+    } catch (error) {
+      snapshotError = error;
+    }
+
+    const capturedRoot = capturedTree.find((entry) => entry.identity.pid === pid)?.identity;
+    if (expectedIdentity && capturedRoot && !sameProcessInstance(expectedIdentity, capturedRoot)) {
+      throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', 'Windows process-tree snapshot no longer matches the exact owned root process.', { details: { sideEffectState: 'uncertain' } });
+    }
+
+    const exitCode = await runWindowsTaskkill(pid);
     if (expectedIdentity) {
       try {
         await waitForExactProcessExit(expectedIdentity, observer, signal);
@@ -1189,10 +1276,15 @@ async function terminateProcessTree(
         }
         throw error;
       }
-      return;
+    } else {
+      if (exitCode !== 0 && processAlive(pid)) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', `taskkill exited with ${String(exitCode)} while the owned process remained alive.`, { details: { sideEffectState: 'uncertain' } });
+      await waitForPidExit(pid, signal);
     }
-    if (exitCode !== 0 && processAlive(pid)) throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED', `taskkill exited with ${String(exitCode)} while the owned process remained alive.`, { details: { sideEffectState: 'uncertain' } });
-    await waitForPidExit(pid, signal);
+
+    if (snapshotError) throw snapshotError;
+    for (const entry of capturedTree.filter((item) => item.identity.pid !== pid).sort((a, b) => b.depth - a.depth || b.identity.pid - a.identity.pid)) {
+      await terminateCapturedWindowsProcess(entry.identity, observer, signal);
+    }
     return;
   }
   try { process.kill(-pid, 'SIGTERM'); } catch { try { child?.kill('SIGTERM'); } catch {} }
