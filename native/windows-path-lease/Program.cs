@@ -15,6 +15,8 @@ internal static class Program
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private const int MAX_PATH = 260;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BY_HANDLE_FILE_INFORMATION
@@ -29,6 +31,22 @@ internal static class Program
         public uint NumberOfLinks;
         public uint FileIndexHigh;
         public uint FileIndexLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MAX_PATH)]
+        public string szExeFile;
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -56,6 +74,17 @@ internal static class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32First(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
     private sealed class Lease : IDisposable
     {
         private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
@@ -74,8 +103,9 @@ internal static class Program
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
             if (args.Length == 1 && args[0] == "system-roots") return PrintSystemRoots();
             if (args.Length == 2 && args[0] == "process-instance") return PrintProcessInstance(args[1]);
+            if (args.Length == 2 && args[0] == "process-tree") return PrintProcessTree(args[1]);
             if (args.Length != 4 || args[0] != "lease")
-                throw new InvalidOperationException("usage: operator-windows-path-lease <lease <existing|parent> <root> <target>|system-roots|process-instance <pid>>");
+                throw new InvalidOperationException("usage: operator-windows-path-lease <lease <existing|parent> <root> <target>|system-roots|process-instance <pid>|process-tree <pid>>");
             string mode = args[1];
             if (mode != "existing" && mode != "parent") throw new InvalidOperationException("invalid lease mode");
 
@@ -187,6 +217,76 @@ internal static class Program
         return 0;
     }
 
+    private static int PrintProcessTree(string pidInput)
+    {
+        int rootPid;
+        if (!Int32.TryParse(pidInput, out rootPid) || rootPid < 1)
+            throw new InvalidOperationException("invalid process id");
+        foreach (KeyValuePair<uint, int> item in EnumerateProcessTree((uint)rootPid))
+        {
+            try
+            {
+                Console.Out.WriteLine(item.Key.ToString() + ":" + ProcessCreationFiletime(item.Key).ToString() + ":" + item.Value.ToString());
+            }
+            catch
+            {
+                // Process exited between the snapshot and identity read. A process
+                // that is already gone needs no termination authority.
+            }
+        }
+        return 0;
+    }
+
+    private static List<KeyValuePair<uint, int>> EnumerateProcessTree(uint rootPid)
+    {
+        IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == new IntPtr(-1))
+            throw new InvalidOperationException("cannot snapshot process table (Win32 " + Marshal.GetLastWin32Error() + ")");
+        try
+        {
+            Dictionary<uint, uint> parents = new Dictionary<uint, uint>();
+            PROCESSENTRY32 entry = new PROCESSENTRY32();
+            entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            if (Process32First(snapshot, ref entry))
+            {
+                do
+                {
+                    if (entry.th32ProcessID > 0) parents[entry.th32ProcessID] = entry.th32ParentProcessID;
+                    entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+                }
+                while (Process32Next(snapshot, ref entry));
+            }
+
+            Dictionary<uint, int> depths = new Dictionary<uint, int>();
+            depths[rootPid] = 0;
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (KeyValuePair<uint, uint> process in parents)
+                {
+                    if (depths.ContainsKey(process.Key)) continue;
+                    int parentDepth;
+                    if (!depths.TryGetValue(process.Value, out parentDepth)) continue;
+                    depths[process.Key] = parentDepth + 1;
+                    changed = true;
+                }
+            }
+
+            List<KeyValuePair<uint, int>> result = new List<KeyValuePair<uint, int>>(depths);
+            result.Sort(delegate(KeyValuePair<uint, int> left, KeyValuePair<uint, int> right)
+            {
+                int depth = right.Value.CompareTo(left.Value);
+                return depth != 0 ? depth : right.Key.CompareTo(left.Key);
+            });
+            return result;
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+    }
+
     private static ulong ProcessCreationFiletime(uint pid)
     {
         IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
@@ -231,8 +331,12 @@ internal static class Program
             TrustedFolder(Environment.SpecialFolder.ProgramFilesX86, "ProgramFilesX86");
             TrustedFolder(Environment.SpecialFolder.UserProfile, "UserProfile");
             TrustedFolder(Environment.SpecialFolder.LocalApplicationData, "LocalApplicationData");
-            if (ProcessCreationFiletime((uint)System.Diagnostics.Process.GetCurrentProcess().Id) == 0)
+            uint currentPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+            if (ProcessCreationFiletime(currentPid) == 0)
                 throw new InvalidOperationException("current process creation identity is unavailable");
+            List<KeyValuePair<uint, int>> tree = EnumerateProcessTree(currentPid);
+            if (!tree.Exists(delegate(KeyValuePair<uint, int> item) { return item.Key == currentPid && item.Value == 0; }))
+                throw new InvalidOperationException("current process tree root is unavailable");
             Console.Out.WriteLine("operator-path-lease-self-test:ok");
             return 0;
         }
