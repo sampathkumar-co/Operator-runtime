@@ -43,6 +43,8 @@ export * from './control-center-ux.ts';
 export * from './operation-trace.ts';
 export * from './otlp-operation-trace.ts';
 export * from './production-trust-platform.ts';
+export * from './control-plane-store.ts';
+export * from './relay-cluster-control.ts';
 export * from './agent-gateway-contract.ts';
 export * from './principal-delegation.ts';
 export * from './enterprise-policy-simulation.ts';
