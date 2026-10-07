@@ -21,6 +21,7 @@ on:
       - 'src/core/gateway-webhook.ts'
       - 'src/core/ecosystem-compatibility.ts'
       - 'src/core/r6-contracts.ts'
+      - 'src/core/r6-external-ecosystem-campaign.ts'
       - 'src/core/resource-identity.ts'
       - 'src/sdk/**'
       - 'packages/sdk-typescript/**'
@@ -37,8 +38,11 @@ on:
       - 'test/document-data.test.ts'
       - 'test/r6-*.test.ts'
       - 'test/r6-document-resource-identity.test.ts'
+      - 'test/r6-external-ecosystem-campaign.test.ts'
       - 'scripts/generate-r6-contracts.ts'
       - 'scripts/generate-r6-certification.ts'
+      - 'scripts/evaluate-r6-external-ecosystem.ts'
+      - 'certification/r6/**'
       - 'package.json'
       - '.github/workflows/r6-universal-agent-gateway.yml'
   workflow_dispatch:
@@ -73,6 +77,8 @@ jobs:
           npm run typecheck:production
       - name: R6 exact-head suite
         run: npm run test:r6
+      - name: R6 external ecosystem certification evaluator
+        run: node --experimental-strip-types --test test/r6-external-ecosystem-campaign.test.ts
       - name: Generate R6 exact-head evidence
         env:
           GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
