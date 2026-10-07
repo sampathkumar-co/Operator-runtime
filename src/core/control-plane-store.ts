@@ -48,7 +48,7 @@ const MIGRATION_NAMESPACE = '__mecord_migrations';
 interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; }
 
 const OPTIONS = {
-  maxBytes: 64 * 1024 * 1024,
+  maxBytes: 256 * 1024 * 1024,
   errorCode: 'CONTROL_PLANE_STORE_CORRUPT',
   invalidMessage: 'Control-plane store state is invalid.'
 } as const;
@@ -79,7 +79,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
   }
 
   async transact(mutations: ControlPlaneMutation[], nowInput = new Date().toISOString()): Promise<ControlPlaneRecord[]> {
-    if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 1000) throw invalid('Transaction mutations are invalid.');
+    if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 10001) throw invalid('Transaction mutations are invalid.');
     const now = iso(nowInput, 'now');
     let output: ControlPlaneRecord[] = [];
     const run = this.#serial.then(async () => {
@@ -212,7 +212,7 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
   }
 
   async transact(mutations: ControlPlaneMutation[], nowInput = new Date().toISOString()): Promise<ControlPlaneRecord[]> {
-    if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 1000) throw invalid('Transaction mutations are invalid.');
+    if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 10001) throw invalid('Transaction mutations are invalid.');
     const now = iso(nowInput,'now');
     const normalized = mutations.map(normalizeMutation);
     const seen = new Set<string>();
@@ -294,7 +294,7 @@ export async function applyControlPlaneMigration(
 ): Promise<boolean> {
   if (!migrationInput || typeof migrationInput !== 'object') throw invalid('Migration is invalid.');
   const migrationId = id(migrationInput.id, 'migration.id');
-  if (!Array.isArray(migrationInput.mutations) || migrationInput.mutations.length > 999) throw invalid('Migration mutations are invalid.');
+  if (!Array.isArray(migrationInput.mutations) || migrationInput.mutations.length > 10000) throw invalid('Migration mutations are invalid.');
   const markerKey = 'migration:' + migrationId;
   if (await store.get(MIGRATION_NAMESPACE, markerKey)) return false;
   await store.transact([
@@ -394,7 +394,7 @@ function makeRecord(namespace:string,key:string,generation:number,value:Record<s
 function objectValue(input:unknown):Record<string,unknown>{
   if(!input||typeof input!=='object'||Array.isArray(input)) throw invalid('Control-plane value must be an object.');
   const encoded=canonicalJson(input);
-  if(Buffer.byteLength(encoded,'utf8')>1024*1024) throw invalid('Control-plane value exceeds 1 MiB.');
+  if(Buffer.byteLength(encoded,'utf8')>32*1024*1024) throw invalid('Control-plane value exceeds 32 MiB.');
   return structuredClone(input as Record<string,unknown>);
 }
 function expired(record:ControlPlaneRecord,now:number):boolean{return Boolean(record.expiresAt&&Date.parse(record.expiresAt)<=now);}
