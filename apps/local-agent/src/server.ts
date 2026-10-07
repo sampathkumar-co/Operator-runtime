@@ -804,7 +804,7 @@ export function createLocalAgentServer(options: {
           device: local ? { configured: true, deviceName: local.deviceName } : { configured: false },
           peerCounts: {
             total: peers.length,
-            online: peers.filter((peer) => peer.status === 'online').length,
+            active: peers.filter((peer) => peer.status === 'active').length,
             revoked: peers.filter((peer) => peer.status === 'revoked').length
           },
           taskCounts,
