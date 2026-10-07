@@ -1566,11 +1566,13 @@ export function createLocalAgentServer(options: {
           send(res, 200, { ok: true, mission: result.mission, ...(result.workItem ? { workItem: result.workItem } : {}) });
           return;
         }
+        if (operation === 'pause' || operation === 'cancel') {
+          abortTeamActions((entry) => entry.missionId === id);
+        }
         const mission = operation === 'start' ? await options.teams.start(id)
           : operation === 'pause' ? await options.teams.pause(id)
           : operation === 'resume' ? await options.teams.resume(id)
           : await options.teams.cancel(id);
-        if (operation === 'pause' || operation === 'cancel') abortTeamActions((entry) => entry.missionId === id);
         send(res, 200, { ok: true, mission });
       } catch (error) {
         send(res, 409, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'TEAM_CONTROL_FAILED', message: error instanceof Error ? error.message : String(error) } });
