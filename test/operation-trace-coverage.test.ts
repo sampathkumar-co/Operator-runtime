@@ -67,5 +67,5 @@ test('trace coverage detects required stages that occur out of causal order',()=
     e('COMPLETE','2026-10-07T00:00:00.500Z')
   ]);
   assert.equal(coverage.complete,false);
-  assert.ok(coverage.outOfOrderStages.includes('DISPATCH'));
+  assert.ok(coverage.outOfOrderStages.includes('VERIFY'));
 });
