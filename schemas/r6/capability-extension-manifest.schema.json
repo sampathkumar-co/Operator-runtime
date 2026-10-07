@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.mecord.dev/r6/capability-extension-manifest.schema.json",
+  "title": "Mecord Capability Extension Manifest",
+  "type": "object",
+  "required": [
+    "sdkVersion",
+    "id",
+    "version",
+    "displayName",
+    "provenance",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "sdkVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "version": {
+      "type": "string"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "vendor": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "source",
+        "packageDigest"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "packageDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "required": [
+          "capability",
+          "risk",
+          "deterministic",
+          "reversible",
+          "verification",
+          "reconciliation",
+          "inputSchemaVersion",
+          "inputMaxBytes",
+          "outputMaxBytes",
+          "cancellation",
+          "resourceKinds"
+        ],
+        "properties": {
+          "capability": {
+            "type": "string"
+          },
+          "risk": {
+            "enum": [
+              "read",
+              "write",
+              "external",
+              "system",
+              "destructive",
+              "dynamic"
+            ]
+          },
+          "deterministic": {
+            "type": "boolean"
+          },
+          "reversible": {
+            "type": "boolean"
+          },
+          "verification": {
+            "enum": [
+              "provider",
+              "runtime",
+              "external"
+            ]
+          },
+          "reconciliation": {
+            "enum": [
+              "provider",
+              "not-required"
+            ]
+          },
+          "inputSchemaVersion": {
+            "const": 1
+          },
+          "inputMaxBytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 4194304
+          },
+          "outputMaxBytes": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 4194304
+          },
+          "cancellation": {
+            "const": "required"
+          },
+          "resourceKinds": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}
