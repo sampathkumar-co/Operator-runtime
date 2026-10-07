@@ -17,7 +17,11 @@ const SCORE:CapabilityScore={reliability:.96,latency:.88,determinism:.98,securit
 export class DocumentDataProvider implements CapabilityProvider{
   readonly name='document-data';
   #scope:PathScope;
-  constructor(input:{allowedRoots:string[]}){this.#scope=new PathScope(input.allowedRoots);}
+  #observationHook?: (filePath:string,phase:'opened'|'before-verify')=>Promise<void>|void;
+  constructor(input:{allowedRoots:string[];observationHook?:(filePath:string,phase:'opened'|'before-verify')=>Promise<void>|void}){
+    this.#scope=new PathScope(input.allowedRoots);
+    this.#observationHook=input.observationHook;
+  }
   supports(action:ActionRequest):boolean{
     return ['document.inspect','document.extract','document.render','structured.inspect','structured.extract','structured.render'].includes(action.capability);
   }
@@ -29,10 +33,7 @@ export class DocumentDataProvider implements CapabilityProvider{
     const requested=String(action.input.path??'');
     if(!requested) throw new OperatorError('DOCUMENT_INPUT_INVALID','Document/data action requires input.path.');
     return await this.#scope.withExisting(requested,async resolved=>{
-      const stat=await fs.stat(resolved);
-      if(!stat.isFile())throw new OperatorError('DOCUMENT_NOT_FILE','Requested document path is not a regular file.');
-      if(stat.size>MAX_FILE_BYTES)throw new OperatorError('DOCUMENT_TOO_LARGE',`Document exceeds ${MAX_FILE_BYTES} bytes.`);
-      const bytes=await fs.readFile(resolved);
+      const bytes=await readStableBoundedDocument(resolved,this.#observationHook);
       const format=detectFormat(resolved,bytes);
       const structured=action.capability.startsWith('structured.');
       if(structured&&!['csv','json'].includes(format))throw new OperatorError('STRUCTURED_FORMAT_UNSUPPORTED','Structured capabilities currently accept CSV or JSON.');
@@ -57,6 +58,45 @@ export class DocumentDataProvider implements CapabilityProvider{
         durationMs:Math.round(performance.now()-started)
       };
     });
+  }
+}
+
+async function readStableBoundedDocument(
+  filePath:string,
+  hook?:(filePath:string,phase:'opened'|'before-verify')=>Promise<void>|void
+):Promise<Buffer>{
+  const handle=await fs.open(filePath,'r');
+  try{
+    const before=await handle.stat({bigint:true});
+    if(!before.isFile())throw new OperatorError('DOCUMENT_NOT_FILE','Requested document path is not a regular file.');
+    if(before.size>BigInt(MAX_FILE_BYTES))throw new OperatorError('DOCUMENT_TOO_LARGE',`Document exceeds ${MAX_FILE_BYTES} bytes.`);
+    const size=Number(before.size);
+    if(!Number.isSafeInteger(size)||size<0)throw new OperatorError('DOCUMENT_TOO_LARGE','Document size exceeds the safe numeric range.');
+    await hook?.(filePath,'opened');
+    const bytes=Buffer.alloc(size);
+    let offset=0;
+    while(offset<size){
+      const {bytesRead}=await handle.read(bytes,offset,size-offset,offset);
+      if(bytesRead===0)break;
+      offset+=bytesRead;
+    }
+    await hook?.(filePath,'before-verify');
+    const [after,pathState]=await Promise.all([handle.stat({bigint:true}),fs.stat(filePath,{bigint:true})]);
+    const stableHandle=['dev','ino','size','mtimeNs','ctimeNs','birthtimeNs'].every(
+      key=>before[key as keyof typeof before]===after[key as keyof typeof after]
+    );
+    const samePath=process.platform==='win32'
+      ? before.ino===pathState.ino&&before.birthtimeNs===pathState.birthtimeNs
+      : before.dev===pathState.dev&&before.ino===pathState.ino;
+    if(offset!==size||!stableHandle||!samePath){
+      throw new OperatorError('DOCUMENT_SOURCE_CHANGED','Document identity or bytes changed during bounded observation; retry from a fresh source.',{
+        retryable:true,
+        details:{sideEffectState:'none',executionPhase:'pre_dispatch',completeRead:offset===size,stableHandle,samePath}
+      });
+    }
+    return bytes;
+  }finally{
+    await handle.close();
   }
 }
 
