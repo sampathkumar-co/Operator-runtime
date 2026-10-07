@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import test from 'node:test';
 import { MecordGatewayClient } from '../src/sdk/gateway-client.ts';
+import { MecordWebhookVerifier as PackagedWebhookVerifier } from '../packages/sdk-typescript/index.js';
 
 test('TypeScript gateway client builds canonical proposals and calls only the gateway endpoint',async()=>{
   let seenUrl='';
@@ -31,4 +33,15 @@ test('TypeScript gateway client builds canonical proposals and calls only the ga
 
 test('TypeScript gateway client refuses insecure non-loopback HTTP',()=>{
   assert.throws(()=>new MecordGatewayClient({baseUrl:'http://example.com',bearerToken:'t'.repeat(32)}),/loopback/);
+});
+
+
+test('packaged TypeScript webhook verifier accepts exact HMAC and rejects tampering',async()=>{
+  const secret='s'.repeat(32);
+  const body='{"kind":"operation.completed","ok":true}';
+  const signature=crypto.createHmac('sha256',secret).update(body,'utf8').digest('hex');
+  const verifier=new PackagedWebhookVerifier(secret);
+  assert.deepEqual(await verifier.verify(body,signature),JSON.parse(body));
+  await assert.rejects(()=>verifier.verify(body.replace('true','false'),signature),/signature is invalid/);
+  await assert.rejects(()=>verifier.verify(body,'0'.repeat(64)),/signature is invalid/);
 });
