@@ -50,7 +50,8 @@
     "soak:r5:24h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=86400000",
     "soak:r5:72h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=259200000",
     "evidence:r5": "node --experimental-strip-types scripts/generate-r5-certification.ts",
-    "test:r6": "node --experimental-strip-types --test test/capability-conformance.test.ts test/capability-package-registry.test.ts test/gateway-enterprise-foundation.test.ts"
+    "test:r6": "npm run generate:r6-schemas && git diff --exit-code -- schemas/capability packages/mecord-capability-sdk/capability-manifest.schema.json packages/mecord-capability-sdk/compatibility.json && node --experimental-strip-types --test test/capability-conformance.test.ts test/capability-package-registry.test.ts test/gateway-enterprise-foundation.test.ts test/r6-extension-runtime.test.ts && npm --prefix packages/mecord-capability-sdk test && python -m unittest discover -s sdk/python/tests -p 'test_*.py'",
+    "generate:r6-schemas": "node scripts/r6-generate-schemas.mjs"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",
