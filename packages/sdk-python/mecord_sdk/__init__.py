@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 import json
 import urllib.request
+import urllib.parse
 import hashlib
 import hmac
 import re
@@ -50,7 +51,12 @@ class GatewayProposal:
 
 class MecordGatewayClient:
     def __init__(self, base_url: str, bearer_token: str):
-        if not base_url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            raise ValueError("Gateway URL must use HTTPS or loopback HTTP")
+        if parsed.username is not None or parsed.password is not None or parsed.fragment:
+            raise ValueError("Gateway URL must not embed credentials or fragments")
+        if parsed.scheme == "http" and parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("Gateway URL must use HTTPS or loopback HTTP")
         if len(bearer_token) < 16:
             raise ValueError("Gateway bearer token is invalid")
