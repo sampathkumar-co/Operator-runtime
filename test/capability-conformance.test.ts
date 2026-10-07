@@ -18,12 +18,18 @@ const manifest: CapabilityExtensionManifest = {
   version: '1.0.0',
   displayName: 'Safe Files',
   vendor: 'Example',
+  provenance: { source: 'https://example.invalid/safe-files', packageDigest: 'a'.repeat(64) },
   capabilities: [{
     capability: 'file.read',
     risk: 'read',
     deterministic: true,
     reversible: true,
     verification: 'runtime',
+    reconciliation: 'not-required',
+    inputSchemaVersion: 1,
+    inputMaxBytes: 4096,
+    outputMaxBytes: 4096,
+    cancellation: 'required',
     resourceKinds: ['file']
   }]
 };
