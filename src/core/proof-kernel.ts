@@ -5,6 +5,8 @@ export type ProofEvidenceClass =
   | 'DETERMINISTIC_POLICY'
   | 'STATIC_ANALYSIS'
   | 'TYPE_SYSTEM'
+  | 'DEPENDENCY_GRAPH'
+  | 'INVARIANT_CHECK'
   | 'STRUCTURAL_DIFF'
   | 'CRYPTOGRAPHIC_RECEIPT'
   | 'INDEPENDENT_TEST'
@@ -25,7 +27,7 @@ export interface ProofKernelDecision {
   reason:string;
 }
 
-const DETERMINISTIC=new Set<ProofEvidenceClass>(['DETERMINISTIC_POLICY','STATIC_ANALYSIS','TYPE_SYSTEM','STRUCTURAL_DIFF','CRYPTOGRAPHIC_RECEIPT']);
+const DETERMINISTIC=new Set<ProofEvidenceClass>(['DETERMINISTIC_POLICY','STATIC_ANALYSIS','TYPE_SYSTEM','DEPENDENCY_GRAPH','INVARIANT_CHECK','STRUCTURAL_DIFF','CRYPTOGRAPHIC_RECEIPT']);
 const EMPIRICAL=new Set<ProofEvidenceClass>(['INDEPENDENT_TEST','RUNTIME_PROBE','INDEPENDENT_VERIFIER']);
 
 export function evaluateProofClaim(input:{evidence:ProofEvidenceRef[]; inferred?:boolean}):ProofKernelDecision{
@@ -48,7 +50,7 @@ export function evaluateProofClaim(input:{evidence:ProofEvidenceRef[]; inferred?
   return{level:'CORROBORATED',artifactIds,reason:'Evidence supports the claim but does not satisfy the PROVEN or EMPIRICALLY_VERIFIED criteria.'};
 }
 function normalizeEvidence(e:ProofEvidenceRef):ProofEvidenceRef{
- if(!e||!/^[0-9a-f]{64}$/i.test(e.artifactId)||!['DETERMINISTIC_POLICY','STATIC_ANALYSIS','TYPE_SYSTEM','STRUCTURAL_DIFF','CRYPTOGRAPHIC_RECEIPT','INDEPENDENT_TEST','RUNTIME_PROBE','INDEPENDENT_VERIFIER','MODEL_INFERENCE'].includes(e.evidenceClass)||typeof e.passed!=='boolean'||typeof e.independent!=='boolean')throw invalid('Proof evidence entry is invalid.');
+ if(!e||!/^[0-9a-f]{64}$/i.test(e.artifactId)||!['DETERMINISTIC_POLICY','STATIC_ANALYSIS','TYPE_SYSTEM','DEPENDENCY_GRAPH','INVARIANT_CHECK','STRUCTURAL_DIFF','CRYPTOGRAPHIC_RECEIPT','INDEPENDENT_TEST','RUNTIME_PROBE','INDEPENDENT_VERIFIER','MODEL_INFERENCE'].includes(e.evidenceClass)||typeof e.passed!=='boolean'||typeof e.independent!=='boolean')throw invalid('Proof evidence entry is invalid.');
  return{...e,artifactId:e.artifactId.toLowerCase()};
 }
 function invalid(m:string):OperatorError{return new OperatorError('PROOF_KERNEL_INPUT_INVALID',m);}
