@@ -172,12 +172,17 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
 export interface PostgresQueryResult<Row = Record<string, unknown>> { rows: Row[]; rowCount?: number | null; }
 export interface PostgresQueryClient {
   query<Row = Record<string, unknown>>(text: string, values?: unknown[]): Promise<PostgresQueryResult<Row>>;
+  release?(error?: Error): void;
+}
+export interface PostgresQueryHost extends PostgresQueryClient {
+  connect?(): Promise<PostgresQueryClient>;
 }
 
 export class PostgresControlPlaneStore implements ControlPlaneStore {
-  #db: PostgresQueryClient;
+  #db: PostgresQueryHost;
+  #directTransactionPoisoned = false;
 
-  constructor(db: PostgresQueryClient) { this.#db = db; }
+  constructor(db: PostgresQueryHost) { this.#db = db; }
 
   async initialize(): Promise<void> {
     await this.#db.query(`
@@ -221,26 +226,34 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
       if (seen.has(rk)) throw invalid('A transaction cannot mutate the same record twice.');
       seen.add(rk);
     }
-    await this.#db.query('BEGIN');
-    try {
+    return await this.#withTransaction(async (db) => {
       const out: ControlPlaneRecord[] = [];
+      // Row locks cannot fence a key that does not exist yet. Acquire a
+      // deterministic transaction-scoped advisory lock for every logical key
+      // first so create-if-absent CAS is serialized across all writers.
+      for (const item of [...normalized].sort((a,b)=>recordKey(a.namespace,a.key).localeCompare(recordKey(b.namespace,b.key)))) {
+        await db.query('SELECT pg_advisory_xact_lock($1::bigint)', [advisoryLockKey(item.namespace,item.key)]);
+      }
       for (const item of normalized) {
-        const locked = await this.#db.query<any>(
+        const locked = await db.query<any>(
           'SELECT generation, expires_at FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2 FOR UPDATE',
           [item.namespace,item.key]
         );
         const row = locked.rows[0];
-        const live = row && (!row.expires_at || Date.parse(String(row.expires_at)) > Date.parse(now));
-        const generation = live ? Number(row.generation) : 0;
-        if (item.expectedGeneration === null ? live : (!live || generation !== item.expectedGeneration)) {
+        const priorGeneration = row ? storedGeneration(row.generation) : 0;
+        const live = Boolean(row && (!row.expires_at || Date.parse(String(row.expires_at)) > Date.parse(now)));
+        if (item.expectedGeneration === null ? live : (!live || priorGeneration !== item.expectedGeneration)) {
           throw new OperatorError('CONTROL_PLANE_CAS_MISMATCH','Record generation changed.',{retryable:true});
         }
         if (item.value === null) {
-          await this.#db.query('DELETE FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',[item.namespace,item.key]);
+          await db.query('DELETE FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',[item.namespace,item.key]);
           continue;
         }
-        const record = makeRecord(item.namespace,item.key,generation+1,item.value,now,item.expiresAt);
-        await this.#db.query(
+        // Expiry makes a row logically absent for CAS, but it does not erase
+        // its fencing history. Re-creation must advance, never recycle, the
+        // prior generation.
+        const record = makeRecord(item.namespace,item.key,priorGeneration+1,item.value,now,item.expiresAt);
+        await db.query(
           `INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at)
            VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)
            ON CONFLICT(namespace,record_key) DO UPDATE SET generation=EXCLUDED.generation,value_digest=EXCLUDED.value_digest,value_json=EXCLUDED.value_json,updated_at=EXCLUDED.updated_at,expires_at=EXCLUDED.expires_at`,
@@ -248,12 +261,8 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
         );
         out.push(record);
       }
-      await this.#db.query('COMMIT');
       return out;
-    } catch (error) {
-      try { await this.#db.query('ROLLBACK'); } catch {}
-      throw error;
-    }
+    });
   }
 
   async snapshot(nowInput = new Date().toISOString()): Promise<ControlPlaneSnapshot> {
@@ -269,20 +278,48 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
 
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
     const snapshot = normalizeSnapshot(snapshotInput);
-    await this.#db.query('BEGIN');
-    try {
-      const existing = await this.#db.query<any>('SELECT COUNT(*)::bigint AS count FROM mecord_control_plane');
+    await this.#withTransaction(async (db) => {
+      // Restore is a whole-store operation. Prevent concurrent writers from
+      // observing the empty precondition and interleaving live state while the
+      // snapshot is being installed.
+      await db.query('LOCK TABLE mecord_control_plane IN ACCESS EXCLUSIVE MODE');
+      const existing = await db.query<any>('SELECT COUNT(*)::bigint AS count FROM mecord_control_plane');
       if (Number(existing.rows[0]?.count ?? 0) > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite live control-plane state.');
       for (const record of snapshot.records) {
-        await this.#db.query(
+        await db.query(
           'INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)',
           [record.namespace,record.key,record.generation,record.valueDigest,JSON.stringify(record.value),record.updatedAt,record.expiresAt ?? null]
         );
       }
-      await this.#db.query('COMMIT');
+    });
+  }
+
+  async #withTransaction<T>(work: (db: PostgresQueryClient) => Promise<T>): Promise<T> {
+    const pooled = typeof this.#db.connect === 'function';
+    if (!pooled && this.#directTransactionPoisoned) {
+      throw new OperatorError('CONTROL_PLANE_CONNECTION_UNSAFE','Control-plane connection is unsafe after a failed rollback.');
+    }
+    const db = pooled ? await this.#db.connect!() : this.#db;
+    let began = false;
+    let releaseError: Error | undefined;
+    try {
+      await db.query('BEGIN');
+      began = true;
+      const result = await work(db);
+      await db.query('COMMIT');
+      began = false;
+      return result;
     } catch (error) {
-      try { await this.#db.query('ROLLBACK'); } catch {}
+      if (began) {
+        try { await db.query('ROLLBACK'); }
+        catch (rollbackError) {
+          releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
+          if (!pooled) this.#directTransactionPoisoned = true;
+        }
+      }
       throw error;
+    } finally {
+      if (pooled) db.release?.(releaseError);
     }
   }
 }
@@ -297,16 +334,25 @@ export async function applyControlPlaneMigration(
   if (!Array.isArray(migrationInput.mutations) || migrationInput.mutations.length > 10000) throw invalid('Migration mutations are invalid.');
   const markerKey = 'migration:' + migrationId;
   if (await store.get(MIGRATION_NAMESPACE, markerKey)) return false;
-  await store.transact([
-    ...migrationInput.mutations,
-    {
-      namespace: MIGRATION_NAMESPACE,
-      key: markerKey,
-      expectedGeneration: null,
-      value: { migrationId, applied: true }
-    }
-  ], iso(now, 'now'));
-  return true;
+  try {
+    await store.transact([
+      ...migrationInput.mutations,
+      {
+        namespace: MIGRATION_NAMESPACE,
+        key: markerKey,
+        expectedGeneration: null,
+        value: { migrationId, applied: true }
+      }
+    ], iso(now, 'now'));
+    return true;
+  } catch (error) {
+    // A concurrent migrator may have committed after our optimistic pre-read.
+    // Treat that as the same idempotent outcome only when the durable marker
+    // is now present; unrelated CAS conflicts must still surface.
+    if (error instanceof OperatorError && error.code === 'CONTROL_PLANE_CAS_MISMATCH'
+        && await store.get(MIGRATION_NAMESPACE, markerKey)) return false;
+    throw error;
+  }
 }
 
 export async function purgeExpiredControlPlaneRecords(
@@ -333,6 +379,15 @@ export async function purgeExpiredControlPlaneRecords(
   return removed;
 }
 
+function advisoryLockKey(namespace:string,key:string):string {
+  const bytes=crypto.createHash('sha256').update(recordKey(namespace,key),'utf8').digest();
+  return bytes.readBigInt64BE(0).toString();
+}
+function storedGeneration(input: unknown): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < 1) throw corrupt('Postgres control-plane generation is invalid.');
+  return value;
+}
 function rowToRecord(row: any): ControlPlaneRecord {
   return normalizeRecord({
     schemaVersion: 1,
