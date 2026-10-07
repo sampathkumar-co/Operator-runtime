@@ -8,6 +8,7 @@ import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore, type DeviceRouteDecision, type OnlineDeviceDescriptor } from '../../../src/core/device-routing.ts';
 import { DevicePoolScheduler, type DevicePoolRequest, type DeviceReservation, type DeviceResourceAdvertisement } from '../../../src/core/device-pool.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { RelayClusterCoordinator, type RelayClusterLease } from '../../../src/core/relay-cluster-control.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
 import { RelayDeliveryStore, type RelayDeliveryAuthority, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
@@ -59,6 +60,7 @@ type Connection = {
   lastSeenAt: string;
   readConcurrency: number;
   inFlight: Map<number, { readOnly: boolean; heavy: boolean }>;
+  clusterLease?: RelayClusterLease;
 };
 
 export interface RelayHubOptions {
@@ -79,6 +81,9 @@ export interface RelayHubOptions {
   maxQueuedBytesPerConnection?: number;
   maxQueuedAgeMs?: number;
   maxAccountRuntimeCaches?: number;
+  cluster?: RelayClusterCoordinator;
+  instanceId?: string;
+  clusterLeaseMs?: number;
 }
 
 export interface RelayDispatchRequest {
@@ -126,6 +131,9 @@ export class RelayHub {
   #maxQueuedAgeMs: number;
   #liveByClientKey = new Map<string, number>();
   #socketWork = new Set<Promise<void>>();
+  #cluster?: RelayClusterCoordinator;
+  #instanceId: string;
+  #clusterLeaseMs: number;
 
   constructor(options: RelayHubOptions) {
     this.#stateDir = path.resolve(options.stateDir);
@@ -137,6 +145,10 @@ export class RelayHub {
     this.#clock = options.clock ?? (() => new Date());
     this.#beforeEnqueue = options.beforeEnqueue;
     this.#beforeFinalDispatchCheck = options.beforeFinalDispatchCheck;
+    this.#cluster = options.cluster;
+    this.#instanceId = options.instanceId ?? crypto.randomUUID();
+    if (!/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(this.#instanceId)) throw new OperatorError('RELAY_CLUSTER_INSTANCE_INVALID', 'Relay cluster instanceId is invalid.');
+    this.#clusterLeaseMs = boundedPositiveInt(options.clusterLeaseMs, 60_000, 10 * 60_000, 'clusterLeaseMs');
     const upgradeLimit = boundedPositiveInt(options.upgradeLimitPerMinute, DEFAULT_UPGRADE_LIMIT_PER_MINUTE, 100_000, 'upgradeLimitPerMinute');
     const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
     this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
@@ -196,8 +208,12 @@ export class RelayHub {
   }
 
   async close(): Promise<void> {
-    for (const connection of this.#connections.values()) {
+    const closingConnections = [...this.#connections.values()];
+    for (const connection of closingConnections) {
       try { connection.socket.close(1001, 'relay shutting down'); } catch { /* noop */ }
+    }
+    if (this.#cluster) {
+      await Promise.allSettled(closingConnections.flatMap((connection) => connection.clusterLease ? [this.#cluster!.release(connection.clusterLease, this.#clock().toISOString())] : []));
     }
     this.#connections.clear();
     const wss = this.#wss;
@@ -472,6 +488,9 @@ export class RelayHub {
         connection.lastSeenAt = this.#clock().toISOString();
         if (frame.type === 'ping') {
           const nonce = validNonce(String(frame.nonce ?? ''));
+          if (this.#cluster && connection.clusterLease) {
+            connection.clusterLease = await this.#cluster.acquire(`device:${connection.deviceId}`, this.#instanceId, this.#clusterLeaseMs, connection.lastSeenAt);
+          }
           send(socket, { type: 'pong', nonce });
           return;
         }
@@ -500,6 +519,9 @@ export class RelayHub {
       clearTimeout(timer);
       if (connection && this.#connections.get(connection.deviceId)?.sessionId === connection.sessionId) {
         this.#connections.delete(connection.deviceId);
+        if (this.#cluster && connection.clusterLease) {
+          void this.#cluster.release(connection.clusterLease, this.#clock().toISOString()).catch(() => undefined);
+        }
       }
     });
     socket.on('error', () => { /* close lifecycle owns cleanup */ });
@@ -556,7 +578,16 @@ export class RelayHub {
       if (!membership) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Capability-bound relay connection requires active account-device authority.');
       accountAuthority = { accountId: membership.accountId, deviceId, generation: membership.authorityGeneration };
     }
-    const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
+    const clusterLease = this.#cluster
+      ? await this.#cluster.acquire(`device:${deviceId}`, this.#instanceId, this.#clusterLeaseMs, this.#clock().toISOString())
+      : undefined;
+    let reconciled;
+    try {
+      reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
+    } catch (error) {
+      if (this.#cluster && clusterLease) await this.#cluster.release(clusterLease, this.#clock().toISOString()).catch(() => undefined);
+      throw error;
+    }
     const sessionId = crypto.randomUUID();
     const logicalSessionBindingId = logicalSessionId;
     const capabilityAuthority = accountAuthority
@@ -583,6 +614,7 @@ export class RelayHub {
       socket, deviceId, sessionId, logicalSessionId, sessionJti: session.jti, capabilities,
       ...(capabilityAuthority ? { capabilityAuthority } : {}),
       ...(resourceProfile ? { resourceProfile } : {}),
+      ...(clusterLease ? { clusterLease } : {}),
       connectedAt: now, lastSeenAt: now,
       readConcurrency,
       inFlight: new Map()
@@ -624,6 +656,10 @@ export class RelayHub {
     const connection = this.#connections.get(authority.deviceId);
     if (!connection || connection.socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'Relay transport is temporarily unavailable for the authorized device.', { retryable: true, details: { deviceId: authority.deviceId, recoverability: 'automatic', transportChanged: true, safeToRetry: true } });
+    }
+    if (this.#cluster) {
+      if (!connection.clusterLease) throw new OperatorError('RELAY_CLUSTER_FENCE_LOST', 'Clustered relay connection has no shared ownership lease.');
+      await this.#cluster.assertCurrent(connection.clusterLease, this.#clock().toISOString());
     }
     // A transport/sessionId replacement is not an authority change. Credential
     // rotation and reconnect may replace the WebSocket while the device,
