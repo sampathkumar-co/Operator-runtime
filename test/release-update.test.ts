@@ -161,7 +161,10 @@ test('artifact selection is deterministic and staging verifies size/hash, is ide
 test('signed canary manifest verifies only on the canary channel', () => {
   const release = crypto.generateKeyPairSync('ed25519');
   const bytes = Buffer.from('canary-payload');
-  const signed = signReleaseManifest(manifest(bytes, { channel: 'canary', version: '1.2.0-canary.1' }), release.privateKey);
+  const signed = signReleaseManifest(
+    manifest(bytes, { channel: 'canary', version: '1.2.0-canary.1' }),
+    release.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  );
   const verifier = new ReleaseUpdateVerifier(release.publicKey.export({ type: 'spki', format: 'pem' }).toString());
   assert.equal(verifier.verifySignedManifest(signed, {
     channel: 'canary', currentVersion: '1.1.0', now: new Date('2026-09-09T12:01:00.000Z')
