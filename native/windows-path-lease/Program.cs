@@ -15,6 +15,28 @@ internal static class Program
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const uint PROCESS_TERMINATE = 0x0001;
+    private const uint PROCESS_SET_QUOTA = 0x0100;
+    private const uint SYNCHRONIZE = 0x00100000;
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private const uint WAIT_OBJECT_0 = 0x00000000;
+    private const uint WAIT_TIMEOUT = 0x00000102;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BY_HANDLE_FILE_INFORMATION
@@ -56,6 +78,35 @@ internal static class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr jobAttributes, string name);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(IntPtr process, IntPtr job, [MarshalAs(UnmanagedType.Bool)] out bool result);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32First(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
     private sealed class Lease : IDisposable
     {
         private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
@@ -74,8 +125,9 @@ internal static class Program
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
             if (args.Length == 1 && args[0] == "system-roots") return PrintSystemRoots();
             if (args.Length == 2 && args[0] == "process-instance") return PrintProcessInstance(args[1]);
+            if (args.Length == 3 && args[0] == "terminate-tree") return TerminateOwnedProcessTree(args[1], args[2]);
             if (args.Length != 4 || args[0] != "lease")
-                throw new InvalidOperationException("usage: operator-windows-path-lease <lease <existing|parent> <root> <target>|system-roots|process-instance <pid>>");
+                throw new InvalidOperationException("usage: operator-windows-path-lease <lease <existing|parent> <root> <target>|system-roots|process-instance <pid>|terminate-tree <pid> <creation-filetime>>");
             string mode = args[1];
             if (mode != "existing" && mode != "parent") throw new InvalidOperationException("invalid lease mode");
 
@@ -178,6 +230,143 @@ internal static class Program
         return 0;
     }
 
+    private static int TerminateOwnedProcessTree(string pidInput, string creationInput)
+    {
+        uint rootPid;
+        ulong expectedCreation;
+        if (!UInt32.TryParse(pidInput, out rootPid) || rootPid < 1)
+            throw new InvalidOperationException("invalid process id");
+        if (!UInt64.TryParse(creationInput, out expectedCreation) || expectedCreation == 0)
+            throw new InvalidOperationException("invalid process creation identity");
+
+        uint access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA | PROCESS_TERMINATE | SYNCHRONIZE;
+        IntPtr root = OpenProcess(access, false, rootPid);
+        if (root == IntPtr.Zero)
+            throw new InvalidOperationException("cannot open owned root process (Win32 " + Marshal.GetLastWin32Error() + ")");
+        IntPtr job = IntPtr.Zero;
+        try
+        {
+            if (ProcessCreationFiletime(root) != expectedCreation)
+                throw new InvalidOperationException("owned root process identity changed");
+
+            job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero)
+                throw new InvalidOperationException("cannot create process containment job (Win32 " + Marshal.GetLastWin32Error() + ")");
+            AssignExactHandleToJob(job, root, rootPid);
+
+            HashSet<uint> assigned = new HashSet<uint>();
+            assigned.Add(rootPid);
+            int stableRounds = 0;
+            for (int round = 0; round < 16 && stableRounds < 2; ++round)
+            {
+                Dictionary<uint, uint> parents = SnapshotProcessParents();
+                HashSet<uint> descendants = DescendantPids(rootPid, parents);
+                int newlyObserved = 0;
+                foreach (uint pid in descendants)
+                {
+                    if (assigned.Contains(pid)) continue;
+                    IntPtr process = OpenProcess(access, false, pid);
+                    if (process == IntPtr.Zero)
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error == 87 || error == 1168) continue;
+                        throw new InvalidOperationException("cannot open owned descendant process " + pid + " (Win32 " + error + ")");
+                    }
+                    try
+                    {
+                        AssignExactHandleToJob(job, process, pid);
+                        assigned.Add(pid);
+                        newlyObserved++;
+                    }
+                    finally { CloseHandle(process); }
+                }
+                if (newlyObserved == 0) stableRounds++;
+                else stableRounds = 0;
+                if (stableRounds < 2) System.Threading.Thread.Sleep(10);
+            }
+
+            if (!TerminateJobObject(job, 1))
+                throw new InvalidOperationException("cannot terminate owned process containment job (Win32 " + Marshal.GetLastWin32Error() + ")");
+            uint wait = WaitForSingleObject(root, 5000);
+            if (wait == WAIT_TIMEOUT)
+                throw new InvalidOperationException("owned root process remained after process containment termination");
+            if (wait != WAIT_OBJECT_0)
+                throw new InvalidOperationException("cannot prove owned root process termination (Win32 " + Marshal.GetLastWin32Error() + ")");
+            Console.Out.WriteLine("TERMINATED");
+            return 0;
+        }
+        finally
+        {
+            if (job != IntPtr.Zero) CloseHandle(job);
+            CloseHandle(root);
+        }
+    }
+
+    private static void AssignExactHandleToJob(IntPtr job, IntPtr process, uint pid)
+    {
+        bool already;
+        if (!IsProcessInJob(process, job, out already))
+            throw new InvalidOperationException("cannot inspect process containment for " + pid + " (Win32 " + Marshal.GetLastWin32Error() + ")");
+        if (already) return;
+        if (!AssignProcessToJobObject(job, process))
+            throw new InvalidOperationException("cannot contain owned process " + pid + " (Win32 " + Marshal.GetLastWin32Error() + ")");
+    }
+
+    private static Dictionary<uint, uint> SnapshotProcessParents()
+    {
+        IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == new IntPtr(-1))
+            throw new InvalidOperationException("cannot snapshot process tree (Win32 " + Marshal.GetLastWin32Error() + ")");
+        try
+        {
+            Dictionary<uint, uint> parents = new Dictionary<uint, uint>();
+            PROCESSENTRY32 entry = new PROCESSENTRY32();
+            entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            if (!Process32First(snapshot, ref entry))
+                throw new InvalidOperationException("cannot enumerate process tree (Win32 " + Marshal.GetLastWin32Error() + ")");
+            do
+            {
+                if (entry.th32ProcessID != 0) parents[entry.th32ProcessID] = entry.th32ParentProcessID;
+                entry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            }
+            while (Process32Next(snapshot, ref entry));
+            return parents;
+        }
+        finally { CloseHandle(snapshot); }
+    }
+
+    private static HashSet<uint> DescendantPids(uint rootPid, Dictionary<uint, uint> parents)
+    {
+        HashSet<uint> descendants = new HashSet<uint>();
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (KeyValuePair<uint, uint> pair in parents)
+            {
+                if (pair.Key == rootPid || descendants.Contains(pair.Key)) continue;
+                if (pair.Value == rootPid || descendants.Contains(pair.Value))
+                {
+                    descendants.Add(pair.Key);
+                    changed = true;
+                }
+            }
+        }
+        while (changed);
+        return descendants;
+    }
+
+    private static ulong ProcessCreationFiletime(IntPtr handle)
+    {
+        System.Runtime.InteropServices.ComTypes.FILETIME creation;
+        System.Runtime.InteropServices.ComTypes.FILETIME exit;
+        System.Runtime.InteropServices.ComTypes.FILETIME kernel;
+        System.Runtime.InteropServices.ComTypes.FILETIME user;
+        if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
+            throw new InvalidOperationException("cannot inspect process (Win32 " + Marshal.GetLastWin32Error() + ")");
+        return ((ulong)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+    }
+
     private static int PrintProcessInstance(string pidInput)
     {
         int pid;
@@ -198,9 +387,7 @@ internal static class Program
             System.Runtime.InteropServices.ComTypes.FILETIME exit;
             System.Runtime.InteropServices.ComTypes.FILETIME kernel;
             System.Runtime.InteropServices.ComTypes.FILETIME user;
-            if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
-                throw new InvalidOperationException("cannot inspect process (Win32 " + Marshal.GetLastWin32Error() + ")");
-            return ((ulong)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+            return ProcessCreationFiletime(handle);
         }
         finally { CloseHandle(handle); }
     }
