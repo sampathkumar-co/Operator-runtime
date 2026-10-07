@@ -38,6 +38,13 @@ export interface ControlPlaneStore {
   restore(snapshot: ControlPlaneSnapshot): Promise<void>;
 }
 
+export interface ControlPlaneMigration {
+  id: string;
+  mutations: ControlPlaneMutation[];
+}
+
+const MIGRATION_NAMESPACE = '__mecord_migrations';
+
 interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; }
 
 const OPTIONS = {
@@ -137,6 +144,8 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
     const snapshot = normalizeSnapshot(snapshotInput);
     const run = this.#serial.then(async () => {
+      const current = await this.#read();
+      if (current.records.length > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite live control-plane state.');
       await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)) });
     });
     this.#serial = run.then(() => undefined, () => undefined);
@@ -262,7 +271,8 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
     const snapshot = normalizeSnapshot(snapshotInput);
     await this.#db.query('BEGIN');
     try {
-      await this.#db.query('DELETE FROM mecord_control_plane');
+      const existing = await this.#db.query<any>('SELECT COUNT(*)::bigint AS count FROM mecord_control_plane');
+      if (Number(existing.rows[0]?.count ?? 0) > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite live control-plane state.');
       for (const record of snapshot.records) {
         await this.#db.query(
           'INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)',
@@ -275,6 +285,50 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
       throw error;
     }
   }
+}
+
+export async function applyControlPlaneMigration(
+  store: ControlPlaneStore,
+  migrationInput: ControlPlaneMigration,
+  now = new Date().toISOString()
+): Promise<boolean> {
+  if (!migrationInput || typeof migrationInput !== 'object') throw invalid('Migration is invalid.');
+  const migrationId = id(migrationInput.id, 'migration.id');
+  if (!Array.isArray(migrationInput.mutations) || migrationInput.mutations.length > 999) throw invalid('Migration mutations are invalid.');
+  const markerKey = 'migration:' + migrationId;
+  if (await store.get(MIGRATION_NAMESPACE, markerKey)) return false;
+  await store.transact([
+    ...migrationInput.mutations,
+    {
+      namespace: MIGRATION_NAMESPACE,
+      key: markerKey,
+      expectedGeneration: null,
+      value: { migrationId, applied: true }
+    }
+  ], iso(now, 'now'));
+  return true;
+}
+
+export async function purgeExpiredControlPlaneRecords(
+  store: ControlPlaneStore,
+  namespaceInput: string,
+  nowInput = new Date().toISOString()
+): Promise<number> {
+  const namespace = id(namespaceInput, 'namespace');
+  const now = iso(nowInput, 'now');
+  const nowMs = Date.parse(now);
+  const expiredRecords = (await store.list(namespace)).filter((record) => record.expiresAt && Date.parse(record.expiresAt) <= nowMs);
+  let removed = 0;
+  for (const record of expiredRecords) {
+    try {
+      await store.transact([{ namespace, key: record.key, expectedGeneration: record.generation, value: null }], now);
+      removed += 1;
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'CONTROL_PLANE_CAS_MISMATCH') continue;
+      throw error;
+    }
+  }
+  return removed;
 }
 
 function rowToRecord(row: any): ControlPlaneRecord {
