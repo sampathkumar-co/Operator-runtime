@@ -2,7 +2,7 @@ name: R5 Production Trust Platform
 
 on:
   push:
-    branches: ['program/r5-production-trust-final-*']
+    branches: ['main', 'program/r5-production-trust-final-*']
   pull_request:
     paths:
       - 'src/core/otlp-operation-trace.ts'
