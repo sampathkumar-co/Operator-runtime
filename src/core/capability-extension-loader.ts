@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 import type { SignedCapabilityPackage } from './capability-package-registry.ts';
 import { CapabilityGovernanceRegistry } from './capability-governance.ts';
@@ -38,12 +37,20 @@ export async function loadGovernedCapabilityModule(input: {
   }
   try {
     const modulePath = await resolveAllowedExisting(input.modulePath, input.allowedRoots);
+    const stat = await fs.stat(modulePath);
+    if (!stat.isFile() || stat.size < 1 || stat.size > 8 * 1024 * 1024) {
+      throw new OperatorError('CAPABILITY_MODULE_SIZE_INVALID', 'Capability module must be a regular file between 1 byte and 8 MiB.');
+    }
     const bytes = await fs.readFile(modulePath);
     const digest = crypto.createHash('sha256').update(bytes).digest('hex');
     if (digest !== input.package.manifest.provenance.packageDigest) {
       throw new OperatorError('CAPABILITY_MODULE_DIGEST_MISMATCH', 'Capability module bytes do not match the signed manifest package digest.');
     }
-    const namespace = await import(pathToFileURL(modulePath).href + `?sha256=${digest}`) as CapabilityModuleFactory;
+    // Import the exact verified bytes rather than re-opening the path after
+    // verification. This closes hash→execute TOCTOU and makes packageDigest
+    // cover every executable byte in the extension entry module.
+    const encoded = bytes.toString('base64');
+    const namespace = await import(`data:text/javascript;base64,${encoded}#sha256=${digest}`) as CapabilityModuleFactory;
     const factory = typeof namespace.createCapabilityProvider === 'function'
       ? namespace.createCapabilityProvider
       : typeof namespace.default === 'function'
