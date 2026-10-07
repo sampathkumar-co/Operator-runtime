@@ -86,9 +86,9 @@ export function explainEnterpriseMutation(
 function matchesScope(rule:EnterprisePolicyRule,ctx:ReturnType<typeof normalizeContext>):boolean{
   if(rule.principalPrefixes?.length&&!rule.principalPrefixes.some((p)=>ctx.principalId.startsWith(p)))return false;
   if(rule.capabilityPatterns?.length&&!rule.capabilityPatterns.some((p)=>capabilityMatch(ctx.capability,p)))return false;
-  if(rule.resourcePrefixes?.length&&(!ctx.resource||!rule.resourcePrefixes.some((p)=>ctx.resource.startsWith(p))))return false;
+  if(rule.resourcePrefixes?.length&&(!ctx.resource||!rule.resourcePrefixes.some((p)=>ctx.resource!.startsWith(p))))return false;
   if(rule.environments?.length&&(!ctx.environment||!rule.environments.includes(ctx.environment)))return false;
-  if(rule.sessionPrefixes?.length&&(!ctx.sessionId||!rule.sessionPrefixes.some((p)=>ctx.sessionId.startsWith(p))))return false;
+  if(rule.sessionPrefixes?.length&&(!ctx.sessionId||!rule.sessionPrefixes.some((p)=>ctx.sessionId!.startsWith(p))))return false;
   return true;
 }
 
