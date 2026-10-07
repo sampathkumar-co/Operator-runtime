@@ -701,8 +701,10 @@ export function createLocalAgentServer(options: {
         const verificationStatus: RecoveryCandidateInput['verificationStatus'] =
           projection.verification.state === 'verified' ? 'passed'
             : projection.verification.state === 'failed' ? 'failed' : 'unknown';
-        const retryable = sideEffectState === 'none'
-          && (current.state === 'FAILED' || current.state === 'BLOCKED' || Boolean(projection.blocker));
+        // Task/action projections do not currently carry an authoritative retryable bit.
+        // R4 must never synthesize retry authority from "failed + no observed effect";
+        // until the execution contract exposes it explicitly, recovery remains escalation-only.
+        const retryable = false;
         const reconciliationStatus: RecoveryCandidateInput['reconciliationStatus'] =
           projection.reconciliationRequired ? undefined
             : sideEffectState === 'none' ? 'not_applied'
