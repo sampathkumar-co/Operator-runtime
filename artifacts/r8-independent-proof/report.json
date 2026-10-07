@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "e8aa52b57fe52605524a091862a836d85bfd02ff",
+  "campaignId": "r8-independent-20261007182436",
+  "caseCount": 50,
+  "mutationClassCount": 5,
+  "independentVerificationRate": 1,
+  "explicitFidelityRate": 1,
+  "externalProofVerificationRate": 1,
+  "tamperRejectionRate": 1,
+  "inferencePromotionRejectionRate": 1,
+  "insufficientFidelityDenialCount": 10,
+  "verifiedMutationRate": 1,
+  "status": "CERTIFIED",
+  "reasons": [],
+  "campaignDigest": "d31d2c7882213260871f28216f2f9a2cb8834fdbac6c7602c615923202ddcec7",
+  "reportDigest": "a693f0c6d6cec5bd89a3984ba09283cd92cc6a3372afae4c1d4dce791d422a0c"
+}

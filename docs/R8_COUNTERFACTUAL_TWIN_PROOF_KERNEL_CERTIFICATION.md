@@ -1,8 +1,8 @@
 # R8 Counterfactual Twin and Proof Kernel Certification
 
-Status: **REPOSITORY_IMPLEMENTATION_CERTIFIED**
+Status: **CERTIFIED**
 
-R8 is qualified by `.github/workflows/r8-counterfactual-proof-kernel.yml`. Every run generates `artifacts/r8/certification.json` bound to the exact tested source SHA and implementation file digests.
+R8 is certified for subject SHA `e8aa52b57fe52605524a091862a836d85bfd02ff`. Repository implementation is qualified by `.github/workflows/r8-counterfactual-proof-kernel.yml`, and the independent acceptance campaign `r8-independent-20261007182436` passed the repository evaluator. The content-addressed campaign manifest is at `certification/r8/evidence/r8-independent-20261007182436/manifest.json`; the evaluator result is at `artifacts/r8-independent-proof/report.json`.
 
 ## Work-package coverage
 
@@ -15,12 +15,14 @@ R8 is qualified by `.github/workflows/r8-counterfactual-proof-kernel.yml`. Every
 
 ## Exit-gate proof
 
-The focused R8 suite proves:
+The focused R8 suite and the 50-case independent acceptance campaign prove:
 
 1. model inference cannot be promoted to proof;
 2. insufficient twin fidelity fails closed;
 3. proof bundles can be verified outside the executing runtime using public-key signatures and SHA-256 artifact bytes;
 4. tampered bundles or missing/mismatched artifacts fail verification;
 5. irreversible execution is denied when uncertainty or proof obligations are unresolved.
+
+The campaign covered five mutation classes using distinct executor and verifier implementations in separate processes. Its verifier independently recomputed proof digests, checked Ed25519 signatures, hashed every referenced artifact, checked postconditions, rejected a tampered bundle per case, rejected ten inference-promotion attempts, and denied ten executions with a deliberately absent required environment dimension. All 40 executed mutations verified with zero residual uncertainty. No signing private key was persisted.
 
 R8 predicts and gates; it does not grant authority. Real execution still requires the R7/R1 authority and lease boundary.

@@ -875,11 +875,13 @@ Status reconciled: **2026-10-07**.
 | R5 Production Trust Platform | IMPLEMENTED_NOT_CERTIFIED |
 | R6 Universal Agent Gateway | IMPLEMENTED_NOT_CERTIFIED |
 | R7 Enterprise Agent Control Plane | IMPLEMENTED_NOT_CERTIFIED |
-| R8 Counterfactual Twin + Proof Kernel | IMPLEMENTED_NOT_CERTIFIED |
+| R8 Counterfactual Twin + Proof Kernel | CERTIFIED |
 | R9 Distributed Autonomous Engineering Fabric | IMPLEMENTED_NOT_CERTIFIED |
 | R10 Verifiable Autonomous Engineering OS | IMPLEMENTED_NOT_CERTIFIED |
 
-R1-R3 have explicit roadmap certification ledgers. R4-R10 now have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+R1-R3 and R8 have explicit roadmap certification ledgers. R4-R7 and R9-R10 have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+
+R8 certification is bound to subject SHA `e8aa52b57fe52605524a091862a836d85bfd02ff` and campaign `r8-independent-20261007182436`: 50 cases across five mutation classes, separate executor/verifier processes and codepaths, independently checked signatures and artifact hashes, 100% verified executed mutations, ten insufficient-fidelity denials and ten rejected inference-promotion attempts.
 
 R9 now implements the distributed scheduler, specialized-worker model, isolation/fencing, resource conflict control and exact distributed lineage. R10 now implements the unified proof-gated objective lifecycle, causal memory/invalidation, proof-aware planning, receipt-gated learning, canonical cross-agent trust semantics, autonomous incident command and portable certification standard. R9's real multi-physical-machine acceptance and R10's comparative real-world outcome/human-intervention thresholds remain external empirical gates.
 
