@@ -129,30 +129,24 @@ export class RelayOwnershipFenceStore {
     const run = this.#serial.then(async () => {
       const state = await this.#read();
       const now = this.#clock();
-      pruneExpired(state, now.getTime());
-      const active = state.fences.find((fence) => fence.resourceKey === resourceKey);
-      if (active) {
-        if (active.ownerInstanceId !== ownerInstanceId) {
+      const existingIndex = state.fences.findIndex((fence) => fence.resourceKey === resourceKey);
+      const existing = existingIndex >= 0 ? state.fences[existingIndex]! : undefined;
+      if (existing && Date.parse(existing.expiresAt) > now.getTime()) {
+        if (existing.ownerInstanceId !== ownerInstanceId) {
           throw new OperatorError('RELAY_CLUSTER_RESOURCE_FENCED', 'Relay resource is owned by another live instance.', {
             retryable: true,
-            details: { resourceKey, generation: active.generation }
+            details: { resourceKey, generation: existing.generation }
           });
         }
-        active.renewedAt = now.toISOString();
-        active.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
-        result = structuredClone(active);
+        existing.renewedAt = now.toISOString();
+        existing.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+        result = structuredClone(existing);
         await this.#write(state);
         return;
       }
-      const previous = state.fences
-        .filter((fence) => fence.resourceKey === resourceKey)
-        .reduce((max, fence) => Math.max(max, fence.generation), 0);
+      const previous = existing?.generation ?? 0;
       if (previous >= Number.MAX_SAFE_INTEGER) throw invalid('Relay fence generation is exhausted.');
-      if (state.fences.length >= MAX_FENCES) {
-        const reclaim = state.fences.findIndex((fence) => Date.parse(fence.expiresAt) <= now.getTime());
-        if (reclaim < 0) throw invalid('Relay fence store capacity is exhausted.');
-        state.fences.splice(reclaim, 1);
-      }
+      if (!existing && state.fences.length >= MAX_FENCES) throw invalid('Relay fence store capacity is exhausted.');
       result = {
         schemaVersion: 1,
         resourceKey,
@@ -163,7 +157,8 @@ export class RelayOwnershipFenceStore {
         renewedAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + leaseMs).toISOString()
       };
-      state.fences.push(result);
+      if (existingIndex >= 0) state.fences[existingIndex] = result;
+      else state.fences.push(result);
       await this.#write(state);
     });
     this.#serial = run.then(() => undefined, () => undefined);
@@ -208,7 +203,8 @@ export class RelayOwnershipFenceStore {
         timingSafeToken(item.token, current.token)
       );
       if (index < 0) return false;
-      state.fences.splice(index, 1);
+      const releasedAt = this.#clock().toISOString();
+      state.fences[index] = { ...state.fences[index]!, renewedAt: releasedAt, expiresAt: releasedAt };
       await this.#write(state);
       return true;
     });
@@ -369,9 +365,6 @@ function validateFenceState(input: unknown): RelayFenceState {
     resources.add(fence.resourceKey);
   }
   return structuredClone(state);
-}
-function pruneExpired(state: RelayFenceState, now: number): void {
-  state.fences = state.fences.filter((fence) => Date.parse(fence.expiresAt) > now);
 }
 function timingSafeToken(expected: string, supplied: string): boolean {
   const a = Buffer.from(expected);
