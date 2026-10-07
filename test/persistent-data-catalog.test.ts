@@ -10,7 +10,7 @@ test('persistent data catalog is unique and covers execution, learning, identity
   for (const required of [
     'audit-active', 'audit-freshness', 'relay-session-credential', 'action-journal', 'action-results', 'sagas', 'compensation',
     'intent-registry', 'world-model', 'procedure-memory', 'studio-teach', 'team-missions', 'evaluations',
-    'approvals', 'device-identity', 'device-registry'
+    'approvals', 'device-identity', 'device-registry', 'enterprise-authority-leases', 'enterprise-identity'
   ]) assert.ok(ids.has(required), required);
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.concurrency.length > 0));
   assert.ok(PERSISTENT_DATA_CATALOG.every((item) => item.retention.length > 0));
