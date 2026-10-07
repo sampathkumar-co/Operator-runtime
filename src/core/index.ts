@@ -58,3 +58,6 @@ export * from './workspace-semantic-intelligence.ts';
 export * from './developer-edit-workflow.ts';
 export * from './developer-session-review.ts';
 export * from './adaptive-planning-control.ts';
+export * from './control-center-ux.ts';
+export * from './otlp-operation-trace.ts';
+export * from './capability-conformance.ts';
