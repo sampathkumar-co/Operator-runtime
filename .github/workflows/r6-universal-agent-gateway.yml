@@ -1,0 +1,85 @@
+name: R6 Universal Agent Gateway
+
+on:
+  push:
+    branches: ['main', 'program/r6-universal-agent-gateway-final-*']
+  pull_request:
+    paths:
+      - 'src/core/agent-gateway-contract.ts'
+      - 'src/core/universal-agent-gateway.ts'
+      - 'src/core/capability-sdk.ts'
+      - 'src/core/capability-policy.ts'
+      - 'src/core/capability-conformance.ts'
+      - 'src/core/capability-package-registry.ts'
+      - 'src/core/capability-governance.ts'
+      - 'src/core/capability-extension-loader.ts'
+      - 'src/core/capability-extension-config.ts'
+      - 'src/core/contract-registry.ts'
+      - 'src/core/index.ts'
+      - 'src/core/capability-quality.ts'
+      - 'src/core/capability-simulator.ts'
+      - 'src/core/gateway-webhook.ts'
+      - 'src/core/ecosystem-compatibility.ts'
+      - 'src/core/r6-contracts.ts'
+      - 'src/core/resource-identity.ts'
+      - 'src/sdk/**'
+      - 'packages/sdk-typescript/**'
+      - 'packages/sdk-python/**'
+      - 'contracts/r6/**'
+      - 'src/capabilities/document-data.ts'
+      - 'src/capabilities/index.ts'
+      - 'apps/local-agent/src/main.ts'
+      - 'apps/local-agent/src/runtime-factory.ts'
+      - 'apps/local-agent/src/server.ts'
+      - 'src/core/developer-relay-surface.ts'
+      - 'apps/relay-server/src/relay-hub.ts'
+      - 'test/capability-*.test.ts'
+      - 'test/document-data.test.ts'
+      - 'test/r6-*.test.ts'
+      - 'test/r6-document-resource-identity.test.ts'
+      - 'scripts/generate-r6-contracts.ts'
+      - 'scripts/generate-r6-certification.ts'
+      - 'package.json'
+      - '.github/workflows/r6-universal-agent-gateway.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r6-universal-agent-gateway-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R6 universal gateway certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R6 exact-head suite
+        run: npm run test:r6
+      - name: Generate R6 exact-head evidence
+        env:
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run evidence:r6
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r6-universal-gateway-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/r6/*
+          if-no-files-found: error
+          retention-days: 30

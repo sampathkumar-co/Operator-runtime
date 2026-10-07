@@ -601,7 +601,7 @@ export class RelayHub {
 
     const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
     const capabilities = capabilityBindingRequested
-      ? locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability))
+      ? locallySupportedCapabilities.filter((capability) => capabilityScopeAllows(authorizedCapabilities, capability))
       : [...authorizedCapabilities].filter(isLegacyReadCapability).sort();
     let accountAuthority: RelayAccountAuthority | undefined;
     if (capabilityBindingRequested) {
@@ -923,6 +923,14 @@ function relayTraceId(request: RelayDispatchRequest): string {
   ].filter((value): value is string => Boolean(value));
   const found = candidates.find((value)=>/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(value));
   return found ?? 'relay-' + crypto.randomUUID();
+}
+
+function capabilityScopeAllows(scopes: Set<string>, capability: string): boolean {
+  if (scopes.has(capability)) return true;
+  for (const scope of scopes) {
+    if (scope.endsWith('.*') && capability.startsWith(scope.slice(0, -1))) return true;
+  }
+  return false;
 }
 
 function boundedPositiveInt(value: number | undefined, fallback: number, max: number, label: string): number {

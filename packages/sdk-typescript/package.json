@@ -1,0 +1,16 @@
+{
+  "name": "@mecord/gateway-sdk",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "UNLICENSED",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ]
+}

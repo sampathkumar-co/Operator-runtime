@@ -49,7 +49,12 @@
     "test:r5-soak:smoke": "node --experimental-strip-types scripts/r5-production-soak.ts --iterations=100",
     "soak:r5:24h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=86400000",
     "soak:r5:72h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=259200000",
-    "evidence:r5": "node --experimental-strip-types scripts/generate-r5-certification.ts"
+    "evidence:r5": "node --experimental-strip-types scripts/generate-r5-certification.ts",
+    "test:r6:node": "node --experimental-strip-types scripts/generate-r6-contracts.ts --check && node --experimental-strip-types --test test/capability-sdk.test.ts test/capability-conformance.test.ts test/capability-package-registry.test.ts test/capability-governance.test.ts test/capability-extension-config.test.ts test/document-data.test.ts test/r6-document-resource-identity.test.ts test/gateway-enterprise-foundation.test.ts test/r6-gateway-api.test.ts test/r6-gateway-ecosystem.test.ts test/r6-typescript-sdk.test.ts test/r6-sdk-adapters.test.ts",
+    "test:r6:python": "python packages/sdk-python/test_sdk.py",
+    "test:r6": "npm run test:r6:node && npm run test:r6:python",
+    "evidence:r6": "node --experimental-strip-types scripts/generate-r6-certification.ts",
+    "verify:r6-contracts": "node --experimental-strip-types scripts/generate-r6-contracts.ts --check"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",

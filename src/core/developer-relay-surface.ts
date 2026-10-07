@@ -3,7 +3,7 @@ import { OperatorError } from './errors.ts';
 import { PUBLIC_PLUGIN_CAPABILITIES } from './public-plugin-surface.ts';
 
 export const DEVELOPER_RELAY_CAPABILITIES = Object.freeze(
-  Object.keys(CAPABILITY_RISK_RULES).sort()
+  [...Object.keys(CAPABILITY_RISK_RULES), 'ext.*'].sort()
 );
 
 export function developerAccountIds(input: string | undefined): Set<string> {

@@ -1470,6 +1470,24 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     return invoke('app.operate', 'external', { operation, selector, value, horizontalAmount, verticalAmount, waitMs });
   });
 
+
+  const documentTools = [
+    ['document.inspect', 'Inspect supported document metadata'],
+    ['document.extract', 'Extract supported document content'],
+    ['document.render', 'Render supported document preview'],
+    ['structured.inspect', 'Inspect CSV or JSON metadata'],
+    ['structured.extract', 'Extract CSV or JSON data'],
+    ['structured.render', 'Render CSV or JSON preview']
+  ] as const;
+  for (const [name, title] of documentTools) {
+    server.registerTool(name, {
+      title,
+      description: title + ' from a bounded file inside an authorized root. The source remains read-only and the result is bound to its SHA-256 identity.',
+      inputSchema: z.object({ path: z.string().min(1).max(4096) }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+    }, async ({ path }) => invoke(name, 'read', { path }, path));
+  }
+
   return server;
 }
 

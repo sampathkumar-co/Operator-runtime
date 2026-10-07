@@ -40,6 +40,7 @@ import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSe
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import type { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import {
   boundedString,
   decodeEnterpriseContextHeader,
@@ -95,6 +96,7 @@ function sendControlCenter(res: http.ServerResponse): void {
 export function createLocalAgentServer(options: {
   runtime: OperatorRuntime;
   agentKernel?: AgentKernel;
+  gateway?: UniversalAgentGateway;
   intentRegistry?: IntentRegistry;
   sagas?: DurableSagaKernel;
   token: string;
@@ -450,6 +452,31 @@ export function createLocalAgentServer(options: {
       return;
     }
     const requestPermissions = requestPermissionDecision.permissions;
+
+    if (pathname === '/v1/gateway/execute' && req.method === 'POST') {
+      if (!options.gateway) {
+        send(res, 503, { ok: false, error: { code: 'AGENT_GATEWAY_NOT_CONFIGURED', message: 'Universal agent gateway is not configured.' } });
+        return;
+      }
+      try {
+        if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Gateway execution is disabled by the local emergency stop.' } });
+          return;
+        }
+        const body = await readJson(req);
+        const expectedPrincipalId = relayRequest
+          ? requestEnterpriseContext?.principalId
+          : 'local-user';
+        if (!expectedPrincipalId) throw new OperatorError('AGENT_GATEWAY_PRINCIPAL_REQUIRED', 'Authenticated gateway principal is unavailable.');
+        const receipt = await options.gateway.executeAuthorized(body, requestPermissions, expectedPrincipalId);
+        send(res, receipt.result.ok ? 200 : 409, { ok: receipt.result.ok, receipt });
+      } catch (error) {
+        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'AGENT_GATEWAY_EXECUTION_FAILED';
+        const status = code === 'AGENT_GATEWAY_PRINCIPAL_MISMATCH' ? 403 : 400;
+        send(res, status, { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
 
     const intentRoute = /^\/v1\/intents\/([A-Za-z0-9._:-]{1,128})$/.exec(pathname);
     if (intentRoute && req.method === 'GET') {

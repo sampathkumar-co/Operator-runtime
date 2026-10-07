@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mecord.tech/contracts/r6/gateway-event-v1.schema.json",
+  "title": "Mecord Gateway Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "kind",
+    "occurredAt",
+    "subjectId",
+    "data"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "kind": {
+      "enum": [
+        "operation.started",
+        "operation.completed",
+        "operation.failed",
+        "capability.certified",
+        "capability.revoked",
+        "device.changed"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "subjectId": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    }
+  }
+}

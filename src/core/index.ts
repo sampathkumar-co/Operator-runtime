@@ -64,3 +64,17 @@ export * from './workspace-semantic-intelligence.ts';
 export * from './developer-edit-workflow.ts';
 export * from './developer-session-review.ts';
 export * from './adaptive-planning-control.ts';
+
+export * from './capability-sdk.ts';
+export * from './capability-conformance.ts';
+export * from './capability-package-registry.ts';
+export * from './capability-governance.ts';
+export * from './capability-quality.ts';
+export * from './capability-simulator.ts';
+export * from './capability-extension-loader.ts';
+export * from './capability-extension-config.ts';
+export * from './universal-agent-gateway.ts';
+export * from './gateway-webhook.ts';
+export * from './ecosystem-compatibility.ts';
+export * from './r6-contracts.ts';
+

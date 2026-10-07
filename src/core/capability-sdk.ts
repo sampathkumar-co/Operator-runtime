@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
-import { capabilityRiskRule, type CapabilityRiskRule } from './capability-policy.ts';
+import { CAPABILITY_RISK_RULES, isBuiltInCapability, type CapabilityRiskRule } from './capability-policy.ts';
 import { OperatorError } from './errors.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 
@@ -169,11 +169,23 @@ export function validateManifest(input: CapabilityExtensionManifest): Capability
     const capability = capabilityName(entry.capability, `capabilities[${index}].capability`);
     if (seen.has(capability)) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability manifest contains duplicate capabilities.');
     seen.add(capability);
-    const canonical = capabilityRiskRule(capability);
-    if (entry.risk !== canonical) {
-      throw new OperatorError('CAPABILITY_MANIFEST_RISK_MISMATCH', `Extension risk for ${capability} must match the canonical runtime policy.`, {
-        details: { declared: entry.risk, canonical }
-      });
+    let canonical: CapabilityRiskRule;
+    if (isBuiltInCapability(capability)) {
+      canonical = CAPABILITY_RISK_RULES[capability]!;
+      if (entry.risk !== canonical) {
+        throw new OperatorError('CAPABILITY_MANIFEST_RISK_MISMATCH', `Extension risk for ${capability} must match the canonical runtime policy.`, {
+          details: { declared: entry.risk, canonical }
+        });
+      }
+    } else {
+      const prefix = `ext.${id}.`;
+      if (!capability.startsWith(prefix)) {
+        throw new OperatorError('CAPABILITY_MANIFEST_NAMESPACE_INVALID', `New extension capabilities must be namespaced under ${prefix}.`);
+      }
+      if (!['read','write','external','system','destructive','dynamic'].includes(entry.risk)) {
+        throw new OperatorError('CAPABILITY_MANIFEST_RISK_MISMATCH', 'Extension capability risk declaration is invalid.');
+      }
+      canonical = entry.risk;
     }
     if (typeof entry.deterministic !== 'boolean' || typeof entry.reversible !== 'boolean') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability deterministic/reversible flags are required.');
     if (entry.verification !== 'provider' && entry.verification !== 'runtime' && entry.verification !== 'external') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability verification mode is invalid.');
