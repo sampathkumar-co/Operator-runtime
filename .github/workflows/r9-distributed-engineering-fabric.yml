@@ -2,17 +2,21 @@ name: R9 Distributed Autonomous Engineering Fabric
 
 on:
   push:
-    branches: ['main', 'program/r9-*', 'program/r9-r10-*']
+    branches: ['main', 'program/r9-*', 'program/r9-r10-*', 'certification/r9-*']
   pull_request:
     paths:
       - 'src/core/distributed-placement.ts'
       - 'src/core/distributed-engineering-fabric.ts'
+      - 'src/core/r9-physical-fabric-campaign.ts'
       - 'src/core/control-plane-store.ts'
       - 'src/core/enterprise-authority-lease.ts'
       - 'src/core/principal-delegation.ts'
       - 'src/core/index.ts'
       - 'test/r9-distributed-engineering-fabric.test.ts'
+      - 'test/r9-physical-fabric-campaign.test.ts'
       - 'scripts/generate-r9-certification.ts'
+      - 'scripts/evaluate-r9-physical-fabric.ts'
+      - 'certification/r9/**'
       - 'package.json'
       - '.github/workflows/r9-distributed-engineering-fabric.yml'
   workflow_dispatch:
@@ -44,6 +48,8 @@ jobs:
           npm run typecheck:production
       - name: R9 exact-head suite
         run: npm run test:r9
+      - name: R9 physical multi-machine acceptance evaluator
+        run: node --experimental-strip-types --test test/r9-physical-fabric-campaign.test.ts
       - name: Generate R9 exact-head evidence
         env:
           GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
