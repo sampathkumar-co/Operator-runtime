@@ -21,7 +21,7 @@ const files=[
   'test/control-plane-store.test.ts',
   'test/r5-fault-lab.test.ts',
   'test/artifact-object-store.test.ts',
-  'test/r5-relay-composition.test.ts',
+  'apps/relay-server/test/r5-cluster-composition.test.ts',
   'scripts/r5-production-soak.ts'
 ];
 const fileDigests:Record<string,string>={};
