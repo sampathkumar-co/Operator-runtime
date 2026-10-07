@@ -94,7 +94,18 @@ test('stage4 pause aborts in-flight mutating worker execution and marks its reso
     })
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  const dispatchDeadline = Date.now() + 5_000;
+  while (true) {
+    const inFlight = await fetch(base + '/v1/teams/' + missionId, {
+      headers: { authorization: 'Bearer ' + token }
+    });
+    assert.equal(inFlight.status, 200);
+    const snapshot = (await inFlight.json() as any).mission;
+    if (snapshot.actionReceipts.some((receipt: any) => receipt.actionId && receipt.state === 'DISPATCHING')) break;
+    assert.ok(Date.now() < dispatchDeadline, 'worker action did not reach durable DISPATCHING state before pause');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
   const pause = await fetch(base + '/v1/teams/' + missionId + '/pause', {
     method: 'POST', headers, body: '{}'
   });
