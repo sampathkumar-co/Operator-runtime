@@ -49,7 +49,8 @@
     "test:r5-soak:smoke": "node --experimental-strip-types scripts/r5-production-soak.ts --iterations=100",
     "soak:r5:24h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=86400000",
     "soak:r5:72h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=259200000",
-    "evidence:r5": "node --experimental-strip-types scripts/generate-r5-certification.ts"
+    "evidence:r5": "node --experimental-strip-types scripts/generate-r5-certification.ts",
+    "test:r6": "node --experimental-strip-types --test test/capability-sdk.test.ts test/gateway-enterprise-foundation.test.ts test/capability-conformance.test.ts test/capability-package-registry.test.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",

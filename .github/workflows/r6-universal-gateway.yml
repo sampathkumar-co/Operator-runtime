@@ -1,0 +1,47 @@
+name: R6 Universal Agent Gateway
+
+on:
+  push:
+    branches: ['program/r6-universal-gateway-final-*']
+  pull_request:
+    paths:
+      - 'src/core/agent-gateway-contract.ts'
+      - 'src/core/capability-sdk.ts'
+      - 'src/core/capability-conformance.ts'
+      - 'src/core/capability-package-registry.ts'
+      - 'src/core/principal-delegation.ts'
+      - 'src/core/contract-registry.ts'
+      - 'src/core/index.ts'
+      - 'test/capability-sdk.test.ts'
+      - 'test/gateway-enterprise-foundation.test.ts'
+      - 'test/capability-conformance.test.ts'
+      - 'test/capability-package-registry.test.ts'
+      - 'package.json'
+      - '.github/workflows/r6-universal-gateway.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r6-universal-gateway-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R6 universal gateway certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R6 exact-head suite
+        run: npm run test:r6
