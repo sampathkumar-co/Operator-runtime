@@ -56,7 +56,9 @@
     "evidence:r6": "node --experimental-strip-types scripts/generate-r6-certification.ts",
     "verify:r6-contracts": "node --experimental-strip-types scripts/generate-r6-contracts.ts --check",
     "test:r7": "node --experimental-strip-types --test test/r7-enterprise-control-plane.test.ts",
-    "evidence:r7": "node --experimental-strip-types scripts/generate-r7-certification.ts"
+    "evidence:r7": "node --experimental-strip-types scripts/generate-r7-certification.ts",
+    "test:r8": "node --experimental-strip-types --test test/r8-counterfactual-proof-kernel.test.ts",
+    "evidence:r8": "node --experimental-strip-types scripts/generate-r8-certification.ts"
   },
   "license": "UNLICENSED",
   "description": "Semantic, evidence-driven execution runtime for operating user-authorized computers from ChatGPT.",
