@@ -421,9 +421,10 @@ export class DistributedEngineeringFabric {
         throw new OperatorError('DISTRIBUTED_FENCE_LOST', 'A distributed resource fence changed ownership.');
       }
     }
+    const verifiedResourceRecords = resourceRecords as ControlPlaneRecord[];
     await this.#store.transact([
       { namespace: NS, key: leaseKey(lease), expectedGeneration: record!.generation, value: renewed as unknown as Record<string, unknown>, expiresAt },
-      ...resourceRecords.map((resourceRecord) => ({ namespace: NS, key: resourceRecord.key, expectedGeneration: resourceRecord.generation, value: resourceRecord.value, expiresAt }))
+      ...verifiedResourceRecords.map((resourceRecord) => ({ namespace: NS, key: resourceRecord.key, expectedGeneration: resourceRecord.generation, value: resourceRecord.value, expiresAt }))
     ], now);
     return renewed;
   }
@@ -432,7 +433,10 @@ export class DistributedEngineeringFabric {
     lineage: DistributedLineageReceipt;
     artifactIds: string[];
   }): Promise<AcceptedDistributedResult> {
-    const lineage = createDistributedLineage({ ...input.lineage, digest: undefined } as never);
+    const { digest: providedDigest, schemaVersion, ...lineageInput } = input.lineage;
+    if (schemaVersion !== 1) throw invalid('Distributed lineage schema version is invalid.');
+    const lineage = createDistributedLineage(lineageInput);
+    if (providedDigest !== lineage.digest) throw invalid('Distributed lineage digest is invalid.');
     const now = this.#clock().toISOString();
     const record = await this.#store.get(NS, leaseKey(lineage));
     const lease = activeLease(record, now);
@@ -478,10 +482,11 @@ export class DistributedEngineeringFabric {
         throw new OperatorError('DISTRIBUTED_FENCE_LOST', 'Distributed resource fence changed before result commit.');
       }
     }
+    const verifiedResourceRecords = resourceRecords as ControlPlaneRecord[];
     await this.#store.transact([
       { namespace: NS, key: leaseKey(lease), expectedGeneration: record!.generation, value: terminal as unknown as Record<string, unknown> },
       { namespace: NS, key: resultKey(lease), expectedGeneration: null, value: result as unknown as Record<string, unknown> },
-      ...resourceRecords.map((resourceRecord) => ({ namespace: NS, key: resourceRecord.key, expectedGeneration: resourceRecord.generation, value: null }))
+      ...verifiedResourceRecords.map((resourceRecord) => ({ namespace: NS, key: resourceRecord.key, expectedGeneration: resourceRecord.generation, value: null }))
     ], now);
     return result;
   }

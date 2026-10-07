@@ -876,12 +876,12 @@ Status reconciled: **2026-10-07**.
 | R6 Universal Agent Gateway | IMPLEMENTED_NOT_CERTIFIED |
 | R7 Enterprise Agent Control Plane | IMPLEMENTED_NOT_CERTIFIED |
 | R8 Counterfactual Twin + Proof Kernel | IMPLEMENTED_NOT_CERTIFIED |
-| R9 Distributed Autonomous Engineering Fabric | IN_PROGRESS |
-| R10 Verifiable Autonomous Engineering OS | IN_PROGRESS |
+| R9 Distributed Autonomous Engineering Fabric | IMPLEMENTED_NOT_CERTIFIED |
+| R10 Verifiable Autonomous Engineering OS | IMPLEMENTED_NOT_CERTIFIED |
 
-R1-R3 have explicit roadmap certification ledgers. R4-R8 have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+R1-R3 have explicit roadmap certification ledgers. R4-R10 now have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
 
-R9-R10 were already carrying foundation modules before this reconciliation. Their `IN_PROGRESS` status records those pre-existing foundations only; the R7-R8 closeout did not promote or implement the remaining R9-R10 work packages.
+R9 now implements the distributed scheduler, specialized-worker model, isolation/fencing, resource conflict control and exact distributed lineage. R10 now implements the unified proof-gated objective lifecycle, causal memory/invalidation, proof-aware planning, receipt-gated learning, canonical cross-agent trust semantics, autonomous incident command and portable certification standard. R9's real multi-physical-machine acceptance and R10's comparative real-world outcome/human-intervention thresholds remain external empirical gates.
 
 Production deployment truth remains separately authoritative in `docs/CURRENT_RELEASE_STATE.md`.
 
