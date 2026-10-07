@@ -39,6 +39,7 @@ export * from './evidence-pack.ts';
 export * from './workspace-graph.ts';
 export * from './developer-session.ts';
 export * from './control-center-model.ts';
+export * from './control-center-ux.ts';
 export * from './operation-trace.ts';
 export * from './agent-gateway-contract.ts';
 export * from './principal-delegation.ts';
