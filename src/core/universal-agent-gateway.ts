@@ -40,6 +40,20 @@ export class UniversalAgentGateway {
   async execute(input: unknown): Promise<AgentGatewayExecutionReceipt> {
     const proposal = this.normalize(input);
     const permissions = await this.#authorizer.permissionsFor(proposal.principalId, proposal);
+    return await this.executeAuthorized(proposal, permissions);
+  }
+
+  async executeAuthorized(
+    input: unknown,
+    permissions: PermissionProfile,
+    expectedPrincipalId?: string
+  ): Promise<AgentGatewayExecutionReceipt> {
+    const proposal = 'digest' in (input as any)
+      ? input as NormalizedAgentGatewayProposal
+      : this.normalize(input);
+    if (expectedPrincipalId !== undefined && proposal.principalId !== expectedPrincipalId) {
+      throw new OperatorError('AGENT_GATEWAY_PRINCIPAL_MISMATCH', 'Gateway proposal principal does not match the authenticated request principal.');
+    }
     assertPermissions(permissions);
     const result = await this.#executor.execute(proposal.action, permissions, {
       learningContext: `gateway:${proposal.principalId}`
