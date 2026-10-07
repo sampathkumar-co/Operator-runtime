@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mecord-capability-sdk"
+version = "1.0.0"
+description = "Standalone Python SDK for Mecord capability extension manifests."
+requires-python = ">=3.10"
