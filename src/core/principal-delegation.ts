@@ -1,7 +1,7 @@
 import { OperatorError } from './errors.ts';
 import type { ActionRisk } from './types.ts';
 
-export type PrincipalKind = 'human' | 'service' | 'agent' | 'subagent' | 'workflow' | 'device';
+export type PrincipalKind = 'human' | 'service' | 'agent' | 'subagent' | 'workflow' | 'device' | 'organization' | 'project' | 'environment';
 export interface Principal { id:string; kind:PrincipalKind; enabled:boolean; }
 export interface AuthorityGrant {
   capabilities:string[];
@@ -100,7 +100,7 @@ function mergeUnion(grants:AuthorityGrant[]):AuthorityGrant{
   return {capabilities,resourcePrefixes,maxRisk,...(expiries.length?{expiresAt:expiries.sort().at(-1)!}:{})};
 }
 function normalizePrincipal(p:Principal):Principal{
-  if(!p||!['human','service','agent','subagent','workflow','device'].includes(p.kind)||typeof p.enabled!=='boolean') throw invalid('Principal is invalid.');
+  if(!p||!['human','service','agent','subagent','workflow','device','organization','project','environment'].includes(p.kind)||typeof p.enabled!=='boolean') throw invalid('Principal is invalid.');
   return {id:id(p.id,'principal id'),kind:p.kind,enabled:p.enabled};
 }
 function normalizeDelegation(d:Delegation):Delegation{
