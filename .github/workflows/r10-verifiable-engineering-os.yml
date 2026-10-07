@@ -1,0 +1,58 @@
+name: R10 Verifiable Autonomous Engineering OS
+
+on:
+  push:
+    branches: ['main', 'program/r10-*', 'program/r9-r10-*']
+  pull_request:
+    paths:
+      - 'src/core/engineering-objective-lifecycle.ts'
+      - 'src/core/engineering-causal-memory.ts'
+      - 'src/core/proof-aware-autonomy.ts'
+      - 'src/core/autonomous-incident-certification.ts'
+      - 'src/core/distributed-engineering-fabric.ts'
+      - 'src/core/proof-bundle.ts'
+      - 'src/core/proof-carrying-execution.ts'
+      - 'src/core/index.ts'
+      - 'test/r10-verifiable-engineering-os.test.ts'
+      - 'scripts/generate-r10-certification.ts'
+      - 'package.json'
+      - '.github/workflows/r10-verifiable-engineering-os.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r10-verifiable-engineering-os-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R10 autonomous engineering OS certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R10 exact-head suite
+        run: npm run test:r10
+      - name: Generate R10 exact-head evidence
+        env:
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run evidence:r10
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r10-engineering-os-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: artifacts/r10/*
+          if-no-files-found: error
+          retention-days: 30
