@@ -67,7 +67,7 @@ export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
   'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
   'terminal-sessions',
   'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
-  'enterprise-policy', 'bootstrap', 'local-device-reset'
+  'enterprise-policy', 'enterprise-authority-leases', 'enterprise-identity', 'bootstrap', 'local-device-reset'
 ] as const);
 const MONOTONIC_RESTORE_STORE_ID_SET = new Set<string>(MONOTONIC_RESTORE_STORE_IDS);
 export function isMonotonicRestoreStore(id: string): boolean { return MONOTONIC_RESTORE_STORE_ID_SET.has(id); }
@@ -112,6 +112,8 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   entry({ id: 'shadow-decisions', owner: 'adaptive-shadow', location: 'shadow-decisions.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-shadow-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
   entry({ id: 'resource-leases-lock', owner: 'resource-leases', location: 'resource-leases.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-writer-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'none', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'local-agent-lock', owner: 'local-agent', location: 'local-agent.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-agent-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'enterprise-authority-leases', owner: 'enterprise-authority', location: 'enterprise-authority-leases.json', category: 'session-state', sensitivity: 'sensitive', retention: 'authority-lease-lifetime', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'account', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
+  entry({ id: 'enterprise-identity', owner: 'enterprise-identity', location: 'enterprise-identity.json', category: 'pairing-state', sensitivity: 'sensitive', retention: 'enterprise-account-lifetime', deletion: 'account-device-erasure', backup: 'include', restore: 'required', scope: 'account', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   entry({ id: 'device-identity', owner: 'device-identity', location: 'device-identity.json', category: 'device-identity', sensitivity: 'secret', retention: 'device-lifetime', deletion: 'device-reset-only', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'encrypted', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   ...[
     ['device-registry', 'device-registry.json'], ['device-routing', 'device-routing.json'], ['device-pool', 'device-pool.json'],
