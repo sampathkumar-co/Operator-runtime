@@ -50,5 +50,7 @@ jobs:
           npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
           npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
           npm run typecheck:production
+      - name: Python SDK runtime
+        run: python --version
       - name: R6 exact-head suite
         run: npm run test:r6
