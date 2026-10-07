@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "participantId": "participant-random-id",
+  "sourceSha": "0000000000000000000000000000000000000000",
+  "environmentDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "externalParticipant": true,
+  "preparedParticipant": true,
+  "consentRecorded": true,
+  "startedAt": "2026-10-07T10:00:00.000Z",
+  "verifiedTaskAt": "2026-10-07T10:10:00.000Z",
+  "primaryWorkflowCompleted": true,
+  "developerAssistanceEvents": [],
+  "onboarding": {
+    "install": true,
+    "doctor": true,
+    "authenticate": true,
+    "pair": true,
+    "roots": true,
+    "readProbe": true,
+    "approvalProbe": true,
+    "guidedVerifiedTask": true
+  },
+  "approvalComprehension": {
+    "completedWithoutDocs": true,
+    "requestedEffect": true,
+    "scope": true,
+    "risk": true,
+    "reversibility": true,
+    "alternatives": true,
+    "exactResource": true,
+    "expiry": true,
+    "reason": true
+  },
+  "recoveryComprehension": {
+    "retryable": true,
+    "reconcilable": true,
+    "reversible": true,
+    "blocked": true,
+    "terminal": true,
+    "uncertain": true
+  },
+  "proofInspection": {
+    "opened": true,
+    "identifiedAuthority": true,
+    "identifiedActionEffect": true,
+    "identifiedVerification": true
+  },
+  "causalTimelineUnderstood": true
+}
