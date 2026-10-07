@@ -21,7 +21,7 @@ export async function loadCapabilityExtensionsFromConfig(input:{
   configPath:string;
   allowedModuleRoots:string[];
   runtime:OperatorRuntime;
-}):Promise<{loaded:number;governance:CapabilityGovernanceRegistry}>{
+}):Promise<{loaded:number;governance:CapabilityGovernanceRegistry;refreshGovernance:()=>Promise<void>}>{
   const configPath=path.resolve(input.configPath);
   const stat=await fs.stat(configPath);
   if(!stat.isFile()||stat.size>8*1024*1024)throw invalid('Capability extension config must be a regular file <= 8 MiB.');
@@ -30,8 +30,11 @@ export async function loadCapabilityExtensionsFromConfig(input:{
   const config=normalizeConfig(raw);
   if(!Array.isArray(input.allowedModuleRoots)||input.allowedModuleRoots.length<1||input.allowedModuleRoots.length>128)throw invalid('Capability extension module roots are required.');
   const governance=new CapabilityGovernanceRegistry();
-  for(const publisher of config.publishers)governance.upsertPublisher(publisher);
-  for(const revocation of config.revocations??[])governance.importRevocation(revocation);
+  const applyGovernance=(next:CapabilityExtensionConfigV1)=>{
+    for(const publisher of next.publishers)governance.upsertPublisher(publisher);
+    for(const revocation of next.revocations??[])governance.importRevocation(revocation);
+  };
+  applyGovernance(config);
   let loaded=0;
   for(const extension of config.extensions){
     const modulePath=path.isAbsolute(extension.modulePath)
@@ -46,7 +49,11 @@ export async function loadCapabilityExtensionsFromConfig(input:{
     input.runtime.register(provider);
     loaded+=1;
   }
-  return{loaded,governance};
+  const refreshGovernance=async()=>{
+    const refreshed=normalizeConfig(JSON.parse(await fs.readFile(configPath,'utf8')));
+    applyGovernance(refreshed);
+  };
+  return{loaded,governance,refreshGovernance};
 }
 
 function normalizeConfig(input:unknown):CapabilityExtensionConfigV1{
