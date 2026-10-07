@@ -59,16 +59,14 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     await this.#serial;
     const state = await this.#read();
     const record = state.records.find((item) => item.namespace === id(namespace, 'namespace') && item.key === id(key, 'key'));
-    if (!record || expired(record, Date.now())) return null;
-    return structuredClone(record);
+    return record ? structuredClone(record) : null;
   }
 
   async list(namespace: string): Promise<ControlPlaneRecord[]> {
     await this.#serial;
     const ns = id(namespace, 'namespace');
-    const now = Date.now();
     return (await this.#read()).records
-      .filter((item) => item.namespace === ns && !expired(item, now))
+      .filter((item) => item.namespace === ns)
       .sort((a, b) => a.key.localeCompare(b.key))
       .map((item) => structuredClone(item));
   }
@@ -190,7 +188,7 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
 
   async get(namespace: string, key: string): Promise<ControlPlaneRecord | null> {
     const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2 AND (expires_at IS NULL OR expires_at>NOW())',
+      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
       [id(namespace,'namespace'), id(key,'key')]
     );
     return result.rows[0] ? rowToRecord(result.rows[0]) : null;
@@ -198,7 +196,7 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
 
   async list(namespace: string): Promise<ControlPlaneRecord[]> {
     const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY record_key',
+      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 ORDER BY record_key',
       [id(namespace,'namespace')]
     );
     return result.rows.map(rowToRecord);
