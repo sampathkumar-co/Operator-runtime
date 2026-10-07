@@ -9,12 +9,16 @@ on:
       - 'src/core/engineering-causal-memory.ts'
       - 'src/core/proof-aware-autonomy.ts'
       - 'src/core/autonomous-incident-certification.ts'
+      - 'src/core/r10-empirical-outcome-campaign.ts'
       - 'src/core/distributed-engineering-fabric.ts'
       - 'src/core/proof-bundle.ts'
       - 'src/core/proof-carrying-execution.ts'
       - 'src/core/index.ts'
       - 'test/r10-verifiable-engineering-os.test.ts'
+      - 'test/r10-empirical-outcome-campaign.test.ts'
       - 'scripts/generate-r10-certification.ts'
+      - 'scripts/evaluate-r10-empirical-outcomes.ts'
+      - 'certification/r10/**'
       - 'package.json'
       - '.github/workflows/r10-verifiable-engineering-os.yml'
   workflow_dispatch:
@@ -46,6 +50,8 @@ jobs:
           npm run typecheck:production
       - name: R10 exact-head suite
         run: npm run test:r10
+      - name: R10 paired empirical outcome evaluator
+        run: node --experimental-strip-types --test test/r10-empirical-outcome-campaign.test.ts
       - name: Generate R10 exact-head evidence
         env:
           GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
