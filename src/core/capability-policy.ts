@@ -61,6 +61,7 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
 interface ExtensionRiskRegistration {
   rule: CapabilityRiskRule;
   owner: string;
+  leases: number;
 }
 const EXTENSION_CAPABILITY_RISK_RULES = new Map<string, ExtensionRiskRegistration>();
 
@@ -97,10 +98,16 @@ export function registerExtensionCapabilityRisk(input: {
   if (existing && (existing.rule !== input.rule || existing.owner !== owner)) {
     throw new PolicyError('CAPABILITY_EXTENSION_RISK_CONFLICT', 'Extension capability risk policy is already owned by another package.');
   }
-  EXTENSION_CAPABILITY_RISK_RULES.set(capability, { rule: input.rule, owner });
+  if (existing) existing.leases += 1;
+  else EXTENSION_CAPABILITY_RISK_RULES.set(capability, { rule: input.rule, owner, leases: 1 });
+  let released = false;
   return () => {
+    if (released) return;
+    released = true;
     const current = EXTENSION_CAPABILITY_RISK_RULES.get(capability);
-    if (current?.owner === owner) EXTENSION_CAPABILITY_RISK_RULES.delete(capability);
+    if (!current || current.owner !== owner) return;
+    if (current.leases <= 1) EXTENSION_CAPABILITY_RISK_RULES.delete(capability);
+    else current.leases -= 1;
   };
 }
 
