@@ -19,6 +19,7 @@ export const RESOURCE_EXTRACTOR_CAPABILITIES = Object.freeze([
   'computer.inspect',
   'project.inspect', 'project.command.inspect', 'project.command.run', 'project.transaction.run',
   'file.read', 'file.list', 'file.write', 'file.create', 'file.replace', 'file.info', 'file.search', 'file.manage',
+  'document.inspect', 'document.extract', 'document.render', 'structured.inspect', 'structured.extract', 'structured.render',
   'workspace.edit.resolve_lsp', 'workspace.edit.transaction', 'workspace.edit.rollback',
   'git.status', 'git.diff', 'git.rev-parse', 'git.checkpoint.inspect', 'git.checkpoint.create', 'git.checkpoint.restore', 'git.write',
   'docker.inspect', 'docker.manage', 'compute.run', 'postgres.inspect', 'postgres.select',
@@ -50,6 +51,7 @@ export function resourcePathOperandsForAction(action: ActionRequest): string[] {
   const values: unknown[] = [];
   if (action.capability === 'file.manage') values.push(input.path, input.source, input.destination);
   else if (action.capability.startsWith('file.')) values.push(input.path);
+  else if (action.capability.startsWith('document.') || action.capability.startsWith('structured.')) values.push(input.path);
   else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') values.push(input.workspaceRoot);
   else if (action.capability === 'workspace.edit.transaction') {
     const root = input.workspaceRoot;
@@ -98,6 +100,8 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     } else {
       add('file', input.path, keys);
     }
+  } else if (action.capability.startsWith('document.') || action.capability.startsWith('structured.')) {
+    add('file', input.path, keys);
   } else if (action.capability === 'workspace.edit.resolve_lsp' || action.capability === 'workspace.edit.rollback') {
     add('workspace', input.workspaceRoot, keys);
   } else if (action.capability === 'workspace.edit.transaction') {
