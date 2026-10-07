@@ -774,9 +774,10 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/control-center/onboarding' && req.method === 'GET') {
-      const [approvalRecords, taskSummaries, readProbeEvents, peers, runtimeStatus] = await Promise.all([
+      const [approvalRecords, taskSummaries, doctorEvents, readProbeEvents, peers, runtimeStatus] = await Promise.all([
         options.approvals ? options.approvals.list() : [],
         options.tasks ? options.tasks.list(500) : [],
+        options.audit ? options.audit.query({ capability: 'onboarding.doctor-probe', limit: 20 }) : [],
         options.audit ? options.audit.query({ capability: 'onboarding.read-probe', limit: 20 }) : [],
         options.deviceRegistry ? options.deviceRegistry.listDevices() : [],
         options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({})
@@ -789,7 +790,7 @@ export function createLocalAgentServer(options: {
       const relayConnected = relay.connected === true || ['connected', 'online', 'ready'].includes(relayState);
       const model = buildGuidedOnboardingModel({
         runtimeInstalled: true,
-        doctorHealthy: true,
+        doctorHealthy: doctorEvents.some((event) => event.result === 'success'),
         authenticated: true,
         devicePaired: relayConnected || peers.some((item) => item.status !== 'revoked'),
         rootsConfigured: requestPermissions.allowedRoots.length > 0,
@@ -801,6 +802,25 @@ export function createLocalAgentServer(options: {
         guidedTaskVerified: taskSummaries.some((task) => task.state === 'VERIFIED')
       });
       send(res, 200, { ok: true, model });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/onboarding/doctor-probe' && req.method === 'POST') {
+      const runtimeStatus = options.getRuntimeStatus ? await options.getRuntimeStatus() : {};
+      const checks = [
+        { id: 'local-agent', status: 'PASS', message: 'Authenticated local agent API is responding.' },
+        { id: 'product-version', status: PRODUCT_VERSION ? 'PASS' : 'FAIL', message: PRODUCT_VERSION ? `Runtime version ${PRODUCT_VERSION} is available.` : 'Runtime version is unavailable.' },
+        { id: 'recovery-authority', status: options.recoveryToken ? 'PASS' : 'WARN', message: options.recoveryToken ? 'Recovery authority is configured.' : 'Recovery authority is not configured; approval/recovery features will be limited.' },
+        { id: 'authorized-roots', status: requestPermissions.allowedRoots.length > 0 ? 'PASS' : 'WARN', message: requestPermissions.allowedRoots.length > 0 ? `${requestPermissions.allowedRoots.length} authorized root(s) are configured.` : 'No authorized roots are configured yet.' }
+      ] as const;
+      const healthy = checks.every((check) => check.status !== 'FAIL');
+      await options.audit?.append({
+        capability: 'onboarding.doctor-probe',
+        result: healthy ? 'success' : 'failure',
+        risk: 'read',
+        details: { productVersion: PRODUCT_VERSION, warningCount: checks.filter((check) => check.status === 'WARN').length }
+      });
+      send(res, healthy ? 200 : 409, { ok: healthy, healthy, checks, runtime: runtimeStatus });
       return;
     }
 

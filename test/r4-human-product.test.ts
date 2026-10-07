@@ -49,6 +49,11 @@ test('R4 Control Center serves separate accessible assets and runtime-backed pro
   assert.match(css.headers.get('content-type')??'',/^text\/css/);
   assert.match(await js.text(),/support-bundle/);
 
+  const doctor=await fetch(`${base}/v1/control-center/onboarding/doctor-probe`,{method:'POST',headers:{...headers,'content-type':'application/json'},body:'{}'});
+  assert.equal(doctor.status,200);
+  const doctorBody=await doctor.json() as any;
+  assert.equal(doctorBody.healthy,true);
+
   const probe=await fetch(`${base}/v1/control-center/onboarding/read-probe`,{method:'POST',headers:{...headers,'content-type':'application/json'},body:'{}'});
   assert.equal(probe.status,200);
 
@@ -72,9 +77,11 @@ test('R4 Control Center serves separate accessible assets and runtime-backed pro
 
   const onboarding=await fetch(`${base}/v1/control-center/onboarding`,{headers});
   const onboardingBody=await onboarding.json() as any;
+  const doctorStep=onboardingBody.model.steps.find((x:any)=>x.id==='DOCTOR');
   const readStep=onboardingBody.model.steps.find((x:any)=>x.id==='READ_PROBE');
   const approvalStep=onboardingBody.model.steps.find((x:any)=>x.id==='APPROVAL_PROBE');
   const taskStep=onboardingBody.model.steps.find((x:any)=>x.id==='GUIDED_VERIFIED_TASK');
+  assert.equal(doctorStep.status,'COMPLETE');
   assert.equal(readStep.status,'COMPLETE');
   assert.equal(approvalStep.status,'COMPLETE');
   assert.equal(taskStep.status,'COMPLETE');

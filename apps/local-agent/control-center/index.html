@@ -39,6 +39,7 @@
       <main id="main" tabindex="-1">
         <section id="view-home" class="view active" aria-labelledby="home-title">
           <div class="view-head"><div><h1 id="home-title">Home</h1><p>What needs attention, what is healthy, and what to do next.</p></div><button class="secondary" data-action="refresh">Refresh</button></div>
+          <div id="homeSafety" aria-live="assertive"></div>
           <div id="homeCards" class="metric-grid" aria-live="polite"></div>
           <div class="split">
             <article class="card"><h2>Guided onboarding</h2><div id="onboarding"></div></article>
@@ -55,6 +56,7 @@
             <div class="actions"><button id="submitGoal" class="primary">Submit &amp; run</button><button id="queueGoal">Queue only</button></div>
           </article>
           <div id="sessions"></div>
+          <div id="sessionDetail" aria-live="polite"></div>
         </section>
         <section id="view-teams" class="view" aria-labelledby="teams-title">
           <div class="view-head"><div><h1 id="teams-title">Teams</h1><p>Durable multi-worker missions, ownership, blockers, and controls.</p></div></div>
