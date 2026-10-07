@@ -45,7 +45,7 @@
     "test:r2": "node --experimental-strip-types --test test/adaptive-planning-shadow.test.ts test/adaptive-planning-control.test.ts test/r2-promotion-evidence-bridge.test.ts",
     "build:control-center": "npm --prefix apps/control-center run build",
     "test:r4": "npm run build:control-center && git diff --exit-code -- apps/local-agent/src/control-center.ts && node --experimental-strip-types --test test/control-center-ux.test.ts test/control-center-evolution.test.ts test/control-center-r4-api.test.ts",
-    "test:r5": "node --experimental-strip-types --test test/otlp-operation-trace.test.ts test/production-trust-platform.test.ts test/release-update.test.ts test/control-plane-store.test.ts test/r5-fault-lab.test.ts test/artifact-object-store.test.ts test/r5-relay-composition.test.ts",
+    "test:r5": "node --experimental-strip-types --test test/otlp-operation-trace.test.ts test/production-trust-platform.test.ts test/release-update.test.ts test/control-plane-store.test.ts test/r5-fault-lab.test.ts test/artifact-object-store.test.ts apps/relay-server/test/r5-cluster-composition.test.ts",
     "test:r5-soak:smoke": "node --experimental-strip-types scripts/r5-production-soak.ts --iterations=100",
     "soak:r5:24h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=86400000",
     "soak:r5:72h": "node --experimental-strip-types scripts/r5-production-soak.ts --duration-ms=259200000",
