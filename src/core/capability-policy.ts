@@ -49,7 +49,13 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'visual.capture': 'read',
   'input.operate': 'external',
   'perception.observe': 'write',
-  'perception.ground': 'read'
+  'perception.ground': 'read',
+  'document.inspect': 'read',
+  'document.extract': 'read',
+  'document.render': 'read',
+  'structured.inspect': 'read',
+  'structured.extract': 'read',
+  'structured.render': 'read'
 });
 
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {
