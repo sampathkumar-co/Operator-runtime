@@ -25,7 +25,8 @@ test('R4 Control Center serves separate accessible assets and runtime-backed pro
   await tasks.put(verified);
   const agent=createLocalAgentServer({
     runtime,token,recoveryToken,tasks,audit,approvals,
-    settings:{recoveryConfigured:true,relayConfigured:false,authorizedRootCount:1},
+    settings:{recoveryConfigured:true,relayConfigured:true,authorizedRootCount:1},
+    getRuntimeStatus:()=>({relay:{connected:true,status:'connected'}}),
     permissions:{allowedCapabilities:['file.*'],allowedRoots:[root]}
   });
   t.after(()=>Promise.allSettled([agent.close(),runtime.close()]));
