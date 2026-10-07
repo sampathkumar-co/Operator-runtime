@@ -47,6 +47,7 @@ export interface R10PairedObjectiveEvidence {
   objectiveDigest: string;
   startingStateDigest: string;
   environmentDigest: string;
+  r10SourceSha: string;
   rubricDigest: string;
   rubricFrozenBeforeExecution: boolean;
   startingStateReproducible: boolean;
@@ -95,6 +96,15 @@ export interface R10EmpiricalOutcomeReport {
 }
 
 const REQUIRED_RELEASES:R10PriorRelease[]=['R1','R2','R3','R4','R5','R6','R7','R8','R9'];
+const MINIMUM_STANDARD:EngineeringCertificationStandard={
+  minSuccessAbsoluteGain:0.05,
+  minFalseCompletionRelativeReduction:0.25,
+  minHumanInterventionRelativeReduction:0.20,
+  minInterruptionRecoveryRate:0.98,
+  minPortableProofRate:0.99,
+  maxUncertaintyCalibrationError:0.10,
+  minRollbackSuccessRate:0.99
+};
 
 export function createR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCampaignBody):R10EmpiricalOutcomeCampaign{
   const body=normalizeCampaign(input);
@@ -122,6 +132,7 @@ export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCamp
     if(!pair.rubricFrozenBeforeExecution)reasons.push('pair '+pair.pairId+' did not freeze its verification rubric before execution');
     if(!pair.startingStateReproducible)reasons.push('pair '+pair.pairId+' did not prove reproducible identical starting state');
     if(!pair.verifierBlindedToMode)reasons.push('pair '+pair.pairId+' verifier was not blinded to execution mode');
+    if(pair.r10SourceSha!==b.sourceSha)reasons.push('pair '+pair.pairId+' did not run the certification source SHA');
     if(pair.baseline.verifierId!==pair.current.verifierId)reasons.push('pair '+pair.pairId+' used different baseline/R10 verifiers');
     if(!pair.baseline.independentVerifier||pair.baseline.executorId===pair.baseline.verifierId)reasons.push('pair '+pair.pairId+' baseline verifier was not independent');
     if(!pair.current.independentVerifier||pair.current.executorId===pair.current.verifierId)reasons.push('pair '+pair.pairId+' R10 verifier was not independent');
@@ -130,6 +141,8 @@ export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCamp
     if(pair.current.interrupted)interruptionCaseCount+=1;
     if(pair.current.rollbackRequired)rollbackCaseCount+=1;
     if(pair.evidenceDigests.length<1)reasons.push('pair '+pair.pairId+' has no paired evidence artifact');
+    if(pair.baseline.evidenceDigests.length<1)reasons.push('pair '+pair.pairId+' baseline observation has no evidence artifact');
+    if(pair.current.evidenceDigests.length<1)reasons.push('pair '+pair.pairId+' R10 observation has no evidence artifact');
   }
 
   if(verifierIds.size<3)reasons.push('fewer than three independent verifier identities participated');
@@ -142,6 +155,7 @@ export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCamp
   for(const release of REQUIRED_RELEASES){
     if(!releaseMap.has(release))reasons.push('missing prior certified release evidence: '+release);
   }
+  if(new Set(b.priorReleaseCertifications.map((item)=>item.reportDigest)).size!==b.priorReleaseCertifications.length)reasons.push('prior release certification digests are not unique');
 
   const baseline=deriveMetrics(pairs.map((pair)=>pair.baseline));
   const current=deriveMetrics(pairs.map((pair)=>pair.current));
@@ -245,6 +259,7 @@ function normalizePair(input:R10PairedObjectiveEvidence):R10PairedObjectiveEvide
     objectiveDigest:digest(input.objectiveDigest,'objectiveDigest'),
     startingStateDigest:digest(input.startingStateDigest,'startingStateDigest'),
     environmentDigest:digest(input.environmentDigest,'environmentDigest'),
+    r10SourceSha:gitSha(input.r10SourceSha,'r10SourceSha'),
     rubricDigest:digest(input.rubricDigest,'rubricDigest'),
     rubricFrozenBeforeExecution:bool(input.rubricFrozenBeforeExecution,'rubricFrozenBeforeExecution'),
     startingStateReproducible:bool(input.startingStateReproducible,'startingStateReproducible'),
@@ -295,8 +310,18 @@ function normalizeObservation(input:R10OutcomeObservation,mode:R10ExecutionMode)
 
 function normalizeStandard(input:Partial<EngineeringCertificationStandard>):Partial<EngineeringCertificationStandard>{
   const out:Partial<EngineeringCertificationStandard>={};
-  for(const key of ['minSuccessAbsoluteGain','minFalseCompletionRelativeReduction','minHumanInterventionRelativeReduction','minInterruptionRecoveryRate','minPortableProofRate','maxUncertaintyCalibrationError','minRollbackSuccessRate'] as const){
-    if(input[key]!==undefined)out[key]=probability(input[key],key);
+  const minimumKeys=['minSuccessAbsoluteGain','minFalseCompletionRelativeReduction','minHumanInterventionRelativeReduction','minInterruptionRecoveryRate','minPortableProofRate','minRollbackSuccessRate'] as const;
+  for(const key of minimumKeys){
+    if(input[key]!==undefined){
+      const value=probability(input[key],key);
+      if(value<MINIMUM_STANDARD[key])throw invalid('Custom engineering standard is weaker than the R10 minimum: '+key);
+      out[key]=value;
+    }
+  }
+  if(input.maxUncertaintyCalibrationError!==undefined){
+    const value=probability(input.maxUncertaintyCalibrationError,'maxUncertaintyCalibrationError');
+    if(value>MINIMUM_STANDARD.maxUncertaintyCalibrationError)throw invalid('Custom engineering standard is weaker than the R10 minimum: maxUncertaintyCalibrationError');
+    out.maxUncertaintyCalibrationError=value;
   }
   return out;
 }
