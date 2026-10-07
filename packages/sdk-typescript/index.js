@@ -8,9 +8,12 @@ function normalizeBaseUrl(baseUrl){
   if(url.protocol==='http:'&&!['localhost','127.0.0.1','::1'].includes(url.hostname)) throw new Error('Plain HTTP is restricted to loopback.');
   return url;
 }
-function hmacHex(body, secret){
-  if(typeof secret!=='string'||new TextEncoder().encode(secret).byteLength<32) throw new Error('Webhook verification secret must be at least 32 bytes.');
-  return crypto.subtle.importKey('raw',new TextEncoder().encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']).then(key=>crypto.subtle.sign('HMAC',key,new TextEncoder().encode(body))).then(sig=>Array.from(new Uint8Array(sig),b=>b.toString(16).padStart(2,'0')).join(''));
+async function hmacVerify(body, signature, secret){
+  const encoder=new TextEncoder();
+  if(typeof secret!=='string'||encoder.encode(secret).byteLength<32) throw new Error('Webhook verification secret must be at least 32 bytes.');
+  const bytes=Uint8Array.from(signature.match(/../g)??[],value=>Number.parseInt(value,16));
+  const key=await crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['verify']);
+  return await crypto.subtle.verify('HMAC',key,bytes,encoder.encode(body));
 }
 export class MecordGatewayClient {
   #baseUrl; #token; #fetch;
@@ -56,8 +59,7 @@ export class MecordWebhookVerifier {
   constructor(secret){if(typeof secret!=='string'||new TextEncoder().encode(secret).byteLength<32) throw new Error('Webhook verification secret must be at least 32 bytes.');this.#secret=secret;}
   async verify(body,signature){
     if(!/^[0-9a-f]{64}$/.test(signature)) throw new Error('Webhook signature is invalid.');
-    const expected=await hmacHex(body,this.#secret);
-    if(expected!==signature) throw new Error('Webhook signature is invalid.');
+    if(!await hmacVerify(body,signature,this.#secret)) throw new Error('Webhook signature is invalid.');
     return JSON.parse(body);
   }
 }
