@@ -169,21 +169,34 @@ export function validateManifest(input: CapabilityExtensionManifest): Capability
     const capability = capabilityName(entry.capability, `capabilities[${index}].capability`);
     if (seen.has(capability)) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability manifest contains duplicate capabilities.');
     seen.add(capability);
-    const canonical = capabilityRiskRule(capability);
-    if (entry.risk !== canonical) {
+    let canonical: CapabilityRiskRule | undefined;
+    try { canonical = capabilityRiskRule(capability); }
+    catch (error) {
+      if (!(error instanceof OperatorError) || error.code !== 'CAPABILITY_RISK_UNREGISTERED') throw error;
+    }
+    if (canonical !== undefined && entry.risk !== canonical) {
       throw new OperatorError('CAPABILITY_MANIFEST_RISK_MISMATCH', `Extension risk for ${capability} must match the canonical runtime policy.`, {
         details: { declared: entry.risk, canonical }
       });
     }
+    if (canonical === undefined) {
+      const requiredPrefix = `ext.${id}.`;
+      if (!capability.startsWith(requiredPrefix)) {
+        throw new OperatorError('CAPABILITY_MANIFEST_NAMESPACE_INVALID', `New extension capability ${capability} must be namespaced under ${requiredPrefix}`);
+      }
+      if (!['read','write','external','system','destructive'].includes(entry.risk)) {
+        throw new OperatorError('CAPABILITY_MANIFEST_RISK_MISMATCH', 'New extension capabilities require an explicit fixed risk class.');
+      }
+    }
     if (typeof entry.deterministic !== 'boolean' || typeof entry.reversible !== 'boolean') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability deterministic/reversible flags are required.');
     if (entry.verification !== 'provider' && entry.verification !== 'runtime' && entry.verification !== 'external') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability verification mode is invalid.');
     if (entry.reconciliation !== 'provider' && entry.reconciliation !== 'not-required') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability reconciliation mode is invalid.');
-    if (canonical !== 'read' && entry.reconciliation !== 'provider') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Mutable extension capabilities require provider reconciliation.');
+    if ((canonical ?? entry.risk) !== 'read' && entry.reconciliation !== 'provider') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Mutable extension capabilities require provider reconciliation.');
     if (entry.inputSchemaVersion !== 1 || entry.cancellation !== 'required') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability schema version and cancellation contract are required.');
     const inputMaxBytes = contractBytes(entry.inputMaxBytes, `capabilities[${index}].inputMaxBytes`);
     const outputMaxBytes = contractBytes(entry.outputMaxBytes, `capabilities[${index}].outputMaxBytes`);
     const resourceKinds = uniqueResourceKinds(entry.resourceKinds, index);
-    return { capability, risk: canonical, deterministic: entry.deterministic, reversible: entry.reversible, verification: entry.verification, reconciliation: entry.reconciliation, inputSchemaVersion: 1 as const, inputMaxBytes, outputMaxBytes, cancellation: 'required' as const, resourceKinds };
+    return { capability, risk: canonical ?? entry.risk, deterministic: entry.deterministic, reversible: entry.reversible, verification: entry.verification, reconciliation: entry.reconciliation, inputSchemaVersion: 1 as const, inputMaxBytes, outputMaxBytes, cancellation: 'required' as const, resourceKinds };
   }).sort((a, b) => a.capability.localeCompare(b.capability));
   return { sdkVersion: 1, id, version, displayName, ...(vendor ? { vendor } : {}), provenance, capabilities };
 }
