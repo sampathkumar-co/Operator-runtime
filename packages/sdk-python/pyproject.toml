@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mecord-gateway-sdk"
+version = "1.0.0"
+description = "Mecord Universal Agent Gateway client and capability contracts"
+requires-python = ">=3.10"
+license = { text = "UNLICENSED" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mecord_sdk*"]
