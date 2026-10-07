@@ -106,7 +106,7 @@ test('Developer Session process survives provider restart as detached durable ow
   const terminated = await provider2.execute(sessionAction('terminate', {
     sessionId: started.sessionId
   }));
-  assert.equal(terminated.ok, true);
+  assert.equal(terminated.ok, true, JSON.stringify(terminated.error ?? null));
   assert.equal((terminated.output as { state?: string }).state, 'terminated');
 
   const after = await provider2.execute(sessionAction('list', {

@@ -8,6 +8,9 @@ import { DeviceEnrollmentStore } from '../../../src/core/device-enrollment.ts';
 import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
+import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
+import type { ControlPlaneStore } from '../../../src/core/control-plane-store.ts';
+import { RelayClusterCoordinator } from '../../../src/core/relay-cluster-control.ts';
 import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { RelayControlService } from './control-service.ts';
@@ -50,7 +53,7 @@ export function readRelayServiceConfig(env: NodeJS.ProcessEnv = process.env): Re
   return { stateDir, host, port, resultHost, resultPort, controlHost: CONTROL_HOST, controlPort, controlToken };
 }
 
-function createRelayStores(stateDir: string) {
+function createRelayStores(stateDir: string, controlPlaneStore?: ControlPlaneStore) {
   let liveHub: RelayHub | null = null;
   const identity = new DeviceIdentityStore(stateDir);
   const devices = new DeviceRegistryStore(stateDir, {
@@ -59,9 +62,10 @@ function createRelayStores(stateDir: string) {
   const sessions = new DeviceSessionTokenStore(stateDir, identity, devices, {
     onRevoke: async (jti) => { liveHub?.invalidateSession(jti, 'session revoked'); }
   });
-  const deliveries = new RelayDeliveryStore(stateDir);
-  const results = new RelayResultStore(stateDir);
+  const deliveries = new RelayDeliveryStore(stateDir, controlPlaneStore ? { sharedStore: controlPlaneStore, sharedNamespace: 'relay-delivery-streams' } : {});
+  const results = new RelayResultStore(stateDir, controlPlaneStore ? { sharedStore: controlPlaneStore, sharedNamespace: 'relay-result-streams' } : {});
   const reservationReconciliations = new RelayReservationReconciliationStore(stateDir);
+  const operationTrace = new OperationTraceStore(stateDir);
   const enrollments = new DeviceEnrollmentStore(stateDir);
   const accounts = new AccountDeviceRegistry(stateDir, devices, {
     onReleaseDevice: async (deviceId, accountId, reason) => {
@@ -90,18 +94,34 @@ function createRelayStores(stateDir: string) {
     }
   });
   return {
-    identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments,
+    identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments, operationTrace,
     attachHub(hub: RelayHub) { liveHub = hub; }
   };
 }
 
-export async function runRelayService(config = readRelayServiceConfig()): Promise<RelayHub> {
+export interface RelayServiceRuntimeOptions {
+  controlPlaneStore?: ControlPlaneStore;
+  instanceId?: string;
+  clusterLeaseMs?: number;
+}
+
+export async function runRelayService(
+  config = readRelayServiceConfig(),
+  runtimeOptions: RelayServiceRuntimeOptions = {}
+): Promise<RelayHub> {
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   let lockOwned = true;
   try {
-    const stores = createRelayStores(config.stateDir);
-    const { identity, devices, sessions, deliveries, accounts } = stores;
-    const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
+    const stores = createRelayStores(config.stateDir, runtimeOptions.controlPlaneStore);
+    const { identity, devices, sessions, deliveries, accounts, operationTrace } = stores;
+    const cluster = runtimeOptions.controlPlaneStore ? new RelayClusterCoordinator(runtimeOptions.controlPlaneStore) : undefined;
+    const hub = new RelayHub({
+      stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries,
+      ...(cluster ? { cluster } : {}),
+      operationTrace,
+      ...(runtimeOptions.instanceId ? { instanceId: runtimeOptions.instanceId } : {}),
+      ...(runtimeOptions.clusterLeaseMs ? { clusterLeaseMs: runtimeOptions.clusterLeaseMs } : {})
+    });
     stores.attachHub(hub);
     await accounts.recoverReleases();
     await accounts.recoverErasures();
@@ -115,11 +135,17 @@ export async function runRelayService(config = readRelayServiceConfig()): Promis
   }
 }
 
-export async function runRelayResultService(config = readRelayServiceConfig()): Promise<RelayResultService> {
+export async function runRelayResultService(
+  config = readRelayServiceConfig(),
+  runtimeOptions: RelayServiceRuntimeOptions = {}
+): Promise<RelayResultService> {
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   let lockOwned = true;
   try {
-    const service = new RelayResultService({ stateDir: config.stateDir });
+    const deliveries = new RelayDeliveryStore(config.stateDir, runtimeOptions.controlPlaneStore ? { sharedStore: runtimeOptions.controlPlaneStore, sharedNamespace: 'relay-delivery-streams' } : {});
+    const results = new RelayResultStore(config.stateDir, runtimeOptions.controlPlaneStore ? { sharedStore: runtimeOptions.controlPlaneStore, sharedNamespace: 'relay-result-streams' } : {});
+    const operationTrace = new OperationTraceStore(config.stateDir);
+    const service = new RelayResultService({ stateDir: config.stateDir, deliveries, results, operationTrace });
     const listening = await service.listen(config.resultHost, config.resultPort);
     logListening('operator-relay-results', listening.host, listening.port, config.stateDir, isLoopbackHost(config.resultHost) ? 'local-http' : 'http-behind-required-tls-proxy');
     releaseLockWhenServiceCloses(service, instanceLock);
@@ -134,13 +160,13 @@ async function main(): Promise<void> {
   const config = readRelayServiceConfig();
   const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
   const stores = createRelayStores(config.stateDir);
-  const { identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments } = stores;
+  const { identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments, operationTrace } = stores;
 
-  const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries });
+  const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, operationTrace });
   stores.attachHub(hub);
   await accounts.recoverReleases();
   await accounts.recoverErasures();
-  const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, results, enrollments });
+  const resultService = new RelayResultService({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, results, enrollments, operationTrace });
   let controlService: RelayControlService | null = null;
 
   try {

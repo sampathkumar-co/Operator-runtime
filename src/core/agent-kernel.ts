@@ -5,6 +5,9 @@ import { kernelVerificationEvidence, verifyActionOutcome } from './action-verifi
 import { evidence } from './evidence.ts';
 import { IntentRegistry } from './intent-registry.ts';
 import { OperatorError } from './errors.ts';
+import { executionContextDigest, executionContextIdentityFrom } from './execution-context-identity.ts';
+import type { OperationTraceOutcome, OperationTraceStage } from './operation-trace.ts';
+import { OperationTraceStore } from './operation-trace.ts';
 import { canonicalResourceKeys, resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import type { OperatorRuntime } from './runtime.ts';
@@ -30,6 +33,7 @@ export class AgentKernel {
   #observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
   #beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
   #globalAbortSignal?: () => AbortSignal | undefined;
+  #operationTrace?: OperationTraceStore;
 
   constructor(options: {
     stateDir: string;
@@ -40,6 +44,7 @@ export class AgentKernel {
     observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
     beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
     globalAbortSignal?: () => AbortSignal | undefined;
+    operationTrace?: OperationTraceStore;
   }) {
     this.#runtime = options.runtime;
     this.#leases = options.leases;
@@ -48,12 +53,34 @@ export class AgentKernel {
     this.#observeResult = options.observeResult;
     this.#beforeProviderDispatch = options.beforeProviderDispatch;
     this.#globalAbortSignal = options.globalAbortSignal;
+    this.#operationTrace = options.operationTrace;
   }
 
   get journal(): ActionTransitionJournal { return this.#journal; }
   get intents(): IntentRegistry { return this.#intents; }
 
   async execute(
+    action: ActionRequest,
+    permissions: PermissionProfile,
+    context: AgentKernelExecuteContext = {}
+  ): Promise<ActionResult> {
+    await this.#trace(action, 'REQUEST', 'OK', { ownerKind: context.ownerKind ?? inferOwnerKind(action) });
+    try {
+      const result = await this.#executeCore(action, permissions, context);
+      await this.#trace(action, 'COMPLETE', traceOutcome(result), {
+        provider: result.provider,
+        ...(result.error?.code ? { code: result.error.code } : {})
+      });
+      return result;
+    } catch (error) {
+      await this.#trace(action, 'COMPLETE', 'FAILED', {
+        code: error instanceof OperatorError ? error.code : 'KERNEL_EXECUTION_THROWN'
+      });
+      throw error;
+    }
+  }
+
+  async #executeCore(
     action: ActionRequest,
     permissions: PermissionProfile,
     context: AgentKernelExecuteContext = {}
@@ -71,7 +98,10 @@ export class AgentKernel {
         (candidate) => this.#runtime.router.resolveRisk(candidate),
         context.authorityToken
       )).canonicalAction;
+      await this.#trace(action, 'ROUTE', 'OK', { risk: action.risk });
+      await this.#trace(action, 'POLICY', 'OK', { capability: action.capability, risk: action.risk });
     } catch (error) {
+      await this.#trace(action, 'POLICY', authorityTraceOutcome(error), { code: traceCode(error), capability: action.capability });
       return authorityFailure(action, error);
     }
 
@@ -94,8 +124,10 @@ export class AgentKernel {
           context.authorityToken
         )).canonicalAction;
       } catch (error) {
+        await this.#trace(action, 'POLICY', authorityTraceOutcome(error), { code: traceCode(error), capability: action.capability });
         const denied = authorityFailure(action, error);
         if (denied.error?.code === 'APPROVAL_REQUIRED') {
+          await this.#trace(action, 'APPROVAL', 'BLOCKED', { code: 'APPROVAL_REQUIRED' });
           prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
           await this.#journal.defer(action.id, denied);
         }
@@ -183,6 +215,7 @@ export class AgentKernel {
       action.risk === 'read' ? 'shared' : 'exclusive',
       action.risk === 'read' ? {} : { mutationActionId: action.id }
     );
+    await this.#trace(action, 'LEASE', 'OK', { resourceCount: resourceKeys.length, mode: action.risk === 'read' ? 'shared' : 'exclusive' });
     let quarantineArmed = false;
     let retainQuarantine = false;
     try {
@@ -202,6 +235,7 @@ export class AgentKernel {
             retainQuarantine = true;
           }
           await this.#journal.markDispatched(action.id, providerName);
+          await this.#trace(action, 'DISPATCH', 'OK', { provider: providerName, capability: action.capability });
           dispatched = true;
           await context.onProviderDispatch?.(providerName);
         }
@@ -218,6 +252,7 @@ export class AgentKernel {
           ...(executionSignal ? { signal: executionSignal } : {})
         });
         journalEntry = await this.#journal.reconcile(action.id, reconciliation);
+        await this.#trace(action, 'RECONCILE', reconciliationTraceOutcome(reconciliation.status), { provider: result.provider, status: reconciliation.status });
         retainQuarantine = journalEntry.state === 'UNCERTAIN';
         result = reconciledResult(action, result, reconciliation);
       }
@@ -226,6 +261,7 @@ export class AgentKernel {
       if (!result.ok) return result;
 
       const receipt = verifyActionOutcome({ action, result, journal: journalEntry });
+      await this.#trace(action, 'VERIFY', receipt.verified ? 'OK' : 'FAILED', { verifier: 'agent-kernel' });
       if (!receipt.verified) {
         return {
           ok: false,
@@ -268,6 +304,31 @@ export class AgentKernel {
       } finally {
         await lease.release();
       }
+    }
+  }
+
+  async #trace(
+    action: ActionRequest,
+    stage: OperationTraceStage,
+    outcome: OperationTraceOutcome,
+    attributes: Record<string, string | number | boolean | null> = {}
+  ): Promise<void> {
+    if (!this.#operationTrace) return;
+    try {
+      await this.#operationTrace.append({
+        traceId: action.taskId ?? action.id,
+        executionContextDigest: executionContextDigest(executionContextIdentityFrom({
+          ...(action.taskId ? { taskId: action.taskId } : {}),
+          actionId: action.id,
+          ...(action.intent ? { intent: action.intent } : {})
+        })),
+        stage,
+        outcome,
+        at: new Date().toISOString(),
+        attributes
+      });
+    } catch {
+      // Observability cannot alter execution authority or replay semantics.
     }
   }
 
@@ -356,6 +417,7 @@ export class AgentKernel {
         ...context,
         ...(reconciliationSignal ? { signal: reconciliationSignal } : {})
       });
+      await this.#trace(action, 'RECONCILE', reconciliationTraceOutcome(outcome.status), { provider: providerName, status: outcome.status });
       const journalEntry = existing.state === 'COMPLETED'
         ? existing
         : await this.#journal.reconcile(action.id, outcome);
@@ -391,6 +453,27 @@ export class AgentKernel {
       }
     }
   }
+}
+
+function traceOutcome(result: ActionResult): OperationTraceOutcome {
+  if (result.ok) return 'OK';
+  if (result.error?.sideEffectState === 'uncertain') return 'UNCERTAIN';
+  if (result.error?.code === 'APPROVAL_REQUIRED' || result.provider === 'policy') return 'BLOCKED';
+  if (result.error?.code === 'CANCELLED' || result.error?.code === 'EMERGENCY_STOPPED') return 'CANCELLED';
+  return 'FAILED';
+}
+
+function authorityTraceOutcome(error: unknown): OperationTraceOutcome {
+  return error instanceof OperatorError && error.code === 'APPROVAL_REQUIRED' ? 'BLOCKED' : 'FAILED';
+}
+
+function traceCode(error: unknown): string {
+  return error instanceof OperatorError ? error.code : 'POLICY_ERROR';
+}
+
+function reconciliationTraceOutcome(status: ProviderReconciliationResult['status']): OperationTraceOutcome {
+  if (status === 'completed' || status === 'not_applied') return 'OK';
+  return 'UNCERTAIN';
 }
 
 function reconciledResult(

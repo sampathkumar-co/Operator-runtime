@@ -1,0 +1,10 @@
+{
+  "name": "@mecord/control-center",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "npm run build && git diff --exit-code -- ../local-agent/src/control-center.ts"
+  }
+}

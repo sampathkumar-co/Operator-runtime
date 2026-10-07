@@ -1,0 +1,74 @@
+name: R5 Production Trust Platform
+
+on:
+  push:
+    branches: ['program/r5-production-trust-final-*']
+  pull_request:
+    paths:
+      - 'src/core/otlp-operation-trace.ts'
+      - 'src/core/operation-trace.ts'
+      - 'src/core/agent-kernel.ts'
+      - 'apps/local-agent/src/main.ts'
+      - 'src/core/production-trust-platform.ts'
+      - 'src/core/release-update.ts'
+      - 'src/core/artifact-store.ts'
+      - 'src/core/artifact-object-store.ts'
+      - 'src/core/control-plane-store.ts'
+      - 'src/core/relay-cluster-control.ts'
+      - 'apps/relay-server/src/relay-hub.ts'
+      - 'apps/relay-server/src/result-service.ts'
+      - 'src/core/relay-delivery-store.ts'
+      - 'src/core/relay-result-store.ts'
+      - 'apps/relay-server/src/main.ts'
+      - 'src/core/contract-registry.ts'
+      - 'src/core/index.ts'
+      - 'test/otlp-operation-trace.test.ts'
+      - 'test/operation-trace-coverage.test.ts'
+      - 'test/agent-kernel-operation-trace.test.ts'
+      - 'test/production-trust-platform.test.ts'
+      - 'test/release-update.test.ts'
+      - 'test/artifact-object-store.test.ts'
+      - 'test/control-plane-store.test.ts'
+      - 'test/r5-fault-lab.test.ts'
+      - 'apps/relay-server/test/r5-cluster-composition.test.ts'
+      - 'package.json'
+      - 'scripts/r5-production-soak.ts'
+      - 'scripts/generate-r5-certification.ts'
+      - '.github/workflows/r5-production-trust.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r5-production-trust-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  focused-certification:
+    name: R5 production trust certification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Production TypeScript boundary
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
+          npm run typecheck:production
+      - name: R5 exact-head suite
+        run: npm run test:r5
+      - name: R5 bounded soak smoke
+        run: npm run test:r5-soak:smoke
+      - name: Generate R5 exact-head evidence
+        run: npm run evidence:r5
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: r5-production-trust-evidence-${{ github.sha }}
+          path: artifacts/r5/*
+          if-no-files-found: error
+          retention-days: 30

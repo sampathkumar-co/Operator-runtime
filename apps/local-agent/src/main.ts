@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { AuditLog } from '../../../src/core/audit.ts';
+import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { TaskStore } from '../../../src/core/task-store.ts';
@@ -186,12 +187,14 @@ const runtime = createRuntime({
   perception
 });
 await runtime.initialize();
+const operationTrace = new OperationTraceStore(stateDir);
 const agentKernel = new AgentKernel({
   stateDir,
   runtime,
   leases: resourceLeases,
   journal: actionJournal,
   intents: intentRegistry,
+  operationTrace,
   globalAbortSignal: () => emergencyExecutionGeneration.signal,
   beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
     if (actionPermissions.enterprisePolicyDigest !== undefined || actionPermissions.enterprisePolicyGeneration !== undefined) {

@@ -8,6 +8,9 @@ import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
 import { DeviceRoutingStore, type DeviceRouteDecision, type OnlineDeviceDescriptor } from '../../../src/core/device-routing.ts';
 import { DevicePoolScheduler, type DevicePoolRequest, type DeviceReservation, type DeviceResourceAdvertisement } from '../../../src/core/device-pool.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { executionContextDigest, executionContextIdentityFrom } from '../../../src/core/execution-context-identity.ts';
+import { OperationTraceStore, type OperationTraceOutcome, type OperationTraceStage } from '../../../src/core/operation-trace.ts';
+import { RelayClusterCoordinator, type RelayClusterLease } from '../../../src/core/relay-cluster-control.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
 import { RelayDeliveryStore, type RelayDeliveryAuthority, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
@@ -59,6 +62,7 @@ type Connection = {
   lastSeenAt: string;
   readConcurrency: number;
   inFlight: Map<number, { readOnly: boolean; heavy: boolean }>;
+  clusterLease?: RelayClusterLease;
 };
 
 export interface RelayHubOptions {
@@ -79,6 +83,10 @@ export interface RelayHubOptions {
   maxQueuedBytesPerConnection?: number;
   maxQueuedAgeMs?: number;
   maxAccountRuntimeCaches?: number;
+  cluster?: RelayClusterCoordinator;
+  instanceId?: string;
+  clusterLeaseMs?: number;
+  operationTrace?: OperationTraceStore;
 }
 
 export interface RelayDispatchRequest {
@@ -126,6 +134,10 @@ export class RelayHub {
   #maxQueuedAgeMs: number;
   #liveByClientKey = new Map<string, number>();
   #socketWork = new Set<Promise<void>>();
+  #cluster?: RelayClusterCoordinator;
+  #instanceId: string;
+  #clusterLeaseMs: number;
+  #operationTrace?: OperationTraceStore;
 
   constructor(options: RelayHubOptions) {
     this.#stateDir = path.resolve(options.stateDir);
@@ -137,6 +149,11 @@ export class RelayHub {
     this.#clock = options.clock ?? (() => new Date());
     this.#beforeEnqueue = options.beforeEnqueue;
     this.#beforeFinalDispatchCheck = options.beforeFinalDispatchCheck;
+    this.#cluster = options.cluster;
+    this.#instanceId = options.instanceId ?? crypto.randomUUID();
+    if (!/^[A-Za-z0-9._:@/+=-]{1,256}$/.test(this.#instanceId)) throw new OperatorError('RELAY_CLUSTER_INSTANCE_INVALID', 'Relay cluster instanceId is invalid.');
+    this.#clusterLeaseMs = boundedPositiveInt(options.clusterLeaseMs, 60_000, 10 * 60_000, 'clusterLeaseMs');
+    this.#operationTrace = options.operationTrace;
     const upgradeLimit = boundedPositiveInt(options.upgradeLimitPerMinute, DEFAULT_UPGRADE_LIMIT_PER_MINUTE, 100_000, 'upgradeLimitPerMinute');
     const helloLimit = boundedPositiveInt(options.deviceHelloLimitPerFiveMinutes, DEFAULT_DEVICE_HELLO_LIMIT_PER_FIVE_MINUTES, 100_000, 'deviceHelloLimitPerFiveMinutes');
     this.#maxLiveConnections = boundedPositiveInt(options.maxLiveConnections, DEFAULT_MAX_LIVE_CONNECTIONS, 100_000, 'maxLiveConnections');
@@ -154,7 +171,7 @@ export class RelayHub {
     const server = http.createServer((request, response) => {
       if (request.method === 'GET' && request.url === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1 }));
+        response.end(JSON.stringify({ ok: true, service: 'operator-relay', version: 1, clustered: Boolean(this.#cluster), instanceId: this.#instanceId }));
         return;
       }
       response.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
@@ -196,8 +213,12 @@ export class RelayHub {
   }
 
   async close(): Promise<void> {
-    for (const connection of this.#connections.values()) {
+    const closingConnections = [...this.#connections.values()];
+    for (const connection of closingConnections) {
       try { connection.socket.close(1001, 'relay shutting down'); } catch { /* noop */ }
+    }
+    if (this.#cluster) {
+      await Promise.allSettled(closingConnections.flatMap((connection) => connection.clusterLease ? [this.#cluster!.release(connection.clusterLease, this.#clock().toISOString())] : []));
     }
     this.#connections.clear();
     const wss = this.#wss;
@@ -302,6 +323,8 @@ export class RelayHub {
 
   async dispatch(request: RelayDispatchRequest): Promise<RelayDispatchResult> {
     const requiredCapabilities = request.requiredCapabilities ?? [];
+    const traceId = relayTraceId(request);
+    await this.#trace(traceId, { accountId: request.accountId }, 'REQUEST', 'OK', { transport: 'relay', kind: request.kind });
     const memberships = await this.#accounts.listDevices(request.accountId);
     const owned = new Set(memberships.map((membership) => membership.deviceId));
     const online = (await this.onlineDevices(request.accountId)).filter((device) => owned.has(device.deviceId));
@@ -312,6 +335,7 @@ export class RelayHub {
       }, online));
     const membership = memberships.find((candidate) => candidate.deviceId === route.deviceId && candidate.status === 'active');
     if (!membership) throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Resolved device has no active account authority.');
+    await this.#trace(traceId, { accountId: request.accountId, deviceId: route.deviceId, sessionId: route.sessionId }, 'ROUTE', 'OK', { transport: 'relay', deviceId: route.deviceId });
     const authority: RelayDeliveryAuthority = {
       accountId: request.accountId,
       deviceId: route.deviceId,
@@ -319,7 +343,7 @@ export class RelayHub {
     };
     await this.#beforeEnqueue?.({ ...authority });
     await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
-    const payload = { ...request.payload, approvalAuthority: { ...authority } };
+    const payload = { ...request.payload, approvalAuthority: { ...authority }, traceId };
     let delivery: StoredRelayDelivery;
     try {
       delivery = await this.#accounts.withActiveAuthorityLease(authority, async () =>
@@ -345,6 +369,7 @@ export class RelayHub {
     await this.#beforeFinalDispatchCheck?.({ ...authority });
     const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
     this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
+    await this.#trace(traceId, { accountId: request.accountId, deviceId: route.deviceId, sessionId: route.sessionId }, 'DISPATCH', 'OK', { transport: 'relay', deliverySeq: delivery.seq, kind: request.kind });
     return { route, delivery };
   }
 
@@ -424,6 +449,28 @@ export class RelayHub {
     return runtime.pool;
   }
 
+  async #trace(
+    traceId: string,
+    identity: { accountId?: string; deviceId?: string; sessionId?: string },
+    stage: OperationTraceStage,
+    outcome: OperationTraceOutcome,
+    attributes: Record<string, string | number | boolean | null>
+  ): Promise<void> {
+    if (!this.#operationTrace) return;
+    try {
+      await this.#operationTrace.append({
+        traceId,
+        executionContextDigest: executionContextDigest(executionContextIdentityFrom(identity)),
+        stage,
+        outcome,
+        at: this.#clock().toISOString(),
+        attributes
+      });
+    } catch {
+      // Relay observability cannot alter routing or delivery authority.
+    }
+  }
+
   #accept(socket: WebSocket): void {
     let authenticated = false;
     let connection: Connection | null = null;
@@ -472,6 +519,9 @@ export class RelayHub {
         connection.lastSeenAt = this.#clock().toISOString();
         if (frame.type === 'ping') {
           const nonce = validNonce(String(frame.nonce ?? ''));
+          if (this.#cluster && connection.clusterLease) {
+            connection.clusterLease = await this.#cluster.acquire(`device:${connection.deviceId}`, this.#instanceId, this.#clusterLeaseMs, connection.lastSeenAt);
+          }
           send(socket, { type: 'pong', nonce });
           return;
         }
@@ -500,6 +550,9 @@ export class RelayHub {
       clearTimeout(timer);
       if (connection && this.#connections.get(connection.deviceId)?.sessionId === connection.sessionId) {
         this.#connections.delete(connection.deviceId);
+        if (this.#cluster && connection.clusterLease) {
+          void this.#cluster.release(connection.clusterLease, this.#clock().toISOString()).catch(() => undefined);
+        }
       }
     });
     socket.on('error', () => { /* close lifecycle owns cleanup */ });
@@ -556,7 +609,16 @@ export class RelayHub {
       if (!membership) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Capability-bound relay connection requires active account-device authority.');
       accountAuthority = { accountId: membership.accountId, deviceId, generation: membership.authorityGeneration };
     }
-    const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
+    const clusterLease = this.#cluster
+      ? await this.#cluster.acquire(`device:${deviceId}`, this.#instanceId, this.#clusterLeaseMs, this.#clock().toISOString())
+      : undefined;
+    let reconciled;
+    try {
+      reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
+    } catch (error) {
+      if (this.#cluster && clusterLease) await this.#cluster.release(clusterLease, this.#clock().toISOString()).catch(() => undefined);
+      throw error;
+    }
     const sessionId = crypto.randomUUID();
     const logicalSessionBindingId = logicalSessionId;
     const capabilityAuthority = accountAuthority
@@ -583,6 +645,7 @@ export class RelayHub {
       socket, deviceId, sessionId, logicalSessionId, sessionJti: session.jti, capabilities,
       ...(capabilityAuthority ? { capabilityAuthority } : {}),
       ...(resourceProfile ? { resourceProfile } : {}),
+      ...(clusterLease ? { clusterLease } : {}),
       connectedAt: now, lastSeenAt: now,
       readConcurrency,
       inFlight: new Map()
@@ -624,6 +687,10 @@ export class RelayHub {
     const connection = this.#connections.get(authority.deviceId);
     if (!connection || connection.socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('RELAY_TRANSPORT_UNAVAILABLE', 'Relay transport is temporarily unavailable for the authorized device.', { retryable: true, details: { deviceId: authority.deviceId, recoverability: 'automatic', transportChanged: true, safeToRetry: true } });
+    }
+    if (this.#cluster) {
+      if (!connection.clusterLease) throw new OperatorError('RELAY_CLUSTER_FENCE_LOST', 'Clustered relay connection has no shared ownership lease.');
+      await this.#cluster.assertCurrent(connection.clusterLease, this.#clock().toISOString());
     }
     // A transport/sessionId replacement is not an authority change. Credential
     // rotation and reconnect may replace the WebSocket while the device,
@@ -834,6 +901,28 @@ function rejectUpgrade(socket: { write(data: string): unknown; destroy(): unknow
   } finally {
     socket.destroy();
   }
+}
+
+function relayTraceId(request: RelayDispatchRequest): string {
+  const payload = request.payload as Record<string, unknown>;
+  const direct = typeof payload.traceId === 'string' ? payload.traceId : undefined;
+  const action = payload.action && typeof payload.action === 'object' && !Array.isArray(payload.action) ? payload.action as Record<string, unknown> : undefined;
+  const task = payload.task && typeof payload.task === 'object' && !Array.isArray(payload.task) ? payload.task as Record<string, unknown> : undefined;
+  const operation = payload.operation && typeof payload.operation === 'object' && !Array.isArray(payload.operation) ? payload.operation as Record<string, unknown> : undefined;
+  const taskRequest = task?.request && typeof task.request === 'object' && !Array.isArray(task.request) ? task.request as Record<string, unknown> : undefined;
+  const operationRequest = operation?.request && typeof operation.request === 'object' && !Array.isArray(operation.request) ? operation.request as Record<string, unknown> : undefined;
+  const candidates = [
+    direct,
+    typeof action?.taskId === 'string' ? action.taskId : undefined,
+    typeof action?.id === 'string' ? action.id : undefined,
+    typeof task?.taskId === 'string' ? task.taskId : undefined,
+    typeof taskRequest?.requestId === 'string' ? taskRequest.requestId : undefined,
+    typeof operation?.operationId === 'string' ? operation.operationId : undefined,
+    typeof operationRequest?.requestId === 'string' ? operationRequest.requestId : undefined,
+    request.idempotencyKey ? 'relay-' + request.idempotencyKey : undefined
+  ].filter((value): value is string => Boolean(value));
+  const found = candidates.find((value)=>/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(value));
+  return found ?? 'relay-' + crypto.randomUUID();
 }
 
 function boundedPositiveInt(value: number | undefined, fallback: number, max: number, label: string): number {
