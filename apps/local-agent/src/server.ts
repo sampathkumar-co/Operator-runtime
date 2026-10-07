@@ -28,6 +28,9 @@ import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
+import { buildControlCenterProductSnapshot } from './control-center-product.ts';
+import { buildControlCenterSupportBundle } from './control-center-support.ts';
+import type { OnboardingStateInput } from '../../../src/core/control-center-ux.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
@@ -127,6 +130,7 @@ export function createLocalAgentServer(options: {
   deviceRegistry?: DeviceRegistryStore;
   settings?: CompanionSettings;
   getRuntimeStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
+  getOnboardingStatus?: () => OnboardingStateInput | Promise<OnboardingStateInput>;
   privacy?: LocalPrivacyDataStore;
   deviceReset?: () => Promise<LocalDeviceResetResult>;
   inlineApprovalWaitMs?: number;
@@ -663,6 +667,68 @@ export function createLocalAgentServer(options: {
         ok: true,
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
         configured: Boolean(options.tasks)
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/product' && req.method === 'GET') {
+      const requested = Number(requestUrl.searchParams.get('limit') ?? 200);
+      const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 500) : 200;
+      const [summaries, approvals, onboarding] = await Promise.all([
+        options.tasks ? options.tasks.list(limit) : [],
+        options.approvals ? options.approvals.list() : [],
+        options.getOnboardingStatus ? options.getOnboardingStatus() : Promise.resolve({
+          runtimeInstalled: true,
+          doctorHealthy: false,
+          authenticated: true,
+          devicePaired: false,
+          rootsConfigured: false,
+          readProbePassed: false,
+          approvalProbePassed: false,
+          guidedTaskVerified: false
+        })
+      ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
+      send(res, 200, {
+        ok: true,
+        product: buildControlCenterProductSnapshot({ approvals, tasks, onboarding })
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/support-bundle' && req.method === 'GET') {
+      const [summaries, approvals, onboarding, runtimeStatus] = await Promise.all([
+        options.tasks ? options.tasks.list(500) : [],
+        options.approvals ? options.approvals.list() : [],
+        options.getOnboardingStatus ? options.getOnboardingStatus() : Promise.resolve({
+          runtimeInstalled: true,
+          doctorHealthy: false,
+          authenticated: true,
+          devicePaired: false,
+          rootsConfigured: false,
+          readProbePassed: false,
+          approvalProbePassed: false,
+          guidedTaskVerified: false
+        }),
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({})
+      ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
+      const product = buildControlCenterProductSnapshot({ approvals, tasks, onboarding });
+      const sourceCommit = process.env.OPERATOR_SOURCE_COMMIT?.trim();
+      send(res, 200, {
+        ok: true,
+        bundle: buildControlCenterSupportBundle({
+          productVersion: PRODUCT_VERSION,
+          ...(sourceCommit && /^[0-9a-f]{40,64}$/i.test(sourceCommit) ? { sourceCommit } : {}),
+          product,
+          runtimeStatus,
+          settings: options.settings,
+          tasks
+        })
       });
       return;
     }

@@ -14,7 +14,7 @@ const UPDATE_STAGE_OPTIONS = {
   invalidMessage: 'Staged update artifact is invalid.'
 } as const;
 
-export type ReleaseChannel = 'stable' | 'beta';
+export type ReleaseChannel = 'stable' | 'beta' | 'canary';
 export type ReleaseArtifactKind = 'msix' | 'msixbundle' | 'zip';
 
 export interface ReleaseArtifact {
@@ -157,7 +157,7 @@ function encodeManifest(manifestInput: ReleaseManifest): Buffer {
 
 function validateManifest(input: ReleaseManifest): ReleaseManifest {
   if (!input || typeof input !== 'object' || input.schemaVersion !== 1 || input.product !== PRODUCT) throw new OperatorError('UPDATE_MANIFEST_INVALID', 'Release manifest schema or product is invalid.');
-  const channel = input.channel === 'stable' ? 'stable' : input.channel === 'beta' ? 'beta' : null;
+  const channel = input.channel === 'stable' ? 'stable' : input.channel === 'beta' ? 'beta' : input.channel === 'canary' ? 'canary' : null;
   if (!channel) throw new OperatorError('UPDATE_MANIFEST_INVALID', 'Release channel is invalid.');
   const version = validVersion(String(input.version ?? ''));
   const publishedAt = validIso(String(input.publishedAt ?? ''));
