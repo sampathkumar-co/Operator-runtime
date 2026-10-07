@@ -1,0 +1,426 @@
+import crypto from 'node:crypto';
+import path from 'node:path';
+import { canonicalJson } from './action-identity.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { OperatorError } from './errors.ts';
+import type { OperationSloSummary } from './operation-trace.ts';
+
+export interface ProductionSloPolicy {
+  minVerificationRate: number;
+  maxFalseCompletionRate: number;
+  maxUncertainRate: number;
+  maxP95CompletionMs: number;
+  minCrashFreeSessionRate: number;
+  minUpdateSuccessRate: number;
+}
+
+export interface ProductionSloObservation {
+  operation: OperationSloSummary;
+  crashFreeSessionRate: number;
+  updateSuccessRate: number;
+}
+
+export interface ProductionSloDecision {
+  healthy: boolean;
+  reasons: string[];
+  metrics: {
+    verificationRate: number;
+    falseCompletionRate: number;
+    uncertainRate: number;
+    p95CompletionMs: number;
+    crashFreeSessionRate: number;
+    updateSuccessRate: number;
+  };
+}
+
+export interface RelayOwnershipFence {
+  schemaVersion: 1;
+  resourceKey: string;
+  ownerInstanceId: string;
+  generation: number;
+  token: string;
+  acquiredAt: string;
+  renewedAt: string;
+  expiresAt: string;
+}
+
+interface RelayFenceState {
+  version: 1;
+  fences: RelayOwnershipFence[];
+}
+
+export interface UpdateRolloutWave {
+  id: string;
+  targetCount: number;
+  minHealthyCount: number;
+}
+
+export interface UpdateRolloutState {
+  schemaVersion: 1;
+  id: string;
+  version: string;
+  channel: 'canary' | 'beta' | 'stable';
+  waves: UpdateRolloutWave[];
+  currentWave: number;
+  state: 'READY' | 'RUNNING' | 'HALTED' | 'ROLLBACK_REQUIRED' | 'COMPLETED';
+  completedTargets: number;
+  healthyTargets: number;
+  failedTargets: number;
+  startedAt?: string;
+  updatedAt: string;
+  reason?: string;
+}
+
+const FENCE_OPTIONS = {
+  maxBytes: 8 * 1024 * 1024,
+  errorCode: 'RELAY_CLUSTER_FENCE_CORRUPT',
+  invalidMessage: 'Relay cluster fence state is invalid.'
+} as const;
+const MAX_FENCES = 100_000;
+const MIN_LEASE_MS = 5_000;
+const MAX_LEASE_MS = 10 * 60_000;
+
+export function evaluateProductionSlo(
+  observation: ProductionSloObservation,
+  policyInput: ProductionSloPolicy
+): ProductionSloDecision {
+  const policy = normalizePolicy(policyInput);
+  const operation = observation.operation;
+  if (!operation || !Number.isSafeInteger(operation.traces) || operation.traces < 0) throw invalid('Operation SLO summary is invalid.');
+  const falseCompletionRate = operation.traces === 0 ? 0 : operation.falseCompletionCount / operation.traces;
+  const uncertainRate = operation.traces === 0 ? 0 : operation.uncertain / operation.traces;
+  const metrics = {
+    verificationRate: boundedRatio(operation.verificationRate, 'verificationRate'),
+    falseCompletionRate: boundedRatio(falseCompletionRate, 'falseCompletionRate'),
+    uncertainRate: boundedRatio(uncertainRate, 'uncertainRate'),
+    p95CompletionMs: finite(operation.p95CompletionMs, 0, 24 * 60 * 60_000, 'p95CompletionMs'),
+    crashFreeSessionRate: boundedRatio(observation.crashFreeSessionRate, 'crashFreeSessionRate'),
+    updateSuccessRate: boundedRatio(observation.updateSuccessRate, 'updateSuccessRate')
+  };
+  const reasons: string[] = [];
+  if (metrics.verificationRate < policy.minVerificationRate) reasons.push('VERIFICATION_RATE_LOW');
+  if (metrics.falseCompletionRate > policy.maxFalseCompletionRate) reasons.push('FALSE_COMPLETION_RATE_HIGH');
+  if (metrics.uncertainRate > policy.maxUncertainRate) reasons.push('UNCERTAIN_RATE_HIGH');
+  if (metrics.p95CompletionMs > policy.maxP95CompletionMs) reasons.push('P95_COMPLETION_LATENCY_HIGH');
+  if (metrics.crashFreeSessionRate < policy.minCrashFreeSessionRate) reasons.push('CRASH_FREE_SESSION_RATE_LOW');
+  if (metrics.updateSuccessRate < policy.minUpdateSuccessRate) reasons.push('UPDATE_SUCCESS_RATE_LOW');
+  return { healthy: reasons.length === 0, reasons, metrics };
+}
+
+export class RelayOwnershipFenceStore {
+  #file: string;
+  #clock: () => Date;
+  #serial: Promise<void> = Promise.resolve();
+
+  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+    this.#file = path.join(path.resolve(stateDir), 'relay-cluster-fences.json');
+    this.#clock = options.clock ?? (() => new Date());
+  }
+
+  async acquire(input: {
+    resourceKey: string;
+    ownerInstanceId: string;
+    leaseMs?: number;
+  }): Promise<RelayOwnershipFence> {
+    const resourceKey = boundedId(input.resourceKey, 'resourceKey');
+    const ownerInstanceId = boundedId(input.ownerInstanceId, 'ownerInstanceId');
+    const leaseMs = integer(input.leaseMs ?? 30_000, MIN_LEASE_MS, MAX_LEASE_MS, 'leaseMs');
+    let result!: RelayOwnershipFence;
+    const run = this.#serial.then(async () => {
+      const state = await this.#read();
+      const now = this.#clock();
+      pruneExpired(state, now.getTime());
+      const active = state.fences.find((fence) => fence.resourceKey === resourceKey);
+      if (active) {
+        if (active.ownerInstanceId !== ownerInstanceId) {
+          throw new OperatorError('RELAY_CLUSTER_RESOURCE_FENCED', 'Relay resource is owned by another live instance.', {
+            retryable: true,
+            details: { resourceKey, generation: active.generation }
+          });
+        }
+        active.renewedAt = now.toISOString();
+        active.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+        result = structuredClone(active);
+        await this.#write(state);
+        return;
+      }
+      const previous = state.fences
+        .filter((fence) => fence.resourceKey === resourceKey)
+        .reduce((max, fence) => Math.max(max, fence.generation), 0);
+      if (previous >= Number.MAX_SAFE_INTEGER) throw invalid('Relay fence generation is exhausted.');
+      if (state.fences.length >= MAX_FENCES) {
+        const reclaim = state.fences.findIndex((fence) => Date.parse(fence.expiresAt) <= now.getTime());
+        if (reclaim < 0) throw invalid('Relay fence store capacity is exhausted.');
+        state.fences.splice(reclaim, 1);
+      }
+      result = {
+        schemaVersion: 1,
+        resourceKey,
+        ownerInstanceId,
+        generation: previous + 1,
+        token: crypto.randomBytes(32).toString('base64url'),
+        acquiredAt: now.toISOString(),
+        renewedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + leaseMs).toISOString()
+      };
+      state.fences.push(result);
+      await this.#write(state);
+    });
+    this.#serial = run.then(() => undefined, () => undefined);
+    await run;
+    return result;
+  }
+
+  async assertCurrent(input: {
+    resourceKey: string;
+    ownerInstanceId: string;
+    generation: number;
+    token: string;
+    now?: string;
+  }): Promise<RelayOwnershipFence> {
+    await this.#serial;
+    const state = await this.#read();
+    const now = input.now ? Date.parse(iso(input.now, 'now')) : this.#clock().getTime();
+    const resourceKey = boundedId(input.resourceKey, 'resourceKey');
+    const fence = state.fences.find((item) => item.resourceKey === resourceKey);
+    if (!fence || Date.parse(fence.expiresAt) <= now) throw new OperatorError('RELAY_CLUSTER_FENCE_LOST', 'Relay resource ownership lease is no longer active.');
+    if (
+      fence.ownerInstanceId !== boundedId(input.ownerInstanceId, 'ownerInstanceId') ||
+      fence.generation !== integer(input.generation, 1, Number.MAX_SAFE_INTEGER, 'generation') ||
+      !timingSafeToken(fence.token, input.token)
+    ) throw new OperatorError('RELAY_CLUSTER_FENCE_STALE', 'Relay resource ownership token is stale.');
+    return structuredClone(fence);
+  }
+
+  async release(input: {
+    resourceKey: string;
+    ownerInstanceId: string;
+    generation: number;
+    token: string;
+  }): Promise<boolean> {
+    const current = await this.assertCurrent(input);
+    const run = this.#serial.then(async () => {
+      const state = await this.#read();
+      const index = state.fences.findIndex((item) =>
+        item.resourceKey === current.resourceKey &&
+        item.ownerInstanceId === current.ownerInstanceId &&
+        item.generation === current.generation &&
+        timingSafeToken(item.token, current.token)
+      );
+      if (index < 0) return false;
+      state.fences.splice(index, 1);
+      await this.#write(state);
+      return true;
+    });
+    this.#serial = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  async #read(): Promise<RelayFenceState> {
+    try {
+      return validateFenceState(JSON.parse(await readDurableStateText(this.#file, FENCE_OPTIONS)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, fences: [] };
+      if (error instanceof OperatorError) throw error;
+      throw new OperatorError('RELAY_CLUSTER_FENCE_CORRUPT', 'Relay cluster fence state could not be read.');
+    }
+  }
+
+  async #write(state: RelayFenceState): Promise<void> {
+    validateFenceState(state);
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), FENCE_OPTIONS);
+  }
+}
+
+export function createUpdateRollout(input: {
+  version: string;
+  channel: UpdateRolloutState['channel'];
+  waves: UpdateRolloutWave[];
+  now?: string;
+}): UpdateRolloutState {
+  const version = semver(input.version);
+  if (!['canary','beta','stable'].includes(input.channel)) throw invalid('Update rollout channel is invalid.');
+  const waves = normalizeWaves(input.waves);
+  const updatedAt = iso(input.now ?? new Date().toISOString(), 'now');
+  const identity = { version, channel: input.channel, waves };
+  return {
+    schemaVersion: 1,
+    id: sha256(canonicalJson(identity)),
+    version,
+    channel: input.channel,
+    waves,
+    currentWave: 0,
+    state: 'READY',
+    completedTargets: 0,
+    healthyTargets: 0,
+    failedTargets: 0,
+    updatedAt
+  };
+}
+
+export function startUpdateRollout(stateInput: UpdateRolloutState, now = new Date().toISOString()): UpdateRolloutState {
+  const state = normalizeRollout(stateInput);
+  if (state.state !== 'READY') throw invalid('Only a ready rollout can start.');
+  return { ...state, state: 'RUNNING', startedAt: iso(now, 'now'), updatedAt: iso(now, 'now') };
+}
+
+export function recordUpdateWaveResult(input: {
+  state: UpdateRolloutState;
+  completedTargets: number;
+  healthyTargets: number;
+  rollbackAvailable: boolean;
+  slo: ProductionSloDecision;
+  now?: string;
+}): UpdateRolloutState {
+  const state = normalizeRollout(input.state);
+  if (state.state !== 'RUNNING') throw invalid('Only a running rollout accepts wave results.');
+  const wave = state.waves[state.currentWave];
+  if (!wave) throw invalid('Update rollout current wave is invalid.');
+  const completedTargets = integer(input.completedTargets, 0, wave.targetCount, 'completedTargets');
+  const healthyTargets = integer(input.healthyTargets, 0, completedTargets, 'healthyTargets');
+  const failedTargets = completedTargets - healthyTargets;
+  const updatedAt = iso(input.now ?? new Date().toISOString(), 'now');
+  const waveHealthy = completedTargets === wave.targetCount && healthyTargets >= wave.minHealthyCount && input.slo.healthy;
+  if (!waveHealthy) {
+    return {
+      ...state,
+      completedTargets: state.completedTargets + completedTargets,
+      healthyTargets: state.healthyTargets + healthyTargets,
+      failedTargets: state.failedTargets + failedTargets,
+      state: input.rollbackAvailable ? 'ROLLBACK_REQUIRED' : 'HALTED',
+      reason: input.slo.healthy ? 'UPDATE_WAVE_HEALTH_THRESHOLD_FAILED' : input.slo.reasons.join(','),
+      updatedAt
+    };
+  }
+  const nextWave = state.currentWave + 1;
+  return {
+    ...state,
+    currentWave: Math.min(nextWave, state.waves.length - 1),
+    completedTargets: state.completedTargets + completedTargets,
+    healthyTargets: state.healthyTargets + healthyTargets,
+    failedTargets: state.failedTargets + failedTargets,
+    state: nextWave >= state.waves.length ? 'COMPLETED' : 'RUNNING',
+    updatedAt
+  };
+}
+
+function normalizePolicy(input: ProductionSloPolicy): ProductionSloPolicy {
+  return {
+    minVerificationRate: boundedRatio(input.minVerificationRate, 'minVerificationRate'),
+    maxFalseCompletionRate: boundedRatio(input.maxFalseCompletionRate, 'maxFalseCompletionRate'),
+    maxUncertainRate: boundedRatio(input.maxUncertainRate, 'maxUncertainRate'),
+    maxP95CompletionMs: finite(input.maxP95CompletionMs, 1, 24 * 60 * 60_000, 'maxP95CompletionMs'),
+    minCrashFreeSessionRate: boundedRatio(input.minCrashFreeSessionRate, 'minCrashFreeSessionRate'),
+    minUpdateSuccessRate: boundedRatio(input.minUpdateSuccessRate, 'minUpdateSuccessRate')
+  };
+}
+
+function normalizeWaves(input: UpdateRolloutWave[]): UpdateRolloutWave[] {
+  if (!Array.isArray(input) || input.length < 1 || input.length > 32) throw invalid('Update rollout waves are invalid.');
+  const ids = new Set<string>();
+  return input.map((wave) => {
+    const id = boundedId(wave.id, 'wave.id');
+    if (ids.has(id)) throw invalid('Update rollout wave ids must be unique.');
+    ids.add(id);
+    const targetCount = integer(wave.targetCount, 1, 10_000_000, 'wave.targetCount');
+    const minHealthyCount = integer(wave.minHealthyCount, 1, targetCount, 'wave.minHealthyCount');
+    return { id, targetCount, minHealthyCount };
+  });
+}
+
+function normalizeRollout(input: UpdateRolloutState): UpdateRolloutState {
+  if (!input || input.schemaVersion !== 1) throw invalid('Update rollout is invalid.');
+  const waves = normalizeWaves(input.waves);
+  const state = String(input.state) as UpdateRolloutState['state'];
+  if (!['READY','RUNNING','HALTED','ROLLBACK_REQUIRED','COMPLETED'].includes(state)) throw invalid('Update rollout state is invalid.');
+  const normalized: UpdateRolloutState = {
+    schemaVersion: 1,
+    id: digest(input.id, 'rollout.id'),
+    version: semver(input.version),
+    channel: input.channel,
+    waves,
+    currentWave: integer(input.currentWave, 0, waves.length - 1, 'currentWave'),
+    state,
+    completedTargets: integer(input.completedTargets, 0, 100_000_000, 'completedTargets'),
+    healthyTargets: integer(input.healthyTargets, 0, 100_000_000, 'healthyTargets'),
+    failedTargets: integer(input.failedTargets, 0, 100_000_000, 'failedTargets'),
+    ...(input.startedAt ? { startedAt: iso(input.startedAt, 'startedAt') } : {}),
+    updatedAt: iso(input.updatedAt, 'updatedAt'),
+    ...(input.reason ? { reason: boundedText(input.reason, 2048, 'reason') } : {})
+  };
+  const expected = sha256(canonicalJson({ version: normalized.version, channel: normalized.channel, waves: normalized.waves }));
+  if (normalized.id !== expected) throw invalid('Update rollout id does not match its immutable definition.');
+  return normalized;
+}
+
+function validateFenceState(input: unknown): RelayFenceState {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
+  const state = input as RelayFenceState;
+  if (state.version !== 1 || !Array.isArray(state.fences) || state.fences.length > MAX_FENCES) throw corrupt('State shape is invalid.');
+  const resources = new Set<string>();
+  for (const fence of state.fences) {
+    if (!fence || fence.schemaVersion !== 1) throw corrupt('Fence shape is invalid.');
+    boundedId(fence.resourceKey, 'resourceKey');
+    boundedId(fence.ownerInstanceId, 'ownerInstanceId');
+    integer(fence.generation, 1, Number.MAX_SAFE_INTEGER, 'generation');
+    if (!/^[A-Za-z0-9_-]{40,128}$/.test(fence.token)) throw corrupt('Fence token is invalid.');
+    iso(fence.acquiredAt, 'acquiredAt'); iso(fence.renewedAt, 'renewedAt'); iso(fence.expiresAt, 'expiresAt');
+    if (resources.has(fence.resourceKey)) throw corrupt('Multiple owners exist for one relay resource.');
+    resources.add(fence.resourceKey);
+  }
+  return structuredClone(state);
+}
+function pruneExpired(state: RelayFenceState, now: number): void {
+  state.fences = state.fences.filter((fence) => Date.parse(fence.expiresAt) > now);
+}
+function timingSafeToken(expected: string, supplied: string): boolean {
+  const a = Buffer.from(expected);
+  const b = Buffer.from(String(supplied ?? ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function boundedId(input: unknown, label: string): string {
+  const value = String(input ?? '');
+  if (!/^[A-Za-z0-9._:@/+-=]{1,512}$/.test(value)) throw invalid(label + ' is invalid.');
+  return value;
+}
+function boundedText(input: unknown, max: number, label: string): string {
+  if (typeof input !== 'string' || !input.trim() || input.includes('\0') || Buffer.byteLength(input, 'utf8') > max) throw invalid(label + ' is invalid.');
+  return input.trim();
+}
+function semver(input: unknown): string {
+  const value = String(input ?? '');
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value)) throw invalid('version must be SemVer.');
+  return value;
+}
+function boundedRatio(input: unknown, label: string): number {
+  return finite(input, 0, 1, label);
+}
+function finite(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isFinite(value) || value < min || value > max) throw invalid(label + ' is invalid.');
+  return value;
+}
+function integer(input: unknown, min: number, max: number, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw invalid(label + ' is invalid.');
+  return value;
+}
+function iso(input: unknown, label: string): string {
+  const value = String(input ?? '');
+  if (!value || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw invalid(label + ' must be canonical ISO.');
+  return value;
+}
+function digest(input: unknown, label: string): string {
+  const value = String(input ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(value)) throw invalid(label + ' must be SHA-256.');
+  return value;
+}
+function sha256(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+function invalid(message: string): OperatorError {
+  return new OperatorError('PRODUCTION_TRUST_INVALID', message);
+}
+function corrupt(message: string): OperatorError {
+  return new OperatorError('RELAY_CLUSTER_FENCE_CORRUPT', message);
+}
