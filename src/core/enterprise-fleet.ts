@@ -168,10 +168,37 @@ function normalizePolicy(input: EnterpriseFleetPolicy): EnterpriseFleetPolicy {
   };
 }
 function compareSemver(left: string, right: string): number {
-  const a = semver(left).split(/[.+-]/,3).slice(0,3).map(Number);
-  const b = semver(right).split(/[.+-]/,3).slice(0,3).map(Number);
-  for (let i=0;i<3;i++) if (a[i] !== b[i]) return (a[i] ?? 0) - (b[i] ?? 0);
+  const a = parseSemver(semver(left));
+  const b = parseSemver(semver(right));
+  for (const key of ['major','minor','patch'] as const) {
+    if (a[key] !== b[key]) return a[key] - b[key];
+  }
+  if (a.prerelease.length === 0 && b.prerelease.length > 0) return 1;
+  if (a.prerelease.length > 0 && b.prerelease.length === 0) return -1;
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let i = 0; i < length; i += 1) {
+    const x = a.prerelease[i];
+    const y = b.prerelease[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xn = /^\d+$/.test(x);
+    const yn = /^\d+$/.test(y);
+    if (xn && yn) return Number(x) - Number(y);
+    if (xn !== yn) return xn ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
   return 0;
+}
+function parseSemver(value: string): { major:number; minor:number; patch:number; prerelease:string[] } {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value);
+  if (!match) throw invalid('runtime version is invalid.');
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ? match[4].split('.') : []
+  };
 }
 function semver(input: unknown): string {
   const value=String(input??'');
