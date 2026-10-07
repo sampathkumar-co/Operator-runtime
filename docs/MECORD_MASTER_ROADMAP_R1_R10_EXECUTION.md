@@ -864,22 +864,26 @@ Every implementation PR must record:
 
 # Program progress ledger
 
-Initial state deliberately starts all releases as not certified.
+Status reconciled: **2026-10-07**.
 
-| Release | Status |
+| Release | Program status |
 |---|---|
-| R1 Canonical Trusted Runtime | NOT_STARTED |
-| R2 Integrated Adaptive Planning Runtime | NOT_STARTED |
-| R3 Developer Workstation OS | NOT_STARTED |
-| R4 Human-Centered Mecord Product | NOT_STARTED |
-| R5 Production Trust Platform | NOT_STARTED |
-| R6 Universal Agent Gateway | NOT_STARTED |
-| R7 Enterprise Agent Control Plane | NOT_STARTED |
-| R8 Counterfactual Twin + Proof Kernel | NOT_STARTED |
-| R9 Distributed Autonomous Engineering Fabric | NOT_STARTED |
-| R10 Verifiable Autonomous Engineering OS | NOT_STARTED |
+| R1 Canonical Trusted Runtime | CERTIFIED |
+| R2 Integrated Adaptive Planning Runtime | CERTIFIED |
+| R3 Developer Workstation OS | CERTIFIED |
+| R4 Human-Centered Mecord Product | IMPLEMENTED_NOT_CERTIFIED |
+| R5 Production Trust Platform | IMPLEMENTED_NOT_CERTIFIED |
+| R6 Universal Agent Gateway | IMPLEMENTED_NOT_CERTIFIED |
+| R7 Enterprise Agent Control Plane | IMPLEMENTED_NOT_CERTIFIED |
+| R8 Counterfactual Twin + Proof Kernel | IMPLEMENTED_NOT_CERTIFIED |
+| R9 Distributed Autonomous Engineering Fabric | IN_PROGRESS |
+| R10 Verifiable Autonomous Engineering OS | IN_PROGRESS |
 
-Existing code may satisfy parts of future work packages, but no release status is upgraded until those capabilities are reconciled against the release's canonical contracts and exit evidence.
+R1-R3 have explicit roadmap certification ledgers. R4-R8 have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+
+R9-R10 were already carrying foundation modules before this reconciliation. Their `IN_PROGRESS` status records those pre-existing foundations only; the R7-R8 closeout did not promote or implement the remaining R9-R10 work packages.
+
+Production deployment truth remains separately authoritative in `docs/CURRENT_RELEASE_STATE.md`.
 
 ---
 
