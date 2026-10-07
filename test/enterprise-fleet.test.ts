@@ -42,3 +42,13 @@ test('offline and revoked devices are never execution eligible',()=>{
   assert.equal(summary.revoked,1);
   assert.equal(summary.executionEligible,0);
 });
+
+test('prerelease does not satisfy an equal stable minimum version',()=>{
+  const assessment=assessEnterpriseFleetDevice({
+    device:device({runtimeVersion:'2.0.5-canary.1',updateChannel:'beta'}),
+    policy:policy as any,
+    now:'2026-10-07T00:01:00.000Z'
+  });
+  assert.equal(assessment.executionEligible,false);
+  assert.ok(assessment.reasons.includes('RUNTIME_VERSION_TOO_OLD'));
+});
