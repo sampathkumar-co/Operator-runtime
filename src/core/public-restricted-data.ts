@@ -93,11 +93,37 @@ export function isSensitiveEntryName(name: string): boolean {
 }
 
 function containsPaymentCard(text: string): boolean {
-  const candidates = text.match(/(?:\d[ -]?){13,19}/g) ?? [];
+  // Luhn alone is not sufficient: timestamps, inode-like identifiers and other
+  // numeric telemetry can satisfy it by chance. Require a standalone numeric
+  // token plus a plausible payment-network issuer prefix before applying Luhn.
+  const candidates = text.match(/(?<![A-Za-z0-9])(?:\d[ -]?){13,19}(?![A-Za-z0-9])/g) ?? [];
   return candidates.some((candidate) => {
     const digits = candidate.replace(/\D/g, '');
-    return digits.length >= 13 && digits.length <= 19 && luhn(digits);
+    return plausiblePaymentCardIssuer(digits) && luhn(digits);
   });
+}
+
+function plausiblePaymentCardIssuer(digits: string): boolean {
+  if (digits.length < 13 || digits.length > 19) return false;
+  const prefix2 = Number(digits.slice(0, 2));
+  const prefix3 = Number(digits.slice(0, 3));
+  const prefix4 = Number(digits.slice(0, 4));
+  const prefix6 = Number(digits.slice(0, 6));
+
+  // Visa.
+  if (digits.startsWith('4') && [13, 16, 19].includes(digits.length)) return true;
+  // Mastercard legacy and 2-series.
+  if (digits.length === 16 && ((prefix2 >= 51 && prefix2 <= 55) || (prefix4 >= 2221 && prefix4 <= 2720))) return true;
+  // American Express.
+  if (digits.length === 15 && (prefix2 === 34 || prefix2 === 37)) return true;
+  // Discover.
+  if ([16, 17, 18, 19].includes(digits.length)
+    && (digits.startsWith('6011') || prefix2 === 65 || (prefix3 >= 644 && prefix3 <= 649) || (prefix6 >= 622126 && prefix6 <= 622925))) return true;
+  // JCB.
+  if ([16, 17, 18, 19].includes(digits.length) && prefix4 >= 3528 && prefix4 <= 3589) return true;
+  // Diners Club.
+  if (digits.length === 14 && ((prefix3 >= 300 && prefix3 <= 305) || [36, 38, 39].includes(prefix2))) return true;
+  return false;
 }
 
 function luhn(digits: string): boolean {
