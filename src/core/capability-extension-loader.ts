@@ -74,7 +74,12 @@ class RiskPolicyBoundProvider implements CapabilityProvider {
   supports(action: ActionRequest): boolean | Promise<boolean> { return this.#provider.supports(action); }
   advertises(action: ActionRequest): boolean | Promise<boolean> { return this.#provider.advertises ? this.#provider.advertises(action) : this.#provider.supports(action); }
   score(action: ActionRequest): CapabilityScore | Promise<CapabilityScore> { return this.#provider.score(action); }
-  resolveRisk(action: ActionRequest): ActionRisk | Promise<ActionRisk> | undefined { return this.#provider.resolveRisk?.(action); }
+  resolveRisk(action: ActionRequest): ActionRisk | Promise<ActionRisk> {
+    if (!this.#provider.resolveRisk) {
+      throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', 'Extension provider has no dynamic-risk resolver.');
+    }
+    return this.#provider.resolveRisk(action);
+  }
   execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult> { return this.#provider.execute(action, context); }
   reconcile(request: ProviderReconciliationRequest, context?: CapabilityExecutionContext): Promise<ProviderReconciliationResult> {
     if (!this.#provider.reconcile) return Promise.reject(new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_UNAVAILABLE','Extension provider has no reconciliation contract.'));
