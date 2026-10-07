@@ -1,3 +1,5 @@
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import unittest
 from mecord_capability_sdk import create_extension_manifest, manifest_digest, create_conformance_plan
 
