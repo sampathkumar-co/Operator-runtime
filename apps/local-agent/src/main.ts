@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { AuditLog } from '../../../src/core/audit.ts';
 import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
 import { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
@@ -82,6 +83,7 @@ if (token.length < 32) {
   process.exit(2);
 }
 
+const relayInternalToken = crypto.randomBytes(32).toString('base64url');
 const recoveryToken = process.env.OPERATOR_RECOVERY_TOKEN;
 if (recoveryToken !== undefined && recoveryToken.length < 32) {
   console.error('[operator] OPERATOR_RECOVERY_TOKEN must be at least 32 characters when set.');
@@ -419,6 +421,7 @@ function startRelay(): void {
     identity: deviceIdentity,
     localAgentBaseUrl,
     agentToken: token,
+    relayInternalToken,
     getSupportedCapabilities: () => runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES),
     onConnectionState: (status) => {
       relayConnectionStatus = { ...status, updatedAt: new Date().toISOString() };
@@ -525,6 +528,7 @@ const agent = createLocalAgentServer({
   intentRegistry,
   sagas,
   token,
+  relayInternalToken,
   recoveryToken,
   emergencyStop,
   approvals,

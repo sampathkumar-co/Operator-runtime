@@ -173,15 +173,26 @@ test('relay-started durable task returns accepted before slow execution complete
   };
   const taskOrchestrator = new TaskOrchestrator({ runtime, store: tasks, permissions });
   const token = 'z'.repeat(64);
-  const agent = createLocalAgentServer({ runtime, token, permissions, tasks, taskOrchestrator });
+  const relayInternalToken = 'r'.repeat(64);
+  const agent = createLocalAgentServer({ runtime, token, relayInternalToken, permissions, tasks, taskOrchestrator });
   t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
   const { port } = await agent.listen('127.0.0.1', 0);
+  const spoofedRelay = await fetch(`http://127.0.0.1:${port}/v1/tasks`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      'x-operator-relay-request': '1'
+    }
+  });
+  assert.equal(spoofedRelay.status, 403);
+  assert.equal((await spoofedRelay.json() as any).error.code, 'RELAY_INTERNAL_AUTH_INVALID');
+
   const request = fetch(`http://127.0.0.1:${port}/v1/tasks`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
-      'x-operator-relay-request': '1'
+      'x-operator-relay-request': '1',
+      'x-operator-relay-auth': relayInternalToken
     },
     body: JSON.stringify({
       objective: 'Navigate slowly without blocking the relay.',
