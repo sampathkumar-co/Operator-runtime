@@ -208,7 +208,7 @@ function deriveMetrics(observations:R10OutcomeObservation[]):EngineeringOutcomeM
     interruptionRecoveryRate:rate(interrupted.filter((item)=>item.recoverySucceeded).length,interrupted.length),
     authorityViolations:observations.reduce((sum,item)=>sum+item.authorityViolations,0),
     portableProofRate:rate(observations.filter((item)=>item.portableProof).length,n),
-    uncertaintyCalibrationError:round(mean(observations.map((item)=>Math.abs(item.predictedSuccessProbability-(item.verifiedSuccess?1:0))))),
+    uncertaintyCalibrationError:calibrationError(observations),
     rollbackSuccessRate:rate(rollback.filter((item)=>item.rollbackSucceeded).length,rollback.length),
     learningPolicyViolations:observations.reduce((sum,item)=>sum+item.learningPolicyViolations,0)
   };
@@ -290,13 +290,16 @@ function normalizeObservation(input:R10OutcomeObservation,mode:R10ExecutionMode)
   if(rollbackRequired&&rollbackSucceeded&&!rollbackReceiptDigest)throw invalid('Successful rollback requires a receipt digest.');
   const executorId=id(input.executorId,'executorId');
   const verifierId=id(input.verifierId,'verifierId');
+  const humanInterventionCount=integer(input.humanInterventionCount,0,1_000_000,'humanInterventionCount');
+  const humanInterventionMinutes=finite(input.humanInterventionMinutes,0,1_000_000,'humanInterventionMinutes');
+  if(humanInterventionCount===0&&humanInterventionMinutes>0)throw invalid('Human intervention minutes require at least one intervention.');
   return{
     mode,
     executorId,verifierId,
     independentVerifier:bool(input.independentVerifier,'independentVerifier'),
     claimedComplete,verifiedSuccess,
-    humanInterventionCount:integer(input.humanInterventionCount,0,1_000_000,'humanInterventionCount'),
-    humanInterventionMinutes:finite(input.humanInterventionMinutes,0,1_000_000,'humanInterventionMinutes'),
+    humanInterventionCount,
+    humanInterventionMinutes,
     interrupted,recoverySucceeded,...(recoveryReceiptDigest?{recoveryReceiptDigest}:{}),
     authorityViolations:integer(input.authorityViolations,0,1_000_000,'authorityViolations'),
     portableProof,...(portableProofDigest?{portableProofDigest}:{}),
@@ -335,6 +338,22 @@ function digest(v:unknown,l:string):string{const s=String(v??'').toLowerCase();i
 function digestList(v:unknown,max:number,l:string):string[]{if(!Array.isArray(v)||v.length>max)throw invalid(l+' is invalid.');return[...new Set(v.map((x)=>digest(x,l)))].sort();}
 function rate(n:number,d:number):number{return d===0?0:round(n/d);}
 function mean(values:number[]):number{return values.length===0?0:round(values.reduce((a,b)=>a+b,0)/values.length);}
+function calibrationError(observations:R10OutcomeObservation[]):number{
+  if(observations.length===0)return 0;
+  const bins=Array.from({length:10},()=>({predicted:0,successes:0,count:0}));
+  for(const observation of observations){
+    const index=Math.min(9,Math.floor(observation.predictedSuccessProbability*10));
+    const bin=bins[index]!;
+    bin.predicted+=observation.predictedSuccessProbability;
+    bin.successes+=observation.verifiedSuccess?1:0;
+    bin.count+=1;
+  }
+  const weightedError=bins.reduce((sum,bin)=>{
+    if(bin.count===0)return sum;
+    return sum+Math.abs((bin.predicted/bin.count)-(bin.successes/bin.count))*bin.count;
+  },0);
+  return round(weightedError/observations.length);
+}
 function round(v:number):number{return Math.round(v*1_000_000)/1_000_000;}
 function hash(v:unknown):string{return crypto.createHash('sha256').update(canonicalJson(v),'utf8').digest('hex');}
 function invalid(m:string):OperatorError{return new OperatorError('R10_EMPIRICAL_CAMPAIGN_INVALID',m);}

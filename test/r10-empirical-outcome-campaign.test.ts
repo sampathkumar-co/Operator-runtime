@@ -170,6 +170,27 @@ test('R10 derives metrics from raw observations and fails when outcome improveme
   assert.match(report.reasons.join(' '),/false completion|human intervention|success improvement/);
 });
 
+test('R10 computes uncertainty calibration over probability cohorts',()=>{
+  const calibrated=body();
+  for(let i=0;i<calibrated.pairs.length;i++){
+    calibrated.pairs[i].current.verifiedSuccess=i<24;
+    calibrated.pairs[i].current.claimedComplete=true;
+    calibrated.pairs[i].current.predictedSuccessProbability=.8;
+  }
+  const report=certifyR10EmpiricalOutcomeCampaign(createR10EmpiricalOutcomeCampaign(calibrated));
+  assert.equal(report.current.uncertaintyCalibrationError,0);
+});
+
+test('R10 rejects intervention minutes without an intervention event',()=>{
+  const inconsistent=body();
+  inconsistent.pairs[0].current.humanInterventionCount=0;
+  inconsistent.pairs[0].current.humanInterventionMinutes=5;
+  assert.throws(
+    ()=>createR10EmpiricalOutcomeCampaign(inconsistent),
+    /minutes require at least one intervention/
+  );
+});
+
 test('R10 campaign digest detects paired evidence tampering',()=>{
   const campaign=createR10EmpiricalOutcomeCampaign(body());
   assert.equal(verifyR10EmpiricalOutcomeCampaign(campaign),true);
