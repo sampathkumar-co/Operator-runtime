@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.mecord.dev/r6/signed-agent-webhook.schema.json",
+  "title": "Mecord Signed Agent Webhook",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "deliveryId",
+    "subscriptionId",
+    "eventType",
+    "occurredAt",
+    "payload",
+    "payloadDigest",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "deliveryId": {
+      "type": "string"
+    },
+    "subscriptionId": {
+      "type": "string"
+    },
+    "eventType": {
+      "type": "string"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "payloadDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string"
+    }
+  }
+}
