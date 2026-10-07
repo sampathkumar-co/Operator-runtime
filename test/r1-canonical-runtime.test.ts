@@ -53,6 +53,7 @@ test('R1 root workspace declares every package-bearing production boundary witho
     'deploy/auth-portal',
     'packages/adaptive-intelligence',
     'packages/mecord-connect',
+    'packages/mecord-capability-sdk',
     'packages/operator-runtime-cli',
     'packages/verified-plan-runtime'
   ]);
