@@ -50,3 +50,33 @@ test('ordinary source-code words do not become false positives', () => {
   ];
   for (const sample of safe) assert.equal(containsRestrictedData(sample), false, sample);
 });
+
+
+test('payment-card detection requires plausible issuer identity and does not flag numeric runtime metadata', () => {
+  const safeRuntimeResult = {
+    output: {
+      identity: {
+        device: '2049',
+        inode: '1760000000000000008',
+        links: '1',
+        size: 14,
+        modifiedNs: '1760000000000000008',
+        changedNs: '1760000000000000008',
+        createdNs: '1760000000000000008',
+        digest: 'a'.repeat(64)
+      },
+      sha256: 'c4ea45b2615142bda2e48e57043ed6e5ebe3e980b4158f786c6b009ead0b2707',
+      content: 'after rotation'
+    }
+  };
+  assert.equal(containsRestrictedData(safeRuntimeResult), false);
+});
+
+test('known payment-network card numbers remain restricted', () => {
+  for (const value of [
+    '4111111111111111',
+    '5555555555554444',
+    '378282246310005',
+    '6011111111111117'
+  ]) assert.equal(containsRestrictedData(value), true, value);
+});

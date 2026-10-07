@@ -11,7 +11,7 @@ import { DeviceRegistryStore, answerPairingChallenge } from '../../../src/core/d
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
 import { createRuntime } from '../../local-agent/src/runtime-factory.ts';
-import { LocalAgentRelayRunner } from '../../local-agent/src/relay-agent.ts';
+import { LocalAgentRelayRunner, containsRestrictedPublicActionResult } from '../../local-agent/src/relay-agent.ts';
 import { createLocalAgentServer } from '../../local-agent/src/server.ts';
 import { RelayHub } from '../src/relay-hub.ts';
 import { RelayResultService } from '../src/result-service.ts';
@@ -289,4 +289,33 @@ gitTest('session rotation reconnect preserves and executes public filesystem and
 
   runner.stop();
   await run;
+});
+
+
+test('public result classifier ignores trusted filesystem numeric identity metadata but still blocks card content', () => {
+  const safeFilesystemResult = {
+    ok: true,
+    capability: 'file.read',
+    provider: 'filesystem.native',
+    output: {
+      path: '/tmp/safe.txt',
+      content: 'ordinary text',
+      identity: {
+        device: '4111111111111111',
+        inode: '4111111111111111',
+        links: '4111111111111111',
+        modifiedNs: '4111111111111111',
+        changedNs: '4111111111111111',
+        createdNs: '4111111111111111',
+        digest: 'a'.repeat(64)
+      }
+    },
+    evidence: [],
+    durationMs: 1
+  };
+  assert.equal(containsRestrictedPublicActionResult('file.read', safeFilesystemResult), false);
+
+  const restrictedContent = structuredClone(safeFilesystemResult);
+  restrictedContent.output.content = '4111111111111111';
+  assert.equal(containsRestrictedPublicActionResult('file.read', restrictedContent), true);
 });
