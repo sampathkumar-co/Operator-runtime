@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.mecord.dev/r6/capability-conformance-receipt.schema.json",
+  "title": "Mecord Capability Conformance Receipt",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "suite",
+    "manifestDigest",
+    "verifierId",
+    "independent",
+    "passed",
+    "evidenceArtifactIds",
+    "observedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "suite": {
+      "enum": [
+        "SANDBOX",
+        "CONTRACT",
+        "ADVERSARIAL",
+        "PERFORMANCE"
+      ]
+    },
+    "manifestDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "verifierId": {
+      "type": "string"
+    },
+    "independent": {
+      "type": "boolean"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "evidenceArtifactIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "metrics": {
+      "type": "object"
+    }
+  }
+}
