@@ -27,7 +27,7 @@ import type { LocalActionExecutionStore } from './action-execution-store.ts';
 import type { SessionApprovalStore } from './session-approval.ts';
 import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
-import { renderControlCenter } from './control-center.ts';
+import { readControlCenterAsset, renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
@@ -38,6 +38,7 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
+import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   boundedString,
@@ -75,18 +76,33 @@ function send(res: http.ServerResponse, status: number, payload: unknown): void 
   res.end(body);
 }
 
-function sendControlCenter(res: http.ServerResponse): void {
-  const nonce = crypto.randomBytes(18).toString('base64url');
-  const body = renderControlCenter(nonce);
-  res.writeHead(200, {
-    'content-type': 'text/html; charset=utf-8',
-    'content-length': Buffer.byteLength(body),
+function controlCenterSecurityHeaders(): Record<string, string> {
+  return {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
     'cross-origin-opener-policy': 'same-origin',
-    'content-security-policy': `default-src 'none'; connect-src 'self'; img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+    'content-security-policy': "default-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  };
+}
+
+function sendControlCenter(res: http.ServerResponse): void {
+  const body = renderControlCenter();
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    ...controlCenterSecurityHeaders()
+  });
+  res.end(body);
+}
+
+function sendControlCenterAsset(res: http.ServerResponse, name: 'app.js' | 'styles.css'): void {
+  const body = readControlCenterAsset(name);
+  res.writeHead(200, {
+    'content-type': name === 'app.js' ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    ...controlCenterSecurityHeaders()
   });
   res.end(body);
 }
@@ -427,6 +443,14 @@ export function createLocalAgentServer(options: {
       sendControlCenter(res);
       return;
     }
+    if (pathname === '/control-center/app.js' && req.method === 'GET') {
+      sendControlCenterAsset(res, 'app.js');
+      return;
+    }
+    if (pathname === '/control-center/styles.css' && req.method === 'GET') {
+      sendControlCenterAsset(res, 'styles.css');
+      return;
+    }
 
     if (!timingSafeTokenMatch(req.headers.authorization, options.token)) {
       send(res, 401, { ok: false, error: { code: 'UNAUTHORIZED', message: 'Valid agent bearer token required.' } });
@@ -663,6 +687,246 @@ export function createLocalAgentServer(options: {
         ok: true,
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
         configured: Boolean(options.tasks)
+      });
+      return;
+    }
+
+
+    if (pathname === '/v1/control-center/overview' && req.method === 'GET') {
+      const [summaries, approvalRecords, emergencyState, runtimeStatus, peers, localDevice] = await Promise.all([
+        options.tasks ? options.tasks.list(500) : [],
+        options.approvals ? options.approvals.list() : [],
+        options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ engaged: false }),
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({}),
+        options.deviceRegistry ? options.deviceRegistry.listDevices() : [],
+        options.deviceIdentity ? options.deviceIdentity.loadExisting() : null
+      ]);
+      const approvals = buildApprovalCenterModel(approvalRecords);
+      const stateCounts: Record<string, number> = {};
+      for (const task of summaries) stateCounts[task.state] = (stateCounts[task.state] ?? 0) + 1;
+      const relayRaw = runtimeStatus && typeof runtimeStatus === 'object'
+        ? (runtimeStatus as Record<string, unknown>).relay
+        : undefined;
+      const relay = relayRaw && typeof relayRaw === 'object' ? relayRaw as Record<string, unknown> : {};
+      const relayState = String(relay.status ?? relay.state ?? '').toLowerCase();
+      const relayConnected = relay.connected === true || ['connected', 'online', 'ready'].includes(relayState);
+      send(res, 200, {
+        ok: true,
+        product: { name: 'Mecord', version: PRODUCT_VERSION },
+        health: {
+          emergencyStopped: Boolean((emergencyState as { engaged?: boolean }).engaged),
+          relayConfigured: Boolean((options.settings ?? {}).relayConfigured),
+          relayConnected,
+          localDevicePresent: Boolean(localDevice),
+          pairedDeviceCount: peers.filter((item) => item.status !== 'revoked').length
+        },
+        tasks: { total: summaries.length, states: stateCounts, recent: summaries.slice(0, 12) },
+        approvals: approvals.counts
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/approvals' && req.method === 'GET') {
+      const approvals = options.approvals ? await options.approvals.list() : [];
+      send(res, 200, { ok: true, model: buildApprovalCenterModel(approvals), configured: Boolean(options.approvals) });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/recovery' && req.method === 'GET') {
+      const summaries = options.tasks ? await options.tasks.list(200) : [];
+      const [tasks, journal, approvals] = await Promise.all([
+        options.tasks ? Promise.all(summaries.map((summary) => options.tasks!.get(summary.id))) : [],
+        options.agentKernel ? options.agentKernel.journal.list(1000) : [],
+        options.approvals ? options.approvals.list() : []
+      ]);
+      const candidates: RecoveryCandidateInput[] = [];
+      for (const task of tasks) {
+        const projection = projectTaskRuntime(task, { journal, approvals });
+        const record = [...(task.execution?.records ?? [])].reverse().find((item) =>
+          item.state === 'FAILED' || item.state === 'BLOCKED' || item.state === 'INTERRUPTED'
+        );
+        if (!record || record.errorCode === 'APPROVAL_REQUIRED') continue;
+        const sideEffectState = record.sideEffectState ?? (record.state === 'BLOCKED' ? 'none' : 'uncertain');
+        const rollbackAvailable = task.evidence.some((item) =>
+          item.status === 'pass' && /checkpoint|rollback|compensation/i.test(item.kind)
+        );
+        const retryable = record.state === 'BLOCKED' && sideEffectState === 'none';
+        const verificationStatus = projection.verification.state === 'verified'
+          ? 'passed'
+          : projection.verification.state === 'failed'
+            ? 'failed'
+            : 'unknown';
+        candidates.push({
+          actionId: record.actionId,
+          capability: record.capability,
+          retryable,
+          sideEffectState,
+          ...(record.executionPhase ? { executionPhase: record.executionPhase } : {}),
+          ...(sideEffectState === 'none' ? { reconciliationStatus: 'not_applied' as const } : {}),
+          rollbackAvailable,
+          verificationStatus,
+          ...(record.errorCode ? { code: record.errorCode } : {}),
+          updatedAt: record.finishedAt ?? task.updatedAt
+        });
+      }
+      send(res, 200, { ok: true, model: buildRecoveryCenterModel(candidates), configured: Boolean(options.tasks) });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/onboarding' && req.method === 'GET') {
+      const [approvalRecords, taskSummaries, readProbeEvents, peers, runtimeStatus] = await Promise.all([
+        options.approvals ? options.approvals.list() : [],
+        options.tasks ? options.tasks.list(500) : [],
+        options.audit ? options.audit.query({ capability: 'onboarding.read-probe', limit: 20 }) : [],
+        options.deviceRegistry ? options.deviceRegistry.listDevices() : [],
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({})
+      ]);
+      const relayRaw = runtimeStatus && typeof runtimeStatus === 'object'
+        ? (runtimeStatus as Record<string, unknown>).relay
+        : undefined;
+      const relay = relayRaw && typeof relayRaw === 'object' ? relayRaw as Record<string, unknown> : {};
+      const relayState = String(relay.status ?? relay.state ?? '').toLowerCase();
+      const relayConnected = relay.connected === true || ['connected', 'online', 'ready'].includes(relayState);
+      const model = buildGuidedOnboardingModel({
+        runtimeInstalled: true,
+        doctorHealthy: true,
+        authenticated: true,
+        devicePaired: relayConnected || peers.some((item) => item.status !== 'revoked'),
+        rootsConfigured: requestPermissions.allowedRoots.length > 0,
+        readProbePassed: readProbeEvents.some((event) => event.result === 'success'),
+        approvalProbePassed: approvalRecords.some((record) =>
+          record.capability === 'onboarding.approval-probe'
+          && (record.status === 'approved' || record.status === 'consumed' || record.status === 'denied')
+        ),
+        guidedTaskVerified: taskSummaries.some((task) => task.state === 'VERIFIED')
+      });
+      send(res, 200, { ok: true, model });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/onboarding/read-probe' && req.method === 'POST') {
+      const root = requestPermissions.allowedRoots[0];
+      if (!root) {
+        send(res, 409, { ok: false, error: { code: 'ONBOARDING_ROOT_REQUIRED', message: 'Configure at least one authorized root before the read probe.' } });
+        return;
+      }
+      const action: ActionRequest = {
+        id: crypto.randomUUID(),
+        capability: 'file.list',
+        risk: 'read',
+        target: root,
+        input: { path: root, limit: 1 },
+        provenance: { kind: 'runtime' }
+      };
+      const result = options.agentKernel
+        ? await options.agentKernel.execute(action, requestPermissions)
+        : await options.runtime.execute(action, requestPermissions);
+      await options.audit?.append({
+        actionId: action.id,
+        providerId: result.provider,
+        capability: 'onboarding.read-probe',
+        result: result.ok ? 'success' : 'failure',
+        risk: 'read',
+        details: { provider: result.provider, errorCode: result.error?.code }
+      });
+      send(res, result.ok ? 200 : 409, {
+        ok: result.ok,
+        probe: { provider: result.provider, verifiedRead: result.ok },
+        ...(result.ok ? {} : { error: result.error })
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/onboarding/approval-probe' && req.method === 'POST') {
+      if (!options.approvals || !options.recoveryToken) {
+        send(res, 503, { ok: false, error: { code: 'ONBOARDING_APPROVAL_NOT_CONFIGURED', message: 'Approval probe requires persistent approvals and a recovery token.' } });
+        return;
+      }
+      const action: ActionRequest = {
+        id: crypto.randomUUID(),
+        capability: 'onboarding.approval-probe',
+        risk: 'external',
+        target: 'guided-onboarding',
+        input: { operation: 'probe' },
+        provenance: { kind: 'runtime' }
+      };
+      const record = await options.approvals.register(action);
+      send(res, 202, {
+        ok: true,
+        approval: buildApprovalCenterModel([record]).pending[0],
+        message: 'Use the Approval Center to approve or deny this harmless training request.'
+      });
+      return;
+    }
+
+    if (pathname === '/v1/control-center/experience' && req.method === 'POST') {
+      try {
+        const body = await readJson(req) as Record<string, unknown>;
+        const event = boundedString(body.event, 'event', 64);
+        if (!['onboarding_started', 'onboarding_completed', 'primary_view_opened'].includes(event)) {
+          throw new OperatorError('CONTROL_CENTER_EXPERIENCE_INVALID', 'Unsupported Control Center experience event.');
+        }
+        const durationMs = body.durationMs === undefined ? undefined : Number(body.durationMs);
+        if (durationMs !== undefined && (!Number.isFinite(durationMs) || durationMs < 0 || durationMs > 24 * 60 * 60_000)) {
+          throw new OperatorError('CONTROL_CENTER_EXPERIENCE_INVALID', 'durationMs is outside the bounded range.');
+        }
+        await options.audit?.append({
+          capability: 'control-center.experience',
+          result: 'success',
+          risk: 'read',
+          details: { event, ...(durationMs === undefined ? {} : { durationMs: Math.round(durationMs) }) }
+        });
+        send(res, 200, { ok: true });
+      } catch (error) {
+        send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'CONTROL_CENTER_EXPERIENCE_INVALID', message: error instanceof Error ? error.message : String(error) } });
+      }
+      return;
+    }
+
+    if (pathname === '/v1/control-center/support-bundle' && req.method === 'GET') {
+      const [summaries, approvalRecords, emergencyState, peers, localDevice, runtimeStatus] = await Promise.all([
+        options.tasks ? options.tasks.list(500) : [],
+        options.approvals ? options.approvals.list() : [],
+        options.emergencyStop ? options.emergencyStop.status() : Promise.resolve({ engaged: false }),
+        options.deviceRegistry ? options.deviceRegistry.listDevices() : [],
+        options.deviceIdentity ? options.deviceIdentity.loadExisting() : null,
+        options.getRuntimeStatus ? options.getRuntimeStatus() : Promise.resolve({})
+      ]);
+      const approvals = buildApprovalCenterModel(approvalRecords);
+      const relayRaw = runtimeStatus && typeof runtimeStatus === 'object'
+        ? (runtimeStatus as Record<string, unknown>).relay
+        : undefined;
+      const relay = relayRaw && typeof relayRaw === 'object' ? relayRaw as Record<string, unknown> : {};
+      const relayState = String(relay.status ?? relay.state ?? '').toLowerCase();
+      const relayConnected = relay.connected === true || ['connected', 'online', 'ready'].includes(relayState);
+      const diagnostics: Array<{ severity: 'info' | 'warning' | 'critical'; code: string; message: string; repair: string }> = [];
+      if ((emergencyState as { engaged?: boolean }).engaged) diagnostics.push({ severity: 'critical', code: 'EMERGENCY_STOP_ENGAGED', message: 'Execution is halted by the local emergency stop.', repair: 'Review the reason, resolve the incident, then clear the stop with recovery authority.' });
+      if (!options.recoveryToken) diagnostics.push({ severity: 'warning', code: 'RECOVERY_AUTHORITY_NOT_CONFIGURED', message: 'Recovery-sensitive actions and guided approvals are unavailable.', repair: 'Configure OPERATOR_RECOVERY_TOKEN with a strong local secret.' });
+      if (requestPermissions.allowedRoots.length === 0) diagnostics.push({ severity: 'critical', code: 'NO_AUTHORIZED_ROOTS', message: 'No filesystem root is authorized.', repair: 'Restart Mecord with at least one explicit authorized root.' });
+      if (Boolean((options.settings ?? {}).relayConfigured) && !relayConnected) diagnostics.push({ severity: 'warning', code: 'RELAY_DISCONNECTED', message: 'Remote continuity is configured but the relay is not connected.', repair: 'Check network reachability and pairing/session credentials.' });
+      if (!localDevice) diagnostics.push({ severity: 'warning', code: 'DEVICE_IDENTITY_UNAVAILABLE', message: 'Local device identity is unavailable.', repair: 'Run doctor and repair the protected local state directory.' });
+      if (diagnostics.length === 0) diagnostics.push({ severity: 'info', code: 'NO_COMMON_FAULTS_DETECTED', message: 'No common Control Center configuration fault is currently visible.', repair: 'If a task still fails, inspect its causal Activity and Recovery views.' });
+      const taskStates: Record<string, number> = {};
+      for (const task of summaries) taskStates[task.state] = (taskStates[task.state] ?? 0) + 1;
+      send(res, 200, {
+        ok: true,
+        bundle: {
+          schemaVersion: 1,
+          generatedAt: new Date().toISOString(),
+          product: { name: 'Mecord', version: PRODUCT_VERSION },
+          health: {
+            emergencyStopped: Boolean((emergencyState as { engaged?: boolean }).engaged),
+            recoveryConfigured: Boolean(options.recoveryToken),
+            authorizedRootCount: requestPermissions.allowedRoots.length,
+            localDevicePresent: Boolean(localDevice),
+            pairedDeviceCount: peers.filter((item) => item.status !== 'revoked').length,
+            relayConfigured: Boolean((options.settings ?? {}).relayConfigured),
+            relayConnected
+          },
+          tasks: { total: summaries.length, states: taskStates },
+          approvals: approvals.counts,
+          diagnostics
+        }
       });
       return;
     }

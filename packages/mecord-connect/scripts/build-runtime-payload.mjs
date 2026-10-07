@@ -52,6 +52,7 @@ function assertTrackedRuntimeSourcesClean() {
     'status', '--porcelain=v1', '--untracked-files=no', '--',
     'src',
     'apps/local-agent/src',
+    'apps/local-agent/control-center',
     'packages/adaptive-intelligence/src',
     'packages/verified-plan-runtime/src'
   ]);
@@ -78,6 +79,25 @@ async function compileTrackedTree(repoRelativeRoot, destinationRoot) {
     const javascript = rewriteTypeScriptSpecifiers(stripTypeScriptTypes(typescript, { mode: 'strip' }));
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.writeFile(destination, javascript, 'utf8');
+  }
+}
+
+async function copyTrackedAssets(repoRelativeRoot, destinationRoot) {
+  const raw = execFileSync(gitExecutable, ['ls-files', '-z', '--', repoRelativeRoot], { cwd: repoRoot, encoding: 'utf8' });
+  const prefix = `${repoRelativeRoot}/`;
+  const files = raw.split('\0').filter(Boolean);
+  if (files.length === 0) throw new Error(`No tracked runtime assets found under ${repoRelativeRoot}.`);
+  for (const repoRelative of files) {
+    if (!repoRelative.startsWith(prefix) || !/\.(?:html|css|js)$/.test(repoRelative)) {
+      throw new Error(`Unexpected tracked runtime asset: ${repoRelative}`);
+    }
+    const relative = repoRelative.slice(prefix.length);
+    const source = path.join(repoRoot, ...repoRelative.split('/'));
+    const destination = path.join(destinationRoot, ...relative.split('/'));
+    const stat = await fs.lstat(source);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Refusing non-file tracked runtime asset: ${repoRelative}`);
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(source, destination);
   }
 }
 
@@ -120,6 +140,7 @@ await fs.rm(runtimeRoot, { recursive: true, force: true });
 await fs.mkdir(nativeRoot, { recursive: true });
 await compileTrackedTree('src', path.join(appRoot, 'src'));
 await compileTrackedTree('apps/local-agent/src', path.join(appRoot, 'apps', 'local-agent', 'src'));
+await copyTrackedAssets('apps/local-agent/control-center', path.join(appRoot, 'apps', 'local-agent', 'control-center'));
 await compileTrackedTree('packages/adaptive-intelligence/src', path.join(appRoot, 'packages', 'adaptive-intelligence', 'src'));
 await compileTrackedTree('packages/verified-plan-runtime/src', path.join(appRoot, 'packages', 'verified-plan-runtime', 'src'));
 

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Mecord Control Center</title>
+  <link rel="stylesheet" href="/control-center/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div><strong>Mecord Control Center</strong><span>Trusted runtime, explained in human terms</span></div>
+      </div>
+      <div class="connection" aria-label="Connection">
+        <label><span>Agent token</span><input id="agentToken" type="password" autocomplete="off" spellcheck="false"></label>
+        <label><span>Recovery token</span><input id="recoveryToken" type="password" autocomplete="off" spellcheck="false"></label>
+        <button id="connect" class="primary">Connect</button>
+        <span id="connectionState" class="status neutral" role="status">Disconnected</span>
+      </div>
+    </header>
+    <div class="layout">
+      <nav class="sidebar" aria-label="Control Center">
+        <button class="nav active" data-view="home" aria-current="page">Home</button>
+        <button class="nav" data-view="sessions">Sessions</button>
+        <button class="nav" data-view="approvals">Approval Center</button>
+        <button class="nav" data-view="activity">Activity</button>
+        <button class="nav" data-view="devices">Devices</button>
+        <button class="nav" data-view="policies">Policies</button>
+        <button class="nav" data-view="knowledge">Knowledge</button>
+        <button class="nav" data-view="diagnostics">Diagnostics</button>
+      </nav>
+      <main id="main" tabindex="-1">
+        <section id="view-home" class="view active" aria-labelledby="home-title">
+          <div class="view-head"><div><h1 id="home-title">Home</h1><p>What needs attention, what is healthy, and what to do next.</p></div><button class="secondary" data-action="refresh">Refresh</button></div>
+          <div id="homeCards" class="metric-grid" aria-live="polite"></div>
+          <div class="split">
+            <article class="card"><h2>Guided onboarding</h2><div id="onboarding"></div></article>
+            <article class="card"><h2>Recent sessions</h2><div id="recentSessions"></div></article>
+          </div>
+        </section>
+        <section id="view-sessions" class="view" aria-labelledby="sessions-title">
+          <div class="view-head"><div><h1 id="sessions-title">Sessions</h1><p>Objectives, progress, blockers, verification, and preserved work.</p></div></div>
+          <div id="sessions"></div>
+        </section>
+        <section id="view-approvals" class="view" aria-labelledby="approvals-title">
+          <div class="view-head"><div><h1 id="approvals-title">Approval Center</h1><p>Plain-language scope, risk, reversibility, expiry, and recovery guidance.</p></div><button id="approvalProbe" class="secondary">Run approval practice</button></div>
+          <div class="split"><article class="card"><h2>Pending & active</h2><div id="approvals"></div></article><article class="card"><h2>Recovery</h2><div id="recovery"></div></article></div>
+        </section>
+        <section id="view-activity" class="view" aria-labelledby="activity-title"><div class="view-head"><div><h1 id="activity-title">Activity</h1><p>Causal runtime events without raw secrets.</p></div></div><div id="activity"></div></section>
+        <section id="view-devices" class="view" aria-labelledby="devices-title"><div class="view-head"><div><h1 id="devices-title">Devices</h1><p>Pairing, trust state, health, and availability.</p></div></div><div id="devices"></div></section>
+        <section id="view-policies" class="view" aria-labelledby="policies-title"><div class="view-head"><div><h1 id="policies-title">Policies</h1><p>Effective local limits and enterprise policy state.</p></div></div><div id="policies"></div></section>
+        <section id="view-knowledge" class="view" aria-labelledby="knowledge-title"><div class="view-head"><div><h1 id="knowledge-title">Knowledge</h1><p>Procedures and world facts with provenance and confidence.</p></div></div><div id="knowledge"></div></section>
+        <section id="view-diagnostics" class="view" aria-labelledby="diagnostics-title"><div class="view-head"><div><h1 id="diagnostics-title">Diagnostics</h1><p>Redacted support information and actionable repair guidance.</p></div><button id="copyBundle" class="secondary">Copy support bundle</button></div><div id="diagnostics"></div></section>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/control-center/app.js" defer></script>
+</body>
+</html>
