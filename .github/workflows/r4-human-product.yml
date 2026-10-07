@@ -104,6 +104,11 @@ jobs:
           "OPERATOR_WINDOWS_DPAPI_PATH=$((Resolve-Path native/windows-dpapi/target/release/operator-windows-dpapi.exe).Path)" >> $env:GITHUB_ENV
           "OPERATOR_WINDOWS_UIA_PATH=$((Resolve-Path native/windows-uia/target/release/operator-windows-uia.exe).Path)" >> $env:GITHUB_ENV
           "OPERATOR_WINDOWS_PATH_LEASE_PATH=$((Resolve-Path native/windows-path-lease/target/release/operator-windows-path-lease.exe).Path)" >> $env:GITHUB_ENV
+      - name: Install packaged runtime dependencies
+        shell: pwsh
+        run: |
+          npm --prefix apps/mcp-server ci --ignore-scripts --no-audit --no-fund
+          npm --prefix apps/relay-server ci --ignore-scripts --no-audit --no-fund
       - name: Protected setup and doctor-style verification
         shell: pwsh
         run: |
