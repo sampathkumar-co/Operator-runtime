@@ -52,8 +52,16 @@ export const CAPABILITY_RISK_RULES = Object.freeze<Record<string, CapabilityRisk
   'perception.ground': 'read'
 });
 
+export function builtInCapabilityRiskRule(capability: string): CapabilityRiskRule | undefined {
+  return CAPABILITY_RISK_RULES[capability];
+}
+
+export function isExtensionCapability(capability: string): boolean {
+  return /^ext\.[a-z0-9][a-z0-9._-]{0,127}\.[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(capability);
+}
+
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {
-  const rule = CAPABILITY_RISK_RULES[capability];
+  const rule = builtInCapabilityRiskRule(capability);
   if (!rule) {
     throw new PolicyError(
       'CAPABILITY_RISK_UNREGISTERED',
