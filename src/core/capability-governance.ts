@@ -38,7 +38,8 @@ export class CapabilityGovernanceRegistry {
     const decision = admitCapabilityPackage({
       package: pkg,
       publishers: [...this.#publishers.values()],
-      revocations: this.#revocations
+      revocations: this.#revocations,
+      requireGovernanceMetadata: true
     });
     if (decision.allowed && decision.entry) this.#packages.set(decision.entry.packageId, structuredClone(pkg));
     return decision;
@@ -48,7 +49,8 @@ export class CapabilityGovernanceRegistry {
     return admitCapabilityPackage({
       package: pkg,
       publishers: [...this.#publishers.values()],
-      revocations: this.#revocations
+      revocations: this.#revocations,
+      requireGovernanceMetadata: true
     });
   }
 
