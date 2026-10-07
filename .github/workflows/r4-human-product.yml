@@ -11,6 +11,8 @@ on:
       - 'test/control-center-ux.test.ts'
       - 'test/control-center-evolution.test.ts'
       - 'test/r4-human-product.test.ts'
+      - 'test/runtime-projection.test.ts'
+      - 'test/companion-api.test.ts'
       - 'packages/mecord-connect/scripts/build-runtime-payload.mjs'
       - '.github/workflows/r4-human-product.yml'
   pull_request:
@@ -22,6 +24,8 @@ on:
       - 'test/control-center-ux.test.ts'
       - 'test/control-center-evolution.test.ts'
       - 'test/r4-human-product.test.ts'
+      - 'test/runtime-projection.test.ts'
+      - 'test/companion-api.test.ts'
       - 'packages/mecord-connect/scripts/build-runtime-payload.mjs'
       - '.github/workflows/r4-human-product.yml'
   workflow_dispatch:
