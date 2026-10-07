@@ -16,14 +16,67 @@ export interface PersistentDataEntry {
   secretMaterial: 'none' | 'derived' | 'encrypted' | 'plaintext-token';
   participatesInDeletion: boolean;
   concurrency: StoreConcurrency;
+  lifecycle: PersistentStoreLifecycle;
 }
 
-const entry = (value: PersistentDataEntry): PersistentDataEntry => Object.freeze(value);
+export interface PersistentStoreLifecycle {
+  maximumActiveEntries: string;
+  terminalRetention: string;
+  reclamation: string;
+  restartBehavior: string;
+  corruptionBehavior: string;
+  referenceSafety: string;
+}
+
+type PersistentDataEntryInput = Omit<PersistentDataEntry, 'lifecycle'>;
+
+const entry = (value: PersistentDataEntryInput): PersistentDataEntry => Object.freeze({
+  ...value,
+  lifecycle: Object.freeze({
+    maximumActiveEntries: value.backup === 'ephemeral'
+      ? 'one active owner record per protected resource'
+      : 'bounded by the owning store shape validator and durable byte ceiling',
+    terminalRetention: value.retention,
+    reclamation: value.backup === 'ephemeral'
+      ? 'removed by the verified owner on clean shutdown; stale ownership is reclaimed only after liveness checks'
+      : /lifetime|while-/.test(value.retention)
+        ? 'removed only by the cataloged privacy, reset, or ownership lifecycle'
+        : 'oldest eligible terminal/history entries are reclaimed without removing live authority or replay fences',
+    restartBehavior: value.restore === 'never'
+      ? 'recreated or reacquired; never restored as authority'
+      : value.restore === 'required'
+        ? 'loaded and validated before accepting new work; snapshots may not overwrite newer authority'
+        : 'loaded and validated when present; absence starts an empty bounded store',
+    corruptionBehavior: 'fail closed on bounded parse, schema, integrity, or reference validation; never silently reset',
+    referenceSafety: value.category === 'tasks' || value.restore === 'required'
+      ? 'live/replay-referenced records are retained; only terminal unreferenced history is reclaimable'
+      : 'reclamation follows owner and privacy boundaries without widening authority'
+  })
+});
+
+/**
+ * Stores whose historical contents must never replace newer live authority.
+ * Snapshots may authenticate/verify these stores, but normal restore preserves
+ * the live copy and refuses to cross a changed authority digest.
+ */
+export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
+  'audit-active', 'audit-head', 'audit-segments',
+  'tasks', 'team-missions', 'action-journal', 'action-results', 'sagas', 'compensation', 'intent-registry',
+  'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'semantic-migrations',
+  'relay-client', 'relay-session-credential', 'relay-deliveries', 'relay-results', 'relay-reservation-reconciliation', 'relay-outbox',
+  'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
+  'terminal-sessions',
+  'device-registry', 'device-routing', 'device-pool', 'device-enrollments', 'device-resets', 'account-devices',
+  'enterprise-policy', 'bootstrap', 'local-device-reset'
+] as const);
+const MONOTONIC_RESTORE_STORE_ID_SET = new Set<string>(MONOTONIC_RESTORE_STORE_IDS);
+export function isMonotonicRestoreStore(id: string): boolean { return MONOTONIC_RESTORE_STORE_ID_SET.has(id); }
 
 /** Authoritative local-runtime persistent-data registry. New durable stores must be added here. */
 export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.freeze([
   entry({ id: 'audit-active', owner: 'audit', location: 'audit.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-active-segment', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
   entry({ id: 'audit-head', owner: 'audit', location: 'audit-head.json', category: 'activity', sensitivity: 'operational', retention: 'while-audit-exists', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'audit-freshness', owner: 'audit', location: 'audit-freshness.json', category: 'activity', sensitivity: 'operational', retention: 'while-audit-exists', deletion: 'privacy-category', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'audit-segments', owner: 'audit', location: 'audit-segments', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-segments', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
   ...[
     ['provider-learning', 'provider-learning.json'], ['execution-optimizer', 'execution-optimizer.json'], ['world-model', 'world-model.json'],
@@ -42,8 +95,21 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
     ['relay-client', 'relay-client.json', 'derived'], ['relay-session-credential', 'relay-session-credential.json', 'encrypted'],
     ['relay-session-token', 'relay-session.token', 'plaintext-token'], ['device-sessions', 'device-sessions.json', 'encrypted'],
     ['approvals', 'approvals.json', 'derived'], ['action-executions', 'action-executions.json', 'derived'],
-    ['resource-leases', 'resource-leases.json', 'none'], ['emergency-stop', 'emergency-stop.json', 'none']
+    ['resource-leases', 'resource-leases.json', 'none'], ['emergency-stop', 'emergency-stop.json', 'none'],
+    ['terminal-sessions', 'terminal-sessions.json', 'none']
   ].map(([id, location, secretMaterial]) => entry({ id, owner: id, location, category: 'session-state', sensitivity: secretMaterial === 'plaintext-token' || secretMaterial === 'encrypted' ? 'secret' : 'sensitive', retention: 'active-session-or-policy', deletion: 'privacy-category', backup: secretMaterial === 'plaintext-token' ? 'exclude-secret' : 'include', restore: secretMaterial === 'plaintext-token' ? 'never' : 'optional', scope: 'device', secretMaterial: secretMaterial as PersistentDataEntry['secretMaterial'], participatesInDeletion: true, concurrency: id === 'resource-leases' ? 'PROCESS_LOCKED' : 'SINGLE_PROCESS_ONLY' })),
+  ...[
+    ['relay-deliveries', 'relay-deliveries.json'], ['relay-results', 'relay-results.json'],
+    ['relay-reservation-reconciliation', 'relay-reservation-reconciliation.json'], ['relay-outbox', 'relay-outbox']
+  ].map(([id, location]) => entry({ id, owner: id, location, category: 'session-state', sensitivity: 'sensitive', retention: 'bounded-replay-fence', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' })),
+  entry({ id: 'developer-runtime-ownership', owner: 'developer-runtime', location: 'developer-runtime-ownership.json', category: 'session-state', sensitivity: 'sensitive', retention: 'active-session-or-terminal-tombstone', deletion: 'privacy-category', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'developer-runtime-ownership-lock', owner: 'developer-runtime', location: 'developer-runtime-ownership.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-writer-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'none', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'developer-sessions', owner: 'developer-session', location: 'developer-sessions', category: 'tasks', sensitivity: 'sensitive', retention: 'objective-session-lifetime', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
+  entry({ id: 'developer-verification-runs', owner: 'developer-verification', location: 'developer-verification-runs', category: 'tasks', sensitivity: 'sensitive', retention: 'objective-session-lifetime', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
+  entry({ id: 'operation-traces', owner: 'operation-trace', location: 'operation-traces.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-operational-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
+  entry({ id: 'shadow-decisions', owner: 'adaptive-shadow', location: 'shadow-decisions.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-shadow-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
+  entry({ id: 'resource-leases-lock', owner: 'resource-leases', location: 'resource-leases.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-writer-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'none', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
+  entry({ id: 'local-agent-lock', owner: 'local-agent', location: 'local-agent.lock', category: 'session-state', sensitivity: 'operational', retention: 'while-agent-active', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: false, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'device-identity', owner: 'device-identity', location: 'device-identity.json', category: 'device-identity', sensitivity: 'secret', retention: 'device-lifetime', deletion: 'device-reset-only', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'encrypted', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   ...[
     ['device-registry', 'device-registry.json'], ['device-routing', 'device-routing.json'], ['device-pool', 'device-pool.json'],
@@ -56,6 +122,14 @@ export function persistentDataForCategory(category: PersistentDataCategory): Per
   return PERSISTENT_DATA_CATALOG.filter((item) => item.category === category).map((item) => ({ ...item }));
 }
 
+export function assertPersistentDataLocationsCataloged(locations: Iterable<string>): void {
+  const cataloged = new Set(PERSISTENT_DATA_CATALOG.map((item) => item.location));
+  const missing = [...new Set([...locations].map((location) => location.replace(/\\/g, '/').replace(/^\.\//, '')))]
+    .filter((location) => !cataloged.has(location))
+    .sort();
+  if (missing.length > 0) throw new Error(`Persistent data locations are not cataloged: ${missing.join(', ')}`);
+}
+
 export function validatePersistentDataCatalog(): void {
   const ids = new Set<string>();
   const locations = new Set<string>();
@@ -66,5 +140,12 @@ export function validatePersistentDataCatalog(): void {
     }
     ids.add(item.id);
     locations.add(item.location);
+    for (const [field, description] of Object.entries(item.lifecycle)) {
+      if (typeof description !== 'string' || description.length < 12) throw new Error(`Persistent data lifecycle ${item.id}.${field} is missing.`);
+    }
+  }
+  for (const id of MONOTONIC_RESTORE_STORE_IDS) {
+    const item = PERSISTENT_DATA_CATALOG.find((candidate) => candidate.id === id);
+    if (!item || item.backup !== 'include' || item.restore === 'never') throw new Error('Monotonic restore catalog references a non-snapshot durable store.');
   }
 }

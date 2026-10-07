@@ -39,12 +39,21 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { SemanticCheckpointManager } from '../../../src/core/semantic-checkpoint.ts';
 import { EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
+import { recoverPendingSnapshotRestores } from '../../../src/core/state-snapshot.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
 import { AgentKernel } from '../../../src/core/agent-kernel.ts';
 import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
 import { IntentRegistry } from '../../../src/core/intent-registry.ts';
 import { DurableSagaKernel } from '../../../src/core/durable-saga.ts';
 import { BoundedTaskIntelligence } from '../../../src/core/task-intelligence.ts';
+import { AdaptiveObservationShadowAdvisor } from '../../../src/core/adaptive-observation-shadow.ts';
+import { AdaptiveOutcomeShadowAdvisor } from '../../../src/core/adaptive-outcome-shadow.ts';
+import { AdaptivePlanNodeShadowAdvisor } from '../../../src/core/adaptive-plan-node-shadow.ts';
+import { AdaptiveRecoveryShadowAdvisor } from '../../../src/core/adaptive-recovery-shadow.ts';
+import { AdaptiveModalityShadowAdvisor } from '../../../src/core/adaptive-modality-shadow.ts';
+import { AdaptiveStrategyShadowAdvisor } from '../../../src/core/adaptive-strategy-shadow.ts';
+import { createLocalStateComponents } from './state-components.ts';
+import { LocalRuntimeLifecycle } from './runtime-lifecycle.ts';
 
 const allowedRoots = (process.env.OPERATOR_ALLOWED_ROOTS ?? process.cwd())
   .split(path.delimiter)
@@ -64,8 +73,8 @@ const terminalAllowedExecutables = (process.env.OPERATOR_TERMINAL_ALLOWED_EXECUT
   .map((item) => item.trim())
   .filter(Boolean);
 
-const token = process.env.OPERATOR_AGENT_TOKEN;
-if (!token || token.length < 32) {
+const token = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
+if (token.length < 32) {
   console.error('[operator] OPERATOR_AGENT_TOKEN must be set to a secret of at least 32 characters.');
   process.exit(2);
 }
@@ -78,6 +87,7 @@ if (recoveryToken !== undefined && recoveryToken.length < 32) {
 
 const stateDir = path.resolve(process.env.OPERATOR_STATE_DIR ?? path.join(os.homedir(), '.operator'));
 const stateInstanceLock = await acquireLocalAgentStateInstanceLock(stateDir);
+await recoverPendingSnapshotRestores(stateDir);
 const remoteLauncherIpc = process.env.OPERATOR_REMOTE_PACKAGE === 'mecord-connect' && typeof process.send === 'function';
 let launcherShutdownRequested = false;
 let launcherShutdownReason = 'launcher-disconnected';
@@ -103,31 +113,39 @@ const permissions = {
   allowSystemChanges: false,
   allowDestructive: false
 };
-const emergencyStop = new EmergencyStopStore(stateDir);
-const approvals = new ApprovalStore(stateDir);
-const actionExecutions = new LocalActionExecutionStore(stateDir);
-const sessionApprovals = new SessionApprovalStore();
-const audit = new AuditLog(stateDir);
-const tasks = new TaskStore(stateDir);
-const resourceLeases = new ResourceLeaseStore(stateDir);
-const actionJournal = new ActionTransitionJournal(stateDir);
-const intentRegistry = new IntentRegistry(stateDir);
-const procedures = new ProcedureMemoryStore(stateDir);
-const world = new WorldModelStore(stateDir);
-const perception = new PerceptionGraphStore(stateDir);
-const optimizer = new ExecutionOptimizerStore(stateDir);
-const taskIntelligence = new BoundedTaskIntelligence({ world, procedures, perception, optimizer });
-const deviceIdentity = new DeviceIdentityStore(stateDir);
-const deviceRegistry = new DeviceRegistryStore(stateDir);
-const semanticMigration = new SemanticCheckpointManager(stateDir, {
-  identity: deviceIdentity,
-  registry: deviceRegistry
-});
-const deviceRouting = new DeviceRoutingStore(stateDir, deviceRegistry);
-const devicePool = new DevicePoolScheduler(stateDir, deviceRegistry, deviceRouting);
-const enterprisePolicy = new EnterprisePolicyStore(stateDir);
-const events = new DurableEventRuntime(stateDir);
-const privacy = new LocalPrivacyDataStore(stateDir);
+const {
+  emergencyStop,
+  approvals,
+  actionExecutions,
+  sessionApprovals,
+  audit,
+  tasks,
+  resourceLeases,
+  actionJournal,
+  intentRegistry,
+  procedures,
+  world,
+  perception,
+  optimizer,
+  taskIntelligence,
+  deviceIdentity,
+  deviceRegistry,
+  semanticMigration,
+  deviceRouting,
+  devicePool,
+  enterprisePolicy,
+  events,
+  privacy
+} = await createLocalStateComponents(stateDir);
+const startupEmergencyStatus = await emergencyStop.status();
+let emergencyExecutionGeneration = new AbortController();
+if (startupEmergencyStatus.engaged) emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
+const adaptiveObservationShadow = new AdaptiveObservationShadowAdvisor();
+const adaptiveOutcomeShadow = new AdaptiveOutcomeShadowAdvisor();
+const adaptivePlanNodeShadow = new AdaptivePlanNodeShadowAdvisor();
+const adaptiveRecoveryShadow = new AdaptiveRecoveryShadowAdvisor();
+const adaptiveModalityShadow = new AdaptiveModalityShadowAdvisor();
+const adaptiveStrategyShadow = new AdaptiveStrategyShadowAdvisor();
 const browserAutoLaunch = process.env.OPERATOR_BROWSER_AUTO_LAUNCH !== '0';
 const relayUrl = process.env.OPERATOR_RELAY_URL?.trim();
 const relayResultUrl = process.env.OPERATOR_RELAY_RESULT_URL?.trim();
@@ -167,12 +185,29 @@ const runtime = createRuntime({
   windowsPathLeasePath: process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH,
   perception
 });
+await runtime.initialize();
 const agentKernel = new AgentKernel({
   stateDir,
   runtime,
   leases: resourceLeases,
   journal: actionJournal,
   intents: intentRegistry,
+  globalAbortSignal: () => emergencyExecutionGeneration.signal,
+  beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
+    if (actionPermissions.enterprisePolicyDigest !== undefined || actionPermissions.enterprisePolicyGeneration !== undefined) {
+      await enterprisePolicy.assertCurrentAuthority({
+        digest: actionPermissions.enterprisePolicyDigest ?? '',
+        generation: actionPermissions.enterprisePolicyGeneration ?? 0
+      });
+    }
+    if ((await emergencyStop.status()).engaged) {
+      throw new OperatorError(
+        'EMERGENCY_STOPPED',
+        'Operator execution is disabled by the local emergency stop.',
+        { retryable: false, details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' } }
+      );
+    }
+  },
   observeResult: async (action, result) => {
     try {
       await publishPerceptionFromActionResult(perception, action, result);
@@ -198,9 +233,14 @@ const teams = new TeamCoordinator(stateDir, {
   permissions
 });
 const organizations = new OrganizationCoordinator(stateDir, teams);
-const organizationRecovery = await organizations.recoverPendingCompensations();
-if (organizationRecovery.pending > 0) {
-  console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+let organizationRecovery = { recovered: 0, pending: 0 };
+if (!startupEmergencyStatus.engaged) {
+  organizationRecovery = await organizations.recoverPendingCompensations();
+  if (organizationRecovery.pending > 0) {
+    console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+  }
+} else {
+  console.warn('[operator] persisted emergency stop is engaged; organization compensation recovery is deferred until explicit recovery.');
 }
 const teachMode = new TeachModeStore(stateDir, {
   journal: actionJournal,
@@ -218,7 +258,10 @@ const studioExecutor = new StudioWorkflowExecutor(stateDir, {
   agentKernel,
   intentRegistry
 });
-const recoveredStudioRuns = await studioExecutor.recoverInterrupted();
+let recoveredStudioRuns = startupEmergencyStatus.engaged ? 0 : await studioExecutor.recoverInterrupted();
+if (startupEmergencyStatus.engaged) {
+  console.warn('[operator] persisted emergency stop is engaged; interrupted Studio recovery is deferred until explicit recovery.');
+}
 const operationCapabilities = await runtime.supportedCapabilities(permissions.allowedCapabilities);
 const operations = new DigitalOperationsLayer(stateDir, {
   procedures,
@@ -254,39 +297,31 @@ let relayConnectionStatus: Record<string, unknown> = {
   state: relayUrl ? 'STARTING' : 'DISABLED',
   updatedAt: new Date().toISOString()
 };
-let shuttingDown = false;
-let shutdownPromise: Promise<void> | null = null;
-
 function stopRelay(): void {
   relayRunner?.stop();
   relaySessionCredentials?.stop();
 }
 
+const lifecycle = new LocalRuntimeLifecycle({
+  stopRelay,
+  pendingRelay: () => relayRun,
+  stopServices: () => [
+    desiredStateReconciler.stop(),
+    eventTicker.stop(),
+    agent.close(),
+    runtime.close()
+  ],
+  releaseStateLock: () => stateInstanceLock.release(),
+  setExitCode: (code) => { process.exitCode = code; },
+  log: (message) => console.error(message)
+});
+
 async function shutdownRuntime(exitCode: number, reason: string, options: { awaitRelay?: boolean } = {}): Promise<void> {
-  if (shutdownPromise) return await shutdownPromise;
-  shuttingDown = true;
-  shutdownPromise = (async () => {
-    console.error(`[operator] shutting down (${reason})`);
-    stopRelay();
-    // Fatal relay shutdown is invoked from relayRun's own rejection chain. Do
-    // not make that path wait on itself; signal/launcher shutdown still drains
-    // the independent active relay promise before releasing durable state.
-    const pendingRelay = options.awaitRelay === false ? null : relayRun;
-    await Promise.allSettled([
-      pendingRelay,
-      desiredStateReconciler.stop(),
-      eventTicker.stop(),
-      agent.close(),
-      runtime.close()
-    ].filter(Boolean) as Array<Promise<unknown>>);
-    await stateInstanceLock.release();
-    process.exitCode = exitCode;
-  })();
-  return await shutdownPromise;
+  await lifecycle.shutdown(exitCode, reason, options);
 }
 
 async function failRequiredRelay(error: unknown): Promise<void> {
-  if (!relayRequired || shuttingDown) return;
+  if (!relayRequired || lifecycle.shuttingDown) return;
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[operator] required relay failed: ${message}`);
   await shutdownRuntime(1, 'required-relay-failure', { awaitRelay: false });
@@ -294,7 +329,7 @@ async function failRequiredRelay(error: unknown): Promise<void> {
 }
 
 function startRelay(): void {
-  if (!relayUrl || shuttingDown || relayRun) return;
+  if (!relayUrl || lifecycle.shuttingDown || relayRun) return;
   const enrollment = new RelayEnrollmentClient({
     relayUrl, resultUrl: relayResultUrl, identity: deviceIdentity,
     allowLoopbackInsecure: relayAllowInsecureLoopback,
@@ -354,7 +389,7 @@ function startRelay(): void {
   const runner = relayRunner;
   relayRun = runner.run()
     .then(async () => {
-      if (relayRequired && !shuttingDown) {
+      if (relayRequired && !lifecycle.shuttingDown) {
         await failRequiredRelay(new OperatorError('RELAY_REQUIRED_STOPPED', 'The required relay connection stopped.'));
       }
     })
@@ -396,6 +431,12 @@ const taskOrchestrator = new TaskOrchestrator({
   intentRegistry,
   actionJournal,
   intelligence: taskIntelligence,
+  observationShadow: adaptiveObservationShadow,
+  planNodeShadow: adaptivePlanNodeShadow,
+  outcomeShadow: adaptiveOutcomeShadow,
+  recoveryShadow: adaptiveRecoveryShadow,
+  modalityShadow: adaptiveModalityShadow,
+  strategyShadow: adaptiveStrategyShadow,
   executeAction: async (action, actionPermissions, context) => {
     if ((await emergencyStop.status()).engaged) {
       return {
@@ -462,8 +503,26 @@ const agent = createLocalAgentServer({
   deviceRegistry,
   privacy,
   deviceReset: resetLocalDevice,
-  onEmergencyStop: () => stopRelay(),
-  onEmergencyClear: () => {
+  onEmergencyStop: async () => {
+    emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
+    stopRelay();
+    const results = await Promise.allSettled([
+      runtime.emergencyStop(),
+      desiredStateReconciler.stop(),
+      eventTicker.stop()
+    ]);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  },
+  onEmergencyClear: async () => {
+    emergencyExecutionGeneration = new AbortController();
+    organizationRecovery = await organizations.recoverPendingCompensations();
+    if (organizationRecovery.pending > 0) {
+      console.warn(`[operator] ${organizationRecovery.pending} organization compensation intent(s) still require recovery before affected rollouts can advance.`);
+    }
+    recoveredStudioRuns += await studioExecutor.recoverInterrupted();
+    desiredStateReconciler.start();
+    eventTicker.start();
     try { startRelay(); }
     catch (error) { console.error(`[operator] relay reconnect after emergency recovery failed: ${error instanceof Error ? error.message : String(error)}`); }
   },
@@ -526,15 +585,18 @@ console.error(`[operator] relay: ${relayUrl ? 'configured' : 'disabled'}`);
 console.error(`[operator] studio workflow recovery: ${recoveredStudioRuns} interrupted run(s) reconciled`);
 console.error(`[operator] desired-state reconciler: every ${desiredStateIntervalMs}ms`);
 console.error(`[operator] durable event ticker: every ${eventTickIntervalMs}ms`);
-desiredStateReconciler.start();
-eventTicker.start();
+if (!startupEmergencyStatus.engaged) {
+  desiredStateReconciler.start();
+  eventTicker.start();
+} else {
+  console.error('[operator] persisted emergency stop is engaged; desired-state and durable-event orchestration remain frozen.');
+}
 if (relayUrl) {
   const relayCapabilities = await runtime.supportedCapabilities(DEVELOPER_RELAY_CAPABILITIES);
   console.error(`[operator] relay capabilities: ${relayCapabilities.join(', ') || 'none'}`);
 }
 
-const emergencyStatus = await emergencyStop.status();
-if (relayUrl && emergencyStatus.engaged) {
+if (relayUrl && startupEmergencyStatus.engaged) {
   if (relayRequired) {
     await failRequiredRelay(new OperatorError(
       'RELAY_REQUIRED_EMERGENCY_STOP',
@@ -551,7 +613,7 @@ if (relayUrl && emergencyStatus.engaged) {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
+    if (lifecycle.shuttingDown) return;
     void shutdownRuntime(0, signal.toLowerCase()).finally(() => process.exit(0));
   });
 }

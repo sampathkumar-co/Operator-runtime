@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
@@ -8,6 +9,68 @@ import { PathScope } from './path-scope.ts';
 
 function sha256(buffer: Uint8Array): string {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+type StableFileIdentity = {
+  device: string;
+  inode: string;
+  links: string;
+  size: number;
+  modifiedNs: string;
+  changedNs: string;
+  createdNs: string;
+  digest: string;
+};
+
+async function stableFileObservation(
+  filePath: string,
+  maxBytes: number,
+  hook?: (filePath: string, phase: 'opened' | 'before-verify') => Promise<void> | void
+): Promise<{ stat: Awaited<ReturnType<Awaited<ReturnType<typeof fs.open>>['stat']>>; bytes: Buffer; identity: StableFileIdentity }> {
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await fs.open(filePath, flags);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) throw new OperatorError('NOT_A_FILE', 'Requested path is not a regular file.');
+    if (before.size > BigInt(maxBytes)) throw new OperatorError('READ_TOO_LARGE', `File exceeds ${maxBytes} byte read limit.`, { details: { size: before.size.toString() } });
+    await hook?.(filePath, 'opened');
+    const first = await readHandleExactly(handle, Number(before.size));
+    await hook?.(filePath, 'before-verify');
+    const second = await readHandleExactly(handle, Number(before.size));
+    const after = await handle.stat({ bigint: true });
+    const pathState = await fs.stat(filePath, { bigint: true });
+    const stableMetadata = ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'birthtimeNs'].every((key) => before[key as keyof typeof before] === after[key as keyof typeof after]);
+    const samePathIdentity = process.platform === 'win32'
+      ? before.ino === pathState.ino && before.birthtimeNs === pathState.birthtimeNs
+      : before.dev === pathState.dev && before.ino === pathState.ino;
+    const completeRead = first.byteLength === Number(before.size) && second.byteLength === Number(before.size);
+    const sameBytes = first.equals(second);
+    if (!stableMetadata || !samePathIdentity || !completeRead || !sameBytes) {
+      throw new OperatorError('FILE_OBSERVATION_CHANGED', 'File identity or bytes changed during stable observation; retry from a fresh precondition.', {
+        retryable: true,
+        details: { sideEffectState: 'none', executionPhase: 'pre_dispatch', stableMetadata, samePathIdentity, completeRead, sameBytes }
+      });
+    }
+    const identityBase = {
+      device: before.dev.toString(), inode: before.ino.toString(), links: before.nlink.toString(), size: Number(before.size),
+      modifiedNs: before.mtimeNs.toString(), changedNs: before.ctimeNs.toString(), createdNs: before.birthtimeNs.toString()
+    };
+    const identity = { ...identityBase, digest: sha256(Buffer.from(JSON.stringify(identityBase), 'utf8')) };
+    return { stat: await handle.stat(), bytes: first, identity };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readHandleExactly(handle: Awaited<ReturnType<typeof fs.open>>, size: number): Promise<Buffer> {
+  const output = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = await handle.read(output, offset, size - offset, offset);
+    if (read.bytesRead === 0) break;
+    offset += read.bytesRead;
+  }
+  return output.subarray(0, offset);
 }
 
 const DEFAULT_MAX_READ_BYTES = 2 * 1024 * 1024;
@@ -34,6 +97,7 @@ export class FilesystemProvider implements CapabilityProvider {
   #maxWriteBytes: number;
   #replaceClaimHook?: (filePath: string) => Promise<void> | void;
   #pathLeaseHook?: (capability: string, filePath: string) => Promise<void> | void;
+  #observationHook?: (filePath: string, phase: 'opened' | 'before-verify') => Promise<void> | void;
 
   constructor(options: {
     allowedRoots: string[];
@@ -41,6 +105,7 @@ export class FilesystemProvider implements CapabilityProvider {
     maxWriteBytes?: number;
     replaceClaimHook?: (filePath: string) => Promise<void> | void;
     pathLeaseHook?: (capability: string, filePath: string) => Promise<void> | void;
+    observationHook?: (filePath: string, phase: 'opened' | 'before-verify') => Promise<void> | void;
     windowsPathLeaseExecutable?: string;
   }) {
     this.#scope = new PathScope(options.allowedRoots, { windowsPathLeaseExecutable: options.windowsPathLeaseExecutable });
@@ -48,6 +113,7 @@ export class FilesystemProvider implements CapabilityProvider {
     this.#maxWriteBytes = boundedBytes(options.maxWriteBytes, DEFAULT_MAX_WRITE_BYTES);
     this.#replaceClaimHook = options.replaceClaimHook;
     this.#pathLeaseHook = options.pathLeaseHook;
+    this.#observationHook = options.observationHook;
   }
 
   supports(action: ActionRequest): boolean {
@@ -83,7 +149,12 @@ export class FilesystemProvider implements CapabilityProvider {
         capability: action.capability,
         provider: this.name,
         evidence: [evidence('filesystem', 'fail', op.message, { code: op.code })],
-        error: { code: op.code, message: op.message, retryable: op.retryable },
+        error: {
+          code: op.code, message: op.message, retryable: op.retryable,
+          ...(op.details && ['none', 'known', 'uncertain'].includes(String(op.details.sideEffectState)) ? { sideEffectState: op.details.sideEffectState as 'none' | 'known' | 'uncertain' } : {}),
+          ...(op.details && ['pre_dispatch', 'dispatched', 'effect_observed', 'reconciled'].includes(String(op.details.executionPhase)) ? { executionPhase: op.details.executionPhase as 'pre_dispatch' | 'dispatched' | 'effect_observed' | 'reconciled' } : {}),
+          ...(op.details ? { details: structuredClone(op.details) } : {})
+        },
         durationMs: Math.round(performance.now() - started)
       };
     }
@@ -175,29 +246,23 @@ export class FilesystemProvider implements CapabilityProvider {
     const requested = requiredString(action.input.path, 'path');
     return await this.#scope.withExisting(requested, async (filePath) => {
       await this.#pathLeaseHook?.(action.capability, filePath);
-      const stat = await fs.stat(filePath);
-      if (!stat.isFile()) throw new OperatorError('NOT_A_FILE', 'Requested path is not a file.');
-      if (stat.size > this.#maxReadBytes) {
-        throw new OperatorError('READ_TOO_LARGE', `File exceeds ${this.#maxReadBytes} byte read limit.`, { details: { size: stat.size } });
-      }
+      const snapshot = await stableFileObservation(filePath, this.#maxReadBytes, this.#observationHook);
+      const { stat, bytes: fullBytes, identity } = snapshot;
+      const size = typeof stat.size === 'bigint' ? Number(stat.size) : stat.size;
+      if (!Number.isSafeInteger(size) || size < 0) throw new OperatorError('FILE_SIZE_INVALID', 'Observed file size exceeds the safe numeric range.');
       const encoding = action.input.encoding === 'base64' ? 'base64' : 'utf8';
-      const offset = boundedInteger(action.input.offset, 0, 0, Math.max(0, stat.size));
+      const offset = boundedInteger(action.input.offset, 0, 0, size);
       const maxBytes = boundedInteger(action.input.maxBytes, 48 * 1024, 1024, encoding === 'base64' ? 96 * 1024 : 128 * 1024);
-      const returnedBytes = Math.min(maxBytes, Math.max(0, stat.size - offset));
-      const handle = await fs.open(filePath, 'r');
-      let data: Buffer;
-      try {
-        data = Buffer.alloc(returnedBytes);
-        if (returnedBytes > 0) await handle.read(data, 0, returnedBytes, offset);
-      } finally { await handle.close(); }
-      const digest = sha256(await fs.readFile(filePath));
+      const returnedBytes = Math.min(maxBytes, Math.max(0, size - offset));
+      const data = fullBytes.subarray(offset, offset + returnedBytes);
+      const digest = sha256(fullBytes);
       const nextOffset = offset + returnedBytes;
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { path: filePath, size: stat.size, sha256: digest, offset, returnedBytes, content: data.toString(encoding), truncated: nextOffset < stat.size, ...(nextOffset < stat.size ? { nextOffset } : {}) },
-        evidence: [evidence('file_read', 'pass', 'A bounded file range was read from authorized scope.', { path: filePath, size: stat.size, offset, returnedBytes, sha256: digest })],
+        output: { path: filePath, size, sha256: digest, identity, offset, returnedBytes, content: data.toString(encoding), truncated: nextOffset < size, ...(nextOffset < size ? { nextOffset } : {}) },
+        evidence: [evidence('file_read', 'pass', 'A stable, handle-bound file snapshot was read from authorized scope.', { path: filePath, size, offset, returnedBytes, sha256: digest, identityDigest: identity.digest })],
         durationMs: Math.round(performance.now() - started)
       };
     });
@@ -209,17 +274,22 @@ export class FilesystemProvider implements CapabilityProvider {
       await this.#pathLeaseHook?.(action.capability, dirPath);
       const stat = await fs.stat(dirPath);
       if (!stat.isDirectory()) throw new OperatorError('NOT_A_DIRECTORY', 'Requested path is not a directory.');
-      const entries = await fs.readdir(dirPath, { withFileTypes: true });
-      const bounded = entries.slice(0, 500).map((entry) => ({
+      const offset = boundedInteger(action.input.offset, 0, 0, 1_000_000);
+      const limit = boundedInteger(action.input.limit, 500, 1, 500);
+      const entries = (await fs.readdir(dirPath, { withFileTypes: true }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const bounded = entries.slice(offset, offset + limit).map((entry) => ({
         name: entry.name,
         type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : entry.isSymbolicLink() ? 'symlink' : 'other'
       }));
+      const nextOffset = offset + bounded.length;
+      const truncated = nextOffset < entries.length;
       return {
         ok: true,
         capability: action.capability,
         provider: this.name,
-        output: { path: dirPath, entries: bounded, truncated: entries.length > bounded.length },
-        evidence: [evidence('directory_list', 'pass', 'Directory listed from authorized scope.', { path: dirPath, count: bounded.length })],
+        output: { path: dirPath, entries: bounded, offset, limit, total: entries.length, truncated, ...(truncated ? { nextOffset } : {}) },
+        evidence: [evidence('directory_list', 'pass', 'Directory page listed deterministically from authorized scope.', { path: dirPath, count: bounded.length, offset, total: entries.length })],
         durationMs: Math.round(performance.now() - started)
       };
     });
@@ -229,19 +299,25 @@ export class FilesystemProvider implements CapabilityProvider {
     const requested = requiredString(action.input.path, 'path');
     return await this.#scope.withExisting(requested, async (resolved) => {
       await this.#pathLeaseHook?.(action.capability, resolved);
-      const stat = await fs.stat(resolved);
+      const lstat = await fs.lstat(resolved);
+      if (lstat.isSymbolicLink()) throw new OperatorError('FILE_OBSERVATION_SYMLINK_DENIED', 'Stable file observation refuses symbolic links.');
+      const stable = lstat.isFile() && lstat.size <= this.#maxReadBytes
+        ? await stableFileObservation(resolved, this.#maxReadBytes, this.#observationHook)
+        : undefined;
+      const stat = stable?.stat ?? lstat;
       const output: Record<string, unknown> = {
         path: resolved,
         type: stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other',
         size: stat.size,
         modifiedAt: stat.mtime.toISOString(),
         createdAt: stat.birthtime.toISOString(),
-        mode: stat.mode
+        mode: stat.mode,
+        ...(stable ? { identity: stable.identity } : {})
       };
-      if (stat.isFile() && stat.size <= this.#maxReadBytes) output.sha256 = sha256(await fs.readFile(resolved));
+      if (stable) output.sha256 = sha256(stable.bytes);
       return {
         ok: true, capability: action.capability, provider: this.name, output,
-        evidence: [evidence('file_info', 'pass', 'Filesystem metadata inspected inside authorized scope.', { path: resolved, type: output.type, size: stat.size })],
+        evidence: [evidence('file_info', 'pass', stable ? 'Filesystem metadata and bytes were captured from one stable handle-bound identity.' : 'Filesystem metadata inspected inside authorized scope.', { path: resolved, type: output.type, size: stat.size, ...(stable ? { identityDigest: stable.identity.digest } : {}) })],
         durationMs: Math.round(performance.now() - started)
       };
     });

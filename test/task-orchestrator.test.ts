@@ -127,6 +127,80 @@ test('task executor completes and durably verifies a real semantic multi-action 
   assert.deepEqual(await store.get(submitted.id), completed);
 });
 
+test('adaptive planning control can veto one exact proposal and return bounded control to the existing planner', async (t) => {
+  if (!supportedGitAvailable()) { t.skip('supported Git executable is unavailable'); return; }
+  const root = await tempDir(t, 'operator-task-adaptive-replan-root-');
+  const state = await tempDir(t, 'operator-task-adaptive-replan-state-');
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => execFile('git', ['init', '--quiet'], { cwd: root }, (error) => error ? reject(error) : resolve()));
+
+  let reviews = 0;
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)).register(new GitProvider({ allowedRoots: [root] })),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list', 'file.create', 'file.read', 'git.status']),
+    planningInfluence: {
+      async review(request) {
+        reviews += 1;
+        if (reviews !== 1) return undefined;
+        return {
+          command: 'REPLAN',
+          effect: 'CONTROL_ALLOWED',
+          reason: 'exercise exact-proposal bounded replan',
+          proposalDigest: request.proposalDigest,
+          grantsAuthority: false,
+          runtimeVetoRequired: true
+        };
+      }
+    }
+  });
+
+  const submitted = await orchestrator.submit({
+    objective: 'Create a file after one bounded adaptive replan.',
+    authorizedScope: [root],
+    successConditions: ['exact file content is verified'],
+    goal: { kind: 'controlled-file-change', root, path: 'adaptive.txt', content: 'adaptive\n' }
+  });
+  const completed = await orchestrator.run(submitted.id);
+
+  assert.equal(completed.state, 'VERIFIED');
+  assert.ok(reviews > 1);
+  assert.ok(completed.evidence.some((item) => item.kind === 'adaptive_planning_replan'));
+  assert.equal(await fs.readFile(path.join(root, 'adaptive.txt'), 'utf8'), 'adaptive\n');
+});
+
+test('adaptive control fails closed when a control recommendation is bound to a stale proposal', async (t) => {
+  const root = await tempDir(t, 'operator-task-adaptive-stale-root-');
+  const state = await tempDir(t, 'operator-task-adaptive-stale-state-');
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(filesystem(root)),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.list']),
+    planningInfluence: {
+      async review() {
+        return {
+          command: 'REPLAN',
+          effect: 'CONTROL_ALLOWED',
+          reason: 'stale recommendation',
+          proposalDigest: '0'.repeat(64),
+          grantsAuthority: false,
+          runtimeVetoRequired: true
+        };
+      }
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Never execute a stale adaptive control recommendation.',
+    authorizedScope: [root],
+    successConditions: ['stale control is rejected'],
+    goal: { kind: 'controlled-file-change', root, path: 'never.txt', content: 'never\n' }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'FAILED');
+  assert.equal(completed.failures.at(-1)?.code, 'TASK_ADAPTIVE_CONTROL_INVALID');
+  await assert.rejects(() => fs.stat(path.join(root, 'never.txt')), (error: any) => error?.code === 'ENOENT');
+});
+
 test('generic autonomous workflow observes, mutates through the kernel boundary, and independently verifies durable machine state', async (t) => {
   const root = await tempDir(t, 'operator-task-autonomous-root-');
   const state = await tempDir(t, 'operator-task-autonomous-state-');
@@ -164,6 +238,189 @@ test('generic autonomous workflow observes, mutates through the kernel boundary,
   assert.deepEqual(durablePlan.subgoals[0].requiredEvidence, ['fresh-machine-observation', 'canonical-verification']);
   assert.equal(await fs.readFile(target, 'utf8'), content);
   assert.ok(completed.evidence.some((item) => item.kind === 'autonomous_step_verified'));
+});
+
+test('autonomous browser workflow focuses and paginates bounded observations until its interaction target is discovered', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-pagination-state-');
+  const root = await tempDir(t, 'operator-task-browser-pagination-root-');
+  const inspectInputs: Array<Record<string, unknown>> = [];
+  let interactionCalls = 0;
+  const provider: CapabilityProvider = {
+    name: 'paged-browser-probe',
+    supports: (action) => action.capability.startsWith('browser.'),
+    resolveRisk: () => 'write',
+    score: () => SCORE,
+    execute: async (action): Promise<ActionResult> => {
+      const passEvidence = [{ kind: 'provider', status: 'pass' as const, message: 'Synthetic browser state observed.', timestamp: new Date().toISOString() }];
+      if (action.capability === 'browser.inspect') {
+        inspectInputs.push(structuredClone(action.input));
+        const observation = action.input.observation && typeof action.input.observation === 'object' && !Array.isArray(action.input.observation)
+          ? action.input.observation as Record<string, unknown>
+          : {};
+        const offset = Number(observation.controlOffset ?? 0);
+        const controls = offset === 0
+          ? [{ ref: 'other-ref', role: 'button', name: 'Other' }]
+          : [{ ref: 'target-ref', role: 'button', name: 'Target Button' }];
+        return {
+          ok: true, capability: action.capability, provider: 'paged-browser-probe',
+          output: {
+            target: { id: action.input.targetId, type: 'page', url: 'https://example.test/' },
+            page: {
+              semantic: {
+                controls,
+                visibleText: [],
+                visualObjects: [],
+                pagination: {
+                  controls: { offset, returned: 1, total: 2, truncated: offset === 0, ...(offset === 0 ? { nextOffset: 1 } : {}) },
+                  visibleText: { offset: 0, returned: 0, total: 0, truncated: false },
+                  visualObjects: { offset: 0, returned: 0, total: 0, truncated: false }
+                }
+              },
+              frames: []
+            }
+          },
+          evidence: passEvidence, durationMs: 1
+        };
+      }
+      if (action.capability === 'browser.interact') {
+        interactionCalls += 1;
+        assert.equal((inspectInputs.at(-1)?.observation as any)?.controlOffset, 1);
+        return {
+          ok: true, capability: action.capability, provider: 'paged-browser-probe',
+          output: { state: 'clicked', changed: true }, evidence: passEvidence, durationMs: 1
+        };
+      }
+      return {
+        ok: true, capability: action.capability, provider: 'paged-browser-probe',
+        output: { state: 'verified', targetId: action.input.targetId }, evidence: passEvidence, durationMs: 1
+      };
+    }
+  };
+  const runtime = new OperatorRuntime().register(provider);
+  const orchestrator = new TaskOrchestrator({
+    runtime,
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.interact', 'browser.verify'],
+      allowedRoots: [root],
+      allowExternalWrites: true
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Find the target button across bounded browser observation pages and click it.',
+    authorizedScope: ['https://example.test'],
+    successConditions: ['target is discovered before interaction', 'fresh verification succeeds'],
+    maxSteps: 6,
+    goal: {
+      kind: 'autonomous-workflow',
+      browserOrigins: ['https://example.test'],
+      steps: [{
+        key: 'click-target',
+        title: 'Discover and click the target button',
+        observe: { capability: 'browser.inspect', input: {} },
+        action: {
+          capability: 'browser.interact',
+          input: { targetId: 'tab-1', operation: 'click', target: { role: 'button', name: 'Target Button' } }
+        },
+        verify: {
+          capability: 'browser.verify',
+          input: { targetId: 'tab-1', expect: { exists: true }, target: { role: 'button', name: 'Target Button' } },
+          assertions: [{ path: 'state', operator: 'equals', value: 'verified' }]
+        }
+      }]
+    }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'VERIFIED');
+  assert.equal(interactionCalls, 1);
+  assert.equal(inspectInputs.length, 2);
+  assert.equal(inspectInputs[0]?.targetId, 'tab-1');
+  assert.deepEqual(inspectInputs[0]?.observation, { focusRole: 'button', focusText: 'Target Button' });
+  assert.deepEqual(inspectInputs[1]?.observation, { focusRole: 'button', focusText: 'Target Button', controlOffset: 1 });
+  assert.ok(completed.evidence.some((item) => item.kind === 'browser_observation_pagination'));
+});
+
+test('autonomous browser pagination is bounded and falls through after five provider-directed page advances', async (t) => {
+  const state = await tempDir(t, 'operator-task-browser-pagination-bound-state-');
+  const root = await tempDir(t, 'operator-task-browser-pagination-bound-root-');
+  let inspectCalls = 0;
+  let interactionCalls = 0;
+  const provider: CapabilityProvider = {
+    name: 'bounded-browser-pagination-probe',
+    supports: (action) => action.capability.startsWith('browser.'),
+    resolveRisk: () => 'write',
+    score: () => SCORE,
+    execute: async (action): Promise<ActionResult> => {
+      const passEvidence = [{ kind: 'provider', status: 'pass' as const, message: 'Synthetic browser state observed.', timestamp: new Date().toISOString() }];
+      if (action.capability === 'browser.inspect') {
+        inspectCalls += 1;
+        const observation = action.input.observation && typeof action.input.observation === 'object' && !Array.isArray(action.input.observation)
+          ? action.input.observation as Record<string, unknown>
+          : {};
+        const offset = Number(observation.controlOffset ?? 0);
+        return {
+          ok: true, capability: action.capability, provider: 'bounded-browser-pagination-probe',
+          output: {
+            target: { id: 'tab-1', type: 'page', url: 'https://example.test/' },
+            page: {
+              semantic: {
+                controls: [{ ref: `other-${offset}`, role: 'button', name: 'Other' }],
+                visibleText: [], visualObjects: [],
+                pagination: {
+                  controls: { offset, returned: 1, total: 10_000, truncated: true, nextOffset: offset + 1 },
+                  visibleText: { offset: 0, returned: 0, total: 0, truncated: false },
+                  visualObjects: { offset: 0, returned: 0, total: 0, truncated: false }
+                }
+              },
+              frames: []
+            }
+          },
+          evidence: passEvidence, durationMs: 1
+        };
+      }
+      if (action.capability === 'browser.interact') {
+        interactionCalls += 1;
+        return {
+          ok: false, capability: action.capability, provider: 'bounded-browser-pagination-probe',
+          evidence: [{ kind: 'provider', status: 'fail', message: 'Target remains absent.', timestamp: new Date().toISOString() }],
+          error: { code: 'PERMANENT_TARGET_ABSENT', message: 'Target remains absent.', retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+          durationMs: 1
+        };
+      }
+      return { ok: true, capability: action.capability, provider: 'bounded-browser-pagination-probe', output: { state: 'unused' }, evidence: passEvidence, durationMs: 1 };
+    }
+  };
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: {
+      allowedCapabilities: ['browser.inspect', 'browser.interact', 'browser.verify'],
+      allowedRoots: [root],
+      allowExternalWrites: true
+    }
+  });
+  const submitted = await orchestrator.submit({
+    objective: 'Bound browser target discovery without looping forever.',
+    authorizedScope: ['https://example.test'],
+    successConditions: ['pagination remains bounded'],
+    maxSteps: 8,
+    goal: {
+      kind: 'autonomous-workflow',
+      browserOrigins: ['https://example.test'],
+      steps: [{
+        key: 'bounded-target',
+        title: 'Bounded target discovery',
+        observe: { capability: 'browser.inspect', input: { targetId: 'tab-1' } },
+        action: { capability: 'browser.interact', input: { targetId: 'tab-1', operation: 'click', target: { role: 'button', name: 'Never Present' } } },
+        verify: { capability: 'browser.verify', input: { targetId: 'tab-1', expect: { exists: true }, target: { role: 'button', name: 'Never Present' } }, assertions: [{ path: 'state', operator: 'equals', value: 'verified' }] }
+      }]
+    }
+  });
+  const completed = await orchestrator.run(submitted.id);
+  assert.equal(completed.state, 'FAILED');
+  assert.equal(inspectCalls, 6);
+  assert.equal(interactionCalls, 1);
+  assert.equal(completed.evidence.filter((item) => item.kind === 'browser_observation_pagination').length, 5);
 });
 
 test('autonomous workflow rejects mutating observation or verification contracts', async (t) => {
@@ -1220,7 +1477,10 @@ class RepairingBudgetPlanner implements TaskPlanner {
     assert.equal(context.budget.maxSteps, 4);
     assert.ok(context.budget.remainingSteps >= 0 && context.budget.remainingSteps <= 4);
     if (context.task.execution!.plannerState.phase === 'complete') return { type: 'complete', message: 'repaired step verified' };
-    return { reasoning: 'I know what to do but omitted the typed action.' } as unknown as PlannerDecision;
+    return {
+      reasoning: 'I know what to do but omitted the typed action.',
+      secretPlannerText: 'never-persist-this-planner-secret'
+    } as unknown as PlannerDecision;
   }
   repair(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision {
     assert.match(issue, /decision type|structured/i);
@@ -1254,4 +1514,43 @@ test('task planner boundary exposes remaining budget and permits one typed repai
   assert.equal(completed.state, 'VERIFIED');
   assert.equal(completed.execution?.stepCount, 1);
   assert.ok(completed.evidence.some((item) => item.kind === 'planner_repair'));
+  const restarted = await new TaskStore(state).get(task.id);
+  const rejected = restarted.execution?.rejectedDecisions?.[0];
+  assert.equal(rejected?.decisionType, 'invalid');
+  assert.equal(rejected?.code, 'TASK_PLANNER_FAILED');
+  assert.equal(rejected?.taskId, task.id);
+  assert.equal(rejected?.authorityState, 'TASK_SCOPE_BOUND');
+  assert.equal(rejected?.retryAllowed, true);
+  assert.equal(rejected?.replanAllowed, true);
+  assert.match(rejected?.decisionDigest ?? '', /^[0-9a-f]{64}$/);
+  assert.doesNotMatch(JSON.stringify(restarted.execution?.rejectedDecisions), /never-persist-this-planner-secret/);
+});
+
+
+test('emergency stop aborts every active task controller and persists cancellation truth', async (t) => {
+  const root = await tempDir(t, 'operator-task-emergency-stop-');
+  const state = await tempDir(t, 'operator-task-emergency-stop-state-');
+  const provider = new DelayedProvider();
+  const orchestrator = new TaskOrchestrator({
+    runtime: new OperatorRuntime().register(provider),
+    store: new TaskStore(state),
+    permissions: permissions(root, ['file.read']),
+    planners: [new OneStepPlanner()]
+  });
+  const task = await orchestrator.submit({
+    objective: 'Stop active work immediately.',
+    authorizedScope: [root],
+    successConditions: ['provider stops'],
+    goal: { kind: 'controlled-file-change', root, path: 'input.txt', content: 'unused' }
+  });
+
+  const running = orchestrator.run(task.id);
+  await provider.startedPromise;
+  assert.deepEqual(orchestrator.emergencyStopActive(), [task.id]);
+
+  const cancelled = await running;
+  assert.equal(cancelled.state, 'CANCELLED');
+  assert.equal(cancelled.execution?.records[0]?.state, 'INTERRUPTED');
+  assert.equal(cancelled.execution?.records[0]?.errorCode, 'EXECUTION_ABORTED');
+  assert.ok(cancelled.evidence.some((item) => item.kind === 'task_cancel'));
 });

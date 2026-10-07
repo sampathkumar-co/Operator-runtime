@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.production.json" },
+    { "path": "./apps/mcp-server/tsconfig.json" }
+  ]
+}

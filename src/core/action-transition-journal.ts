@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { actionHash, canonicalJson } from './action-identity.ts';
-import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { canonicalResourceKeys } from './resource-identity.ts';
 import type { ActionRequest, ActionResult, IntentBinding, ProviderReconciliationResult } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
+import { kernelVerificationDigest, verifyActionOutcome } from './action-verification.ts';
 
 export type ActionJournalState =
   | 'PREPARED'
@@ -48,6 +50,22 @@ interface JournalState {
   entries: ActionJournalEntry[];
 }
 
+interface StagedCompletedResult {
+  version: 1;
+  actionId: string;
+  actionDigest: string;
+  journalGeneration: number;
+  capability: string;
+  verificationDigest: string;
+  resultDigest: string;
+  result: ActionResult;
+}
+
+export type ActionCompletionFaultPoint =
+  | 'after_result_staged'
+  | 'after_journal_completed'
+  | 'after_result_published';
+
 const MAX_ENTRIES = 20_000;
 const MAX_TRANSITIONS = 64;
 const TERMINAL_RETENTION_MS = 14 * 24 * 60 * 60_000;
@@ -61,18 +79,28 @@ const RESULT_OPTIONS = {
   errorCode: 'ACTION_JOURNAL_RESULT_CORRUPT',
   invalidMessage: 'Completed action replay result is invalid.'
 } as const;
+const STAGED_RESULT_OPTIONS = {
+  maxBytes: RESULT_OPTIONS.maxBytes + 128 * 1024,
+  errorCode: 'ACTION_JOURNAL_RESULT_CORRUPT',
+  invalidMessage: 'Staged completed action result is invalid.'
+} as const;
 
 export class ActionTransitionJournal {
   #file: string;
   #resultDir: string;
   #clock: () => Date;
+  #completionFault?: (point: ActionCompletionFaultPoint, actionId: string) => void | Promise<void>;
   #serial: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: {
+    clock?: () => Date;
+    completionFault?: (point: ActionCompletionFaultPoint, actionId: string) => void | Promise<void>;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'action-transitions.json');
     this.#resultDir = path.join(root, 'action-results');
     this.#clock = options.clock ?? (() => new Date());
+    this.#completionFault = options.completionFault;
   }
 
   async prepare(input: {
@@ -86,6 +114,7 @@ export class ActionTransitionJournal {
       for (const actionId of prunedActionIds) {
         try {
           await fs.rm(this.#resultFile(actionId), { force: true });
+          await fs.rm(this.#stagedResultFile(actionId), { force: true });
         } catch (error) {
           throw new OperatorError(
             'ACTION_JOURNAL_RESULT_CLEANUP_FAILED',
@@ -99,7 +128,7 @@ export class ActionTransitionJournal {
         if (existing.actionDigest !== digest || existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId
           || existing.capability !== input.action.capability || existing.risk !== input.action.risk
           || canonicalJson(existing.intent ?? null) !== canonicalJson(input.action.intent ?? null)
-          || canonicalJson(existing.resourceKeys) !== canonicalJson(uniqueKeys(input.resourceKeys))) {
+          || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(uniqueKeys(input.resourceKeys)))) {
           throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Action id is already bound to a different durable execution identity.');
         }
         if (existing.state === 'COMPLETED' && input.action.risk === 'read') {
@@ -172,23 +201,82 @@ export class ActionTransitionJournal {
 
   async complete(actionId: string, verificationDigest: string, result?: ActionResult): Promise<ActionJournalEntry> {
     const digestValue = sha(verificationDigest, 'verificationDigest');
-    const entry = await this.inspect(actionId);
-    let resultDigest: string | undefined;
-    if (entry.risk !== 'read' && result) {
-      if (!result.ok || result.capability !== entry.capability) {
-        throw new OperatorError('ACTION_JOURNAL_RESULT_INVALID', 'Only a successful matching mutation result can be persisted for replay.');
-      }
-      resultDigest = digest(result);
-      await this.#persistCompletedResult(entry.actionId, resultDigest, result);
+    const current = await this.inspect(actionId);
+    if (current.risk === 'read') {
+      return await this.#transition(actionId, 'COMPLETED', { verificationDigest: digestValue });
     }
-    return await this.#transition(actionId, 'COMPLETED', {
+    if (!result || !result.ok || result.capability !== current.capability) {
+      throw new OperatorError('ACTION_JOURNAL_RESULT_INVALID', 'A successful matching mutation result is required for durable completion.');
+    }
+    const safeResult = validateReplayResult(result, current.capability);
+    const embeddedVerification = kernelVerificationDigest(safeResult);
+    if (!embeddedVerification || embeddedVerification !== digestValue) {
+      throw new OperatorError('ACTION_JOURNAL_RESULT_INVALID', 'Mutation completion result is not bound to the supplied kernel verification digest.');
+    }
+    const resultDigest = digest(safeResult);
+    const staged: StagedCompletedResult = {
+      version: 1,
+      actionId: current.actionId,
+      actionDigest: current.actionDigest,
+      journalGeneration: current.generation,
+      capability: current.capability,
       verificationDigest: digestValue,
-      ...(resultDigest ? { resultDigest } : {})
+      resultDigest,
+      result: safeResult
+    };
+    const completed = await this.#mutate(async (state, now) => {
+      const entry = findEntry(state, actionId);
+      assertStageMatchesEntry(staged, entry);
+      if (entry.state === 'COMPLETED') {
+        assertStageMatchesCompletion(staged, entry);
+        return entry;
+      }
+      if (entry.state !== 'OBSERVED' && entry.state !== 'RECONCILED') {
+        throw new OperatorError('ACTION_JOURNAL_TRANSITION_INVALID', `Cannot complete mutation from action journal state ${entry.state}.`);
+      }
+      await this.#writeStagedResult(staged);
+      await this.#completionFault?.('after_result_staged', entry.actionId);
+      applyTransition(entry, 'COMPLETED', now, { verificationDigest: digestValue, resultDigest });
+      return entry;
     });
+    await this.#completionFault?.('after_journal_completed', completed.actionId);
+    await this.#publishStagedResult(staged);
+    return completed;
+  }
+
+  async recoverPendingCompletion(actionIdInput: string, action?: ActionRequest): Promise<ActionJournalEntry> {
+    const actionId = bounded(actionIdInput, 512, 'actionId');
+    let staged = await this.#readStagedResult(actionId);
+    if (!staged) {
+      const entry = await this.inspect(actionId);
+      if (entry.state !== 'COMPLETED' && (entry.state === 'OBSERVED' || entry.state === 'RECONCILED')) {
+        staged = await this.#readLegacyOrphanResult(entry, action);
+      }
+      if (!staged) return entry;
+    }
+    const completed = await this.#mutate((state, now) => {
+      const entry = findEntry(state, actionId);
+      assertStageMatchesEntry(staged!, entry);
+      if (entry.state === 'COMPLETED') {
+        assertStageMatchesCompletion(staged!, entry);
+        return entry;
+      }
+      if (entry.state !== 'OBSERVED' && entry.state !== 'RECONCILED') {
+        throw new OperatorError('ACTION_JOURNAL_COMPLETION_CONFLICT', `Staged completion conflicts with journal state ${entry.state}.`);
+      }
+      applyTransition(entry, 'COMPLETED', now, {
+        verificationDigest: staged!.verificationDigest,
+        resultDigest: staged!.resultDigest
+      });
+      return entry;
+    });
+    await this.#publishStagedResult(staged);
+    return completed;
   }
 
   async replayCompleted(actionIdInput: string): Promise<ActionResult | undefined> {
-    const entry = await this.inspect(actionIdInput);
+    let entry = await this.inspect(actionIdInput);
+    if (entry.risk !== 'read') entry = await this.recoverPendingCompletion(entry.actionId);
     if (entry.state !== 'COMPLETED' || entry.risk === 'read') return undefined;
     const transition = [...entry.transitions].reverse().find((item) =>
       item.state === 'COMPLETED' && item.verificationDigest && item.resultDigest
@@ -224,45 +312,114 @@ export class ActionTransitionJournal {
     return state.entries.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map((item) => structuredClone(item));
   }
 
+  async unresolvedMutations(): Promise<ActionJournalEntry[]> {
+    await this.#serial;
+    const state = await this.#read();
+    return state.entries
+      .filter((entry) => entry.risk !== 'read' && (entry.state === 'DISPATCHED' || entry.state === 'UNCERTAIN'))
+      .sort((a, b) => a.actionId.localeCompare(b.actionId))
+      .map((entry) => structuredClone(entry));
+  }
+
   async #transition(
     actionIdInput: string,
     next: ActionJournalState,
     metadata: Omit<ActionJournalTransition, 'seq' | 'state' | 'at'>
   ): Promise<ActionJournalEntry> {
     return await this.#mutate((state, now) => {
-      const actionId = bounded(actionIdInput, 512, 'actionId');
-      const entry = state.entries.find((item) => item.actionId === actionId);
-      if (!entry) throw new OperatorError('ACTION_JOURNAL_NOT_FOUND', 'Action journal entry was not found.');
-      if (!allowedTransition(entry.state, next)) {
-        if (entry.state === next) return entry;
-        throw new OperatorError('ACTION_JOURNAL_TRANSITION_INVALID', `Cannot transition action journal from ${entry.state} to ${next}.`);
-      }
-      if (entry.transitions.length >= MAX_TRANSITIONS) {
-        throw new OperatorError('ACTION_JOURNAL_TRANSITION_LIMIT', 'Action journal transition history is unexpectedly large.');
-      }
-      const at = now.toISOString();
-      entry.state = next;
-      entry.updatedAt = at;
-      entry.transitions.push({ seq: entry.transitions.length + 1, state: next, at, ...metadata });
+      const entry = findEntry(state, actionIdInput);
+      applyTransition(entry, next, now, metadata);
       return entry;
     });
   }
 
-  async #persistCompletedResult(actionId: string, expectedDigest: string, result: ActionResult): Promise<void> {
-    const text = JSON.stringify(result);
-    if (Buffer.byteLength(text, 'utf8') > RESULT_OPTIONS.maxBytes) {
+  async #writeStagedResult(staged: StagedCompletedResult): Promise<void> {
+    const resultText = JSON.stringify(staged.result);
+    if (Buffer.byteLength(resultText, 'utf8') > RESULT_OPTIONS.maxBytes) {
       throw new OperatorError('ACTION_JOURNAL_RESULT_TOO_LARGE', 'Completed mutation result is too large for durable replay.');
     }
-    await writeDurableStateText(this.#resultFile(actionId), text, RESULT_OPTIONS);
-    const persisted = JSON.parse(await readDurableStateText(this.#resultFile(actionId), RESULT_OPTIONS));
-    if (digest(validateReplayResult(persisted)) !== expectedDigest) {
-      throw new OperatorError('ACTION_JOURNAL_RESULT_CORRUPT', 'Persisted completed action result failed its integrity check.');
+    const stagedText = JSON.stringify(staged);
+    try {
+      await createDurableStateBytes(this.#stagedResultFile(staged.actionId), Buffer.from(stagedText, 'utf8'), STAGED_RESULT_OPTIONS);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const persisted = await this.#readStagedResult(staged.actionId);
+    if (!persisted || canonicalJson(persisted) !== canonicalJson(staged)) {
+      throw new OperatorError('ACTION_JOURNAL_COMPLETION_CONFLICT', 'An immutable staged completion already exists with different lineage.');
+    }
+  }
+
+  async #publishStagedResult(staged: StagedCompletedResult): Promise<void> {
+    const resultText = JSON.stringify(staged.result);
+    try {
+      await createDurableStateBytes(this.#resultFile(staged.actionId), Buffer.from(resultText, 'utf8'), RESULT_OPTIONS);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    const persisted = validateReplayResult(JSON.parse(await readDurableStateText(this.#resultFile(staged.actionId), RESULT_OPTIONS)), staged.capability);
+    if (digest(persisted) !== staged.resultDigest) {
+      throw new OperatorError('ACTION_JOURNAL_COMPLETION_CONFLICT', 'An immutable published result already exists with different lineage.');
+    }
+    await this.#completionFault?.('after_result_published', staged.actionId);
+    await fs.rm(this.#stagedResultFile(staged.actionId), { force: true });
+  }
+
+  async #readStagedResult(actionId: string): Promise<StagedCompletedResult | undefined> {
+    try {
+      return validateStagedResult(JSON.parse(await readDurableStateText(this.#stagedResultFile(actionId), STAGED_RESULT_OPTIONS)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (error instanceof OperatorError) throw error;
+      throw resultCorrupt('Staged completion could not be read.');
+    }
+  }
+
+  async #readLegacyOrphanResult(entry: ActionJournalEntry, action?: ActionRequest): Promise<StagedCompletedResult | undefined> {
+    try {
+      const result = validateReplayResult(JSON.parse(await readDurableStateText(this.#resultFile(entry.actionId), RESULT_OPTIONS)), entry.capability);
+      const verificationDigest = kernelVerificationDigest(result);
+      if (!verificationDigest || !action || action.id !== entry.actionId || actionHash(action) !== entry.actionDigest) {
+        throw resultCorrupt('Legacy orphan result has no exact action and kernel verification lineage.');
+      }
+      const evidenceIndex = result.evidence.map((item) => item.kind === 'kernel_verification'
+        && item.status === 'pass'
+        && item.data?.verificationDigest === verificationDigest).lastIndexOf(true);
+      if (evidenceIndex < 0) throw resultCorrupt('Legacy orphan kernel verification evidence is invalid.');
+      const resultBeforeKernelVerification = {
+        ...result,
+        evidence: result.evidence.filter((_item, index) => index !== evidenceIndex)
+      };
+      const receipt = verifyActionOutcome({ action, result: resultBeforeKernelVerification, journal: entry });
+      if (!receipt.verified || receipt.digest !== verificationDigest) {
+        throw resultCorrupt('Legacy orphan kernel verification lineage could not be reproduced.');
+      }
+      const staged: StagedCompletedResult = {
+        version: 1,
+        actionId: entry.actionId,
+        actionDigest: entry.actionDigest,
+        journalGeneration: entry.generation,
+        capability: entry.capability,
+        verificationDigest,
+        resultDigest: digest(result),
+        result
+      };
+      await this.#writeStagedResult(staged);
+      return staged;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
     }
   }
 
   #resultFile(actionId: string): string {
     const key = crypto.createHash('sha256').update(actionId, 'utf8').digest('hex');
     return path.join(this.#resultDir, `${key}.json`);
+  }
+
+  #stagedResultFile(actionId: string): string {
+    const key = crypto.createHash('sha256').update(actionId, 'utf8').digest('hex');
+    return path.join(this.#resultDir, `${key}.staged.json`);
   }
 
   async #read(): Promise<JournalState> {
@@ -298,6 +455,32 @@ function allowedTransition(current: ActionJournalState, next: ActionJournalState
   if (current === 'UNCERTAIN') return next === 'RECONCILED' || next === 'UNCERTAIN';
   if (current === 'RECONCILED') return next === 'DISPATCHED' || next === 'COMPLETED' || next === 'UNCERTAIN';
   return false;
+}
+
+function findEntry(state: JournalState, actionIdInput: string): ActionJournalEntry {
+  const actionId = bounded(actionIdInput, 512, 'actionId');
+  const entry = state.entries.find((item) => item.actionId === actionId);
+  if (!entry) throw new OperatorError('ACTION_JOURNAL_NOT_FOUND', 'Action journal entry was not found.');
+  return entry;
+}
+
+function applyTransition(
+  entry: ActionJournalEntry,
+  next: ActionJournalState,
+  now: Date,
+  metadata: Omit<ActionJournalTransition, 'seq' | 'state' | 'at'>
+): void {
+  if (!allowedTransition(entry.state, next)) {
+    if (entry.state === next) return;
+    throw new OperatorError('ACTION_JOURNAL_TRANSITION_INVALID', `Cannot transition action journal from ${entry.state} to ${next}.`);
+  }
+  if (entry.transitions.length >= MAX_TRANSITIONS) {
+    throw new OperatorError('ACTION_JOURNAL_TRANSITION_LIMIT', 'Action journal transition history is unexpectedly large.');
+  }
+  const at = now.toISOString();
+  entry.state = next;
+  entry.updatedAt = at;
+  entry.transitions.push({ seq: entry.transitions.length + 1, state: next, at, ...metadata });
 }
 
 function pruneTerminal(state: JournalState, now: number): string[] {
@@ -419,6 +602,53 @@ function validateReplayResult(input: unknown, expectedCapability?: string): Acti
   return structuredClone(raw);
 }
 
+function validateStagedResult(input: unknown): StagedCompletedResult {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw resultCorrupt('Staged completion must be an object.');
+  const raw = input as Record<string, unknown>;
+  if (Object.keys(raw).some((key) => ![
+    'version', 'actionId', 'actionDigest', 'journalGeneration', 'capability',
+    'verificationDigest', 'resultDigest', 'result'
+  ].includes(key)) || raw.version !== 1) {
+    throw resultCorrupt('Staged completion shape is invalid.');
+  }
+  const capability = bounded(raw.capability, 256, 'staged.capability');
+  const result = validateReplayResult(raw.result, capability);
+  const staged: StagedCompletedResult = {
+    version: 1,
+    actionId: bounded(raw.actionId, 512, 'staged.actionId'),
+    actionDigest: sha(raw.actionDigest, 'staged.actionDigest'),
+    journalGeneration: integer(raw.journalGeneration, 1, Number.MAX_SAFE_INTEGER, 'staged.journalGeneration'),
+    capability,
+    verificationDigest: sha(raw.verificationDigest, 'staged.verificationDigest'),
+    resultDigest: sha(raw.resultDigest, 'staged.resultDigest'),
+    result
+  };
+  if (digest(result) !== staged.resultDigest) throw resultCorrupt('Staged result digest is invalid.');
+  const embeddedVerification = kernelVerificationDigest(result);
+  if (!embeddedVerification || embeddedVerification !== staged.verificationDigest) {
+    throw resultCorrupt('Staged verification lineage does not match the result evidence.');
+  }
+  return staged;
+}
+
+function assertStageMatchesEntry(staged: StagedCompletedResult, entry: ActionJournalEntry): void {
+  const recordedProvider = [...entry.transitions].reverse().find((transition) => transition.provider)?.provider;
+  if (staged.actionId !== entry.actionId || staged.actionDigest !== entry.actionDigest
+    || staged.journalGeneration !== entry.generation || staged.capability !== entry.capability
+    || !recordedProvider || staged.result.provider !== recordedProvider) {
+    throw new OperatorError('ACTION_JOURNAL_COMPLETION_CONFLICT', 'Staged completion does not match the journal action lineage.');
+  }
+}
+
+function assertStageMatchesCompletion(staged: StagedCompletedResult, entry: ActionJournalEntry): void {
+  const completion = [...entry.transitions].reverse().find((transition) => transition.state === 'COMPLETED');
+  if (!completion?.verificationDigest || !completion.resultDigest
+    || completion.verificationDigest !== staged.verificationDigest
+    || completion.resultDigest !== staged.resultDigest) {
+    throw new OperatorError('ACTION_JOURNAL_COMPLETION_CONFLICT', 'Staged completion does not match the completed journal transition.');
+  }
+}
+
 function digest(value: unknown): string {
   return crypto.createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
 }
@@ -450,4 +680,8 @@ function integer(input: unknown, min: number, max: number, label: string): numbe
 }
 function corrupt(message: string): OperatorError {
   return new OperatorError('ACTION_JOURNAL_CORRUPT', `Action transition journal is invalid. ${message}`);
+}
+
+function resultCorrupt(message: string): OperatorError {
+  return new OperatorError('ACTION_JOURNAL_RESULT_CORRUPT', `Completed action replay result is invalid. ${message}`);
 }

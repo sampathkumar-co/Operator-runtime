@@ -199,3 +199,16 @@ test('mutating UIA transport timeout is uncertain and is never replayed after la
   assert.equal(result.error?.sideEffectState, 'uncertain');
   assert.equal(result.error?.retryable, false);
 });
+
+test('Windows UIA emergency lifecycle awaits sidecar shutdown', async () => {
+  let closed = false;
+  const provider = new WindowsUiaProvider({
+    platform: 'win32',
+    client: {
+      async call() { return {}; },
+      async close() { await new Promise((resolve) => setTimeout(resolve, 20)); closed = true; }
+    }
+  });
+  await provider.emergencyStop();
+  assert.equal(closed, true);
+});

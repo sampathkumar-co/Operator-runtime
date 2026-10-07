@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { ActionRequest, ActionResult, Evidence } from './types.ts';
 import type { TaskObservationDomain, TaskObservationSummaryV2 } from './task.ts';
+import { epistemicReasonFromResult, epistemicStatusFromResult } from './epistemic-state.ts';
 
 const SAFE_STATE_KEYS = new Set([
   'sha256', 'size', 'bytes', 'count', 'clean', 'operation', 'verified',
@@ -8,8 +9,6 @@ const SAFE_STATE_KEYS = new Set([
   'events_truncated', 'waited_ms', 'observed_ms', 'max_nodes', 'max_depth',
   'afterCaptured', 'captureLeaseConsumed', 'changed', 'windowStable', 'afterSha256', 'dispatched'
 ]);
-const AMBIGUOUS_ERROR = /AMBIGUOUS|MULTIPLE_MATCH|TARGET_NOT_UNIQUE/i;
-
 export function normalizeMachineObservation(
   action: ActionRequest,
   result: ActionResult,
@@ -18,6 +17,7 @@ export function normalizeMachineObservation(
   const domain = observationDomain(result.capability, result.provider);
   const importantState = importantStateFromResult(result);
   const entityId = observationEntityId(action, result, domain);
+  const epistemicStatus = epistemicStatusFromResult(result);
   return {
     schemaVersion: 2,
     channel,
@@ -28,7 +28,9 @@ export function normalizeMachineObservation(
     observedAt: new Date().toISOString(),
     stateVersion: sha256(canonicalJson({ domain, entityId, importantState })),
     importantState,
-    ambiguous: AMBIGUOUS_ERROR.test(result.error?.code ?? ''),
+    epistemicStatus,
+    epistemicReason: epistemicReasonFromResult(result),
+    ambiguous: epistemicStatus === 'AMBIGUOUS',
     confidence: observationConfidence(result),
     evidenceRefs: result.evidence.slice(0, 100).map(evidenceRef)
   };
@@ -203,7 +205,9 @@ function normalizeDockerServices(input: unknown): Array<{ service: string; conta
 }
 
 function observationConfidence(result: ActionResult): number {
-  if (AMBIGUOUS_ERROR.test(result.error?.code ?? '')) return 0;
+  const status = epistemicStatusFromResult(result);
+  if (status === 'AMBIGUOUS' || status === 'UNKNOWN' || status === 'CONTRADICTED' || status === 'EXECUTION_UNCERTAIN') return 0;
+  if (status === 'UNAVAILABLE' || status === 'UNAUTHORIZED') return 0.25;
   return result.ok ? 1 : 0.5;
 }
 function evidenceRef(item: Evidence): string {

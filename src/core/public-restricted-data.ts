@@ -29,7 +29,9 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bsk_(?:live|test)_[0-9A-Za-z]{16,}\b/,
   /\bsk-[A-Za-z0-9_-]{20,}\b/,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+  /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/i,
   /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/i,
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/?#]+:[^\s@/?#]+@[^\s"']+/i,
   /\b(?:otp|one[- ]time(?: password| code)?|verification code|recovery code)\s*[:=]\s*[A-Za-z0-9-]{4,20}\b/i,
   /\b(?:ssn|social security(?: number)?|aadhaar|aadhar|passport(?: number)?|driver'?s? license(?: number)?)\s*[:=]\s*[A-Za-z0-9 -]{5,32}\b/i,
   /\b(?:medical record(?: number)?|mrn|diagnosis|patient(?: name| id)|health insurance(?: number)?)\s*[:=]\s*[^\r\n]{2,96}/i,
@@ -41,7 +43,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b(?:AccountKey|SharedAccessKey)\s*=\s*[A-Za-z0-9+/=]{16,}/i,
   /\b(?:session|sessionid|session_id|auth_cookie|cookie)\s*[:=]\s*["']?[A-Za-z0-9._~+%/=-]{12,}["']?/i
 ];
-const SENSITIVE_KEYS = /(?:password|passwd|pwd|secret|token|api.?key|access.?key|client.?secret|authorization|private.?key|otp|cvv|card.?number|ssn|social.?security|aadhaar|aadhar|passport|driver.?license|medical.?record|mrn|diagnosis|patient.?name|patient.?id|health.?insurance|account.?key|cookie|session)/i;
+const SENSITIVE_KEYS = /(?:password|passwd|pwd|secret|credential|token|api.?key|access.?key|client.?secret|authorization|private.?key|otp|cvv|card.?number|ssn|social.?security|aadhaar|aadhar|passport|driver.?license|medical.?record|mrn|diagnosis|patient.?name|patient.?id|health.?insurance|account.?key|cookie|session)/i;
 
 export function assertPublicSafePath(input: string): void {
   const normalized = String(input ?? '').replace(/\\/g, '/');
@@ -58,14 +60,23 @@ export function assertPublicSafePath(input: string): void {
 export function containsRestrictedData(value: unknown, keyHint = ''): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === 'string') {
-    if (keyHint && SENSITIVE_KEYS.test(keyHint) && value.length > 0) return true;
-    if (SECRET_PATTERNS.some((pattern) => pattern.test(value))) return true;
-    return containsPaymentCard(value);
+    if (keyHint && isRestrictedDataKey(keyHint) && value.length > 0) return true;
+    return containsRestrictedString(value);
   }
   if (Array.isArray(value)) return value.some((item) => containsRestrictedData(item, keyHint));
   if (typeof value !== 'object') return false;
   return Object.entries(value as Record<string, unknown>)
     .some(([key, item]) => containsRestrictedData(item, key));
+}
+
+/** Value-level restricted-data recognition for sinks that must redact instead of reject. */
+export function containsRestrictedString(value: string): boolean {
+  return SECRET_PATTERNS.some((pattern) => pattern.test(value)) || containsPaymentCard(value);
+}
+
+/** Canonical restricted-data key recognition shared by rejecting and redacting boundaries. */
+export function isRestrictedDataKey(key: string): boolean {
+  return SENSITIVE_KEYS.test(key);
 }
 export function assertNoRestrictedData(value: unknown): void {
   if (!containsRestrictedData(value)) return;

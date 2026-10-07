@@ -1,9 +1,21 @@
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
-import { StateSnapshotManager, type SnapshotManifest } from '../../../src/core/state-snapshot.ts';
+import { StateSnapshotManager, recoverPendingSnapshotRestores, type SnapshotAuthenticator, type SnapshotManifest } from '../../../src/core/state-snapshot.ts';
 import { acquireLocalAgentStateInstanceLock } from './state-instance-lock.ts';
+
+async function snapshotAuthenticator(stateDir: string): Promise<SnapshotAuthenticator> {
+  const identityStore = new DeviceIdentityStore(stateDir);
+  const identity = await identityStore.loadExisting();
+  if (!identity) throw new OperatorError('SNAPSHOT_DEVICE_IDENTITY_REQUIRED', 'Authenticated snapshot maintenance requires an existing device identity.');
+  return {
+    keyId: identity.fingerprint,
+    sign: async (payload) => await identityStore.sign(payload),
+    verify: async (payload, signature) => await identityStore.verify(payload, signature)
+  };
+}
 
 /**
  * Runs snapshot maintenance with exclusive ownership of the complete local
@@ -17,9 +29,11 @@ export async function runOfflineStateSnapshot(input: {
   snapshotRoot: string;
   epoch?: string;
   signal?: AbortSignal;
+  authenticator?: SnapshotAuthenticator;
 }): Promise<SnapshotManifest> {
   const stateDir = path.resolve(input.stateDir);
-  const manager = new StateSnapshotManager(stateDir, path.resolve(input.snapshotRoot));
+  const authenticator = input.authenticator ?? await snapshotAuthenticator(stateDir);
+  const manager = new StateSnapshotManager(stateDir, path.resolve(input.snapshotRoot), { authenticator });
   if (input.operation === 'verify') {
     if (!input.epoch) throw new OperatorError('SNAPSHOT_EPOCH_REQUIRED', 'Snapshot verification requires an epoch.');
     return await manager.verify(input.epoch);
@@ -27,6 +41,7 @@ export async function runOfflineStateSnapshot(input: {
 
   const lock = await acquireLocalAgentStateInstanceLock(stateDir);
   try {
+    await recoverPendingSnapshotRestores(stateDir);
     const exclusivelyQuiescent = async <T>(operation: () => Promise<T>): Promise<T> => await operation();
     if (input.operation === 'create') {
       return await manager.create({

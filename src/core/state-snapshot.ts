@@ -2,10 +2,37 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
-import { PERSISTENT_DATA_CATALOG, validatePersistentDataCatalog } from './persistent-data-catalog.ts';
+import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { PERSISTENT_DATA_CATALOG, isMonotonicRestoreStore, validatePersistentDataCatalog } from './persistent-data-catalog.ts';
 
 const MAX_FILES = 50_000;
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
+const RESTORE_TRANSACTION_PREFIX = '.mecord-restore-';
+const RESTORE_TRANSACTION_FILE = 'restore-transaction.json';
+const RESTORE_TRANSACTION_OPTIONS = {
+  maxBytes: 2 * 1024 * 1024,
+  errorCode: 'SNAPSHOT_RESTORE_TRANSACTION_CORRUPT',
+  invalidMessage: 'Snapshot restore transaction is invalid.'
+} as const;
+
+interface RestoreTransactionStore {
+  targetLocation: string;
+  hadOriginal: boolean;
+  snapshotPresent: boolean;
+}
+interface RestoreTransactionBody {
+  version: 1;
+  stateDir: string;
+  epoch: string;
+  manifestDigest: string;
+  phase: 'PREPARED' | 'COMMITTED';
+  stores: RestoreTransactionStore[];
+  createdAt: string;
+  updatedAt: string;
+}
+interface RestoreTransactionRecord extends RestoreTransactionBody {
+  recordDigest: string;
+}
 
 export interface SnapshotFile { path: string; bytes: number; sha256: string }
 export interface SnapshotStore {
@@ -16,12 +43,20 @@ export interface SnapshotStore {
   files: SnapshotFile[];
 }
 export interface SnapshotManifest {
-  version: 1;
+  version: 2;
   epoch: string;
   createdAt: string;
   catalogDigest: string;
+  authorityDigest: string;
   stores: SnapshotStore[];
+  signerKeyId: string;
   manifestDigest: string;
+  signature: string;
+}
+export interface SnapshotAuthenticator {
+  keyId: string;
+  sign(payload: Uint8Array): Promise<string>;
+  verify(payload: Uint8Array, signature: string): Promise<boolean>;
 }
 export interface SnapshotCatalogMigrationPlan {
   id: string;
@@ -35,12 +70,14 @@ export class StateSnapshotManager {
   #stateDir: string;
   #snapshotRoot: string;
   #catalogMigrations: SnapshotCatalogMigrationPlan[];
+  #authenticator: SnapshotAuthenticator;
 
-  constructor(stateDir: string, snapshotRoot: string, options: { catalogMigrations?: SnapshotCatalogMigrationPlan[] } = {}) {
+  constructor(stateDir: string, snapshotRoot: string, options: { authenticator: SnapshotAuthenticator; catalogMigrations?: SnapshotCatalogMigrationPlan[] }) {
     validatePersistentDataCatalog();
     this.#stateDir = path.resolve(stateDir);
     this.#snapshotRoot = path.resolve(snapshotRoot);
     this.#catalogMigrations = structuredClone(options.catalogMigrations ?? []);
+    this.#authenticator = normalizeAuthenticator(options.authenticator);
     if (inside(this.#stateDir, this.#snapshotRoot) || inside(this.#snapshotRoot, this.#stateDir) || this.#stateDir === this.#snapshotRoot) {
       throw new OperatorError('SNAPSHOT_PATH_INVALID', 'Snapshot storage and runtime state must be separate directory trees.');
     }
@@ -85,14 +122,18 @@ export class StateSnapshotManager {
             files: manifestFiles
           });
         }
-        const base = {
-          version: 1 as const,
+        const unsigned = {
+          version: 2 as const,
           epoch,
           createdAt: new Date().toISOString(),
           catalogDigest: catalogDigest(),
-          stores
+          authorityDigest: authorityDigestFromStores(stores),
+          stores,
+          signerKeyId: this.#authenticator.keyId
         };
-        const manifest: SnapshotManifest = { ...base, manifestDigest: digestJson(base) };
+        const manifestDigest = digestJson(unsigned);
+        const signature = await this.#authenticator.sign(signaturePayload(manifestDigest, unsigned.signerKeyId));
+        const manifest: SnapshotManifest = { ...unsigned, manifestDigest, signature: validSignature(signature) };
         await fs.writeFile(path.join(partialDir, 'manifest.json'), JSON.stringify(manifest, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         await fs.rename(partialDir, finalDir);
         return manifest;
@@ -107,8 +148,16 @@ export class StateSnapshotManager {
     const snapshotDir = path.join(this.#snapshotRoot, validEpoch(epochInput));
     const manifest = await readManifest(snapshotDir);
     validateManifestShape(manifest);
-    const base = { version: manifest.version, epoch: manifest.epoch, createdAt: manifest.createdAt, catalogDigest: manifest.catalogDigest, stores: manifest.stores };
-    if (manifest.manifestDigest !== digestJson(base)) throw new OperatorError('SNAPSHOT_MANIFEST_TAMPERED', 'Snapshot manifest digest does not match its contents.');
+    const unsigned = {
+      version: manifest.version, epoch: manifest.epoch, createdAt: manifest.createdAt,
+      catalogDigest: manifest.catalogDigest, authorityDigest: manifest.authorityDigest,
+      stores: manifest.stores, signerKeyId: manifest.signerKeyId
+    };
+    if (manifest.manifestDigest !== digestJson(unsigned)) throw new OperatorError('SNAPSHOT_MANIFEST_TAMPERED', 'Snapshot manifest digest does not match its contents.');
+    if (manifest.authorityDigest !== authorityDigestFromStores(manifest.stores)) throw new OperatorError('SNAPSHOT_AUTHORITY_TAMPERED', 'Snapshot authority digest does not match its authority-bearing stores.');
+    if (manifest.signerKeyId !== this.#authenticator.keyId || !await this.#authenticator.verify(signaturePayload(manifest.manifestDigest, manifest.signerKeyId), manifest.signature)) {
+      throw new OperatorError('SNAPSHOT_SIGNATURE_INVALID', 'Snapshot manifest is not authenticated by the current device authority.');
+    }
     this.#resolveRestoreStores(manifest);
     for (const store of manifest.stores) {
       if (store.revision !== storeRevision(store.id, store.files)) throw new OperatorError('SNAPSHOT_STORE_TAMPERED', `Snapshot store ${store.id} revision is invalid.`);
@@ -123,38 +172,83 @@ export class StateSnapshotManager {
 
   async restore(input: { epoch: string; withQuiescence: SnapshotQuiescence; signal?: AbortSignal; onStoreRestored?: (count: number) => void | Promise<void> }): Promise<SnapshotManifest> {
     const manifest = await this.verify(input.epoch);
-    const restoreStores = this.#resolveRestoreStores(manifest);
+    const restoreStores = this.#resolveRestoreStores(manifest).filter((store) => !isMonotonicRestoreStore(store.targetId));
     return await input.withQuiescence(async () => {
       throwIfAborted(input.signal);
+      await recoverPendingSnapshotRestores(this.#stateDir);
+
+      const liveAuthorityDigest = await authorityDigestForState(this.#stateDir);
+      if (liveAuthorityDigest !== manifest.authorityDigest) {
+        throw new OperatorError('SNAPSHOT_AUTHORITY_STALE', 'Restore refused because live authority changed after this snapshot; historical authority cannot replace or bypass the newer state.', {
+          retryable: false,
+          details: { snapshotAuthorityDigest: manifest.authorityDigest, liveAuthorityDigest }
+        });
+      }
+
       const snapshotDir = path.join(this.#snapshotRoot, manifest.epoch);
-      const transaction = path.join(path.dirname(this.#stateDir), `.mecord-restore-${crypto.randomUUID()}`);
-        const staged = path.join(transaction, 'staged');
+      const transaction = path.join(path.dirname(this.#stateDir), `${restoreTransactionPrefix(this.#stateDir)}${crypto.randomUUID()}`);
+      const staged = path.join(transaction, 'staged');
       const rollback = path.join(transaction, 'rollback');
       await fs.mkdir(staged, { recursive: true, mode: 0o700 });
-      const moved: Array<{ target: string; rollbackTarget?: string }> = [];
+      let transactionBody: RestoreTransactionBody | undefined;
       let restored = 0;
+
       try {
+        // Stage and re-hash the exact bytes that will be published. This closes
+        // the verify->restore TOCTOU window: a snapshot modified after verify()
+        // can never become live state.
         for (const store of restoreStores) {
           const isDirectory = store.present && !store.files.some((file) => file.targetPath === store.targetLocation);
           if (isDirectory) await fs.mkdir(safeJoin(staged, store.targetLocation), { recursive: true, mode: 0o700 });
           for (const file of store.files) {
+            throwIfAborted(input.signal);
             const source = safeJoin(path.join(snapshotDir, 'data'), file.sourcePath);
+            const sourceStat = await safeFileStat(source);
+            if (sourceStat.size !== file.bytes) {
+              throw new OperatorError('SNAPSHOT_FILE_TAMPERED', `Snapshot file ${file.sourcePath} changed after verification.`);
+            }
             const destination = safeJoin(staged, file.targetPath);
             await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
             await fs.copyFile(source, destination);
+            const stagedStat = await safeFileStat(destination);
+            if (stagedStat.size !== file.bytes || await sha256File(destination) !== file.sha256) {
+              throw new OperatorError('SNAPSHOT_FILE_TAMPERED', `Snapshot file ${file.sourcePath} changed after verification.`);
+            }
           }
         }
+
         throwIfAborted(input.signal);
+        const transactionStores: RestoreTransactionStore[] = [];
         for (const store of restoreStores) {
           const target = safeJoin(this.#stateDir, store.targetLocation);
           await assertNoSymlink(target);
-          let rollbackTarget: string | undefined;
-          if (await exists(target)) {
-            rollbackTarget = safeJoin(rollback, store.targetLocation);
+          transactionStores.push({
+            targetLocation: store.targetLocation,
+            hadOriginal: await exists(target),
+            snapshotPresent: store.present
+          });
+        }
+        const now = new Date().toISOString();
+        transactionBody = {
+          version: 1,
+          stateDir: this.#stateDir,
+          epoch: manifest.epoch,
+          manifestDigest: manifest.manifestDigest,
+          phase: 'PREPARED',
+          stores: transactionStores,
+          createdAt: now,
+          updatedAt: now
+        };
+        await writeRestoreTransaction(transaction, transactionBody);
+
+        for (const store of restoreStores) {
+          const target = safeJoin(this.#stateDir, store.targetLocation);
+          const txStore = transactionStores.find((item) => item.targetLocation === store.targetLocation)!;
+          if (txStore.hadOriginal) {
+            const rollbackTarget = safeJoin(rollback, store.targetLocation);
             await fs.mkdir(path.dirname(rollbackTarget), { recursive: true, mode: 0o700 });
             await fs.rename(target, rollbackTarget);
           }
-          moved.push({ target, ...(rollbackTarget ? { rollbackTarget } : {}) });
           if (store.present) {
             const source = safeJoin(staged, store.targetLocation);
             await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -164,17 +258,30 @@ export class StateSnapshotManager {
           await input.onStoreRestored?.(restored);
           throwIfAborted(input.signal);
         }
-        await fs.rm(transaction, { recursive: true, force: true });
+
+        transactionBody = { ...transactionBody, phase: 'COMMITTED', updatedAt: new Date().toISOString() };
+        await writeRestoreTransaction(transaction, transactionBody);
+        // Once COMMITTED is durable, cleanup failure is not a restore failure.
+        // Startup recovery will remove committed transaction debris without rollback.
+        await fs.rm(transaction, { recursive: true, force: true }).catch(() => undefined);
         return manifest;
       } catch (error) {
-        for (const item of moved.reverse()) {
-          await fs.rm(item.target, { recursive: true, force: true }).catch(() => undefined);
-          if (item.rollbackTarget && await exists(item.rollbackTarget)) {
-            await fs.mkdir(path.dirname(item.target), { recursive: true, mode: 0o700 });
-            await fs.rename(item.rollbackTarget, item.target).catch(() => undefined);
-          }
+        if (!transactionBody) {
+          await fs.rm(transaction, { recursive: true, force: true });
+          throw error;
         }
-        await fs.rm(transaction, { recursive: true, force: true });
+        try {
+          await recoverRestoreTransaction(transaction, this.#stateDir);
+        } catch (rollbackError) {
+          throw new OperatorError('SNAPSHOT_ROLLBACK_INCOMPLETE', 'Snapshot restore failed and durable rollback could not fully recover the prior state. Recovery evidence was preserved.', {
+            retryable: false,
+            details: {
+              transaction,
+              originalError: error instanceof Error ? error.message : String(error),
+              rollbackError: rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+            }
+          });
+        }
         throw error;
       }
     });
@@ -184,7 +291,7 @@ export class StateSnapshotManager {
     targetId: string;
     targetLocation: string;
     present: boolean;
-    files: Array<{ sourcePath: string; targetPath: string }>;
+    files: Array<{ sourcePath: string; targetPath: string; bytes: number; sha256: string }>;
   }> {
     const current = snapshotCatalog();
     const currentDigest = catalogDigest();
@@ -233,20 +340,258 @@ export class StateSnapshotManager {
           sourcePath: file.path,
           targetPath: file.path === source!.location
             ? target.location
-            : `${target.location}/${file.path.slice(source!.location.length + 1)}`
+            : `${target.location}/${file.path.slice(source!.location.length + 1)}`,
+          bytes: file.bytes,
+          sha256: file.sha256
         }))
       };
     });
   }
 }
 
+export async function recoverPendingSnapshotRestores(stateDirInput: string): Promise<{
+  rolledBack: number;
+  cleanedCommitted: number;
+  discardedUnprepared: number;
+}> {
+  const stateDir = path.resolve(stateDirInput);
+  const parent = path.dirname(stateDir);
+  const prefix = restoreTransactionPrefix(stateDir);
+  let entries;
+  try { entries = await fs.readdir(parent, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rolledBack: 0, cleanedCommitted: 0, discardedUnprepared: 0 };
+    throw error;
+  }
+
+  let rolledBack = 0;
+  let cleanedCommitted = 0;
+  let discardedUnprepared = 0;
+  for (const entry of entries) {
+    // Only transactions created by the new state-directory-bound protocol can
+    // be attributed to this runtime. Pre-upgrade UUID-only directories lack
+    // enough durable identity to associate them with a specific state root.
+    if (!entry.name.startsWith(prefix)) continue;
+    if (!entry.isDirectory()) {
+      throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction path is not a real directory.');
+    }
+    const transaction = path.join(parent, entry.name);
+    const journalFile = path.join(transaction, RESTORE_TRANSACTION_FILE);
+    if (!await exists(journalFile)) {
+      // New-format restore never mutates live state before PREPARED is durable.
+      await fs.rm(transaction, { recursive: true, force: true });
+      discardedUnprepared += 1;
+      continue;
+    }
+    const record = await readRestoreTransaction(transaction, stateDir);
+    if (record.phase === 'COMMITTED') {
+      await fs.rm(transaction, { recursive: true, force: true });
+      cleanedCommitted += 1;
+      continue;
+    }
+    await recoverRestoreTransaction(transaction, stateDir, record);
+    rolledBack += 1;
+  }
+  return { rolledBack, cleanedCommitted, discardedUnprepared };
+}
+
+async function writeRestoreTransaction(transaction: string, body: RestoreTransactionBody): Promise<void> {
+  const stat = await fs.lstat(transaction);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction path must be a real directory.');
+  }
+  const normalized = validateRestoreTransactionBody(body);
+  const record: RestoreTransactionRecord = { ...normalized, recordDigest: digestJson(normalized) };
+  await writeDurableStateText(
+    path.join(transaction, RESTORE_TRANSACTION_FILE),
+    JSON.stringify(record, null, 2),
+    RESTORE_TRANSACTION_OPTIONS
+  );
+}
+
+async function readRestoreTransaction(transaction: string, expectedStateDir: string): Promise<RestoreTransactionRecord> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readDurableStateText(path.join(transaction, RESTORE_TRANSACTION_FILE), RESTORE_TRANSACTION_OPTIONS));
+  } catch (error) {
+    if (error instanceof OperatorError) throw error;
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction journal could not be parsed.');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction journal must be an object.');
+  }
+  const raw = parsed as Record<string, unknown>;
+  const body = validateRestoreTransactionBody({
+    version: raw.version as 1,
+    stateDir: raw.stateDir as string,
+    epoch: raw.epoch as string,
+    manifestDigest: raw.manifestDigest as string,
+    phase: raw.phase as RestoreTransactionBody['phase'],
+    stores: raw.stores as RestoreTransactionStore[],
+    createdAt: raw.createdAt as string,
+    updatedAt: raw.updatedAt as string
+  });
+  const recordDigest = String(raw.recordDigest ?? '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(recordDigest) || recordDigest !== digestJson(body)) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction digest does not match its contents.');
+  }
+  if (!sameStatePath(body.stateDir, expectedStateDir)) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction is bound to a different state directory.');
+  }
+  return { ...body, recordDigest };
+}
+
+function validateRestoreTransactionBody(input: RestoreTransactionBody): RestoreTransactionBody {
+  if (!input || input.version !== 1 || !sameStatePath(input.stateDir, path.resolve(input.stateDir))
+    || !/^[0-9a-f]{64}$/.test(String(input.manifestDigest ?? ''))
+    || (input.phase !== 'PREPARED' && input.phase !== 'COMMITTED')
+    || !Array.isArray(input.stores) || input.stores.length > 5000) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction shape is invalid.');
+  }
+  const epoch = validEpoch(String(input.epoch ?? ''));
+  const createdAt = exactIso(input.createdAt, 'createdAt');
+  const updatedAt = exactIso(input.updatedAt, 'updatedAt');
+  if (Date.parse(updatedAt) < Date.parse(createdAt)) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction timestamps are invalid.');
+  }
+  const seen = new Set<string>();
+  const stores = input.stores.map((store) => {
+    if (!store || typeof store !== 'object' || typeof store.targetLocation !== 'string'
+      || typeof store.hadOriginal !== 'boolean' || typeof store.snapshotPresent !== 'boolean') {
+      throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction store entry is invalid.');
+    }
+    const targetLocation = store.targetLocation;
+    if (!targetLocation || targetLocation.length > 1024 || targetLocation.includes('\\') || path.isAbsolute(targetLocation)
+      || targetLocation.split('/').includes('..') || seen.has(targetLocation)) {
+      throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', 'Snapshot restore transaction target location is invalid.');
+    }
+    seen.add(targetLocation);
+    return { targetLocation, hadOriginal: store.hadOriginal, snapshotPresent: store.snapshotPresent };
+  });
+  return {
+    version: 1,
+    stateDir: path.resolve(input.stateDir),
+    epoch,
+    manifestDigest: String(input.manifestDigest).toLowerCase(),
+    phase: input.phase,
+    stores,
+    createdAt,
+    updatedAt
+  };
+}
+
+async function recoverRestoreTransaction(
+  transaction: string,
+  stateDirInput: string,
+  suppliedRecord?: RestoreTransactionRecord
+): Promise<void> {
+  const stateDir = path.resolve(stateDirInput);
+  const record = suppliedRecord ?? await readRestoreTransaction(transaction, stateDir);
+  if (record.phase === 'COMMITTED') {
+    await fs.rm(transaction, { recursive: true, force: true });
+    return;
+  }
+
+  const rollback = path.join(transaction, 'rollback');
+  const staged = path.join(transaction, 'staged');
+  const failures: string[] = [];
+  for (const store of [...record.stores].reverse()) {
+    const target = safeJoin(stateDir, store.targetLocation);
+    const rollbackTarget = safeJoin(rollback, store.targetLocation);
+    const stagedTarget = safeJoin(staged, store.targetLocation);
+    try {
+      await assertNoSymlink(target);
+      if (store.hadOriginal) {
+        if (await exists(rollbackTarget)) {
+          await assertNoSymlink(rollbackTarget);
+          await fs.rm(target, { recursive: true, force: true });
+          await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+          await fs.rename(rollbackTarget, target);
+        } else {
+          const targetExists = await exists(target);
+          const stagedExists = await exists(stagedTarget);
+          if (!targetExists || (store.snapshotPresent && !stagedExists)) {
+            throw new Error('required rollback source is missing after live-state replacement began');
+          }
+        }
+      } else {
+        if (await exists(rollbackTarget)) throw new Error('unexpected rollback source exists for a previously absent store');
+        await fs.rm(target, { recursive: true, force: true });
+      }
+    } catch (error) {
+      failures.push(`${store.targetLocation}:${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new OperatorError('SNAPSHOT_RESTORE_RECOVERY_INCOMPLETE', 'Snapshot restore transaction could not be rolled back completely.', {
+      retryable: false,
+      details: { transaction, failures }
+    });
+  }
+  await fs.rm(transaction, { recursive: true, force: true });
+}
+
+function restoreTransactionPrefix(stateDir: string): string {
+  const resolved = path.resolve(stateDir);
+  const identity = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const digest = crypto.createHash('sha256').update(identity, 'utf8').digest('hex').slice(0, 16);
+  return `${RESTORE_TRANSACTION_PREFIX}${digest}-`;
+}
+
+function sameStatePath(left: string, right: string): boolean {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function exactIso(input: unknown, label: string): string {
+  const value = String(input ?? '');
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new OperatorError('SNAPSHOT_RESTORE_TRANSACTION_CORRUPT', `Snapshot restore transaction ${label} is invalid.`);
+  }
+  return value;
+}
+
 function snapshotCatalog() {
   return PERSISTENT_DATA_CATALOG.filter((item) => item.backup === 'include' && item.restore !== 'never');
 }
-function catalogDigest(): string { return digestJson(snapshotCatalog().map(({ id, location, restore }) => ({ id, location, restore }))); }
+function catalogDigest(): string {
+  return digestJson(snapshotCatalog().map(({ id, location, restore }) => ({ id, location, restore, monotonicRestore: isMonotonicRestoreStore(id) })));
+}
 export function currentSnapshotCatalogDigest(): string { return catalogDigest(); }
 function storeRevision(id: string, files: SnapshotFile[]): string { return digestJson({ id, files: files.slice().sort((a, b) => a.path.localeCompare(b.path)) }); }
+function authorityDigestFromStores(stores: SnapshotStore[]): string {
+  return digestJson(stores.filter((store) => isMonotonicRestoreStore(store.id)).map((store) => ({
+    id: store.id, present: store.present, revision: store.revision
+  })).sort((a, b) => a.id.localeCompare(b.id)));
+}
+async function authorityDigestForState(stateDir: string): Promise<string> {
+  const stores: SnapshotStore[] = [];
+  for (const catalog of snapshotCatalog().filter((item) => isMonotonicRestoreStore(item.id))) {
+    const source = safeJoin(stateDir, catalog.location);
+    const files = await enumerate(source, catalog.location);
+    const manifestFiles: SnapshotFile[] = [];
+    for (const file of files) manifestFiles.push({ path: file.relative, bytes: file.bytes, sha256: await sha256File(file.absolute) });
+    stores.push({ id: catalog.id, location: catalog.location, present: await exists(source), revision: storeRevision(catalog.id, manifestFiles), files: manifestFiles });
+  }
+  return authorityDigestFromStores(stores);
+}
 function digestJson(value: unknown): string { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }
+function signaturePayload(manifestDigest: string, signerKeyId: string): Uint8Array {
+  return Buffer.from(JSON.stringify({ purpose: 'mecord-state-snapshot-v2', manifestDigest, signerKeyId }), 'utf8');
+}
+function normalizeAuthenticator(input: SnapshotAuthenticator): SnapshotAuthenticator {
+  if (!input || typeof input !== 'object' || !/^[A-Za-z0-9._:-]{8,256}$/.test(String(input.keyId ?? '')) || typeof input.sign !== 'function' || typeof input.verify !== 'function') {
+    throw new OperatorError('SNAPSHOT_AUTHENTICATOR_INVALID', 'Snapshot authenticator is missing or invalid.');
+  }
+  return input;
+}
+function validSignature(input: string): string {
+  const value = String(input ?? '');
+  if (!/^[A-Za-z0-9_-]{40,512}$/.test(value)) throw new OperatorError('SNAPSHOT_SIGNATURE_INVALID', 'Snapshot signature is invalid.');
+  return value;
+}
 
 async function enumerate(target: string, relative: string): Promise<Array<{ absolute: string; relative: string; bytes: number }>> {
   if (!await exists(target)) return [];
@@ -288,8 +633,9 @@ async function readManifest(snapshotDir: string): Promise<SnapshotManifest> {
 }
 
 function validateManifestShape(manifest: SnapshotManifest): void {
-  if (!manifest || manifest.version !== 1 || validEpoch(manifest.epoch) !== manifest.epoch || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.stores)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest shape is invalid.');
-  if (!/^[0-9a-f]{64}$/.test(manifest.catalogDigest) || !/^[0-9a-f]{64}$/.test(manifest.manifestDigest)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest digests are invalid.');
+  if (!manifest || manifest.version !== 2 || validEpoch(manifest.epoch) !== manifest.epoch || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.stores)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest shape is invalid.');
+  if (!/^[0-9a-f]{64}$/.test(manifest.catalogDigest) || !/^[0-9a-f]{64}$/.test(manifest.authorityDigest) || !/^[0-9a-f]{64}$/.test(manifest.manifestDigest)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot manifest digests are invalid.');
+  if (!/^[A-Za-z0-9._:-]{8,256}$/.test(manifest.signerKeyId) || !/^[A-Za-z0-9_-]{40,512}$/.test(manifest.signature)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot authentication metadata is invalid.');
   for (const store of manifest.stores) {
     if (!store || typeof store.id !== 'string' || typeof store.location !== 'string' || typeof store.present !== 'boolean' || !/^[0-9a-f]{64}$/.test(store.revision) || !Array.isArray(store.files)) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Snapshot store entry is invalid.');
     if (!store.present && store.files.length > 0) throw new OperatorError('SNAPSHOT_MANIFEST_INVALID', 'Absent snapshot stores cannot contain files.');

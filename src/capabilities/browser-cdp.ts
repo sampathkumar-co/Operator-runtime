@@ -104,7 +104,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const caught = context.signal?.aborted ? abortError() : error;
       const normalized = action.capability === 'browser.interact'
         && caught instanceof OperatorError
-        && ['BROWSER_TARGET_STALE', 'BROWSER_STALE_TARGET', 'BROWSER_TARGET_NOT_FOUND'].includes(caught.code)
+        && caught.details?.executionPhase === undefined
         && caught.details?.sideEffectState === undefined
         ? new OperatorError(caught.code, caught.message, {
             retryable: caught.retryable,
@@ -423,7 +423,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const targetId = String(action.input.targetId ?? '');
     if (!targetId) throw new OperatorError('INVALID_BROWSER_TARGET', 'targetId is required.');
     const operation = String(action.input.operation ?? '');
-    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'key_press', 'hotkey', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
+    if (!['click', 'hover', 'drag', 'drag_by', 'resize', 'drag_between', 'click_relative', 'scroll', 'type', 'select', 'set_value', 'select_date', 'key_press', 'hotkey', 'keyboard_text', 'format_text', 'select_text_range'].includes(operation)) throw new OperatorError('INVALID_BROWSER_OPERATION', 'operation is not a supported bounded browser interaction.');
 
     const targetSpec = normalizeTargetSpec(action.input.target);
     if (!targetSpec.ref && !targetSpec.css && !targetSpec.text && !targetSpec.renderedColor && !(targetSpec.role && targetSpec.name)) {
@@ -440,10 +440,37 @@ export class BrowserCdpProvider implements CapabilityProvider {
       throw new OperatorError(operation === 'scroll' ? 'INVALID_BROWSER_SCROLL' : 'INVALID_BROWSER_DRAG', 'Drag/resize/scroll requires non-zero finite deltaX/deltaY within 2000 CSS pixels.');
     }
     if (operation === 'scroll' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'scroll requires an observed target ref.');
-    const xRatio = operation === 'click_relative' ? Number(action.input.xRatio) : undefined;
-    const yRatio = operation === 'click_relative' ? Number(action.input.yRatio) : undefined;
-    if (operation === 'click_relative' && (!targetSpec.ref || !Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1)) {
-      throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and finite xRatio/yRatio values between 0 and 1.');
+    if (operation === 'resize' && !targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'resize requires an observed semantic target ref.');
+    if (operation === 'format_text') {
+      const format = String(action.input.value ?? '').toLowerCase();
+      const formatScope = String(action.input.scope ?? 'all').toLowerCase();
+      if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'format_text requires an observed editable target ref.');
+      if (!['bold', 'italic', 'italics', 'underline', 'underlined'].includes(format) || !['all', 'selection'].includes(formatScope)) {
+        throw new OperatorError('INVALID_BROWSER_FORMAT', 'format_text supports bold, italic, or underline with scope all or selection.');
+      }
+    }
+    if (operation === 'keyboard_text') {
+      const text = String(action.input.value ?? '');
+      if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'keyboard_text requires an observed target ref.');
+      if (!text.length || text.length > 4096 || Buffer.byteLength(text, 'utf8') > 16 * 1024) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters and at most 16 KiB UTF-8.');
+    }
+    if (operation === 'select_date') {
+      const requestedDate = String(action.input.value ?? '');
+      if (!targetSpec.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'select_date requires an observed target ref.');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(requestedDate)) throw new OperatorError('INVALID_BROWSER_DATE', 'select_date requires an ISO YYYY-MM-DD value.');
+    }
+    const hasRatioPoint = operation === 'click_relative' && (action.input.xRatio !== undefined || action.input.yRatio !== undefined);
+    const hasPixelPoint = operation === 'click_relative' && (action.input.xPx !== undefined || action.input.yPx !== undefined);
+    const xRatio = hasRatioPoint ? Number(action.input.xRatio) : undefined;
+    const yRatio = hasRatioPoint ? Number(action.input.yRatio) : undefined;
+    const xPx = hasPixelPoint ? Number(action.input.xPx) : undefined;
+    const yPx = hasPixelPoint ? Number(action.input.yPx) : undefined;
+    if (operation === 'click_relative' && (
+      !targetSpec.ref || hasRatioPoint === hasPixelPoint
+      || (hasRatioPoint && (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio! < 0 || xRatio! > 1 || yRatio! < 0 || yRatio! > 1))
+      || (hasPixelPoint && (!Number.isFinite(xPx) || !Number.isFinite(yPx) || xPx! < 0 || yPx! < 0 || xPx! > 2000 || yPx! > 2000))
+    )) {
+      throw new OperatorError('INVALID_BROWSER_POINT', 'click_relative requires an observed ref and exactly one bounded coordinate pair: xRatio/yRatio in [0,1] or non-negative xPx/yPx within 2000 CSS pixels.');
     }
 
     const tabs = await this.#listTargets(signal);
@@ -452,6 +479,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     const diagnostics = await collectDiagnostics(session);
     const expectDownload = action.input.expectDownload === true;
     let download: DownloadTracker | undefined;
+    let interactionDispatched = false;
     try {
       await session.send('Runtime.enable');
       if (expectDownload) {
@@ -472,8 +500,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
         target: targetSpec,
         ...(toTargetSpec ? { toTarget: toTargetSpec } : {}),
         value: action.input.value ?? null,
+        ...(operation === 'format_text' ? { scope: String(action.input.scope ?? 'all') } : {}),
         ...(deltaOperation ? { deltaX, deltaY } : {}),
-        ...(operation === 'click_relative' ? { xRatio, yRatio } : {}),
+        ...(operation === 'click_relative' && hasRatioPoint ? { xRatio, yRatio } : {}),
+        ...(operation === 'click_relative' && hasPixelPoint ? { xPx, yPx } : {}),
         ...(operation === 'key_press' ? { key: String(action.input.key ?? '') } : {}),
         ...(operation === 'hotkey' ? { keys: Array.isArray(action.input.keys) ? action.input.keys.map(String) : [] } : {}),
         ...(operation === 'select_text_range' ? { start: Number(action.input.start), end: Number(action.input.end) } : {})
@@ -481,29 +511,40 @@ export class BrowserCdpProvider implements CapabilityProvider {
       const value = interaction.value;
       if (value.ok !== true) {
         const message = typeof value.error === 'string' ? String(value.error) : 'Browser interaction did not complete.';
+        if (value.recoverable === true) {
+          throw new OperatorError('BROWSER_INPUT_NORMALIZATION_REQUIRED', message, {
+            retryable: true,
+            details: { target: targetSpec, frame: interaction.frame, sideEffectState: 'none', executionPhase: 'pre_dispatch' }
+          });
+        }
         if (value.staleRef === true || (targetSpec.ref && /stale/i.test(message))) {
           throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: targetSpec, frame: interaction.frame } });
         }
         throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: targetSpec, frame: interaction.frame } });
       }
+      interactionDispatched = true;
       const matchedAutocomplete = Boolean(value.matched && typeof value.matched === 'object' && (value.matched as JsonMap).autocomplete === true);
       const settle = await settleAfterInteraction(session, signal, operation === 'type' && matchedAutocomplete ? 350 : 50);
       throwIfAborted(signal);
       const after = await pageIdentity(session);
       const afterTarget = await observeSemanticTargetState(session, targetSpec, signal);
+      const afterDestination = toTargetSpec ? await observeSemanticTargetState(session, toTargetSpec, signal) : undefined;
       const beforeTarget = value.matched && typeof value.matched === 'object' ? value.matched as JsonMap : {};
+      const beforeDestination = value.destination && typeof value.destination === 'object' ? value.destination as JsonMap : undefined;
       const compactTarget = (sample: JsonMap | undefined) => sample ? {
         identity: sample.identity, role: sample.role, name: sample.name, value: sample.value,
         checked: sample.checked, selected: sample.selected, expanded: sample.expanded, current: sample.current,
-        active: sample.active, documentMutationVersion: sample.documentMutationVersion, scroll: sample.scroll, geometry: sample.geometry
+        active: sample.active, scroll: sample.scroll, geometry: sample.geometry, localTreeState: sample.subtreeSignature,
+        associatedState: sample.associatedState
       } : null;
-      const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget) };
+      const beforeRelevant = { page: { url: before.url, title: before.title }, target: compactTarget(beforeTarget), ...(beforeDestination ? { destination: compactTarget(beforeDestination) } : {}) };
       const afterRelevant = {
         page: { url: after.url, title: after.title },
-        target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status }
+        target: afterTarget.status === 'observed' ? compactTarget(afterTarget.sample) : { status: afterTarget.status },
+        ...(afterDestination ? { destination: afterDestination.status === 'observed' ? compactTarget(afterDestination.sample) : { status: afterDestination.status } } : {})
       };
       const semanticAfter = value.after && typeof value.after === 'object' ? value.after as JsonMap : undefined;
-      const directSemanticProgress = ['type', 'select', 'set_value', 'select_text_range'].includes(operation)
+      const directSemanticProgress = ['type', 'select', 'set_value', 'select_date', 'select_text_range'].includes(operation)
         && semanticAfter !== undefined
         && JSON.stringify({
           value: beforeTarget.value, checked: beforeTarget.checked, selected: beforeTarget.selected,
@@ -517,8 +558,14 @@ export class BrowserCdpProvider implements CapabilityProvider {
         throw new OperatorError('BROWSER_DOWNLOAD_CANCELED', 'Browser download was canceled.', { retryable: true, details: downloadResult });
       }
       const stateProgress = downloadResult?.state === 'completed' || directSemanticProgress || JSON.stringify(beforeRelevant) !== JSON.stringify(afterRelevant);
+      if (['drag', 'drag_by', 'drag_between'].includes(operation) && !stateProgress) {
+        throw new OperatorError('BROWSER_NO_PROGRESS', 'Drag input was dispatched but no source, destination, or associated objective state changed.', {
+          retryable: false,
+          details: { sideEffectState: 'none', executionPhase: 'effect_observed', actionFamily: 'drag', target: targetSpec, toTarget: toTargetSpec, before: beforeRelevant, after: afterRelevant }
+        });
+      }
       const actionIdentity = String(beforeTarget.identity ?? targetSpec.ref ?? targetSpec.css ?? `${targetSpec.role ?? ''}:${targetSpec.name ?? targetSpec.text ?? ''}`);
-      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
+      const actionPayload = { operation, toTarget: toTargetSpec, value: action.input.value ?? null, deltaX, deltaY, xRatio, yRatio, xPx, yPx, key: action.input.key, keys: action.input.keys, start: action.input.start, end: action.input.end };
       const noProgressFamily = (() => {
         if (operation === 'drag' || operation === 'drag_by') return { family: 'drag-displacement' };
         if (operation === 'resize') return { family: 'resize-displacement' };
@@ -527,7 +574,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
         if (operation === 'click_relative') return { family: 'click-relative' };
         if (operation === 'key_press') return { family: 'key-press', key: action.input.key };
         if (operation === 'hotkey') return { family: 'hotkey', keys: action.input.keys };
-        if (operation === 'type' || operation === 'select' || operation === 'set_value') return { family: operation, value: action.input.value ?? null };
+        if (operation === 'type' || operation === 'select' || operation === 'set_value' || operation === 'select_date' || operation === 'keyboard_text' || operation === 'format_text') return { family: operation, value: action.input.value ?? null, ...(operation === 'format_text' ? { scope: action.input.scope ?? 'all' } : {}) };
         if (operation === 'select_text_range') return { family: operation, start: action.input.start, end: action.input.end };
         return { family: operation };
       })();
@@ -562,6 +609,21 @@ export class BrowserCdpProvider implements CapabilityProvider {
         evidence: evidenceItems,
         durationMs: Math.round(performance.now() - started)
       };
+    } catch (error) {
+      if (interactionDispatched && error instanceof OperatorError
+        && error.details?.executionPhase === undefined && error.details?.sideEffectState === undefined) {
+        throw new OperatorError(error.code, error.message, {
+          retryable: error.retryable,
+          details: { ...(error.details ?? {}), sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+        });
+      }
+      if (interactionDispatched && !(error instanceof OperatorError)) {
+        throw new OperatorError('BROWSER_POST_DISPATCH_FAILED', error instanceof Error ? error.message : String(error), {
+          retryable: true,
+          details: { sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+        });
+      }
+      throw error;
     } finally {
       diagnostics.stop();
       download?.stop();

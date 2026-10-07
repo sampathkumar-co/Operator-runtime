@@ -255,13 +255,16 @@ test('relay-only main reports loopback readiness only to the trusted Mecord laun
 test('remote launcher owns child lifetime and orphaned runtime exits when IPC authority disappears', async () => {
   const cli = await fs.readFile(path.resolve('packages/mecord-connect/src/cli.mjs'), 'utf8');
   const main = await fs.readFile(path.resolve('apps/local-agent/src/main.ts'), 'utf8');
+  const lifecycle = await fs.readFile(path.resolve('apps/local-agent/src/runtime-lifecycle.ts'), 'utf8');
   assert.match(cli, /process\.once\('SIGINT', onSigint\)/);
   assert.match(cli, /process\.once\('SIGTERM', onSigterm\)/);
   assert.match(cli, /child\.send\(\{ type: 'mecord-shutdown', signal \}\)/);
   assert.match(cli, /setTimeout\(\(\) => \{[\s\S]*child\.kill\('SIGTERM'\)[\s\S]*\}, 8_000\)/);
   assert.match(main, /process\.once\('disconnect'/);
   assert.match(main, /raw\.type !== 'mecord-shutdown'/);
-  assert.match(main, /await stateInstanceLock\.release\(\)/);
+  assert.match(main, /releaseStateLock: \(\) => stateInstanceLock\.release\(\)/);
+  assert.match(lifecycle, /await this\.#options\.releaseStateLock\(\)/);
+  assert.match(lifecycle, /Promise\.allSettled/);
   assert.match(main, /launcherShutdownHandler = \(\) =>/);
 });
 
@@ -331,7 +334,7 @@ test('npm release uses immutable first-release artifact and staged future public
 
 test('runtime payload builder copies only tracked clean sources bound to HEAD', async () => {
   const source = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
-  assert.match(source, /gitText\(\['status', '--porcelain=v1', '--untracked-files=no'/);
+  assert.match(source, /gitText\(\[\s*'status', '--porcelain=v1', '--untracked-files=no'/);
   assert.match(source, /resolveTrustedGitExecutable\(process\.env\)/);
   assert.match(source, /execFileSync\(gitExecutable, args/);
   assert.match(source, /execFileSync\(gitExecutable, \['ls-files'/);
@@ -341,6 +344,8 @@ test('runtime payload builder copies only tracked clean sources bound to HEAD', 
   assert.match(source, /contains tracked changes/);
   assert.match(source, /compileTrackedTree\('src'/);
   assert.match(source, /compileTrackedTree\('apps\/local-agent\/src'/);
+  assert.match(source, /compileTrackedTree\('packages\/adaptive-intelligence\/src'/);
+  assert.match(source, /compileTrackedTree\('packages\/verified-plan-runtime\/src'/);
   assert.match(source, /stripTypeScriptTypes/);
   assert.ok(source.includes(".replace(/\\.ts$/, '.js')"));
   assert.doesNotMatch(source, /copyTree\(path\.join\(repoRoot/);

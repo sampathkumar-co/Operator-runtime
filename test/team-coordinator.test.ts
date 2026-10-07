@@ -281,3 +281,29 @@ test('stage4 recent mission listing sorts by updatedAt before applying the page 
   assert.equal(recent[0]?.id, lexicallyLast.id);
   assert.ok(recent.some((item) => item.id === lexicallyLast.id));
 });
+
+
+test('team mission lock never steals ownership when process liveness is unknown', async (t) => {
+  const state = await stateDir(t);
+  const coordinator = new TeamCoordinator(state, {
+    processInstance: { pid: 44102, started: 'new-owner' },
+    observeProcessInstance: async () => ({ status: 'unknown' })
+  });
+  const mission = await coordinator.submit({
+    objective: 'unknown liveness lock retention',
+    workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+  });
+  const lockPath = path.join(state, 'team-mission-locks', `${mission.id}.lock`);
+  await fs.writeFile(lockPath, JSON.stringify({
+    id: 'existing-lock',
+    pid: 44101,
+    processInstance: { pid: 44101, started: 'existing-instance' },
+    at: new Date().toISOString()
+  }));
+
+  await assert.rejects(
+    () => coordinator.start(mission.id),
+    (error: any) => error?.code === 'TEAM_LOCK_BUSY'
+  );
+  assert.equal(JSON.parse(await fs.readFile(lockPath, 'utf8')).pid, 44101);
+});

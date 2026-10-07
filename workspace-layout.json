@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "strategy": "independently-locked-packages",
+  "productionTypeGraph": "./tsconfig.production.json",
+  "packages": [
+    {
+      "path": "apps/mcp-server",
+      "lockfile": "apps/mcp-server/package-lock.json"
+    },
+    {
+      "path": "apps/relay-server",
+      "lockfile": "apps/relay-server/package-lock.json"
+    },
+    {
+      "path": "deploy/auth-portal",
+      "lockfile": null
+    },
+    {
+      "path": "packages/adaptive-intelligence",
+      "lockfile": null
+    },
+    {
+      "path": "packages/mecord-connect",
+      "lockfile": null
+    },
+    {
+      "path": "packages/operator-runtime-cli",
+      "lockfile": null
+    },
+    {
+      "path": "packages/verified-plan-runtime",
+      "lockfile": null
+    }
+  ],
+  "invariants": {
+    "nestedReleaseLocksRemainAuthoritative": true,
+    "rootNpmWorkspacesDisabledToPreventLockfileShadowing": true,
+    "crossPackageProductionImportsCheckedByRootTypeGraph": true
+  }
+}

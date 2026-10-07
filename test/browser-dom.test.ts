@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { interactionFunction, semanticSnapshotFunction } from '../src/capabilities/browser-cdp-page.ts';
+import { dateSelectFunction, interactionFunction, semanticSnapshotFunction } from '../src/capabilities/browser-cdp-page.ts';
 import { semanticLocatorFunction } from '../src/capabilities/browser-cdp-frames.ts';
 
 class FakeEvent {
@@ -10,6 +10,21 @@ class FakeEvent {
   readonly clientY?: number;
   readonly buttons?: number;
   constructor(type: string, init?: any) { this.type = type; this.key = init?.key; this.clientX = init?.clientX; this.clientY = init?.clientY; this.buttons = init?.buttons; }
+}
+
+class FakeText {
+  readonly nodeType = 3;
+  readonly childNodes: never[] = [];
+  data: string;
+  constructor(data: string) { this.data = data; }
+}
+
+class FakeMutationObserver {
+  static created = 0;
+  static disconnected = 0;
+  constructor(_callback: () => void) { FakeMutationObserver.created += 1; }
+  observe(): void { /* synthetic observer */ }
+  disconnect(): void { FakeMutationObserver.disconnected += 1; }
 }
 
 class FakeRoot {
@@ -27,8 +42,31 @@ class FakeRoot {
   };
   body = { innerText: '', appendChild: () => undefined };
   activeElement?: FakeElement;
+  selectionRange?: { startNode?: FakeText; startOffset?: number; endNode?: FakeText; endOffset?: number };
 
   createElement(tagName: string): FakeElement { const element = new FakeElement(tagName); element.ownerDocument = this; return element; }
+  createRange(): any {
+    const draft: { startNode?: FakeText; startOffset?: number; endNode?: FakeText; endOffset?: number } = {};
+    return {
+      draft,
+      setStart(node: FakeText, offset: number) { draft.startNode = node; draft.startOffset = offset; },
+      setEnd(node: FakeText, offset: number) { draft.endNode = node; draft.endOffset = offset; }
+    };
+  }
+  getSelection(): any {
+    const root = this;
+    return {
+      get rangeCount() { return root.selectionRange ? 1 : 0; },
+      removeAllRanges() { root.selectionRange = undefined; },
+      addRange(range: any) { root.selectionRange = { ...range.draft }; },
+      toString() {
+        const selected = root.selectionRange;
+        if (!selected?.startNode || !selected.endNode) return '';
+        if (selected.startNode === selected.endNode) return selected.startNode.data.slice(selected.startOffset ?? 0, selected.endOffset ?? 0);
+        return '';
+      }
+    };
+  }
 
   querySelectorAll(selector: string): FakeElement[] {
     if (selector === '*') return [...this.elements];
@@ -43,14 +81,18 @@ class FakeRoot {
 }
 
 class FakeElement {
+  readonly nodeType = 1;
   readonly tagName: string;
+  childNodes: Array<FakeElement | FakeText> = [];
   textContent = '';
+  innerText?: string;
   id = '';
   value = '';
   min = '';
   max = '';
   step = '';
   disabled = false;
+  isConnected = true;
   checked = false;
   isContentEditable = false;
   clicked = false;
@@ -103,7 +145,37 @@ class FakeElement {
   click(): void { this.clicked = true; this.onEvent?.(new FakeEvent('click')); }
   remove(): void { /* synthetic style probe */ }
   contains(element: FakeElement): boolean { return this === element || this.children.includes(element); }
-  querySelector(): FakeElement | null { return this.child ?? null; }
+  querySelector(selector?: string): FakeElement | null {
+    if (!selector) return this.child ?? null;
+    if (this.child?.matches(selector)) return this.child;
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    const found: FakeElement[] = [];
+    const parts = selector.trim().split(/\s+/);
+    const leafSelector = parts.at(-1) ?? selector;
+    const ancestorSelector = parts.length > 1 ? parts.slice(0, -1).join(' ') : '';
+    const hasAncestor = (node: FakeElement, wanted: string) => {
+      let current = node.parentElement;
+      while (current) {
+        if (current.matches(wanted)) return true;
+        current = current.parentElement;
+      }
+      return false;
+    };
+    const visit = (node: FakeElement) => {
+      for (const child of node.children) {
+        if (child.matches(leafSelector) && (!ancestorSelector || hasAncestor(child, ancestorSelector))) found.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return found;
+  }
+  get classList(): { contains(name: string): boolean } {
+    const classes = String(this.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
+    return { contains: (name: string) => classes.includes(name) };
+  }
   closest(): FakeElement | null {
     if (this.hasAttribute('id') || this.hasAttribute('aria-label') || this.hasAttribute('title')) return this;
     return this.parentElement ?? null;
@@ -126,9 +198,12 @@ class FakeElement {
     return selector.split(',').some((raw) => {
       const token = raw.trim().toLowerCase();
       if (token === '*') return true;
+      if (token.startsWith('.')) return this.classList.contains(token.slice(1));
       if (token === this.tagName.toLowerCase()) return true;
       if (token === 'a[href]') return this.tagName === 'A' && this.hasAttribute('href');
       if (token === '[role]') return this.hasAttribute('role');
+      if (token === '[aria-controls]') return this.hasAttribute('aria-controls');
+      if (token === '[aria-owns]') return this.hasAttribute('aria-owns');
       if (token === '[tabindex]') return this.hasAttribute('tabindex');
       if (token === '[contenteditable="true"]') return this.getAttribute('contenteditable') === 'true';
       if (token === '[role="heading"]') return this.getAttribute('role') === 'heading';
@@ -272,6 +347,70 @@ test('pointer-style custom controls are discoverable through shadow roots and sa
   assert.equal(snapshot.controls.find((control: any) => control.name === 'Frame action').context.frameDepth, 1);
 });
 
+test('semantic snapshot exposes contenteditable controls as editable textboxes', (t) => {
+  const root = new FakeRoot();
+  const editor = new FakeElement('div', 'Draft text');
+  editor.isContentEditable = true;
+  editor.setAttribute('contenteditable', 'true');
+  editor.setAttribute('aria-label', 'Editor');
+  attach(root, editor); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'Editor');
+  assert.ok(control);
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+});
+
+test('semantic snapshot keeps visible editable inputs even without an accessible name', (t) => {
+  const root = new FakeRoot();
+  const input = new FakeElement('input');
+  input.setAttribute('type', 'text');
+  attach(root, input); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.tag === 'input');
+  assert.ok(control);
+  assert.equal(control.name, '');
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+  assert.equal(control.actionable, true);
+});
+
+test('active visually hidden editable control is exposed only as a bounded keyboard sink', (t) => {
+  const root = new FakeRoot();
+  const sink = new FakeElement('input');
+  sink.id = 'terminal-target';
+  sink.setAttribute('type', 'text');
+  sink.style.opacity = '0';
+  attach(root, sink); root.activeElement = sink; installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'terminal-target');
+  assert.ok(control);
+  assert.equal(control.role, 'textbox');
+  assert.equal(control.editable, true);
+  assert.equal(control.visuallyHidden, true);
+  assert.equal(control.keyboardSink, true);
+  assert.equal((semanticLocatorFunction({ ref: control.ref }) as any).count, 1);
+  assert.equal((interactionFunction({ operation: 'focus', target: { ref: control.ref }, value: null }) as any).ok, true);
+  assert.match((interactionFunction({ operation: 'click', target: { ref: control.ref }, value: null }) as any).error, /No matching|stale/i);
+});
+
+test('hover-only CSS pointer affordance exposes an icon-like control without requiring visible text', (t) => {
+  const root = new FakeRoot();
+  (root as any).styleSheets = [{ cssRules: [{ selectorText: 'span:hover', style: { cursor: 'pointer' } }] }];
+  const icon = new FakeElement('span');
+  attach(root, icon); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.tag === 'span');
+  assert.ok(control);
+  assert.equal(control.role, 'pointer');
+  assert.equal(control.name, '');
+  assert.equal(control.selector, 'span');
+});
+
 test('semantic snapshot emits distinct structural selectors for duplicate visible siblings', (t) => {
   const root = new FakeRoot();
   const parent = new FakeElement('section');
@@ -406,7 +545,7 @@ test('click uses a coherent pointer sequence so delegated menu state activates t
   assert.equal(result.ok, true); assert.equal(selected, true);
 });
 
-test('drag emits bounded intermediate pointer motion and verifies changed geometry', (t) => {
+test('drag-items regression: drag emits bounded intermediate pointer motion and verifies changed geometry', (t) => {
   const root = new FakeRoot();
   const shape = new FakeElement('svg', 'Shape'); shape.setAttribute('role', 'graphics-symbol');
   shape.onEvent = (event) => { if (event.type === 'mousemove' && event.buttons === 1) { shape.x = Number(event.clientX) - 10; shape.y = Number(event.clientY) - 10; } };
@@ -428,6 +567,23 @@ test('rendered visual colors are bounded, normalized, and uniquely actionable', 
   assert.equal(clicked.ok, true); assert.equal(olive.clicked, true); assert.equal(blue.clicked, false);
   blue.backgroundColor = 'rgb(128, 128, 0)';
   assert.match((interactionFunction({ operation: 'click', target: { renderedColor: 'olive' }, value: null }) as any).error, /multiple/);
+});
+
+test('visual observations derive names from rendered text without embedded source text', (t) => {
+  const root = new FakeRoot();
+  const page = new FakeElement('html', 'Visible task text function hiddenImplementation() { return 42; }');
+  page.innerText = 'Visible task text';
+  page.backgroundColor = 'rgb(255, 255, 255)';
+  const script = new FakeElement('script', 'function hiddenImplementation() { return 42; }');
+  script.backgroundColor = 'rgb(255, 255, 255)';
+  attach(root, page, script); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction() as any;
+  const pageVisual = snapshot.visualObjects.find((item: any) => item.tag === 'html');
+  const scriptVisual = snapshot.visualObjects.find((item: any) => item.tag === 'script');
+  assert.equal(pageVisual.name, 'Visible task text');
+  assert.equal(scriptVisual.name, '');
+  assert.equal(snapshot.visibleText.some((item: any) => /hiddenImplementation/.test(item.text)), false);
 });
 
 test('semantic select preserves bounded native multi-select values', (t) => {
@@ -545,6 +701,28 @@ test('focusable slider widgets expose their container name and use keyboard acti
   assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
 });
 
+test('legacy slider value readback stays associated with the nearest following output', (t) => {
+  const root = new FakeRoot();
+  const group = new FakeElement('div');
+  const firstTrack = new FakeElement('div'); firstTrack.setAttribute('class', 'ui-slider'); firstTrack.setAttribute('id', 'first-slider'); firstTrack.parentElement = group;
+  const firstOutput = new FakeElement('div', '2'); firstOutput.parentElement = group;
+  const secondTrack = new FakeElement('div'); secondTrack.setAttribute('class', 'ui-slider'); secondTrack.setAttribute('id', 'second-slider'); secondTrack.parentElement = group;
+  const secondOutput = new FakeElement('div', '5'); secondOutput.parentElement = group;
+  const firstHandle = new FakeElement('span'); firstHandle.setAttribute('class', 'ui-slider-handle'); firstHandle.setAttribute('tabindex', '0'); firstHandle.tabIndex = 0; firstHandle.parentElement = firstTrack;
+  const secondHandle = new FakeElement('span'); secondHandle.setAttribute('class', 'ui-slider-handle'); secondHandle.setAttribute('tabindex', '0'); secondHandle.tabIndex = 0; secondHandle.parentElement = secondTrack;
+  firstTrack.children = [firstHandle]; secondTrack.children = [secondHandle];
+  group.children = [firstTrack, firstOutput, secondTrack, secondOutput];
+  attach(root, group, firstTrack, firstHandle, firstOutput, secondTrack, secondHandle, secondOutput); installDocument(t, root);
+
+  const sliders = (semanticSnapshotFunction() as any).controls.filter((item: any) => item.role === 'slider');
+  assert.deepEqual(sliders.map((item: any) => [item.name, item.value]), [['first-slider', '2'], ['second-slider', '5']]);
+  const result = interactionFunction({ operation: 'set_value', target: { role: 'slider', name: 'second-slider' }, value: 8 }) as any;
+  assert.equal(result.ok, true); assert.deepEqual(result.pendingKeys, Array(3).fill('ArrowRight'));
+  secondOutput.textContent = '8';
+  const verified = interactionFunction({ operation: 'verify_value', target: { role: 'slider', name: 'second-slider' }, value: 8 }) as any;
+  assert.equal(verified.ok, true); assert.equal(verified.after.value, '8');
+});
+
 
 test('Browser Observation V2 refs are ephemeral, relationship-aware, and heal only a unique semantic replacement', (t) => {
   const root = new FakeRoot();
@@ -608,7 +786,7 @@ test('Browser Observation V2 stale-ref healing fails closed when semantic replac
   assert.equal(secondReplacement.clicked, false);
 });
 
-test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry facts with explicit coordinate spaces', (t) => {
+test('bisect-angle, find-midpoint, and draw-circle regressions expose deterministic geometry facts', (t) => {
   const root = new FakeRoot();
   const polygon = new FakeElement('polygon');
   polygon.setAttribute('points', '0,0 10,0 10,10');
@@ -619,7 +797,10 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
   const line = new FakeElement('line');
   line.setAttribute('x1', '2'); line.setAttribute('y1', '3'); line.setAttribute('x2', '12'); line.setAttribute('y2', '13');
   line.stroke = 'rgb(0, 0, 0)'; line.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
-  attach(root, polygon, line); installDocument(t, root);
+  const circle = new FakeElement('circle');
+  circle.setAttribute('cx', '15'); circle.setAttribute('cy', '25'); circle.setAttribute('r', '7');
+  circle.fill = 'rgb(4, 5, 6)'; circle.screenMatrix = { a: 1, b: 0, c: 0, d: 1, e: 20, f: 30 };
+  attach(root, polygon, line, circle); installDocument(t, root);
 
   const snapshot = semanticSnapshotFunction() as any;
   const visual = snapshot.visualObjects.find((item: any) => item.tag === 'polygon');
@@ -638,6 +819,9 @@ test('Browser Observation V2 exposes bounded deterministic SVG and grid geometry
   assert.equal(lineVisual.line.coordinateSpace, 'svg-local');
   assert.deepEqual(lineVisual.viewportLine, { coordinateSpace: 'viewport', x1: 22, y1: 33, x2: 32, y2: 43, vector: { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 } });
   assert.deepEqual(lineVisual.line.vector, { dx: 10, dy: 10, length: 14.142, angleDegrees: 45 });
+  const circleVisual = snapshot.visualObjects.find((item: any) => item.tag === 'circle');
+  assert.deepEqual(circleVisual.circle, { coordinateSpace: 'svg-local', cx: 15, cy: 25, r: 7 });
+  assert.deepEqual(circleVisual.viewportCenter, { coordinateSpace: 'viewport', x: 35, y: 55 });
 });
 
 
@@ -652,12 +836,36 @@ test('Browser Observation V2 gives repeated controls bounded rendered container 
   assert.ok(control);
   assert.equal(control.name, '+');
   assert.equal(control.contextLabel, 'Spicy Thai Peanut Chicken - +');
+  assert.deepEqual(control.ancestorContextLabels, ['Spicy Thai Peanut Chicken - +']);
+});
+
+test('repeated-item context stops at the owning card instead of absorbing neighboring entities', (t) => {
+  const root = new FakeRoot();
+  const area = new FakeElement('div', '@myron card @aenean card');
+  const myron = new FakeElement('div', '@myron Share via DM'); myron.setAttribute('class', 'media');
+  const aenean = new FakeElement('div', '@aenean Share via DM'); aenean.setAttribute('class', 'media');
+  const controls = new FakeElement('div', 'Share via DM'); controls.setAttribute('class', 'controls');
+  const wrapper = new FakeElement('span', 'Share via DM');
+  const menu = new FakeElement('ul', 'Share via DM');
+  const action = new FakeElement('li', 'Share via DM'); action.cursor = 'pointer';
+
+  myron.parentElement = area; aenean.parentElement = area; area.children = [myron, aenean];
+  controls.parentElement = myron; myron.children = [controls];
+  wrapper.parentElement = controls; controls.children = [wrapper];
+  menu.parentElement = wrapper; wrapper.children = [menu];
+  action.parentElement = menu; menu.children = [action];
+
+  attach(root, area, myron, aenean, controls, wrapper, menu, action); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const control = snapshot.controls.find((item: any) => item.name === 'Share via DM' && item.tag === 'li');
+  assert.ok(control);
+  assert.equal(control.ancestorContextLabels.some((label: string) => label.includes('@myron')), true);
+  assert.equal(control.ancestorContextLabels.some((label: string) => label.includes('@aenean')), false);
 });
 
 test('Browser Observation V2 exposes bounded scroll state for visual regions', (t) => {
   const root = new FakeRoot();
   const scroller = new FakeElement('div', 'Scrollable list');
-  scroller.backgroundColor = 'rgb(255, 255, 255)';
   scroller.scrollTop = 40; scroller.scrollHeight = 400; scroller.clientHeight = 120;
   attach(root, scroller); installDocument(t, root);
 
@@ -685,6 +893,12 @@ test('semantic locator carries document mutation version and scroll state into a
   assert.equal(located.matches[0].documentMutationVersion, 7);
   assert.equal(located.matches[0].scroll.top, 10);
   assert.equal(located.matches[0].scroll.canScrollY, true);
+  assert.deepEqual(located.matches[0].subtreeSignature, { descendantCount: 0, digest: '811c9dc5' });
+
+  const marker = new FakeElement('span'); marker.id = 'blue-point'; marker.parentElement = scroller; scroller.children.push(marker); attach(root, marker);
+  const changed = semanticLocatorFunction({ name: 'List' }) as any;
+  assert.equal(changed.matches[0].subtreeSignature.descendantCount, 1);
+  assert.notEqual(changed.matches[0].subtreeSignature.digest, located.matches[0].subtreeSignature.digest);
 });
 
 test('same-origin iframe geometry is converted into the owning CDP target viewport', (t) => {
@@ -730,7 +944,22 @@ test('bounded text selection uses visible control offsets and verifies its postc
 });
 
 
-test('Browser Observation V2 exposes a bounded page scroll target when the document can scroll', (t) => {
+test('bounded text selection supports ordinary observed static text', (t) => {
+  const root = new FakeRoot();
+  const paragraph = new FakeElement('p', 'select this phrase');
+  paragraph.childNodes = [new FakeText('select this phrase')];
+  attach(root, paragraph); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.visibleText.find((item: any) => item.text === 'select this phrase');
+  assert.ok(observed?.ref);
+
+  const selected = interactionFunction({ operation: 'select_text_range', target: { ref: observed.ref }, value: null, start: 0, end: 6 }) as any;
+  assert.equal(selected.ok, true);
+  assert.deepEqual(selected.after.selection, { start: 0, end: 6 });
+  assert.equal(root.getSelection().toString(), 'select');
+});
+
+test('click-scroll-list regression: observation exposes a bounded page scroll target', (t) => {
   const root = new FakeRoot();
   const scroller = new FakeElement('html');
   scroller.scrollTop = 25;
@@ -771,6 +1000,99 @@ test('Browser Observation V2 marks autocomplete text controls and preserves the 
   assert.equal(typed.after.value, 'SHG');
 });
 
+test('enter-date regression: native date input normalizes a locale-aware numeric value', (t) => {
+  const root = new FakeRoot();
+  root.defaultView.navigator = { language: 'en-US' };
+  const input = new FakeElement('input');
+  input.setAttribute('type', 'date');
+  input.setAttribute('aria-label', 'Date field');
+  attach(root, input); installDocument(t, root);
+  const snapshot = semanticSnapshotFunction() as any;
+  const observed = snapshot.controls.find((control: any) => control.name === 'Date field');
+  assert.equal(observed.nativeValueFormat, 'YYYY-MM-DD');
+  const typed = interactionFunction({ operation: 'type', target: { ref: observed.ref }, value: '02/04/2012' }) as any;
+  assert.equal(typed.ok, true);
+  assert.equal(input.value, '2012-02-04');
+});
+
+test('choose-date-easy regression: bounded select_date navigates and verifies the chosen date', (t) => {
+  const root = new FakeRoot();
+  const input = new FakeElement('input'); input.id = 'datepicker';
+  const picker = new FakeElement('div'); picker.setAttribute('class', 'ui-datepicker');
+  const header = new FakeElement('div'); header.setAttribute('class', 'ui-datepicker-header');
+  const prev = new FakeElement('a', 'Prev'); prev.setAttribute('class', 'ui-datepicker-prev');
+  const next = new FakeElement('a', 'Next'); next.setAttribute('class', 'ui-datepicker-next');
+  const title = new FakeElement('div'); title.setAttribute('class', 'ui-datepicker-title');
+  const month = new FakeElement('span', 'December'); month.setAttribute('class', 'ui-datepicker-month');
+  const year = new FakeElement('span', '2016'); year.setAttribute('class', 'ui-datepicker-year');
+  const table = new FakeElement('table'); table.setAttribute('class', 'ui-datepicker-calendar');
+  const row = new FakeElement('tr');
+  const cell = new FakeElement('td');
+  const day = new FakeElement('a', '17');
+
+  picker.children = [header, table]; header.parentElement = picker; table.parentElement = picker;
+  header.children = [prev, title, next]; prev.parentElement = header; title.parentElement = header; next.parentElement = header;
+  title.children = [month, year]; month.parentElement = title; year.parentElement = title;
+  table.children = [row]; row.parentElement = table; row.children = [cell]; cell.parentElement = row; cell.children = [day]; day.parentElement = cell;
+
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  let monthIndex = 11;
+  prev.onEvent = () => { monthIndex -= 1; month.textContent = months[monthIndex]!; };
+  next.onEvent = () => { monthIndex += 1; month.textContent = months[monthIndex]!; };
+  day.onEvent = () => { input.value = '03/17/2016'; };
+
+  attach(root, input, picker, header, prev, next, title, month, year, table, row, cell, day);
+  installDocument(t, root);
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const priorRegistry = (globalThis as any)[registryKey];
+  (globalThis as any)[registryKey] = { refs: new Map([['b-date-input', input]]) };
+  t.after(() => { if (priorRegistry === undefined) delete (globalThis as any)[registryKey]; else (globalThis as any)[registryKey] = priorRegistry; });
+
+  const contract = { stateOf: () => ({ rendered: true, visible: true, disabled: false }) } as any;
+  const result = dateSelectFunction({ target: { ref: 'b-date-input' }, value: '2016-03-17' }, contract) as any;
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.after.navigationSteps, 9);
+  assert.equal(result.after.displayedMonth, 3);
+  assert.equal(result.after.displayedYear, 2016);
+  assert.equal(input.value, '03/17/2016');
+  assert.equal(day.clicked, true);
+});
+
+test('Browser Observation V2 disconnects observers for detached iframe documents', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const priorRegistry = (globalThis as any)[registryKey];
+  delete (globalThis as any)[registryKey];
+  t.after(() => {
+    if (priorRegistry === undefined) delete (globalThis as any)[registryKey];
+    else (globalThis as any)[registryKey] = priorRegistry;
+  });
+  FakeMutationObserver.created = 0;
+  FakeMutationObserver.disconnected = 0;
+
+  const root = new FakeRoot();
+  const frameDocument = new FakeRoot();
+  root.defaultView.MutationObserver = FakeMutationObserver;
+  frameDocument.defaultView.MutationObserver = FakeMutationObserver;
+  const iframe = new FakeElement('iframe');
+  const frameText = new FakeElement('p', 'frame text');
+  iframe.contentDocument = frameDocument;
+  frameDocument.defaultView.frameElement = iframe;
+  attach(root, iframe);
+  attach(frameDocument, frameText);
+  installDocument(t, root);
+
+  semanticSnapshotFunction();
+  const registry = (globalThis as any)[registryKey];
+  assert.equal(registry.observers.length, 2);
+  assert.equal(FakeMutationObserver.created, 2);
+
+  iframe.isConnected = false;
+  iframe.contentDocument = undefined;
+  semanticSnapshotFunction();
+  assert.equal(registry.observers.length, 1);
+  assert.equal(FakeMutationObserver.disconnected, 1);
+});
+
 test('focused Browser Observation V2 ranks a prior observed ref before truncation and refreshes its generation', (t) => {
   const root = new FakeRoot();
   const firstButton = new FakeElement('button', 'First'); firstButton.y = 10;
@@ -808,4 +1130,170 @@ test('focused observation can prioritize role, text, and viewport region without
   assert.equal(focused.controls.length, 1);
   assert.equal(focused.controls[0].name, 'Schedule meeting');
   assert.equal(focused.pagination.controls.limit, 1);
+});
+
+test('semantic grouping and ordinal focus select the requested repeated item without name hacks', (t) => {
+  const root = new FakeRoot();
+  const list = new FakeElement('ul', 'Repeated actions'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', 'Queue');
+  const rows = [1, 2, 3].map((ordinal) => {
+    const row = new FakeElement('li', `Job ${ordinal} Open`); row.setAttribute('role', 'listitem'); row.parentElement = list;
+    const button = new FakeElement('button', 'Open'); button.parentElement = row; button.y = ordinal * 20; row.children = [button];
+    return { row, button };
+  });
+  list.children = rows.map(({ row }) => row);
+  attach(root, list, ...rows.flatMap(({ row, button }) => [row, button])); installDocument(t, root);
+
+  const snapshot = semanticSnapshotFunction({ maxControls: 1, focusRole: 'button', focusText: 'third Open' }) as any;
+  assert.equal(snapshot.controls[0].name, 'Open');
+  assert.equal(snapshot.controls[0].groupRole, 'listitem');
+  assert.equal(snapshot.controls[0].repeatedOrdinal, 3);
+  assert.match(snapshot.controls[0].semanticPath, /ul:Queue>li/);
+  assert.equal(snapshot.controls[0].rect.y, 60);
+});
+
+test('dense-DOM observation paginates the ten-thousandth control truthfully', (t) => {
+  const root = new FakeRoot();
+  const controls = Array.from({ length: 10_000 }, (_, index) => {
+    const button = new FakeElement('button', `Control ${index + 1}`); button.y = index;
+    return button;
+  });
+  attach(root, ...controls); installDocument(t, root);
+  const page = semanticSnapshotFunction({ controlOffset: 9_999, maxControls: 1, maxText: 1, maxVisuals: 1 }) as any;
+  assert.equal(page.controls[0].name, 'Control 10000');
+  assert.deepEqual(page.pagination.controls, { offset: 9999, limit: 1, returned: 1, total: 10000, truncated: false });
+});
+
+test('realistic dense grouped DOM remains bounded, rankable, and deeply pageable', (t) => {
+  const root = new FakeRoot();
+  const rows: FakeElement[] = [];
+  const controls: FakeElement[] = [];
+  for (let index = 0; index < 3_000; index += 1) {
+    const row = new FakeElement('div', `Invoice row ${index + 1}`);
+    row.setAttribute('role', 'row');
+    row.setAttribute('aria-label', `Invoice ${index + 1}`);
+    const buttons = ['Open', 'Approve', 'Archive'].map((label, ordinal) => {
+      const button = new FakeElement('button', label);
+      button.parentElement = row;
+      button.y = index * 24;
+      button.x = ordinal * 30;
+      return button;
+    });
+    row.children = buttons;
+    rows.push(row);
+    controls.push(...buttons);
+  }
+  const visuals = Array.from({ length: 500 }, (_, index) => {
+    const image = new FakeElement('div');
+    image.setAttribute('alt', `Invoice chart ${index + 1}`);
+    image.backgroundColor = 'rgb(240, 240, 240)';
+    image.cursor = 'pointer';
+    image.y = index * 30;
+    return image;
+  });
+  attach(root, ...rows, ...controls, ...visuals);
+  installDocument(t, root);
+
+  const heapBefore = process.memoryUsage().heapUsed;
+  const started = performance.now();
+  const focused = semanticSnapshotFunction({
+    maxControls: 3, maxText: 10, maxVisuals: 5,
+    focusRole: 'button', focusText: 'Invoice 2999 Approve'
+  }) as any;
+  const elapsed = performance.now() - started;
+  const encodedBytes = Buffer.byteLength(JSON.stringify(focused));
+  const heapGrowth = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+
+  assert.equal(focused.controls[0].name, 'Approve');
+  assert.equal(focused.controls[0].groupRole, 'row');
+  assert.equal(focused.controls[0].groupName, 'Invoice 2999');
+  assert.equal(focused.pagination.controls.total, 12_500);
+  assert.equal(focused.pagination.visualObjects.total, 500);
+  assert.ok(encodedBytes < 256 * 1024, `bounded observation grew to ${encodedBytes} bytes`);
+  assert.ok(elapsed < 10_000, `dense observation took ${elapsed.toFixed(1)} ms`);
+  assert.ok(heapGrowth < 192 * 1024 * 1024, `dense observation heap grew by ${heapGrowth} bytes`);
+
+  const deepPage = semanticSnapshotFunction({ controlOffset: 8_997, maxControls: 3, maxText: 1, maxVisuals: 1 }) as any;
+  assert.deepEqual(deepPage.controls.map((control: any) => control.name), ['Open', 'Approve', 'Archive']);
+  assert.deepEqual(deepPage.pagination.controls, { offset: 8997, limit: 3, returned: 3, total: 12500, truncated: true, nextOffset: 9000 });
+});
+
+test('click-collapsible-nodelay regression exposes and verifies immediate expanded state changes', (t) => {
+  const root = new FakeRoot();
+  const disclosure = new FakeElement('button', 'Details'); disclosure.setAttribute('aria-expanded', 'false');
+  disclosure.onEvent = (event) => { if (event.type === 'click') disclosure.setAttribute('aria-expanded', 'true'); };
+  attach(root, disclosure); installDocument(t, root);
+  const before = semanticSnapshotFunction() as any;
+  const target = before.controls.find((item: any) => item.name === 'Details');
+  assert.equal(target.expanded, false);
+  const clicked = interactionFunction({ operation: 'click', target: { ref: target.ref }, value: null }) as any;
+  assert.equal(clicked.ok, true);
+  assert.equal((semanticLocatorFunction({ ref: target.ref }) as any).matches[0].expanded, true);
+});
+
+test('hierarchical observations preserve parent paths across menus, trees, listboxes, and portaled descendants', (t) => {
+  const root = new FakeRoot();
+  const navigation = new FakeElement('nav'); navigation.setAttribute('role', 'navigation'); navigation.setAttribute('aria-label', 'Workspace');
+  const menu = new FakeElement('div'); menu.setAttribute('role', 'menu'); menu.setAttribute('aria-label', 'Create'); menu.parentElement = navigation;
+  const menuItem = new FakeElement('button', 'Document'); menuItem.setAttribute('role', 'menuitem'); menuItem.parentElement = menu;
+  navigation.children = [menu]; menu.children = [menuItem];
+
+  const tree = new FakeElement('div'); tree.setAttribute('role', 'tree'); tree.setAttribute('aria-label', 'Files');
+  const treeItem = new FakeElement('div', 'Reports'); treeItem.setAttribute('role', 'treeitem'); treeItem.parentElement = tree; tree.children = [treeItem];
+
+  const palette = new FakeElement('div'); palette.setAttribute('role', 'dialog'); palette.setAttribute('aria-label', 'Commands');
+  const options = new FakeElement('div'); options.setAttribute('role', 'listbox'); options.setAttribute('aria-label', 'Results'); options.parentElement = palette;
+  const option = new FakeElement('div', 'Open settings'); option.setAttribute('role', 'option'); option.parentElement = options;
+  palette.children = [options]; options.children = [option];
+
+  const portalOwner = new FakeElement('button', 'Account'); portalOwner.setAttribute('aria-controls', 'account-menu');
+  const portal = new FakeElement('div'); portal.id = 'account-menu'; portal.setAttribute('role', 'menu'); portal.setAttribute('aria-label', 'Account actions');
+  const portalItem = new FakeElement('button', 'Sign out'); portalItem.setAttribute('role', 'menuitem'); portalItem.parentElement = portal; portal.children = [portalItem];
+  attach(root, navigation, menu, menuItem, tree, treeItem, palette, options, option, portalOwner, portal, portalItem); installDocument(t, root);
+
+  const controls = (semanticSnapshotFunction() as any).controls;
+  const documentItem = controls.find((item: any) => item.name === 'Document');
+  const reports = controls.find((item: any) => item.name === 'Reports');
+  const command = controls.find((item: any) => item.name === 'Open settings');
+  const signOut = controls.find((item: any) => item.name === 'Sign out');
+  assert.deepEqual(documentItem.hierarchyPath.map((item: any) => item.name), ['Workspace', 'Create']);
+  assert.deepEqual(reports.hierarchyPath.map((item: any) => item.name), ['Files']);
+  assert.deepEqual(command.hierarchyPath.map((item: any) => item.name), ['Commands', 'Results']);
+  assert.equal(signOut.logicalParentName, 'Account');
+  assert.equal(signOut.hierarchyPath.at(-1).relationship, 'aria-owner');
+});
+
+test('objective-scoped state follows sibling, controlled, status, and repeated-result regions but ignores unrelated page noise', (t) => {
+  const root = new FakeRoot();
+  const panel = new FakeElement('section'); panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', 'Weather');
+  const refresh = new FakeElement('button', 'Refresh'); refresh.setAttribute('aria-controls', 'forecast'); refresh.parentElement = panel;
+  const forecast = new FakeElement('div', '18 C'); forecast.id = 'forecast'; forecast.setAttribute('role', 'status'); forecast.parentElement = panel;
+  panel.children = [refresh, forecast];
+  const noise = new FakeElement('div', 'frame 1');
+  attach(root, panel, refresh, forecast, noise); installDocument(t, root);
+
+  const first = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  forecast.textContent = '19 C';
+  const second = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  assert.notDeepEqual(second.associatedState, first.associatedState);
+  noise.textContent = 'frame 2';
+  const third = (semanticLocatorFunction({ role: 'button', name: 'Refresh' }) as any).matches[0];
+  assert.deepEqual(third.associatedState, second.associatedState);
+  assert.ok(second.associatedState.some((region: any) => region.role === 'status' && region.text === '19 C'));
+});
+
+test('custom rendered widgets expose bounded perceptible state for grids, calendars, dashboards, swatches, and diagrams', (t) => {
+  const root = new FakeRoot();
+  const gridCell = new FakeElement('rect', 'X'); gridCell.setAttribute('role', 'gridcell'); gridCell.setAttribute('aria-selected', 'true'); gridCell.fill = 'rgb(1, 2, 3)';
+  const calendarDay = new FakeElement('button', '17'); calendarDay.setAttribute('aria-current', 'date'); calendarDay.setAttribute('class', 'today selected'); calendarDay.backgroundColor = 'rgb(4, 5, 6)';
+  const dashboard = new FakeElement('div', 'Online'); dashboard.setAttribute('role', 'status'); dashboard.setAttribute('data-status', 'healthy'); dashboard.setAttribute('class', 'success'); dashboard.backgroundColor = 'rgb(7, 8, 9)';
+  const swatch = new FakeElement('div'); swatch.setAttribute('role', 'option'); swatch.setAttribute('aria-label', 'Ocean'); swatch.setAttribute('aria-selected', 'true'); swatch.backgroundColor = 'rgb(10, 11, 12)';
+  const node = new FakeElement('circle', 'Gateway'); node.setAttribute('role', 'graphics-symbol'); node.setAttribute('aria-pressed', 'true'); node.setAttribute('class', 'highlighted'); node.fill = 'rgb(13, 14, 15)';
+  attach(root, gridCell, calendarDay, dashboard, swatch, node); installDocument(t, root);
+
+  const visuals = (semanticSnapshotFunction() as any).visualObjects;
+  assert.equal(visuals.find((item: any) => item.name === 'X').perceptibleState.selected, true);
+  assert.deepEqual(visuals.find((item: any) => item.name === '17').perceptibleState.stateTokens, ['today', 'selected']);
+  assert.equal(visuals.find((item: any) => item.name === 'Online').perceptibleState.status, 'healthy');
+  assert.equal(visuals.find((item: any) => item.name === 'Ocean').perceptibleState.selected, true);
+  assert.equal(visuals.find((item: any) => item.name === 'Gateway').perceptibleState.pressed, true);
 });

@@ -279,3 +279,40 @@ test('managed browser delegates reconciliation without replay or launcher recove
   assert.equal(reconciliations, 1);
   assert.equal(launches, 0);
 });
+
+test('managed browser emergency lifecycle awaits delegate and owned launcher shutdown', async () => {
+  const closed: string[] = [];
+  const delegate: CapabilityProvider = {
+    name: 'fake.cdp.lifecycle',
+    supports: () => true,
+    score: () => FAKE_SCORE,
+    execute: async () => ({ ok: true, capability: 'browser.inspect', provider: 'fake.cdp.lifecycle', evidence: [], durationMs: 0 }),
+    close: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); closed.push('delegate'); }
+  };
+  const provider = new ManagedBrowserProvider({
+    delegate,
+    launcher: {
+      async ensureEndpoint() { return 'http://127.0.0.1:9222'; },
+      async close() { await new Promise((resolve) => setTimeout(resolve, 20)); closed.push('launcher'); }
+    }
+  });
+  await provider.emergencyStop();
+  assert.deepEqual(closed.sort(), ['delegate', 'launcher']);
+});
+
+test('managed browser emergency lifecycle still closes owned child when delegate close fails', async () => {
+  let launcherClosed = false;
+  const provider = new ManagedBrowserProvider({
+    delegate: {
+      name: 'fake.cdp.close-failure', supports: () => true, score: () => FAKE_SCORE,
+      execute: async () => ({ ok: true, capability: 'browser.inspect', provider: 'fake', evidence: [], durationMs: 0 }),
+      close: () => { throw new Error('delegate close failed'); }
+    },
+    launcher: {
+      async ensureEndpoint() { return 'http://127.0.0.1:9222'; },
+      close() { launcherClosed = true; }
+    }
+  });
+  await assert.rejects(provider.emergencyStop(), /delegate close failed/);
+  assert.equal(launcherClosed, true);
+});

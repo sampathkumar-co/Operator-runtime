@@ -59,10 +59,15 @@ test('stage8 starts only canary wave and requires verified promotion before incr
   await finishMission(teams, started.targets[0]!.missionId!);
   const refreshed = await org.refresh(program.id);
   assert.equal(refreshed.waves[0]?.state, 'VERIFIED');
+  assert.match(refreshed.waves[0]?.verificationDigest ?? '', /^[0-9a-f]{64}$/);
   assert.equal(refreshed.state, 'PAUSED');
   assert.equal(refreshed.targets[1]?.missionId, undefined);
+  await assert.rejects(
+    () => org.promote(program.id, 'a'.repeat(64)),
+    (error: any) => error?.code === 'ORGANIZATION_VERIFICATION_DIGEST_MISMATCH'
+  );
 
-  const promoted = await org.promote(program.id, 'a'.repeat(64));
+  const promoted = await org.promote(program.id, refreshed.waves[0]!.verificationDigest!);
   assert.equal(promoted.activeWave, 1);
   assert.equal(promoted.waves[1]?.state, 'RUNNING');
   assert.ok(promoted.targets[1]?.missionId);
@@ -85,11 +90,15 @@ test('stage8 final program requires every wave verification and explicit promoti
   await finishMission(teams, current.targets[0]!.missionId!);
   current = await org.refresh(program.id);
   await assert.rejects(org.promote(program.id, 'bad'), /SHA-256/);
-  current = await org.promote(program.id, 'b'.repeat(64));
+  await assert.rejects(
+    () => org.promote(program.id, 'b'.repeat(64)),
+    (error: any) => error?.code === 'ORGANIZATION_VERIFICATION_DIGEST_MISMATCH'
+  );
+  current = await org.promote(program.id, current.waves[0]!.verificationDigest!);
   await finishMission(teams, current.targets[1]!.missionId!);
   current = await org.refresh(program.id);
   assert.equal(current.state, 'PAUSED');
-  current = await org.promote(program.id, 'c'.repeat(64));
+  current = await org.promote(program.id, current.waves[1]!.verificationDigest!);
   assert.equal(current.state, 'VERIFIED');
 });
 

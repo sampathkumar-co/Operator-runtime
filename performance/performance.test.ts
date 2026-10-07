@@ -166,3 +166,35 @@ test('verification receipts remain cheap enough for pervasive postconditions', (
   metric('verification-kernel', elapsed, operations);
   assert.ok(elapsed < 5_000, `Verification kernel regression: ${elapsed.toFixed(1)} ms for ${operations} receipts.`);
 });
+
+test('one-thousand-delivery relay soak stays compact, restart-safe, and reports latency distribution', async (t) => {
+  const state = await temp(t, 'operator-perf-relay-soak-');
+  const deviceId = crypto.randomUUID();
+  const store = new RelayDeliveryStore(state, { maxDeliveriesPerStream: 16, terminalReplayWindow: 4 });
+  const samples: number[] = [];
+  const heapBefore = process.memoryUsage().heapUsed;
+  for (let index = 0; index < 1_000; index += 1) {
+    const started = performance.now();
+    const delivery = await store.enqueue(deviceId, 'soak.delivery', { index, value: 'x'.repeat(32) });
+    await store.acknowledge(deviceId, delivery.seq, delivery.id);
+    samples.push(performance.now() - started);
+  }
+  samples.sort((a, b) => a - b);
+  const percentile = (ratio: number) => samples[Math.min(samples.length - 1, Math.ceil(samples.length * ratio) - 1)]!;
+  const p50 = percentile(0.5), p95 = percentile(0.95), max = samples.at(-1)!;
+  const heapGrowth = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+  const file = path.join(state, 'relay-deliveries.json');
+  const fileBytes = (await fs.stat(file)).size;
+  console.log(`[perf] relay-soak: p50=${p50.toFixed(3)}ms p95=${p95.toFixed(3)}ms max=${max.toFixed(3)}ms heapGrowth=${heapGrowth}B file=${fileBytes}B`);
+
+  const restarted = new RelayDeliveryStore(state, { maxDeliveriesPerStream: 16, terminalReplayWindow: 4 });
+  assert.deepEqual(await restarted.cursor(deviceId), { lastAckedSeq: 1_000, highestEnqueuedSeq: 1_000 });
+  assert.deepEqual(await restarted.pending(deviceId), []);
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(persisted.streams[0].deliveries.length, 4);
+  assert.equal(persisted.streams[0].highestCompactedAckedSeq, 996);
+  assert.ok(p95 < 250, `relay soak p95 regressed to ${p95.toFixed(1)} ms`);
+  assert.ok(max < 2_000, `relay soak max regressed to ${max.toFixed(1)} ms`);
+  assert.ok(heapGrowth < 128 * 1024 * 1024, `relay soak heap grew by ${heapGrowth} bytes`);
+  assert.ok(fileBytes < 128 * 1024, `compacted relay file grew to ${fileBytes} bytes`);
+});

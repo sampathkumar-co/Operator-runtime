@@ -1,19 +1,24 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskNode, TaskObservationSummary, TaskRejectedDecision } from './task.ts';
 import { validIntentBinding } from './intent-registry.ts';
-import type { Evidence, TaskState } from './types.ts';
+import type { EpistemicStatus, Evidence, TaskState } from './types.ts';
 import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from './task-planner-event.ts';
 import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { validateRecoveryShadowRecommendation } from './adaptive-recovery-shadow.ts';
+import { validateStrategyShadowAssessment } from './adaptive-strategy-shadow.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
+  observerFromLegacyInspector,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceInspector,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from './process-instance.ts';
 
@@ -31,6 +36,8 @@ const TASK_OPTIONS = {
 } as const;
 const TASK_STATES = new Set<TaskState>(['PENDING', 'RUNNING', 'PAUSED', 'CANCELLED', 'BLOCKED', 'FAILED', 'VERIFIED', 'SKIPPED']);
 const MAX_ACTION_RECORDS = 5000;
+const MAX_REJECTED_DECISIONS = 100;
+const MAX_PROGRESS_PROOFS = 1000;
 const LEASE_OPTIONS = {
   maxBytes: 16 * 1024,
   errorCode: 'TASK_LEASE_CORRUPT',
@@ -58,14 +65,20 @@ export interface TaskExecutionLease {
 export class TaskStore {
   #dir: string;
   #leaseDir: string;
-  #inspectProcessInstance: ProcessInstanceInspector;
+  #observeProcessInstance: ProcessInstanceObserver;
   #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+  constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated Legacy identity-only seam. A null result is UNKNOWN, never confirmed dead. */
+    inspectProcessInstance?: ProcessInstanceInspector;
+    processInstance?: ProcessInstanceIdentity;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#dir = path.join(root, 'tasks');
     this.#leaseDir = path.join(root, 'task-leases');
-    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#observeProcessInstance = options.observeProcessInstance
+      ?? (options.inspectProcessInstance ? observerFromLegacyInspector(options.inspectProcessInstance) : observeProcessInstance);
     this.#processInstance = options.processInstance;
   }
 
@@ -160,10 +173,10 @@ export class TaskStore {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
       }
-      const liveIdentity = await this.#inspectProcessInstance(existing.pid);
-      if (existing.version === 1 ? liveIdentity !== null : sameProcessInstance(existing.processInstance, liveIdentity)) {
-        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned by an active executor.`, {
-          details: { acquiredAt: existing.acquiredAt }
+      const observation = await this.#observeProcessInstance(existing.pid);
+      if (!processInstanceDefinitelyStale(existing.version === 2 ? existing.processInstance : undefined, observation)) {
+        throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned or process ownership cannot be safely disproven.`, {
+          details: { acquiredAt: existing.acquiredAt, liveness: observation.status }
         });
       }
       const stale = `${leasePath}.${crypto.randomUUID()}.stale`;
@@ -334,6 +347,15 @@ function validateExecution(input: unknown): TaskExecution {
   const plannerIterations = raw.plannerIterations === undefined
     ? stepCount
     : boundedInteger(raw.plannerIterations, 0, 1_000_000, 'execution plannerIterations');
+  const progressExtensions = raw.progressExtensions === undefined
+    ? 0
+    : boundedInteger(raw.progressExtensions, 0, maxSteps, 'execution progressExtensions');
+  const progressProofDigests = raw.progressProofDigests === undefined
+    ? []
+    : boundedTextArray(raw.progressProofDigests, Math.min(MAX_PROGRESS_PROOFS, maxSteps), 64, 'execution progressProofDigests');
+  if (progressProofDigests.some((digest) => !/^[a-f0-9]{64}$/.test(digest))) throw corrupt('execution progressProofDigests must contain SHA-256 digests.');
+  if (new Set(progressProofDigests).size !== progressProofDigests.length) throw corrupt('execution progressProofDigests must be unique.');
+  if (progressExtensions !== progressProofDigests.length) throw corrupt('execution progressExtensions must equal its durable proof count.');
   const preDispatchReobserves = raw.preDispatchReobserves === undefined
     ? 0
     : boundedInteger(raw.preDispatchReobserves, 0, 1_000_000, 'execution preDispatchReobserves');
@@ -348,12 +370,60 @@ function validateExecution(input: unknown): TaskExecution {
   if (!Array.isArray(raw.records) || raw.records.length > MAX_ACTION_RECORDS) throw corrupt(`execution records must contain at most ${MAX_ACTION_RECORDS} entries.`);
   const records = raw.records.map((entry, index) => validateActionRecord(entry, index));
   const plannerEvents = raw.plannerEvents === undefined ? [] : validatePlannerEvents(raw.plannerEvents);
+  const rejectedDecisions = raw.rejectedDecisions === undefined ? [] : validateRejectedDecisions(raw.rejectedDecisions);
   return {
     schemaVersion: 1, plannerId, goalKind, plannerState, maxSteps, maxAttemptsPerStep, timeoutMs, stepCount,
-    plannerIterations, preDispatchReobserves, dispatchedActions,
+    plannerIterations, progressExtensions, progressProofDigests, preDispatchReobserves, dispatchedActions,
     ...(startedAt ? { startedAt, deadlineAt } : {}), records,
-    ...(plannerEvents.length > 0 ? { plannerEvents } : {})
+    ...(plannerEvents.length > 0 ? { plannerEvents } : {}),
+    ...(rejectedDecisions.length > 0 ? { rejectedDecisions } : {})
   };
+}
+
+function validateRejectedDecisions(input: unknown): TaskRejectedDecision[] {
+  if (!Array.isArray(input) || input.length > MAX_REJECTED_DECISIONS) {
+    throw corrupt(`execution rejectedDecisions must contain at most ${MAX_REJECTED_DECISIONS} entries.`);
+  }
+  const decisionTypes = new Set<TaskRejectedDecision['decisionType']>(['invalid', 'complete', 'step']);
+  const authorityStates = new Set<TaskRejectedDecision['authorityState']>(['INTENT_BOUND', 'TASK_SCOPE_BOUND']);
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw corrupt(`rejected decision ${index} must be an object.`);
+    const raw = entry as Record<string, unknown>;
+    const decisionType = String(raw.decisionType) as TaskRejectedDecision['decisionType'];
+    const authorityState = String(raw.authorityState) as TaskRejectedDecision['authorityState'];
+    if (!decisionTypes.has(decisionType)) throw corrupt(`rejected decision ${index} type is invalid.`);
+    if (!authorityStates.has(authorityState)) throw corrupt(`rejected decision ${index} authorityState is invalid.`);
+    const resource = raw.resourceContext;
+    if (!resource || typeof resource !== 'object' || Array.isArray(resource)) throw corrupt(`rejected decision ${index} resourceContext is invalid.`);
+    const resourceRaw = resource as Record<string, unknown>;
+    const capability = resourceRaw.capability === undefined ? undefined : boundedText(resourceRaw.capability, 256, `rejected decision ${index} capability`);
+    const targetDigest = resourceRaw.targetDigest === undefined ? undefined : digest(resourceRaw.targetDigest, `rejected decision ${index} targetDigest`);
+    const actionCorrelation = raw.actionCorrelation === undefined ? undefined : digest(raw.actionCorrelation, `rejected decision ${index} actionCorrelation`);
+    for (const field of ['retryAllowed', 'reobserveAllowed', 'replanAllowed'] as const) {
+      if (typeof raw[field] !== 'boolean') throw corrupt(`rejected decision ${index} ${field} is invalid.`);
+    }
+    return {
+      taskId: boundedText(raw.taskId, 128, `rejected decision ${index} taskId`),
+      ...(actionCorrelation ? { actionCorrelation } : {}),
+      decisionDigest: digest(raw.decisionDigest, `rejected decision ${index} decisionDigest`),
+      decisionType,
+      code: boundedText(raw.code, 256, `rejected decision ${index} code`),
+      reason: boundedText(raw.reason, 1024, `rejected decision ${index} reason`),
+      authorityState,
+      resourceContext: { ...(capability ? { capability } : {}), ...(targetDigest ? { targetDigest } : {}) },
+      observationDigest: digest(raw.observationDigest, `rejected decision ${index} observationDigest`),
+      at: validIso(raw.at, `rejected decision ${index} at`),
+      retryAllowed: raw.retryAllowed as boolean,
+      reobserveAllowed: raw.reobserveAllowed as boolean,
+      replanAllowed: raw.replanAllowed as boolean
+    };
+  });
+}
+
+function digest(input: unknown, name: string): string {
+  const value = boundedText(input, 64, name);
+  if (!/^[0-9a-f]{64}$/.test(value)) throw corrupt(`${name} is invalid.`);
+  return value;
 }
 
 function validatePlannerEvents(input: unknown): TaskPlannerEvent[] {
@@ -373,6 +443,12 @@ function validatePlannerEvents(input: unknown): TaskPlannerEvent[] {
       provider: boundedText(raw.provider, 512, `planner event ${index} provider`),
       capability: boundedText(raw.capability, 256, `planner event ${index} capability`)
     };
+    if (raw.epistemicStatus !== undefined) {
+      const statuses = new Set<EpistemicStatus>(['KNOWN', 'UNKNOWN', 'AMBIGUOUS', 'CONTRADICTED', 'UNAVAILABLE', 'UNAUTHORIZED', 'EXECUTION_UNCERTAIN', 'VERIFIED_FALSE']);
+      const status = String(raw.epistemicStatus) as EpistemicStatus;
+      if (!statuses.has(status)) throw corrupt(`planner event ${index} epistemicStatus is invalid.`);
+      event.epistemicStatus = status;
+    }
     if (raw.settled !== undefined) {
       if (typeof raw.settled !== 'boolean') throw corrupt(`planner event ${index} settled is invalid.`);
       event.settled = raw.settled;
@@ -451,13 +527,22 @@ function validateObservation(input: unknown, index: number): TaskObservationSumm
   const confidence = Number(raw.confidence);
   if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw corrupt(`Action record ${index} observation confidence is invalid.`);
   if (typeof raw.ambiguous !== 'boolean') throw corrupt(`Action record ${index} observation ambiguous must be boolean.`);
+  const epistemicStatuses = new Set<EpistemicStatus>(['KNOWN', 'UNKNOWN', 'AMBIGUOUS', 'CONTRADICTED', 'UNAVAILABLE', 'UNAUTHORIZED', 'EXECUTION_UNCERTAIN', 'VERIFIED_FALSE']);
+  const epistemicStatus = raw.epistemicStatus === undefined
+    ? (raw.ambiguous ? 'AMBIGUOUS' : 'KNOWN')
+    : String(raw.epistemicStatus) as EpistemicStatus;
+  if (!epistemicStatuses.has(epistemicStatus)) throw corrupt(`Action record ${index} observation epistemicStatus is invalid.`);
+  const epistemicReason = raw.epistemicReason === undefined
+    ? (epistemicStatus === 'AMBIGUOUS' ? 'LEGACY_AMBIGUOUS_OBSERVATION' : 'LEGACY_KNOWN_OBSERVATION')
+    : boundedText(raw.epistemicReason, 128, `action record ${index} observation epistemicReason`);
+  if ((epistemicStatus === 'AMBIGUOUS') !== raw.ambiguous) throw corrupt(`Action record ${index} observation ambiguity fields disagree.`);
   const evidenceRefs = boundedHashArray(raw.evidenceRefs, 100, `action record ${index} observation evidenceRefs`);
   const stateVersion = boundedHash(raw.stateVersion, `action record ${index} observation stateVersion`);
   return {
     schemaVersion: 2, channel, domain: domain as TaskObservationSummary['domain'], provider,
     capability: boundedText(raw.capability, 256, `action record ${index} observation capability`),
     entityId: boundedText(raw.entityId, 256, `action record ${index} observation entityId`),
-    observedAt, stateVersion, importantState, ambiguous: raw.ambiguous, confidence, evidenceRefs
+    observedAt, stateVersion, importantState, epistemicStatus, epistemicReason, ambiguous: raw.ambiguous, confidence, evidenceRefs
   };
 }
 
@@ -503,7 +588,15 @@ function validateEvidenceArray(input: unknown, max: number, label: string): Evid
     if (!status) throw corrupt(`${label} entry ${index} status is invalid.`);
     const message = boundedText(raw.message, 64 * 1024, `${label} entry ${index} message`);
     const timestamp = validIso(raw.timestamp, `${label} entry ${index} timestamp`);
-    const data = raw.data === undefined ? undefined : jsonObject(raw.data, `${label} entry ${index} data`);
+    let data = raw.data === undefined ? undefined : jsonObject(raw.data, `${label} entry ${index} data`);
+    if (kind === 'adaptive_recovery_shadow') {
+      try { data = validateRecoveryShadowRecommendation(data) as unknown as Record<string, unknown>; }
+      catch { throw corrupt(`${label} entry ${index} recovery shadow lineage is invalid.`); }
+    }
+    if (kind === 'adaptive_strategy_shadow') {
+      try { data = validateStrategyShadowAssessment(data) as unknown as Record<string, unknown>; }
+      catch { throw corrupt(`${label} entry ${index} strategy shadow lineage is invalid.`); }
+    }
     return { kind, status, message, ...(data ? { data } : {}), timestamp };
   });
 }

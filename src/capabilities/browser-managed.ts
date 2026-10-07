@@ -43,7 +43,7 @@ export type ManagedBrowserOptions = {
 
 export type BrowserEndpointLauncher = {
   ensureEndpoint(): Promise<string>;
-  close(): void;
+  close(): void | Promise<void>;
 };
 
 export function candidateBrowserPaths(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string[] {
@@ -233,15 +233,15 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
       await new Promise((resolve) => setTimeout(resolve, 75));
     }
 
-    this.#terminateChild();
+    await this.#terminateChild();
     throw new OperatorError('BROWSER_LAUNCH_TIMEOUT', 'Managed browser did not expose a healthy CDP endpoint before timeout.', {
       retryable: true,
       details: { cause: lastError instanceof Error ? lastError.message : undefined }
     });
   }
 
-  close(): void {
-    this.#terminateChild();
+  async close(): Promise<void> {
+    await this.#terminateChild();
   }
 
   #managedDataDir(): string {
@@ -277,12 +277,12 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
     throw new OperatorError('BROWSER_EXECUTABLE_NOT_FOUND', 'Chrome, Chrome for Testing, Chromium, or Edge was not found. Configure OPERATOR_BROWSER_PATH.', { retryable: false });
   }
 
-  #terminateChild(): void {
+  async #terminateChild(): Promise<void> {
     const child = this.#child;
     this.#child = undefined;
     this.#launchedEndpoint = undefined;
-    if (!child || child.exitCode !== null || child.killed) return;
-    try { child.kill('SIGTERM'); } catch { /* noop */ }
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await terminateManagedChild(child);
   }
 }
 
@@ -372,8 +372,44 @@ export class ManagedBrowserProvider implements CapabilityProvider {
     };
   }
 
-  close(): void {
-    void this.#delegate.close?.();
-    this.#launcher.close();
+  async emergencyStop(): Promise<void> {
+    await this.#closeOwnedResources();
   }
+
+  async close(): Promise<void> {
+    await this.#closeOwnedResources();
+  }
+
+  async #closeOwnedResources(): Promise<void> {
+    const results = await Promise.allSettled([
+      (async () => this.#delegate.close?.())(),
+      (async () => this.#launcher.close())()
+    ]);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
+  }
+}
+
+async function terminateManagedChild(child: ChildProcess): Promise<void> {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+    const taskkill = path.join(systemRoot, 'System32', 'taskkill.exe');
+    await new Promise<void>((resolve, reject) => {
+      const killer = spawn(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
+        shell: false, windowsHide: true, stdio: 'ignore', env: safeChildEnvironment('windows-native')
+      });
+      killer.once('error', reject);
+      killer.once('close', () => resolve());
+    });
+  } else {
+    try { child.kill('SIGTERM'); } catch { /* postcondition below decides */ }
+  }
+  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+  if (child.exitCode === null && child.signalCode === null) {
+    try { child.kill('SIGKILL'); } catch { /* postcondition below decides */ }
+    await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+  }
+  if (child.exitCode === null && child.signalCode === null) throw new OperatorError('BROWSER_TERMINATE_POSTCONDITION_FAILED', 'Managed browser remained alive after shutdown.', { retryable: false });
 }

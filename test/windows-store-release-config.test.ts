@@ -63,6 +63,12 @@ test('Windows packaging resolves relative output under repo and runs npm with ce
   assert.doesNotMatch(build, /& npm\.cmd ci --ignore-scripts --omit=dev --prefix \$mcpDeps/);
 });
 
+test('Windows package includes runtime workspace packages imported by core sources', () => {
+  const build = text('packaging/windows/build-release.ps1');
+  assert.match(build, /packages\\adaptive-intelligence\\src/);
+  assert.match(build, /packages\\verified-plan-runtime\\src/);
+});
+
 
 test('Windows package prunes non-runtime dependency test and benchmark directories', () => {
   const build = text('packaging/windows/build-release.ps1');

@@ -57,6 +57,7 @@ export interface DigitalOperation {
   organizationProgramId?: string;
   lastBlockReason?: string;
   outcomeRecorded: boolean;
+  verificationEvidenceDigest?: string;
   receiptDigest?: string;
   createdAt: string;
   updatedAt: string;
@@ -415,11 +416,14 @@ export class DigitalOperationsLayer {
 
     let nextState: DigitalOperationState = mapUnderlyingState(underlyingState);
     let blockReason: string | undefined;
+    let verificationEvidenceDigest: string | undefined;
     if (nextState === 'VERIFIED') {
       const worldCheck = await this.#checkWorldConditions(current.postconditions);
       if (!worldCheck.ok) {
         nextState = 'BLOCKED';
         blockReason = worldCheck.reason;
+      } else {
+        verificationEvidenceDigest = await this.#underlyingVerificationDigest(current);
       }
     }
 
@@ -427,7 +431,14 @@ export class DigitalOperationsLayer {
       operation.state = nextState;
       if (blockReason) operation.lastBlockReason = blockReason;
       else delete operation.lastBlockReason;
-      if (nextState === 'VERIFIED' && !operation.receiptDigest) operation.receiptDigest = operationReceipt(operation);
+      if (nextState === 'VERIFIED') {
+        if (!verificationEvidenceDigest) throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Verified operation is missing its underlying machine verification proof.');
+        if (operation.verificationEvidenceDigest && operation.verificationEvidenceDigest !== verificationEvidenceDigest) {
+          throw new OperatorError('OPERATIONS_VERIFICATION_DRIFT', 'Underlying verification evidence changed after the operation was verified.');
+        }
+        operation.verificationEvidenceDigest = verificationEvidenceDigest;
+        if (!operation.receiptDigest) operation.receiptDigest = operationReceipt(operation);
+      }
     });
     if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(updated.state) && !updated.outcomeRecorded) return await this.#recordFinalOutcome(updated);
     return updated;
@@ -476,6 +487,12 @@ export class DigitalOperationsLayer {
 
   async #recordFinalOutcome(operation: DigitalOperation): Promise<DigitalOperation> {
     const verified = operation.state === 'VERIFIED';
+    if (verified) {
+      const currentVerificationDigest = await this.#underlyingVerificationDigest(operation);
+      if (!operation.verificationEvidenceDigest || operation.verificationEvidenceDigest !== currentVerificationDigest) {
+        throw new OperatorError('OPERATIONS_VERIFICATION_DRIFT', 'Verified operation no longer matches its machine-derived underlying verification evidence.');
+      }
+    }
     const outcomeReceipt = crypto.createHash('sha256').update(JSON.stringify({
       operationId: operation.id,
       submissionDigest: operation.submissionDigest,
@@ -486,8 +503,8 @@ export class DigitalOperationsLayer {
     try {
       await this.#optimizer.record(strategyContextFor(operation.scopeKey, operation.mode), operation.selectedStrategy, { verified }, outcomeReceipt);
       let capturedProcedureId: string | undefined;
-      if (verified && operation.procedureCapture && operation.receiptDigest) {
-        const verifierEvidenceDigest = await this.#underlyingVerificationDigest(operation);
+      if (verified && operation.procedureCapture && operation.receiptDigest && operation.verificationEvidenceDigest) {
+        const verifierEvidenceDigest = operation.verificationEvidenceDigest;
         const captured = await this.#procedures.recordVerified({
           key: operation.procedureCapture.key,
           title: operation.procedureCapture.title,
@@ -727,6 +744,7 @@ function operationReceipt(operation: DigitalOperation): string {
     deviceReservationId: operation.deviceReservationId ?? null,
     teamMissionId: operation.teamMissionId ?? null,
     organizationProgramId: operation.organizationProgramId ?? null,
+    verificationEvidenceDigest: operation.verificationEvidenceDigest ?? null,
     state: 'VERIFIED'
   };
   return crypto.createHash('sha256').update(JSON.stringify(receipt)).digest('hex');
@@ -772,7 +790,14 @@ function validateOperation(operation: DigitalOperation): void {
   if (operation.organizationProgramId !== undefined) validUuid(operation.organizationProgramId, 'organizationProgramId');
   if (operation.lastBlockReason !== undefined) boundedText(operation.lastBlockReason, 4096, 'lastBlockReason');
   if (typeof operation.outcomeRecorded !== 'boolean') throw corrupt('outcomeRecorded is invalid.');
+  if (operation.verificationEvidenceDigest !== undefined) shaDigest(operation.verificationEvidenceDigest, 'verificationEvidenceDigest');
   if (operation.receiptDigest !== undefined) shaDigest(operation.receiptDigest, 'receiptDigest');
+  if (operation.state === 'VERIFIED') {
+    if (!operation.verificationEvidenceDigest || !operation.receiptDigest) throw corrupt('Verified operation is missing its bound verification receipt.');
+    if (operation.receiptDigest !== operationReceipt(operation)) throw corrupt('Verified operation receipt does not match its bound contract and verification evidence.');
+  } else if (operation.receiptDigest !== undefined || operation.verificationEvidenceDigest !== undefined) {
+    throw corrupt('Non-verified operation cannot retain a verification receipt.');
+  }
   validIso(operation.createdAt, 'createdAt'); validIso(operation.updatedAt, 'updatedAt');
 }
 

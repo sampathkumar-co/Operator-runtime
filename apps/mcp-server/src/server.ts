@@ -27,6 +27,7 @@ import { PRODUCT_NAME, PRODUCT_TITLE, PRODUCT_VERSION } from '../../../src/core/
 import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../../src/core/public-plugin-surface.ts';
 import { TOOL_NAMES } from './tool-surface.ts';
 import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
+import { createMultiFileEditPlan } from '../../../src/core/multi-file-edit-plan.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -606,6 +607,161 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
     expectedRisk
   }, path));
 
+  server.registerTool('workspace.edit.resolve', {
+    title: 'Resolve LSP edits into a transactional workspace plan',
+    description: 'Resolve versioned LSP text-document edits against exact current SHA-256 document bytes. This is read-only: it returns an immutable multi-file plan and affected-test hints; applying the plan requires a separate workspace.edit write action.',
+    inputSchema: z.object({
+      workspaceRoot: z.string().min(1).max(4096),
+      documents: z.array(z.object({
+        uri: z.string().min(1).max(8192),
+        expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+        version: z.number().int().nullable().optional(),
+        edits: z.array(z.object({
+          start: z.object({
+            line: z.number().int().min(0).max(10_000_000),
+            character: z.number().int().min(0).max(100_000_000)
+          }),
+          end: z.object({
+            line: z.number().int().min(0).max(10_000_000),
+            character: z.number().int().min(0).max(100_000_000)
+          }),
+          newText: z.string().max(256 * 1024)
+        })).min(1).max(2000)
+      })).min(1).max(200),
+      trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
+      includeImpactAnalysis: z.boolean().default(true)
+    }),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, async ({ workspaceRoot, documents, trustedCommandIds, includeImpactAnalysis }) => {
+    const expectedDocumentSha256: Record<string, string> = {};
+    for (const document of documents) {
+      const prior = expectedDocumentSha256[document.uri];
+      if (prior && prior.toLowerCase() !== document.expectedSha256.toLowerCase()) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'workspace.edit.resolve: duplicate document URI has conflicting SHA-256 bindings.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'workspace.edit.resolve_lsp',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'LSP_EDIT_DIGEST_CONFLICT', message: 'Duplicate document URI has conflicting SHA-256 bindings.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      expectedDocumentSha256[document.uri] = document.expectedSha256.toLowerCase();
+    }
+    const edit = {
+      documentChanges: documents.map((document) => ({
+        textDocument: {
+          uri: document.uri,
+          ...(document.version !== undefined ? { version: document.version } : {})
+        },
+        edits: document.edits.map((entry) => ({
+          range: { start: entry.start, end: entry.end },
+          newText: entry.newText
+        }))
+      }))
+    };
+    return invoke('workspace.edit.resolve_lsp', 'read', {
+      workspaceRoot,
+      edit,
+      expectedDocumentSha256,
+      trustedCommandIds,
+      includeImpactAnalysis
+    }, workspaceRoot);
+  });
+
+  server.registerTool('workspace.edit', {
+    title: 'Apply or rollback transactional multi-file workspace edit',
+    description: 'Apply a bounded SHA-bound edit plan with crash-safe staging, optionally publishing a sensitive immutable rollback artifact; or restore a previously committed edit from that artifact under destructive approval.',
+    inputSchema: z.object({
+      mode: z.enum(['apply', 'rollback']).default('apply'),
+      workspaceRoot: z.string().min(1).max(4096),
+      files: z.array(z.object({
+        path: z.string().min(1).max(4096),
+        expectedSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+        edits: z.array(z.object({
+          start: z.number().int().min(0).max(16 * 1024 * 1024),
+          end: z.number().int().min(0).max(16 * 1024 * 1024),
+          replacement: z.string().max(256 * 1024)
+        })).min(1).max(2000)
+      })).max(200).default([]),
+      verification: z.object({
+        trustedCommandIds: z.array(z.string().regex(/^[A-Za-z0-9._:@/+\-=]{1,256}$/)).max(50).default([]),
+        requiredTestPaths: z.array(z.string().min(1).max(4096)).max(1000).default([])
+      }).optional(),
+      retainRollback: z.boolean().default(true),
+      rollbackArtifactId: z.string().regex(/^[0-9a-f]{64}$/i).optional()
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+  }, async ({ mode, workspaceRoot, files, verification, retainRollback, rollbackArtifactId }) => {
+    if (mode === 'rollback') {
+      if (!rollbackArtifactId) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: 'workspace.edit rollback requires rollbackArtifactId.' }],
+          structuredContent: {
+            ok: false,
+            capability: 'workspace.edit.rollback',
+            provider: 'mcp.validation',
+            evidence: [],
+            error: { code: 'WORKSPACE_EDIT_ROLLBACK_ARTIFACT_REQUIRED', message: 'rollbackArtifactId is required.', retryable: false },
+            durationMs: 0
+          }
+        };
+      }
+      return invoke(
+        'workspace.edit.rollback',
+        'destructive',
+        { workspaceRoot, rollbackArtifactId },
+        workspaceRoot
+      );
+    }
+
+    if (files.length < 1) {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit apply requires at least one file.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.edit.transaction',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'WORKSPACE_EDIT_PLAN_INVALID', message: 'At least one edit file is required.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    let plan;
+    try {
+      plan = createMultiFileEditPlan({
+        files,
+        ...(verification ? { verification } : {})
+      });
+    } catch {
+      return {
+        isError: true,
+        content: [{ type: 'text' as const, text: 'workspace.edit: edit plan is invalid.' }],
+        structuredContent: {
+          ok: false,
+          capability: 'workspace.edit.transaction',
+          provider: 'mcp.validation',
+          evidence: [],
+          error: { code: 'WORKSPACE_EDIT_PLAN_INVALID', message: 'Edit plan is invalid.', retryable: false },
+          durationMs: 0
+        }
+      };
+    }
+    return invoke(
+      'workspace.edit.transaction',
+      'write',
+      { workspaceRoot, plan, retainRollback },
+      workspaceRoot
+    );
+  });
+
   server.registerTool('file.read', {
     title: 'Read project file',
     description: 'Read a bounded file inside an authorized root. The local agent rejects traversal and symlink escapes.',
@@ -955,34 +1111,49 @@ function createServer(agent: LocalAgentClient, authInfo?: AuthInfo): McpServer {
 
   server.registerTool('terminal.execute', {
     title: 'Execute authorized process',
-    description: 'Execute an allowlisted executable with an argv array and no command shell, inside an authorized root. This is a high-power development capability and is policy-gated locally.',
+    description: 'Execute an allowlisted executable with an argv array and no command shell. Declare every absolute host path the process may mutate in affectedResources; an omitted declaration receives a conservative host-filesystem mutation lease.',
     inputSchema: z.object({
       executable: z.string().min(1),
       args: z.array(z.string()).max(200).default([]),
       cwd: z.string().min(1),
+      affectedResources: z.array(z.object({ kind: z.literal('path'), path: z.string().min(1).max(4096) }).strict()).max(128).optional(),
       timeoutMs: z.number().int().min(100).max(600000).default(30000)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ executable, args, cwd, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, timeoutMs }, cwd));
+  }, async ({ executable, args, cwd, affectedResources, timeoutMs }) => invoke('terminal.execute', 'destructive', { executable, args, cwd, affectedResources, timeoutMs }, cwd));
 
   server.registerTool('terminal.session', {
     title: 'Manage interactive terminal session',
-    description: 'Start an allowlisted shell-free process session, read bounded cursor-based output, write bounded stdin, list owned sessions, or terminate the owned process tree. Start/write/terminate remain destructive-policy gated.',
+    description: 'Start an allowlisted shell-free process session, optionally bind it durably to an ACTIVE Developer Session with declared ports, read bounded cursor-based output, write bounded stdin, list owned/recovered sessions, or terminate the exact owned process tree. Start/write/terminate remain destructive-policy gated.',
     inputSchema: z.object({
       operation: z.enum(['start', 'list', 'read', 'write', 'terminate']),
       executable: z.string().min(1).optional(),
       args: z.array(z.string()).max(200).default([]),
       cwd: z.string().min(1).optional(),
+      affectedResources: z.array(z.object({ kind: z.literal('path'), path: z.string().min(1).max(4096) }).strict()).max(128).optional(),
       sessionId: z.string().uuid().optional(),
+      developerSessionId: z.string().uuid().optional(),
+      ports: z.array(z.number().int().min(1).max(65535)).max(128).default([]),
       input: z.string().max(65536).optional(),
       afterCursor: z.number().int().min(0).optional(),
       maxEvents: z.number().int().min(1).max(500).default(100),
       maxBytes: z.number().int().min(1024).max(131072).default(65536)
     }),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
-  }, async ({ operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }) => {
+  }, async ({ operation, executable, args, cwd, affectedResources, sessionId, developerSessionId, ports, input, afterCursor, maxEvents, maxBytes }) => {
     const risk = operation === 'list' || operation === 'read' ? 'read' : 'destructive';
-    return invoke('terminal.session', risk, { operation, executable, args, cwd, sessionId, input, afterCursor, maxEvents, maxBytes }, cwd);
+    return invoke(
+      'terminal.session',
+      risk,
+      {
+        operation, executable, args, cwd,
+        ...(operation === 'start' && affectedResources ? { affectedResources } : {}),
+        ...(developerSessionId ? { developerSessionId } : {}),
+        ...(ports.length > 0 ? { ports } : {}),
+        sessionId, input, afterCursor, maxEvents, maxBytes
+      },
+      cwd
+    );
   });
 
   server.registerTool('process.inspect', {

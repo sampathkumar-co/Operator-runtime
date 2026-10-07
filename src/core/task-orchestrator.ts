@@ -3,19 +3,19 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, ExecutionPhase, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
-import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain } from './task.ts';
+import type { TaskActionRecord, TaskCapsule, TaskExecution, TaskObservationDomain, TaskObservationSummaryV2, TaskRejectedDecision } from './task.ts';
 import { addTaskNode, createTask, finalizeTask, setNodeState, stableTaskExecutionNodeKey } from './task.ts';
 import { TaskStore } from './task-store.ts';
 import { capabilityRiskRule } from './capability-policy.ts';
 import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import { normalizeMachineObservation, observationDomain } from './machine-state.ts';
-import { classifyTaskFailure } from './task-failure.ts';
+import { classifyTaskFailure, type TaskFailureDecision } from './task-failure.ts';
 import { verifyGoalOutcomeTruth, verifyTaskCompletion } from './task-verifier.ts';
 import { postgresSelectActionInput } from './semantic-task-input.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
-import { resourceKeysForAction } from './resource-identity.ts';
+import { resolvePhysicalResourceKeysForAction } from './resource-identity.ts';
 import type { IntentRegistry } from './intent-registry.ts';
 import type { ActionTransitionJournal } from './action-transition-journal.ts';
 import { validIntentBinding } from './intent-registry.ts';
@@ -23,158 +23,93 @@ import { plannerEventFromResult, type TaskPlannerEvent } from './task-planner-ev
 import { assertTaskMachineState, normalizeTaskStateAssertions, type TaskStateAssertion } from './task-state-assertion.ts';
 import {
   activateSubgoal, createDurableTaskPlan, nextReadySubgoal, normalizeDurableTaskPlan,
-  taskPlanComplete, verifySubgoal, type DurableTaskPlan
+  taskPlanComplete, verifySubgoal, type DurableTaskPlan, type TaskPlanSubgoal
 } from './task-plan.ts';
 import { decisionBudgetExhaustion, taskDecisionBudget, type TaskDecisionBudget } from './task-decision-budget.ts';
+import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
 
-export type UiaTaskOperation = 'invoke' | 'set_value' | 'focus' | 'select' | 'expand' | 'collapse' | 'scroll' | 'activate_window';
-export type UiaTaskSelector = { name?: string; automationId?: string; className?: string; controlType?: string; processId?: number };
-export type PhysicalInputTaskOperation = 'move' | 'click' | 'double_click' | 'drag' | 'scroll' | 'type_text' | 'key_press' | 'hotkey';
-export type VisualTaskSelector = { name?: string; className?: string; processId?: number };
-export type AppPhysicalFallback = {
-  source: 'screen' | 'window' | 'region';
-  selector?: VisualTaskSelector;
-  region?: { x: number; y: number; width: number; height: number };
-  operation: PhysicalInputTaskOperation;
-  x?: number; y?: number; toX?: number; toY?: number;
-  deltaX?: number; deltaY?: number;
-  text?: string; key?: string; keys?: string[];
-  maxWidth?: number; maxHeight?: number;
-};
-export type PostgresTaskFilter = { column: string; op: 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'ilike' | 'is_null' | 'not_null'; value?: string };
-export type PostgresTaskOrder = { column: string; direction: 'asc' | 'desc' };
-export type ProjectQualityCheck = 'lint' | 'test' | 'build';
-export type AutonomousTaskAction = { capability: string; input: Record<string, unknown>; target?: string };
-export type AutonomousTaskStep = {
-  key: string;
-  title: string;
-  parentKey?: string;
-  dependsOn?: string[];
-  resourceScope?: string[];
-  observe: AutonomousTaskAction;
-  action: AutonomousTaskAction;
-  verify: AutonomousTaskAction & { assertions: TaskStateAssertion[] };
-};
-
-export type AtomicSemanticTaskGoal =
-  | { kind: 'controlled-file-change'; root: string; path: string; content: string }
-  | { kind: 'trusted-project-command'; root: string; commandKind: 'build' | 'test' | 'lint' }
-  | { kind: 'browser-navigation'; url: string; targetId?: string }
-  | { kind: 'docker-lifecycle'; root: string; operation: 'start' | 'stop' | 'restart'; services: string[]; timeoutMs?: number }
-  | {
-      kind: 'postgres-select'; root: string; profileId: string; schema?: string; table: string;
-      columns?: string[]; filters?: PostgresTaskFilter[]; orderBy?: PostgresTaskOrder[];
-      limit?: number; offset?: number; timeoutMs?: number;
-    }
-  | {
-      kind: 'app-operation'; operation: UiaTaskOperation; selector: UiaTaskSelector;
-      value?: string; horizontalAmount?: string; verticalAmount?: string;
-      verifySelector?: UiaTaskSelector; waitMs?: number;
-      physicalFallback?: AppPhysicalFallback;
-    };
-
-export type SemanticTaskGoal =
-  | AtomicSemanticTaskGoal
-  | { kind: 'project-quality-gate'; root: string; checks?: ProjectQualityCheck[]; requireAll?: boolean }
-  | { kind: 'semantic-workflow'; steps: AtomicSemanticTaskGoal[] }
-  | { kind: 'autonomous-workflow'; roots?: string[]; browserOrigins?: string[]; application?: boolean; steps: AutonomousTaskStep[] };
-
-export interface TaskPlannerContext {
-  task: TaskCapsule;
-  goal: SemanticTaskGoal;
-  budget: {
-    maxSteps: number;
-    usedSteps: number;
-    remainingSteps: number;
-    plannerIterations: number;
-    preDispatchReobserves: number;
-    dispatchedActions: number;
-    maxAttemptsPerStep: number;
-    activeDeadlineMsRemaining: number;
-  };
-  recentEvents: TaskPlannerEvent[];
-  intelligence: TaskIntelligenceContext;
-  decisionBudget: TaskDecisionBudget;
-}
-
-export interface TaskIntelligenceContext {
-  retrievedAt: string;
-  scopeKey: string;
-  sceneKey?: string;
-  world: Array<{
-    entityKey: string; type: string; updatedAt: string;
-    facts: Array<{ key: string; claimCount: number; freshestAt?: string; maxConfidence: number; evidenceDigests: string[] }>;
-  }>;
-  procedures: Array<{
-    id: string; confidence: number; capabilities: string[]; verifiedRuns: number; failedRuns: number; verificationDigest: string;
-  }>;
-  perception: Array<{
-    nodeId: string; semanticId?: string; confidence: number; channels: string[]; role?: string; name?: string; bounds?: PerceptionBoundsLike;
-  }>;
-  strategies: Array<{ id: string; score: number; staticScore: number; learnedAdjustment: number; samples: number }>;
-}
-
-type PerceptionBoundsLike = { x: number; y: number; width: number; height: number };
-
-export interface TaskIntelligenceRequest {
-  task: TaskCapsule;
-  goal: SemanticTaskGoal;
-  budget: TaskPlannerContext['budget'];
-  recentEvents: TaskPlannerEvent[];
-}
-
-export interface TaskIntelligenceProvider {
-  retrieve(request: TaskIntelligenceRequest): Promise<TaskIntelligenceContext>;
-}
-
-/** Stable semantic observation boundary. A future visual provider can populate the
- * same contract with channel="visual" without changing planner control flow. */
-export interface TaskObservation {
-  channel: 'semantic' | 'visual';
-  domain: TaskObservationDomain;
-  observedAt: string;
-  ok: boolean;
-  capability: string;
-  provider: string;
-  output?: unknown;
-  evidence: ActionResult['evidence'];
-  error?: ActionResult['error'];
-}
-
-export type PlannerDecision =
-  | { type: 'complete'; message: string }
-  | { type: 'step'; key: string; title: string; capability: string; input: Record<string, unknown>; target?: string };
-
-export interface TaskPlanner {
-  readonly id: string;
-  supports(goal: SemanticTaskGoal): boolean;
-  next(context: TaskPlannerContext): PlannerDecision;
-  repair?(context: TaskPlannerContext, invalidDecision: unknown, issue: string): PlannerDecision;
-  accept(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void;
-  fallback?(context: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): boolean;
-}
-
-export interface TaskRunAuthorization {
-  permissionProvider?: (action: ActionRequest) => PermissionProfile | Promise<PermissionProfile>;
-  onActionResult?: (action: ActionRequest, result: ActionResult) => void | Promise<void>;
-  onApprovalRequired?: (
-    action: ActionRequest,
-    remainingMs: number
-  ) => 'retry' | 'deny' | void | Promise<'retry' | 'deny' | void>;
-}
-
-export interface SubmitTaskOptions {
-  requestId?: string;
-  objective: string;
-  authorizedScope: string[];
-  prohibitedScope?: string[];
-  successConditions: string[];
-  goal: SemanticTaskGoal;
-  maxSteps?: number;
-  maxAttemptsPerStep?: number;
-  timeoutMs?: number;
-  intent?: IntentBinding;
-}
+import type {
+  AppPhysicalFallback,
+  AtomicSemanticTaskGoal,
+  AutonomousTaskAction,
+  AutonomousTaskStep,
+  PhysicalInputTaskOperation,
+  PlannerDecision,
+  PostgresTaskFilter,
+  PostgresTaskOrder,
+  ProjectQualityCheck,
+  SemanticTaskGoal,
+  SubmitTaskOptions,
+  TaskIntelligenceContext,
+  TaskIntelligenceProvider,
+  TaskObservation,
+  TaskPlanner,
+  TaskPlannerContext,
+  TaskPlanningInfluence,
+  TaskPlanningInfluenceProvider,
+  TaskRunAuthorization,
+  UiaTaskOperation,
+  UiaTaskSelector,
+  VisualTaskSelector
+} from './task-orchestrator-contracts.ts';
+import type {
+  TaskModalityShadowAdvisor,
+  TaskModalityShadowAssessment,
+  TaskObservationShadowAdvisor,
+  TaskObservationShadowRecommendation,
+  TaskOutcomeShadowAdvisor,
+  TaskOutcomeShadowAssessment,
+  TaskPlanNodeShadowAdvisor,
+  TaskPlanNodeShadowRecommendation,
+  TaskRecoveryShadowAdvisor,
+  TaskRecoveryShadowRecommendation,
+  TaskStrategyShadowAdvisor,
+  TaskStrategyShadowAssessment
+} from './task-shadow-contracts.ts';
+export type {
+  AppPhysicalFallback,
+  AtomicSemanticTaskGoal,
+  AutonomousTaskAction,
+  AutonomousTaskStep,
+  PhysicalInputTaskOperation,
+  PlannerDecision,
+  PostgresTaskFilter,
+  PostgresTaskOrder,
+  ProjectQualityCheck,
+  SemanticTaskGoal,
+  SubmitTaskOptions,
+  TaskExecuteAction,
+  TaskIntelligenceContext,
+  TaskIntelligenceProvider,
+  TaskIntelligenceRequest,
+  TaskObservation,
+  TaskPlanner,
+  TaskPlannerContext,
+  TaskPlanningInfluence,
+  TaskPlanningInfluenceProvider,
+  TaskPlanningInfluenceRequest,
+  TaskRunAuthorization,
+  UiaTaskOperation,
+  UiaTaskSelector,
+  VisualTaskSelector
+} from './task-orchestrator-contracts.ts';
+export type {
+  TaskExecutionModality,
+  TaskModalityShadowAdvisor,
+  TaskModalityShadowAssessment,
+  TaskObservationShadowAdvisor,
+  TaskObservationShadowRecommendation,
+  TaskOutcomeShadowAdvisor,
+  TaskOutcomeShadowAssessment,
+  TaskPlanNodeShadowAdvisor,
+  TaskPlanNodeShadowRecommendation,
+  TaskRecoveryShadowAdvisor,
+  TaskRecoveryShadowKind,
+  TaskRecoveryShadowRecommendation,
+  TaskStrategyShadowAdvisor,
+  TaskStrategyShadowAssessment,
+  TaskStrategyShadowKind
+} from './task-shadow-contracts.ts';
 
 export class TaskOrchestrator {
   #runtime: OperatorRuntime;
@@ -192,6 +127,13 @@ export class TaskOrchestrator {
   #wallNow: () => number;
   #monotonicNow: () => number;
   #intelligence?: TaskIntelligenceProvider;
+  #observationShadow?: TaskObservationShadowAdvisor;
+  #planNodeShadow?: TaskPlanNodeShadowAdvisor;
+  #outcomeShadow?: TaskOutcomeShadowAdvisor;
+  #recoveryShadow?: TaskRecoveryShadowAdvisor;
+  #modalityShadow?: TaskModalityShadowAdvisor;
+  #strategyShadow?: TaskStrategyShadowAdvisor;
+  #planningInfluence?: TaskPlanningInfluenceProvider;
 
   constructor(options: {
     runtime: OperatorRuntime;
@@ -205,6 +147,13 @@ export class TaskOrchestrator {
     wallNow?: () => number;
     monotonicNow?: () => number;
     intelligence?: TaskIntelligenceProvider;
+    observationShadow?: TaskObservationShadowAdvisor;
+    planNodeShadow?: TaskPlanNodeShadowAdvisor;
+    outcomeShadow?: TaskOutcomeShadowAdvisor;
+    recoveryShadow?: TaskRecoveryShadowAdvisor;
+    modalityShadow?: TaskModalityShadowAdvisor;
+    strategyShadow?: TaskStrategyShadowAdvisor;
+    planningInfluence?: TaskPlanningInfluenceProvider;
   }) {
     this.#runtime = options.runtime;
     this.#store = options.store;
@@ -218,6 +167,13 @@ export class TaskOrchestrator {
     this.#wallNow = options.wallNow ?? Date.now;
     this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#intelligence = options.intelligence;
+    this.#observationShadow = options.observationShadow;
+    this.#planNodeShadow = options.planNodeShadow;
+    this.#outcomeShadow = options.outcomeShadow;
+    this.#recoveryShadow = options.recoveryShadow;
+    this.#modalityShadow = options.modalityShadow;
+    this.#strategyShadow = options.strategyShadow;
+    this.#planningInfluence = options.planningInfluence;
   }
 
   async submit(input: SubmitTaskOptions): Promise<TaskCapsule> {
@@ -282,6 +238,8 @@ export class TaskOrchestrator {
       timeoutMs: normalized.timeoutMs,
       stepCount: 0,
       plannerIterations: 0,
+      progressExtensions: 0,
+      progressProofDigests: [],
       preDispatchReobserves: 0,
       dispatchedActions: 0,
       records: []
@@ -451,6 +409,9 @@ export class TaskOrchestrator {
         decision = validatePlannerDecision(rawDecision);
       } catch (error) {
         const issue = error instanceof Error ? error.message : String(error);
+        await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
+          retryAllowed: Boolean(planner.repair), reobserveAllowed: false, replanAllowed: Boolean(planner.repair)
+        }, assertLease);
         if (!planner.repair) return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
         try {
           decision = validatePlannerDecision(planner.repair(context, rawDecision, issue));
@@ -460,13 +421,20 @@ export class TaskOrchestrator {
             remainingSteps: context.budget.remainingSteps
           }));
         } catch (repairError) {
-          return await this.#fail(task, 'TASK_PLANNER_FAILED', repairError instanceof Error ? repairError.message : String(repairError), assertLease);
+          const issue = repairError instanceof Error ? repairError.message : String(repairError);
+          await this.#recordRejectedDecision(task, rawDecision, 'TASK_PLANNER_FAILED', issue, {
+            retryAllowed: false, reobserveAllowed: false, replanAllowed: false
+          }, assertLease);
+          return await this.#fail(task, 'TASK_PLANNER_FAILED', issue, assertLease);
         }
       }
       if (decision.type === 'complete') {
         const verification = verifyTaskCompletion(task);
         task.evidence.push(verification.evidence);
         if (!verification.ok) {
+          await this.#recordRejectedDecision(task, decision, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', {
+            retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+          }, assertLease);
           return await this.#fail(task, 'TASK_INDEPENDENT_VERIFICATION_FAILED', 'Independent completion verification rejected the task graph.', assertLease);
         }
         task.evidence.push(evidence('task_completion', 'pass', decision.message, { verificationDigest: verification.bundle.digest }));
@@ -474,21 +442,103 @@ export class TaskOrchestrator {
         await this.#persistRunState(task, assertLease);
         return task;
       }
-      if (current.stepCount >= current.maxSteps) return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
+      if (current.stepCount >= current.maxSteps) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', {
+          retryAllowed: false, reobserveAllowed: false, replanAllowed: false
+        }, assertLease);
+        return await this.#fail(task, 'TASK_STEP_BUDGET_EXHAUSTED', 'Task execution exhausted its bounded step budget.', assertLease);
+      }
 
       const inputHash = sha256(canonicalJson(decision.input));
       const previous = [...current.records].reverse().find((record) => record.stepKey === decision.key && record.inputHash === inputHash);
       const recoveryReplay = previous?.state === 'STARTED' ? previous : undefined;
       if (!recoveryReplay && detectPlannerLoop(current.records, decision.key, inputHash)) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, {
+          retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+        }, assertLease);
         return await this.#fail(task, 'TASK_LOOP_DETECTED', `Planner repeated the ${decision.key} cycle without progress.`, assertLease);
       }
       const priorAttempts = current.records.filter((record) =>
         record.stepKey === decision.key && record.inputHash === inputHash && record.state !== 'BLOCKED' && record.state !== 'STARTED'
       ).length;
-      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      if (!recoveryReplay && priorAttempts >= current.maxAttemptsPerStep) {
+        await this.#recordRejectedDecision(task, decision, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, {
+          retryAllowed: false, reobserveAllowed: true, replanAllowed: true
+        }, assertLease);
+        return await this.#fail(task, 'TASK_RETRY_BUDGET_EXHAUSTED', `Step ${decision.key} exhausted its retry budget.`, assertLease);
+      }
       let risk: ActionRisk;
       try { risk = await this.#canonicalRisk(decision.capability, decision.input); }
-      catch (error) { return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', error instanceof Error ? error.message : String(error), assertLease); }
+      catch (error) {
+        const issue = error instanceof Error ? error.message : String(error);
+        await this.#recordRejectedDecision(task, decision, 'TASK_RISK_RESOLUTION_FAILED', issue, {
+          retryAllowed: false, reobserveAllowed: false, replanAllowed: true
+        }, assertLease);
+        return await this.#fail(task, 'TASK_RISK_RESOLUTION_FAILED', issue, assertLease);
+      }
+
+      const proposalDigest = sha256(canonicalJson({
+        taskId: task.id,
+        stepKey: decision.key,
+        capability: decision.capability,
+        target: decision.target ?? null,
+        inputHash,
+        risk
+      }));
+      if (this.#planningInfluence) {
+        let influence: TaskPlanningInfluence | undefined;
+        try {
+          influence = await this.#planningInfluence.review({
+            proposalDigest,
+            task: structuredClone(task),
+            goal: structuredClone(goal),
+            decision: structuredClone(decision),
+            risk,
+            budget: structuredClone(budget),
+            recentEvents: structuredClone(recentEvents),
+            intelligence: structuredClone(intelligence),
+            decisionBudget: structuredClone(decisionBudget)
+          });
+        } catch (error) {
+          return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_FAILED', error instanceof Error ? error.message : String(error), assertLease);
+        }
+        if (influence) {
+          task.evidence.push(evidence('adaptive_planning_influence', 'info', 'Adaptive planning recommendation was evaluated without granting execution authority.', {
+            command: influence.command,
+            effect: influence.effect,
+            reason: influence.reason.slice(0, 512),
+            proposalDigest
+          }));
+          if (influence.effect === 'CONTROL_ALLOWED') {
+            if (influence.grantsAuthority !== false || influence.runtimeVetoRequired !== true || influence.proposalDigest !== proposalDigest) {
+              return await this.#fail(task, 'TASK_ADAPTIVE_CONTROL_INVALID', 'Adaptive control influence was not bound to the exact current proposal and runtime veto.', assertLease);
+            }
+            if (influence.command === 'FAIL_SAFE') {
+              return await this.#fail(task, 'TASK_ADAPTIVE_FAIL_SAFE', 'Adaptive control requested fail-safe termination.', assertLease);
+            }
+            if (influence.command === 'ESCALATE' || influence.command === 'WAIT' || influence.command === 'RECONCILE') {
+              task.state = 'BLOCKED';
+              task.evidence.push(evidence('adaptive_planning_block', 'info', 'Adaptive control deferred execution for authoritative review or reconciliation.', {
+                command: influence.command,
+                proposalDigest
+              }));
+              await this.#persistRunState(task, assertLease);
+              return task;
+            }
+            current.preDispatchReobserves = (current.preDispatchReobserves ?? 0) + 1;
+            current.plannerEvents ??= [];
+            current.plannerEvents.push(plannerEventFromAdaptiveInfluence(influence.command, influence.reason));
+            if (current.plannerEvents.length > 100) current.plannerEvents.splice(0, current.plannerEvents.length - 100);
+            task.evidence.push(evidence('adaptive_planning_replan', 'info', 'Adaptive control vetoed the current proposal and returned bounded control to the existing planner.', {
+              command: influence.command,
+              proposalDigest,
+              preDispatchReobserves: current.preDispatchReobserves
+            }));
+            await this.#persistRunState(task, assertLease);
+            continue;
+          }
+        }
+      }
       const blockedReplay = previous?.state === 'BLOCKED' ? previous : undefined;
       const replayRecord = blockedReplay ?? recoveryReplay;
       const attempt = replayRecord?.attempt ?? priorAttempts + 1;
@@ -562,6 +612,30 @@ export class TaskOrchestrator {
         approvedActionIds: [...new Set([...(basePermissions.approvedActionIds ?? []), ...approvedActionIds])]
       };
       const learningContext = semanticLearningContext(goal, task);
+      let observationShadow: TaskObservationShadowRecommendation | undefined;
+      let observationShadowUnavailable = false;
+      if (this.#observationShadow) {
+        try {
+          observationShadow = await this.#observationShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions)
+          });
+        } catch {
+          observationShadowUnavailable = true;
+        }
+      }
+      let planNodeShadow: TaskPlanNodeShadowRecommendation | undefined;
+      let planNodeShadowUnavailable = false;
+      if (this.#planNodeShadow) {
+        try {
+          planNodeShadow = await this.#planNodeShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions)
+          });
+        } catch {
+          planNodeShadowUnavailable = true;
+        }
+      }
       let result: ActionResult | undefined;
       let resourceLease: Awaited<ReturnType<ResourceLeaseStore['acquire']>> | undefined;
       let executionDispatched = false;
@@ -569,9 +643,10 @@ export class TaskOrchestrator {
         if (this.#resourceLeases) {
           resourceLease = await this.#resourceLeases.acquire(
             task.id,
-            resourceKeysForAction(action),
+            await resolvePhysicalResourceKeysForAction(action),
             risk === 'read' ? 'shared' : 'exclusive'
           );
+          await resourceLease.assertOwned();
         }
         executionDispatched = true;
         result = await this.#executeAction(action, permissions, { signal, learningContext });
@@ -687,6 +762,11 @@ export class TaskOrchestrator {
       if (!latestNode) return await this.#fail(task, 'TASK_STATE_CONFLICT', 'Persisted task node disappeared during execution.', assertLease);
       const observation = observe(result);
       const normalizedObservation = normalizeMachineObservation(action, result, observation.channel);
+      const previousObservation = [...latestExecution.records].reverse()
+        .filter((candidate) => candidate !== latestRecord)
+        .map((candidate) => candidate.observation)
+        .find((candidate): candidate is TaskObservationSummaryV2 => candidate?.schemaVersion === 2
+          && candidate.entityId === normalizedObservation.entityId);
       latestRecord.finishedAt = new Date().toISOString();
       latestRecord.evidence = result.evidence;
       latestRecord.sideEffectState = conservativeSideEffectState(risk, result);
@@ -694,7 +774,177 @@ export class TaskOrchestrator {
       latestRecord.observation = normalizedObservation;
       latestNode.evidence.push(...result.evidence);
       task.evidence.push(...result.evidence);
-      const plannerEvent = plannerEventFromResult(result, result.ok ? undefined : classifyTaskFailure(result.error));
+      if (observationShadow) {
+        task.evidence.push(evidence('adaptive_observation_shadow', 'info', 'Compared the production observation choice with a non-authoritative adaptive recommendation.', {
+          mode: observationShadow.mode,
+          policyVersion: observationShadow.policyVersion,
+          decisionDigest: observationShadow.decisionDigest,
+          authoritySnapshotDigest: observationShadow.authoritySnapshotDigest,
+          selectedId: observationShadow.selectedId,
+          controlId: observationShadow.controlId,
+          alternatives: observationShadow.alternatives,
+          agreement: observationShadow.agreement,
+          actualOk: result.ok,
+          actualProvider: result.provider,
+          actualDurationMs: result.durationMs,
+          ...(result.error ? { actualErrorCode: result.error.code } : {})
+        }));
+      } else if (observationShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_observation_shadow', 'info', 'Adaptive observation shadow evaluation was unavailable; production control execution remained authoritative.', {
+          mode: 'SHADOW', controlId: decision.capability, actualOk: result.ok
+        }));
+      }
+      if (planNodeShadow) {
+        task.evidence.push(evidence('adaptive_plan_node_shadow', 'info', 'Compared the production planner node with a non-executable low-risk plan-node recommendation.', {
+          mode: planNodeShadow.mode,
+          policyVersion: planNodeShadow.policyVersion,
+          decisionDigest: planNodeShadow.decisionDigest,
+          authoritySnapshotDigest: planNodeShadow.authoritySnapshotDigest,
+          inputStateDigest: planNodeShadow.inputStateDigest,
+          selectedCapability: planNodeShadow.selectedCapability,
+          controlCapability: planNodeShadow.controlCapability,
+          alternatives: planNodeShadow.alternatives,
+          agreement: planNodeShadow.agreement,
+          actualOk: result.ok,
+          actualProvider: result.provider,
+          ...(result.error ? { actualErrorCode: result.error.code } : {})
+        }));
+      } else if (planNodeShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_plan_node_shadow', 'info', 'Low-risk plan-node shadow evaluation was unavailable; the production planner node remained authoritative.', {
+          mode: 'SHADOW', controlCapability: decision.capability, actualOk: result.ok
+        }));
+      }
+      const productionFailure = result.ok ? undefined : classifyTaskFailure(result.error);
+      let outcomeShadow: TaskOutcomeShadowAssessment | undefined;
+      let outcomeShadowUnavailable = false;
+      if (this.#outcomeShadow) {
+        try {
+          outcomeShadow = await this.#outcomeShadow.analyze({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, permissions: structuredClone(permissions), result: structuredClone(result),
+            observation: structuredClone(normalizedObservation),
+            ...(previousObservation ? { previousObservation: structuredClone(previousObservation) } : {}),
+            sideEffectState: latestRecord.sideEffectState,
+            executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {})
+          });
+        } catch {
+          outcomeShadowUnavailable = true;
+        }
+      }
+      if (outcomeShadow) {
+        task.evidence.push(evidence('adaptive_outcome_shadow', 'info', 'Compared the authoritative action outcome with non-controlling adaptive progress and failure reasoning.', {
+          mode: outcomeShadow.mode,
+          policyVersion: outcomeShadow.policyVersion,
+          decisionDigest: outcomeShadow.decisionDigest,
+          authoritySnapshotDigest: outcomeShadow.authoritySnapshotDigest,
+          inputStateDigest: outcomeShadow.inputStateDigest,
+          progressLevel: outcomeShadow.progress.level,
+          progressConfidence: outcomeShadow.progress.confidence,
+          progressCreditedSignals: outcomeShadow.progress.creditedSignals,
+          progressRejectedSignals: outcomeShadow.progress.rejectedSignals,
+          verificationRequired: outcomeShadow.progress.verificationRequired,
+          ...(outcomeShadow.failure ? {
+            failurePrimaryClass: outcomeShadow.failure.primaryClass,
+            failureProbability: outcomeShadow.failure.probability,
+            failureAlternatives: outcomeShadow.failure.alternatives,
+            failureEntropy: outcomeShadow.failure.entropy,
+            failureEvidenceCoverage: outcomeShadow.failure.evidenceCoverage
+          } : {}),
+          actualOk: result.ok,
+          ...(productionFailure ? {
+            productionFailureClass: productionFailure.class,
+            productionFailureStrategy: productionFailure.strategy,
+            productionFailureCode: productionFailure.code
+          } : {})
+        }));
+      } else if (outcomeShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_outcome_shadow', 'info', 'Adaptive outcome shadow evaluation was unavailable; production progress and recovery logic remained authoritative.', {
+          mode: 'SHADOW', actualOk: result.ok, ...(productionFailure ? { productionFailureCode: productionFailure.code } : {})
+        }));
+      }
+      const resultOutputForRecovery = result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+        ? result.output as Record<string, unknown>
+        : {};
+      const stateDeltaForRecovery = resultOutputForRecovery.stateDelta && typeof resultOutputForRecovery.stateDelta === 'object'
+        && !Array.isArray(resultOutputForRecovery.stateDelta)
+        ? resultOutputForRecovery.stateDelta as Record<string, unknown>
+        : undefined;
+      const recoveryFailure = productionFailure ?? (stateDeltaForRecovery?.progress === false
+        ? classifyTaskFailure({
+            code: 'ACTION_NO_PROGRESS', message: 'The authoritative provider reported no goal progress.', retryable: false,
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase
+          })
+        : undefined);
+      let recoveryShadow: TaskRecoveryShadowRecommendation | undefined;
+      let recoveryShadowUnavailable = false;
+      if (recoveryFailure && this.#recoveryShadow) {
+        try {
+          recoveryShadow = await this.#recoveryShadow.recommend({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, failedNodeId: latestNode.id, attempt: latestRecord.attempt, risk,
+            permissions: structuredClone(permissions), result: structuredClone(result),
+            observation: structuredClone(normalizedObservation), sideEffectState: latestRecord.sideEffectState,
+            executionPhase: latestRecord.executionPhase, productionFailure: structuredClone(recoveryFailure),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {})
+          });
+        } catch {
+          recoveryShadowUnavailable = true;
+        }
+      }
+      if (recoveryShadow) {
+        task.evidence.push(evidence('adaptive_recovery_shadow', 'info', 'Recorded a non-executable recovery recommendation; production recovery remained authoritative.', { ...recoveryShadow }));
+      } else if (recoveryShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_recovery_shadow_unavailable', 'info', 'Recovery shadow evaluation was unavailable; production recovery remained authoritative.', {
+          mode: 'SHADOW', actionId, productionFailureCode: recoveryFailure?.code
+        }));
+      }
+      let modalityShadow: TaskModalityShadowAssessment | undefined;
+      let modalityShadowUnavailable = false;
+      if (this.#modalityShadow) {
+        try {
+          modalityShadow = await this.#modalityShadow.assess({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions),
+            result: structuredClone(result), observation: structuredClone(normalizedObservation),
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {}),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {}),
+            ...(recoveryShadow ? { recoveryRecommendation: structuredClone(recoveryShadow) } : {})
+          });
+        } catch {
+          modalityShadowUnavailable = true;
+        }
+      }
+      if (modalityShadow) {
+        task.evidence.push(evidence('adaptive_modality_shadow', 'info', 'Recorded a non-executable modality comparison; production routing remained authoritative.', { ...modalityShadow }));
+      } else if (modalityShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_modality_shadow_unavailable', 'info', 'Modality shadow evaluation was unavailable; production routing remained authoritative.', { mode: 'SHADOW', actionId }));
+      }
+      let strategyShadow: TaskStrategyShadowAssessment | undefined;
+      let strategyShadowUnavailable = false;
+      if (this.#strategyShadow) {
+        try {
+          strategyShadow = await this.#strategyShadow.assess({
+            task: structuredClone(task), goal: structuredClone(goal), decision: structuredClone(decision),
+            actionId, risk, intelligence: structuredClone(intelligence), permissions: structuredClone(permissions),
+            result: structuredClone(result), observation: structuredClone(normalizedObservation),
+            sideEffectState: latestRecord.sideEffectState, executionPhase: latestRecord.executionPhase,
+            ...(productionFailure ? { productionFailure: structuredClone(productionFailure) } : {}),
+            ...(outcomeShadow ? { outcomeAssessment: structuredClone(outcomeShadow) } : {}),
+            ...(recoveryShadow ? { recoveryRecommendation: structuredClone(recoveryShadow) } : {}),
+            ...(modalityShadow ? { modalityAssessment: structuredClone(modalityShadow) } : {})
+          });
+        } catch {
+          strategyShadowUnavailable = true;
+        }
+      }
+      if (strategyShadow) {
+        task.evidence.push(evidence('adaptive_strategy_shadow', 'info', 'Recorded a non-executable strategy comparison; production planner control remained authoritative.', { ...strategyShadow }));
+      } else if (strategyShadowUnavailable) {
+        task.evidence.push(evidence('adaptive_strategy_shadow_unavailable', 'info', 'Strategy shadow evaluation was unavailable; production planner control remained authoritative.', { mode: 'SHADOW', actionId }));
+      }
+      const plannerEvent = plannerEventFromResult(result, productionFailure);
       if (plannerEvent) {
         latestExecution.plannerEvents ??= [];
         latestExecution.plannerEvents.push(plannerEvent);
@@ -735,6 +985,30 @@ export class TaskOrchestrator {
           setNodeState(task, latestNode.id, 'FAILED');
           return await this.#fail(task, 'TASK_POSTCONDITION_FAILED', postconditionMessage, assertLease);
         }
+        const resultOutput = result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+          ? result.output as Record<string, unknown>
+          : {};
+        const stateDelta = resultOutput.stateDelta && typeof resultOutput.stateDelta === 'object' && !Array.isArray(resultOutput.stateDelta)
+          ? resultOutput.stateDelta as Record<string, unknown>
+          : undefined;
+        if (stateDelta?.progress === true && (latestExecution.progressExtensions ?? 0) < latestExecution.maxSteps) {
+          const progressProofDigest = crypto.createHash('sha256').update(canonicalJson({
+            actionId, stepKey: decision.key, inputHash, stateDelta
+          })).digest('hex');
+          latestExecution.progressProofDigests ??= [];
+          if (!latestExecution.progressProofDigests.includes(progressProofDigest)) {
+            latestExecution.progressProofDigests.push(progressProofDigest);
+            latestExecution.progressExtensions = latestExecution.progressProofDigests.length;
+            task.evidence.push(evidence('decision_budget_extension', 'pass', 'A unique, explicitly reported state delta passed the planner postcondition and earned one bounded planner-iteration extension.', {
+              actionId,
+              stepKey: decision.key,
+              progressProofDigest,
+              progressExtensions: latestExecution.progressExtensions,
+              maximumExtensions: latestExecution.maxSteps,
+              environmentActionLimit: latestExecution.maxSteps
+            }));
+          }
+        }
         await this.#recordLearning(task, result, 'verified', learningContext);
         latestRecord.state = 'SUCCEEDED';
         setNodeState(task, latestNode.id, 'VERIFIED');
@@ -745,7 +1019,7 @@ export class TaskOrchestrator {
       }
 
       latestRecord.errorCode = result.error?.code ?? 'EXECUTION_FAILED';
-      const failureDecision = classifyTaskFailure(result.error);
+      const failureDecision = productionFailure!;
       task.evidence.push(evidence('failure_classification', 'info', 'Classified failed task action before choosing recovery strategy.', {
         code: failureDecision.code,
         class: failureDecision.class,
@@ -799,8 +1073,12 @@ export class TaskOrchestrator {
         return task;
       }
       const retrySafe = retrySafeWithoutReconciliation(risk, latestRecord.sideEffectState ?? 'uncertain');
+      const ambiguityAlreadyReobserved = /AMBIGUOUS|NOT_UNIQUE|MULTIPLE_MATCH/i.test(failureDecision.code)
+        && task.evidence.some((item) => item.kind === 'strategy_reobserve'
+          && item.data?.code === failureDecision.code && item.data?.stepKey === decision.key);
       if (failureDecision.retryable && retrySafe && failureDecision.strategy === 'reobserve'
-        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')) {
+        && (risk === 'read' || latestRecord.executionPhase === 'pre_dispatch')
+        && !ambiguityAlreadyReobserved) {
         setNodeState(task, latestNode.id, 'SKIPPED');
         latestExecution.records = latestExecution.records.filter((candidate) => candidate !== latestRecord);
         latestExecution.preDispatchReobserves = (latestExecution.preDispatchReobserves ?? 0) + 1;
@@ -808,6 +1086,7 @@ export class TaskOrchestrator {
           code: failureDecision.code,
           class: failureDecision.class,
           strategy: failureDecision.strategy,
+          stepKey: decision.key,
           actionId: latestRecord.actionId,
           sideEffectState: latestRecord.sideEffectState ?? 'none',
           executionPhase: latestRecord.executionPhase ?? 'pre_dispatch'
@@ -879,6 +1158,16 @@ export class TaskOrchestrator {
   async cancel(taskId: string): Promise<TaskCapsule> {
     return await this.#requestControl(taskId, 'CANCELLED');
   }
+
+  emergencyStopActive(): string[] {
+    const taskIds = [...this.#active.keys()].sort();
+    for (const taskId of taskIds) {
+      this.#controlRequests.set(taskId, 'CANCELLED');
+      this.#controllers.get(taskId)?.abort('EMERGENCY_STOPPED');
+    }
+    return taskIds;
+  }
+
   async resume(taskId: string, approvedActionIds: string[] = [], authorization: TaskRunAuthorization = {}): Promise<TaskCapsule> {
     const active = this.#active.get(taskId);
     if (active) await active;
@@ -1054,6 +1343,55 @@ export class TaskOrchestrator {
     if (assertLease) await this.#persistRunState(task, assertLease);
     else await this.#store.put(task);
     return task;
+  }
+
+  async #recordRejectedDecision(
+    task: TaskCapsule,
+    candidate: unknown,
+    code: string,
+    reason: string,
+    recovery: Pick<TaskRejectedDecision, 'retryAllowed' | 'reobserveAllowed' | 'replanAllowed'>,
+    assertLease: () => Promise<void>
+  ): Promise<void> {
+    const execution = task.execution!;
+    const structured = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      ? candidate as Record<string, unknown>
+      : {};
+    const rawType = structured.type;
+    const decisionType: TaskRejectedDecision['decisionType'] = rawType === 'complete' || rawType === 'step' ? rawType : 'invalid';
+    const capability = decisionType === 'step' && typeof structured.capability === 'string'
+      ? structured.capability.slice(0, 256)
+      : undefined;
+    const target = decisionType === 'step' && typeof structured.target === 'string' ? structured.target : undefined;
+    const safeDecision = {
+      type: decisionType,
+      key: decisionType === 'step' && typeof structured.key === 'string' ? structured.key.slice(0, 256) : undefined,
+      capability,
+      targetDigest: target ? sha256(target) : undefined
+    };
+    const decisionDigest = sha256(canonicalJson(safeDecision));
+    const latestObservation = [...execution.records].reverse().find((record) => record.observation)?.observation;
+    const observationDigest = latestObservation?.schemaVersion === 2
+      ? latestObservation.stateVersion
+      : sha256(canonicalJson(latestObservation ?? { state: 'unobserved' }));
+    const record: TaskRejectedDecision = {
+      taskId: task.id,
+      ...(decisionType === 'step' ? { actionCorrelation: sha256(`${task.id}:${decisionDigest}`) } : {}),
+      decisionDigest,
+      decisionType,
+      code: code.slice(0, 256),
+      reason: reason.slice(0, 1024),
+      authorityState: task.intent ? 'INTENT_BOUND' : 'TASK_SCOPE_BOUND',
+      resourceContext: { ...(capability ? { capability } : {}), ...(target ? { targetDigest: sha256(target) } : {}) },
+      observationDigest,
+      at: new Date().toISOString(),
+      ...recovery
+    };
+    execution.rejectedDecisions ??= [];
+    execution.rejectedDecisions.push(record);
+    if (execution.rejectedDecisions.length > 100) execution.rejectedDecisions.splice(0, execution.rejectedDecisions.length - 100);
+    task.updatedAt = record.at;
+    await this.#persistRunState(task, assertLease);
   }
 }
 
@@ -1498,15 +1836,19 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     const phase = String(state.autonomousPhase ?? 'observe');
     const selected = phase === 'observe' ? item.execution.observe : phase === 'action' ? item.execution.action : phase === 'verify' ? item.successContract : undefined;
     if (!selected) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow phase is invalid.');
+    const selectedInput = structuredClone(selected.input);
+    if (phase === 'observe' && selected.capability === 'browser.inspect') {
+      applyAutonomousBrowserObservationFocusAndPagination(state, item, selectedInput);
+    }
     return {
       type: 'step', key: `autonomous:${index}:${phase}`,
       title: `[${index + 1}/${goal.steps.length}] ${phase}: ${item.description}`,
-      capability: selected.capability, input: structuredClone(selected.input),
+      capability: selected.capability, input: selectedInput,
       ...(selected.target ? { target: selected.target } : {})
     };
   }
 
-  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>): void {
+  accept({ task, goal }: TaskPlannerContext, step: Extract<PlannerDecision, { type: 'step' }>, observation: TaskObservation): void {
     if (goal.kind !== 'autonomous-workflow') throw new OperatorError('TASK_GOAL_INVALID', 'Autonomous workflow planner requires an autonomous-workflow goal.');
     const state = task.execution!.plannerState;
     const plan = autonomousPlan(task, goal);
@@ -1514,6 +1856,17 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     if (!item) throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Autonomous workflow has no active subgoal.');
     const index = item.sourceIndex;
     if (step.key === `autonomous:${index}:observe`) {
+      if (item.execution.observe.capability === 'browser.inspect'
+        && advanceAutonomousBrowserObservationPage(state, item, observation)) {
+        state.durablePlan = plan;
+        task.evidence.push(evidence('browser_observation_pagination', 'info', 'The interaction target was absent from the current bounded browser observation page; advancing using provider-supplied pagination metadata.', {
+          subgoalId: item.id,
+          stepKey: item.key,
+          pagination: state.autonomousBrowserPagination ?? null
+        }));
+        return;
+      }
+      delete state.autonomousBrowserPagination;
       state.autonomousPhase = 'action';
       return;
     }
@@ -1555,6 +1908,185 @@ export class AutonomousWorkflowPlanner implements TaskPlanner {
     }
     return observation.error?.sideEffectState === 'none' && observation.error?.retryable === true;
   }
+}
+
+
+const MAX_AUTONOMOUS_BROWSER_PAGE_ADVANCES = 5;
+
+function autonomousBrowserTarget(item: TaskPlanSubgoal): Record<string, unknown> | undefined {
+  if (item.execution.action.capability !== 'browser.interact') return undefined;
+  const raw = item.execution.action.input.target;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const target = raw as Record<string, unknown>;
+  const discoverable = ['ref', 'role', 'name', 'text', 'renderedColor']
+    .some((key) => typeof target[key] === 'string' && String(target[key]).trim().length > 0);
+  return discoverable ? target : undefined;
+}
+
+function applyAutonomousBrowserObservationFocusAndPagination(
+  state: Record<string, unknown>,
+  item: TaskPlanSubgoal,
+  input: Record<string, unknown>
+): void {
+  const actionTargetId = item.execution.action.input.targetId;
+  if (input.targetId === undefined && typeof actionTargetId === 'string' && actionTargetId) input.targetId = actionTargetId;
+
+  const target = autonomousBrowserTarget(item);
+  if (!target) return;
+  const observation = { ...asRecord(input.observation) };
+  const text = typeof target.name === 'string' && target.name.trim()
+    ? target.name.trim()
+    : typeof target.text === 'string' && target.text.trim()
+      ? target.text.trim()
+      : undefined;
+  if (observation.focusRef === undefined && typeof target.ref === 'string' && target.ref.trim()) observation.focusRef = target.ref.trim();
+  if (observation.focusRole === undefined && typeof target.role === 'string' && target.role.trim()) observation.focusRole = target.role.trim();
+  if (observation.focusText === undefined && text) observation.focusText = text;
+
+  const pagination = asRecord(state.autonomousBrowserPagination);
+  if (pagination.subgoalId === item.id) {
+    for (const key of ['controlOffset', 'textOffset', 'visualOffset'] as const) {
+      const value = Number(pagination[key]);
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 10_000) observation[key] = value;
+    }
+  }
+  input.observation = observation;
+}
+
+function advanceAutonomousBrowserObservationPage(
+  state: Record<string, unknown>,
+  item: TaskPlanSubgoal,
+  observation: TaskObservation
+): boolean {
+  const target = autonomousBrowserTarget(item);
+  if (!target || browserObservationContainsTarget(observation.output, target)) return false;
+
+  const prior = asRecord(state.autonomousBrowserPagination);
+  const priorPages = prior.subgoalId === item.id && Number.isSafeInteger(Number(prior.pages))
+    ? Number(prior.pages)
+    : 0;
+  if (priorPages >= MAX_AUTONOMOUS_BROWSER_PAGE_ADVANCES) return false;
+
+  const dimensions = browserTargetPaginationDimensions(target);
+  const next: Record<string, unknown> = { subgoalId: item.id, pages: priorPages + 1 };
+  let advanced = false;
+  for (const dimension of dimensions) {
+    const offsetKey = dimension === 'controls' ? 'controlOffset' : dimension === 'visibleText' ? 'textOffset' : 'visualOffset';
+    const priorOffset = prior.subgoalId === item.id && Number.isSafeInteger(Number(prior[offsetKey]))
+      ? Number(prior[offsetKey])
+      : -1;
+    const candidates = browserPaginationNextOffsets(observation.output, dimension)
+      .filter((value) => value > priorOffset && value <= 10_000);
+    if (candidates.length > 0) {
+      next[offsetKey] = Math.min(...candidates);
+      advanced = true;
+    } else if (priorOffset >= 0) {
+      next[offsetKey] = priorOffset;
+    }
+  }
+  if (!advanced) return false;
+  state.autonomousBrowserPagination = next;
+  return true;
+}
+
+function browserTargetPaginationDimensions(target: Record<string, unknown>): Array<'controls' | 'visibleText' | 'visualObjects'> {
+  const dimensions = new Set<'controls' | 'visibleText' | 'visualObjects'>();
+  if (typeof target.renderedColor === 'string' && target.renderedColor.trim()) dimensions.add('visualObjects');
+  if (typeof target.text === 'string' && target.text.trim()) {
+    dimensions.add('controls');
+    dimensions.add('visibleText');
+  }
+  if (['ref', 'role', 'name'].some((key) => typeof target[key] === 'string' && String(target[key]).trim())) {
+    dimensions.add('controls');
+    if (typeof target.ref === 'string' && target.ref.trim()) {
+      dimensions.add('visibleText');
+      dimensions.add('visualObjects');
+    }
+  }
+  return [...dimensions];
+}
+
+function browserSemanticScopes(output: unknown): Record<string, unknown>[] {
+  const page = asRecord(asRecord(output).page);
+  const scopes: Record<string, unknown>[] = [];
+  if (page.semantic && typeof page.semantic === 'object' && !Array.isArray(page.semantic)) scopes.push(page.semantic as Record<string, unknown>);
+  for (const frame of Array.isArray(page.frames) ? page.frames : []) {
+    const semantic = asRecord(frame).semantic;
+    if (semantic && typeof semantic === 'object' && !Array.isArray(semantic)) scopes.push(semantic as Record<string, unknown>);
+  }
+  return scopes;
+}
+
+function browserObservationContainsTarget(output: unknown, target: Record<string, unknown>): boolean {
+  const ref = cleanBrowserTargetText(target.ref);
+  const role = cleanBrowserTargetText(target.role)?.toLowerCase();
+  const name = cleanBrowserTargetText(target.name)?.toLowerCase();
+  const text = cleanBrowserTargetText(target.text)?.toLowerCase();
+  const renderedColor = cleanBrowserTargetText(target.renderedColor)?.toLowerCase();
+  if (!ref && !role && !name && !text && !renderedColor) return true;
+
+  const matches = (value: unknown): boolean => {
+    const item = asRecord(value);
+    if (ref && item.ref !== ref) return false;
+    if (role && String(item.role ?? '').toLowerCase() !== role) return false;
+    if (name && String(item.name ?? '').trim().toLowerCase() !== name) return false;
+    if (text) {
+      const corpus = [item.text, item.name].filter((part) => typeof part === 'string').join(' ').toLowerCase();
+      if (!corpus.includes(text)) return false;
+    }
+    if (renderedColor && !browserVisualColorMatches(item, renderedColor)) return false;
+    return true;
+  };
+
+  for (const semantic of browserSemanticScopes(output)) {
+    const candidates = [
+      ...(Array.isArray(semantic.controls) ? semantic.controls : []),
+      ...(Array.isArray(semantic.visibleText) ? semantic.visibleText : []),
+      ...(Array.isArray(semantic.visualObjects) ? semantic.visualObjects : [])
+    ];
+    if (candidates.some(matches)) return true;
+  }
+  return false;
+}
+
+function browserPaginationNextOffsets(
+  output: unknown,
+  dimension: 'controls' | 'visibleText' | 'visualObjects'
+): number[] {
+  const offsets: number[] = [];
+  for (const semantic of browserSemanticScopes(output)) {
+    const pagination = asRecord(semantic.pagination);
+    const meta = asRecord(pagination[dimension]);
+    if (meta.truncated !== true) continue;
+    const nextOffset = Number(meta.nextOffset);
+    if (Number.isSafeInteger(nextOffset) && nextOffset >= 0) offsets.push(nextOffset);
+  }
+  return offsets;
+}
+
+function cleanBrowserTargetText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function browserVisualColorMatches(item: Record<string, unknown>, requested: string): boolean {
+  const colors = asRecord(item.colors);
+  const observed = Object.values(colors).filter((value): value is string => typeof value === 'string').map((value) => value.trim().toLowerCase());
+  const aliases = new Set<string>([requested]);
+  const named: Record<string, string> = {
+    red: 'rgb(255, 0, 0)', green: 'rgb(0, 128, 0)', blue: 'rgb(0, 0, 255)',
+    black: 'rgb(0, 0, 0)', white: 'rgb(255, 255, 255)', yellow: 'rgb(255, 255, 0)',
+    gray: 'rgb(128, 128, 128)', grey: 'rgb(128, 128, 128)', orange: 'rgb(255, 165, 0)',
+    purple: 'rgb(128, 0, 128)'
+  };
+  if (named[requested]) aliases.add(named[requested]!);
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(requested);
+  if (hex) {
+    const raw = hex[1]!.length === 3 ? hex[1]!.split('').map((part) => part + part).join('') : hex[1]!;
+    const [r, g, b] = [0, 2, 4].map((offset) => Number.parseInt(raw.slice(offset, offset + 2), 16));
+    aliases.add(`rgb(${r}, ${g}, ${b})`);
+    aliases.add(`rgba(${r}, ${g}, ${b}, 1)`);
+  }
+  return observed.some((value) => aliases.has(value));
 }
 
 
@@ -1646,6 +2178,25 @@ function autonomousPlan(task: TaskCapsule, goal: Extract<SemanticTaskGoal, { kin
   if (plan.taskId !== task.id) throw new OperatorError('TASK_PLAN_INVALID', 'Durable task plan belongs to a different task.');
   task.execution!.plannerState.durablePlan = plan;
   return plan;
+}
+
+function plannerEventFromAdaptiveInfluence(command: RuntimeAdvisoryCommand, reason: string): TaskPlannerEvent {
+  const decision: TaskPlannerEvent['decision'] =
+    command === 'REPLAN' ? 'REPLAN' :
+    command === 'REPAIR' ? 'REPAIR' :
+    command === 'RECONCILE' ? 'RECONCILE' :
+    command === 'WAIT' ? 'WAIT' :
+    command === 'FAIL_SAFE' || command === 'ESCALATE' ? 'FAIL' :
+    'REOBSERVE';
+  return {
+    kind: command === 'RECONCILE' ? 'RECONCILIATION_REQUIRED' : command === 'WAIT' ? 'RESOURCE_BUSY' : 'STATE_CHANGED',
+    decision,
+    code: 'ADAPTIVE_' + command,
+    at: new Date().toISOString(),
+    provider: 'adaptive-planning-control',
+    capability: 'planner',
+    reason: reason.slice(0, 1024)
+  };
 }
 
 function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]): TaskIntelligenceContext {

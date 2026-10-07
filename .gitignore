@@ -12,3 +12,5 @@ native/*/target/
 packages/mecord-connect/runtime/
 
 deploy/public-edge/operator-edge.env
+
+artifacts/r1/

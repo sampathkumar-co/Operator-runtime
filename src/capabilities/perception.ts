@@ -1,6 +1,7 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import type { PerceptionGraphStore, PerceptionObservation } from '../core/perception-graph.ts';
 
 const SCORE: CapabilityScore = {
@@ -26,6 +27,10 @@ export class PerceptionProvider implements CapabilityProvider {
   }
 
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async execute(action: ActionRequest, _context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();

@@ -105,6 +105,7 @@ test('stage10 binds preconditions, verified procedure memory, team verifier and 
   });
   const verified = await ops.refresh(operation.id);
   assert.equal(verified.state, 'VERIFIED');
+  assert.match(verified.verificationEvidenceDigest ?? '', /^[0-9a-f]{64}$/);
   assert.match(verified.receiptDigest ?? '', /^[0-9a-f]{64}$/);
   assert.equal(verified.outcomeRecorded, true);
 
@@ -213,6 +214,42 @@ test('stage10 operation cannot verify from worker success alone without Stage4 v
   assert.notEqual(current.state, 'VERIFIED');
 });
 
+
+test('stage10 rejects a persisted verified receipt that is detached from its bound verification evidence', async (t) => {
+  const base = await setup(t);
+  const operation = await base.ops.submit({
+    objective: 'Produce one bound verification receipt',
+    scopeKey: 'project:receipt-proof',
+    successConditions: ['team verifier passes'],
+    execution: { kind: 'team', workItems: work() },
+    run: true
+  });
+  assert.ok(operation.teamMissionId);
+  await finishTeam(base.teams, operation.teamMissionId!);
+  const verified = await base.ops.refresh(operation.id);
+  assert.equal(verified.state, 'VERIFIED');
+  assert.match(verified.verificationEvidenceDigest ?? '', /^[0-9a-f]{64}$/);
+
+  const file = path.join(base.state, 'digital-operations.json');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  const record = persisted.operations.find((item: any) => item.id === operation.id);
+  record.receiptDigest = '0'.repeat(64);
+  await fs.writeFile(file, JSON.stringify(persisted, null, 2));
+
+  const restarted = new DigitalOperationsLayer(base.state, {
+    procedures: base.procedures,
+    world: base.world,
+    devices: base.devices,
+    optimizer: base.optimizer,
+    teams: base.teams,
+    organizations: base.organizations,
+    availableCapabilities: base.availableCapabilities
+  });
+  await assert.rejects(
+    () => restarted.inspect(operation.id),
+    (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT'
+  );
+});
 
 test('stage10 requestId is idempotent for identical contract and rejects conflicting reuse', async (t) => {
   const { ops } = await setup(t);
@@ -438,7 +475,13 @@ test('stage10 organization procedure capture hashes every target Stage4 verifier
 
   let refreshed = await ops.refresh(operation.id);
   assert.equal(refreshed.state, 'PAUSED');
-  refreshed = await ops.promoteOrganization(operation.id, 'a'.repeat(64));
+  program = await organizations.inspect(operation.organizationProgramId!);
+  assert.match(program.waves[0]?.verificationDigest ?? '', /^[0-9a-f]{64}$/);
+  await assert.rejects(
+    () => ops.promoteOrganization(operation.id, 'a'.repeat(64)),
+    (error: any) => error?.code === 'ORGANIZATION_VERIFICATION_DIGEST_MISMATCH'
+  );
+  refreshed = await ops.promoteOrganization(operation.id, program.waves[0]!.verificationDigest!);
   assert.equal(refreshed.state, 'RUNNING');
   refreshed = await ops.refresh(operation.id);
   assert.equal(refreshed.state, 'VERIFIED');

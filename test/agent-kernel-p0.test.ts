@@ -9,7 +9,10 @@ import { DurableSagaKernel } from '../src/core/durable-saga.ts';
 import { kernelVerificationDigest } from '../src/core/action-verification.ts';
 import { IntentRegistry, bindingForIntent } from '../src/core/intent-registry.ts';
 import { ResourceLeaseStore } from '../src/core/resource-leases.ts';
+import { resolvePhysicalResourceKeysForAction } from '../src/core/resource-identity.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
+import { OperatorError } from '../src/core/errors.ts';
+import { EnterprisePolicyStore } from '../src/core/enterprise-policy.ts';
 import { StudioWorkflowExecutor } from '../src/core/studio-executor.ts';
 import { TeachModeStore } from '../src/core/studio-teach.ts';
 import { TeamCoordinator } from '../src/core/team-coordinator.ts';
@@ -157,6 +160,106 @@ function kernelAt(stateDir: string, provider: CapabilityProvider): {
   return { kernel, runtime, journal, intents };
 }
 
+test('shared AgentKernel pre-dispatch guard blocks every provider before journal dispatch', async (t) => {
+  const stateDir = await temp(t);
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal,
+    beforeProviderDispatch: async () => {
+      throw new OperatorError(
+        'EMERGENCY_STOPPED',
+        'Emergency stop engaged immediately before provider dispatch.',
+        { retryable: false, details: { sideEffectState: 'none', executionPhase: 'pre_dispatch' } }
+      );
+    }
+  });
+  const action: ActionRequest = {
+    id: 'kernel-pre-dispatch-stop',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  const result = await kernel.execute(action, permissions(['file.write']));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EMERGENCY_STOPPED');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(provider.calls, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
+
+test('enterprise policy freshness is revalidated at the shared AgentKernel dispatch boundary', async (t) => {
+  const stateDir = await temp(t);
+  const root = path.join(stateDir, 'project');
+  await fs.mkdir(root, { recursive: true });
+  const enterprise = new EnterprisePolicyStore(stateDir);
+  const configure = async (caps: string[]) => await enterprise.configure({
+    roles: [{
+      id: 'developer',
+      capabilities: caps,
+      rootPrefixes: [root],
+      maxRisk: 'write',
+      environments: [],
+      projectPrefixes: [],
+      deviceGroups: []
+    }],
+    bindings: [{
+      id: 'developer-binding',
+      principalId: 'alice',
+      roleId: 'developer',
+      enabled: true
+    }]
+  });
+  await configure(['file.write']);
+
+  const decision = await enterprise.narrow(
+    permissions(['file.write'], { allowedRoots: [root], maxRisk: 'write' }),
+    { principalId: 'alice' }
+  );
+
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal,
+    beforeProviderDispatch: async (_action, _providerName, actionPermissions) => {
+      if (actionPermissions.enterprisePolicyDigest !== undefined || actionPermissions.enterprisePolicyGeneration !== undefined) {
+        await enterprise.assertCurrentAuthority({
+          digest: actionPermissions.enterprisePolicyDigest ?? '',
+          generation: actionPermissions.enterprisePolicyGeneration ?? 0
+        });
+      }
+    }
+  });
+
+  await configure(['file.read']);
+  await configure(['file.write']);
+  const action: ActionRequest = {
+    id: 'enterprise-stale-before-dispatch',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(root, 'a.txt'), key: 'x', value: 1 },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const result = await kernel.execute(action, decision.permissions);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'ENTERPRISE_POLICY_STALE');
+  assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  assert.equal(result.error?.sideEffectState, 'none');
+  assert.equal(provider.calls, 0);
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
+
 test('newest intent wins before provider dispatch', async (t) => {
   const stateDir = await temp(t);
   const provider = new StateProvider();
@@ -175,7 +278,7 @@ test('newest intent wins before provider dispatch', async (t) => {
     id: 'intent-stale-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(v1)
   }, permissions(['computer.inspect']));
@@ -193,7 +296,7 @@ test('approval-required stays deferred and same action id can dispatch after app
     id: 'danger-action',
     capability: 'file.replace',
     risk: 'destructive',
-    input: { key: 'danger', value: 1 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'danger', value: 1 },
     provenance: { kind: 'trusted_policy' }
   };
 
@@ -233,7 +336,7 @@ test('uncertain mutation is reconciled by provider and journal completes without
     id: 'uncertain-action',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 42, behavior: 'uncertain' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 42, behavior: 'uncertain' },
     provenance: { kind: 'trusted_policy' }
   };
   const result = await kernel.execute(action, permissions(['file.write']));
@@ -263,14 +366,14 @@ test('durable saga compensates completed mutations after later definite failure'
           id: 'saga-set-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
           provenance: { kind: 'trusted_policy' }
         },
         compensation: {
           id: 'saga-restore-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 0 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 0 },
           provenance: { kind: 'trusted_policy' }
         }
       },
@@ -280,7 +383,7 @@ test('durable saga compensates completed mutations after later definite failure'
           id: 'saga-fail-next',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'next', behavior: 'fail' },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'next', behavior: 'fail' },
           provenance: { kind: 'trusted_policy' }
         }
       }
@@ -311,7 +414,7 @@ test('durable saga restart recovers a completed mutation from journal without re
         id: 'saga-restart-set-x',
         capability: 'file.write',
         risk: 'write',
-        input: { key: 'x', value: 7 },
+        input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 7 },
         provenance: { kind: 'trusted_policy' }
       }
     }]
@@ -357,7 +460,7 @@ test('current cancel intent blocks forward execution before provider dispatch', 
     id: 'intent-cancel-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(cancelled)
   }, permissions(['computer.inspect']));
@@ -391,7 +494,7 @@ test('stale intent still permits reconciliation of an already-dispatched mutatio
     id: 'stale-reconcile-action',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 42, behavior: 'uncertain' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 42, behavior: 'uncertain' },
     provenance: { kind: 'trusted_policy' },
     intent: bindingForIntent(v1)
   };
@@ -399,7 +502,7 @@ test('stale intent still permits reconciliation of an already-dispatched mutatio
   const prior = await provider.execute(action);
   assert.equal(prior.ok, false);
   assert.equal(prior.error?.sideEffectState, 'uncertain');
-  await journal.prepare({ action, ownerKind: 'test', ownerId: 'reconcile', resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'test', ownerId: 'reconcile', resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
   await journal.observe(action.id, prior);
 
@@ -501,7 +604,7 @@ test('Studio run is cancelled before dispatch when a newer intent supersedes it'
     id: 'studio-demo-action',
     capability: 'computer.inspect',
     risk: 'read',
-    input: { key: 'x' },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x' },
     provenance: { kind: 'trusted_policy' }
   };
   await teach.record(session.id, {
@@ -565,14 +668,14 @@ test('superseded saga intent stops new work but still allows compensation of pri
           id: 'intent-saga-set-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 1 },
           provenance: { kind: 'trusted_policy' }
         },
         compensation: {
           id: 'intent-saga-restore-x',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'x', value: 0 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 0 },
           provenance: { kind: 'trusted_policy' }
         }
       },
@@ -582,7 +685,7 @@ test('superseded saga intent stops new work but still allows compensation of pri
           id: 'intent-saga-set-y',
           capability: 'file.write',
           risk: 'write',
-          input: { key: 'y', value: 1 },
+          input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'y', value: 1 },
           provenance: { kind: 'trusted_policy' }
         }
       }
@@ -634,7 +737,7 @@ test('completed mutation result replays from the central journal without provide
     id: 'journal-replay-mutation',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 91 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 91 },
     provenance: { kind: 'trusted_policy' }
   };
 
@@ -650,6 +753,53 @@ test('completed mutation result replays from the central journal without provide
   assert.equal(replayed.evidence.some((item) => item.kind === 'action_journal_replay'), true);
 });
 
+test('kernel restart promotes a staged verified result without replaying the provider mutation', async (t) => {
+  const stateDir = await temp(t);
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  let injected = false;
+  const faultingJournal = new ActionTransitionJournal(stateDir, {
+    completionFault: (point) => {
+      if (!injected && point === 'after_result_staged') {
+        injected = true;
+        throw new Error('hard crash after verified result stage');
+      }
+    }
+  });
+  const firstKernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal: faultingJournal
+  });
+  const action: ActionRequest = {
+    id: 'journal-staged-result-recovery',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 92 },
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  await assert.rejects(firstKernel.execute(action, permissions(['file.write'])), /hard crash after verified result stage/);
+  assert.equal(injected, true);
+  assert.equal(provider.calls, 1);
+  assert.equal((await faultingJournal.inspect(action.id)).state, 'OBSERVED');
+
+  const restartedJournal = new ActionTransitionJournal(stateDir);
+  const restartedKernel = new AgentKernel({
+    stateDir,
+    runtime,
+    leases: new ResourceLeaseStore(stateDir),
+    journal: restartedJournal
+  });
+  const recovered = await restartedKernel.execute(action, permissions(['file.write']));
+  assert.equal(recovered.ok, true);
+  assert.equal(provider.calls, 1, 'staged verified result must complete without provider redispatch');
+  assert.equal(provider.values.get('x'), 92);
+  assert.equal((await restartedJournal.inspect(action.id)).state, 'COMPLETED');
+  assert.equal(recovered.evidence.some((item) => item.kind === 'action_journal_replay'), true);
+});
+
 test('detached dispatched mutation reconciles to completed without provider replay', async (t) => {
   const stateDir = await temp(t);
   const provider = new StateProvider();
@@ -658,11 +808,11 @@ test('detached dispatched mutation reconciles to completed without provider repl
     id: 'journal-dispatched-reconcile',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 77 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 77 },
     provenance: { kind: 'trusted_policy' }
   };
 
-  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
   provider.values.set('x', 77);
 
@@ -681,11 +831,11 @@ test('reconciled not-applied mutation may dispatch exactly once after crash reco
     id: 'journal-not-applied-retry',
     capability: 'file.write',
     risk: 'write',
-    input: { key: 'x', value: 13 },
+    input: { path: path.join(os.tmpdir(), 'operator-agent-kernel-resource'), key: 'x', value: 13 },
     provenance: { kind: 'trusted_policy' }
   };
 
-  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: [] });
+  await journal.prepare({ action, ownerKind: 'direct', ownerId: action.id, resourceKeys: await resolvePhysicalResourceKeysForAction(action) });
   await journal.markDispatched(action.id, provider.name);
 
   const recovered = await kernel.execute(action, permissions(['file.write']));
@@ -694,4 +844,189 @@ test('reconciled not-applied mutation may dispatch exactly once after crash reco
   assert.equal(provider.calls, 1, 'only a proven not-applied action may be freshly dispatched');
   assert.equal(provider.values.get('x'), 13);
   assert.equal((await journal.inspect(action.id)).state, 'COMPLETED');
+});
+
+
+test('uncertain mutation quarantines the physical resource across action IDs until reconciliation', async (t) => {
+  const stateDir = await temp(t);
+  const target = path.join(stateDir, 'shared.txt');
+  let calls = 0;
+  let reconcileStatus: 'uncertain' | 'not_applied' = 'uncertain';
+  let uncertainExecution = true;
+  const provider: CapabilityProvider = {
+    name: 'test.quarantine',
+    supports: (action) => action.capability === 'file.write',
+    score: () => SCORE,
+    resolveRisk: () => 'write',
+    async execute(action) {
+      calls += 1;
+      if (!uncertainExecution) return success(action, 'test.quarantine', { applied: true });
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'test.quarantine',
+        evidence: [{ kind: 'transport', status: 'fail', message: 'Outcome lost after dispatch.', timestamp: new Date().toISOString() }],
+        error: {
+          code: 'TRANSPORT_LOST',
+          message: 'Outcome lost after dispatch.',
+          retryable: false,
+          sideEffectState: 'uncertain',
+          executionPhase: 'dispatched'
+        },
+        durationMs: 0
+      };
+    },
+    async reconcile() {
+      if (reconcileStatus === 'not_applied') {
+        return {
+          status: 'not_applied',
+          evidence: [{ kind: 'reconciliation', status: 'pass', message: 'Mutation was not applied.', timestamp: new Date().toISOString() }]
+        };
+      }
+      return {
+        status: 'uncertain',
+        evidence: [{ kind: 'reconciliation', status: 'info', message: 'Mutation outcome remains unknown.', timestamp: new Date().toISOString() }]
+      };
+    }
+  };
+
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const leases = new ResourceLeaseStore(stateDir);
+  const kernel = new AgentKernel({ stateDir, runtime, leases, journal });
+  const allow = permissions(['file.write'], { allowedRoots: [stateDir] });
+  const actionA: ActionRequest = {
+    id: 'quarantine-action-a',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: target, value: 'A' },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const actionB: ActionRequest = {
+    ...actionA,
+    id: 'quarantine-action-b',
+    input: { path: target, value: 'B' }
+  };
+
+  const first = await kernel.execute(actionA, allow);
+  assert.equal(first.ok, false);
+  assert.equal(first.error?.sideEffectState, 'uncertain');
+  assert.equal((await journal.inspect(actionA.id)).state, 'UNCERTAIN');
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), true);
+
+  await assert.rejects(
+    () => kernel.execute(actionB, allow),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === actionA.id
+  );
+  assert.equal(calls, 1);
+
+  reconcileStatus = 'not_applied';
+  const reconciled = await kernel.reconcile(actionA, provider.name, first);
+  assert.equal(reconciled.status, 'not_applied');
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), false);
+
+  uncertainExecution = false;
+  const second = await kernel.execute(actionB, allow);
+  assert.equal(second.ok, true);
+  assert.equal(calls, 2);
+});
+
+test('legacy unresolved journal mutations reconstruct resource quarantine before a new dispatch', async (t) => {
+  const stateDir = await temp(t);
+  const target = path.join(stateDir, 'legacy-shared.txt');
+  const provider = new StateProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const journal = new ActionTransitionJournal(stateDir);
+  const leases = new ResourceLeaseStore(stateDir);
+  const kernel = new AgentKernel({ stateDir, runtime, leases, journal });
+  const actionA: ActionRequest = {
+    id: 'legacy-uncertain-a',
+    capability: 'file.write',
+    risk: 'write',
+    input: { path: target, key: 'legacy', value: 'A' },
+    provenance: { kind: 'trusted_policy' }
+  };
+  const keys = await resolvePhysicalResourceKeysForAction(actionA);
+  await journal.prepare({ action: actionA, ownerKind: 'test', ownerId: 'legacy-owner', resourceKeys: keys });
+  await journal.markDispatched(actionA.id, provider.name);
+  await journal.observe(actionA.id, {
+    ok: false,
+    capability: actionA.capability,
+    provider: provider.name,
+    evidence: [{ kind: 'legacy', status: 'fail', message: 'Legacy uncertain result.', timestamp: new Date().toISOString() }],
+    error: {
+      code: 'LEGACY_UNCERTAIN',
+      message: 'Legacy uncertain result.',
+      retryable: false,
+      sideEffectState: 'uncertain',
+      executionPhase: 'dispatched'
+    },
+    durationMs: 0
+  });
+
+  const actionB: ActionRequest = {
+    ...actionA,
+    id: 'legacy-uncertain-b',
+    input: { path: target, key: 'legacy', value: 'B' }
+  };
+  await assert.rejects(
+    () => kernel.execute(actionB, permissions(['file.write'], { allowedRoots: [stateDir] })),
+    (error: any) => error?.code === 'RESOURCE_QUARANTINED' && error?.details?.actionId === actionA.id
+  );
+  assert.equal(provider.calls, 0);
+  assert.equal((await leases.inspect()).quarantines.some((item) => item.actionId === actionA.id), true);
+});
+
+
+test('AgentKernel global abort generation interrupts already-dispatched provider work', async (t) => {
+  const stateDir = await temp(t);
+  let started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const provider: CapabilityProvider = {
+    name: 'test.global-abort',
+    supports: (action) => action.capability === 'computer.inspect',
+    score: () => SCORE,
+    resolveRisk: () => 'read',
+    async execute(action, context) {
+      started();
+      if (!context?.signal?.aborted) {
+        await new Promise<void>((resolve) => context?.signal?.addEventListener('abort', () => resolve(), { once: true }));
+      }
+      return {
+        ok: false,
+        capability: action.capability,
+        provider: 'test.global-abort',
+        evidence: [{ kind: 'abort', status: 'fail', message: 'Global execution generation was aborted.', timestamp: new Date().toISOString() }],
+        error: {
+          code: 'EXECUTION_ABORTED',
+          message: 'Global execution generation was aborted.',
+          retryable: false,
+          sideEffectState: 'none',
+          executionPhase: 'dispatched'
+        },
+        durationMs: 0
+      };
+    }
+  };
+  const generation = new AbortController();
+  const kernel = new AgentKernel({
+    stateDir,
+    runtime: new OperatorRuntime().register(provider),
+    leases: new ResourceLeaseStore(stateDir),
+    globalAbortSignal: () => generation.signal
+  });
+  const action: ActionRequest = {
+    id: 'kernel-global-abort',
+    capability: 'computer.inspect',
+    risk: 'read',
+    input: {},
+    provenance: { kind: 'trusted_policy' }
+  };
+
+  const executing = kernel.execute(action, permissions(['computer.inspect']));
+  await startedPromise;
+  generation.abort('EMERGENCY_STOPPED');
+  const result = await executing;
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'EXECUTION_ABORTED');
 });

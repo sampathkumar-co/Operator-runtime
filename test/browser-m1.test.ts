@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
 import { BrowserCdpProvider } from '../src/capabilities/browser-cdp.ts';
-import { performSemanticInteraction } from '../src/capabilities/browser-cdp-frames.ts';
+import { observedDropPointFunction, performSemanticInteraction } from '../src/capabilities/browser-cdp-frames.ts';
 
 type Listener = (event: any) => void;
 
@@ -10,6 +10,12 @@ class FakeWebSocket {
   static readonly OPEN = 1;
   static downloadScenario: 'complete' | 'unrelated-first' | 'simultaneous' | 'canceled' | 'target-closed' = 'complete';
   static autoAttachDisabled = 0;
+  static mutationNoise = false;
+  static mutationVersion = 0;
+  static localTreeProgress = false;
+  static localTreeVersion = 0;
+  static dateWidgetDelay = false;
+  static dateSelectEvaluations = 0;
   static #instances = new Set<FakeWebSocket>();
   readonly url: string;
   readyState = 0;
@@ -73,14 +79,24 @@ class FakeWebSocket {
       if (message.params?.type === 'mouseReleased') FakeWebSocket.#emitDownload();
     } else if (message.method === 'Runtime.evaluate') {
       const expression = String(message.params?.expression ?? '');
-      if (expression.includes('semanticLocatorFunction')) {
+      if (FakeWebSocket.dateWidgetDelay && expression.includes('Calendar date postcondition failed')) {
+        FakeWebSocket.dateSelectEvaluations += 1;
+        result = FakeWebSocket.dateSelectEvaluations === 1
+          ? { result: { value: { ok: false, recoverable: true, error: 'No supported visible calendar widget was associated with the observed input.' } } }
+          : { result: { value: { ok: true, matched: { tag: 'input', role: 'textbox', name: 'Date', identity: '#date', value: '' }, after: { value: '03/17/2016', date: '2016-03-17', widget: 'calendar', navigationSteps: 9 } } } };
+      } else if (expression.includes('semanticLocatorFunction')) {
         const inFrame = message.sessionId === 'frame-session-1';
         const count = this.#oopif ? (inFrame ? 1 : 0) : 1;
         result = {
           result: {
             value: {
               count,
-              matches: count ? [{ tag: 'input', role: 'textbox', name: 'Email', identity: '#email', geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 } }] : []
+              matches: count ? [{
+                tag: 'input', role: 'textbox', name: 'Email', identity: '#email',
+                ...(FakeWebSocket.mutationNoise ? { documentMutationVersion: (FakeWebSocket.mutationVersion += 1) } : {}),
+                ...(FakeWebSocket.localTreeProgress ? { subtreeSignature: { descendantCount: 1, digest: `tree-${FakeWebSocket.localTreeVersion += 1}` } } : {}),
+                geometry: { x: 10, y: 20, width: 100, height: 30 }, context: { frameDepth: 0, shadowDepth: 0 }
+              }] : []
             }
           }
         };
@@ -343,6 +359,79 @@ test('semantic pointer actions use native CDP input and reject a target that cha
   );
 });
 
+test('semantic resize dispatches from the observed control resize handle and verifies geometry change', async () => {
+  const nativeEvents: any[] = [];
+  let locateCount = 0;
+  const sample = {
+    tag: 'textarea', role: 'textbox', name: 'Notes', identity: '#notes',
+    geometry: { coordinateSpace: 'viewport', x: 20, y: 30, width: 100, height: 60 },
+    context: { frameDepth: 0, shadowDepth: 0 }
+  };
+  const resizedSample = { ...sample, geometry: { ...sample.geometry, height: 100 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedResizeHandleFunction')) {
+          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle', targetRect: { x: 20, y: 30, width: 100, height: 60 } } } };
+        }
+        if (expression.includes('semanticLocatorFunction')) {
+          locateCount += 1;
+          return { result: { value: { count: 1, matches: [locateCount >= 2 ? resizedSample : sample] } } };
+        }
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'resize', target: { ref: 'b-notes' }, value: null, deltaX: 0, deltaY: 40
+  });
+  assert.equal(result.value.ok, true);
+  assert.equal((result.value.after as any).handleClass, 'ui-resizable-s');
+  assert.deepEqual(nativeEvents.map((event) => event.type), [
+    'mouseMoved', 'mousePressed', 'mouseMoved', 'mouseMoved', 'mouseMoved', 'mouseMoved', 'mouseReleased'
+  ]);
+  assert.equal(nativeEvents[0].x, 118);
+  assert.equal(nativeEvents[0].y, 88);
+  assert.equal(nativeEvents.at(-1).x, 118);
+  assert.equal(nativeEvents.at(-1).y, 128);
+  assert.equal((result.value.after as any).beforeGeometry.height, 60);
+  assert.equal((result.value.after as any).afterGeometry.height, 100);
+});
+
+test('semantic resize fails closed when native input produces no geometry change', async () => {
+  const sample = {
+    tag: 'textarea', role: 'textbox', name: 'Notes', identity: '#notes',
+    geometry: { coordinateSpace: 'viewport', x: 20, y: 30, width: 100, height: 60 },
+    context: { frameDepth: 0, shadowDepth: 0 }
+  };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedResizeHandleFunction')) {
+          return { result: { value: { ok: true, local: { x: 118, y: 88 }, handleClass: 'ui-resizable-s', source: 'generated-handle', targetRect: { x: 20, y: 30, width: 100, height: 60 } } } };
+        }
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  await assert.rejects(
+    () => performSemanticInteraction(session as any, {
+      operation: 'resize', target: { ref: 'b-notes' }, value: null, deltaX: 0, deltaY: 40
+    }),
+    (error: any) => error?.code === 'BROWSER_RESIZE_NO_EFFECT'
+      && error?.details?.executionPhase === 'dispatched'
+      && error?.details?.sideEffectState === 'known'
+  );
+});
+
 test('download tracking binds events to the initiating target frame and fails closed on ambiguity', async (t) => {
   const original = globalThis.WebSocket;
   Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
@@ -427,6 +516,51 @@ test('native browser keyboard actions focus the unique semantic target and dispa
     ['keyDown', 'Control'], ['keyDown', 'a'], ['keyUp', 'a'], ['keyUp', 'Control']
   ]);
   assert.equal(keyEvents[1].modifiers & 2, 2);
+
+  keyEvents.length = 0;
+  const inserted = await performSemanticInteraction(session as any, { operation: 'keyboard_text', target: { ref: 'b-command' }, value: 'echo ready' });
+  assert.equal(inserted.value.ok, true);
+  assert.equal(keyEvents.length, 'echo ready'.length * 2);
+  assert.deepEqual(keyEvents.slice(0, 4).map((event) => [event.type, event.key, event.text]), [
+    ['keyDown', 'e', 'e'], ['keyUp', 'e', undefined], ['keyDown', 'c', 'c'], ['keyUp', 'c', undefined]
+  ]);
+  assert.equal((inserted.value.after as any).nativeKeyboardTextDispatched, true);
+
+  keyEvents.length = 0;
+  const formatted = await performSemanticInteraction(session as any, {
+    operation: 'format_text', target: { ref: 'b-command' }, value: 'bold', scope: 'all'
+  });
+  assert.equal(formatted.value.ok, true);
+  assert.equal((formatted.value.after as any).nativeTextFormatDispatched, true);
+  assert.deepEqual(keyEvents.map((event) => [event.type, event.key]), [
+    ['keyDown', 'Control'], ['keyDown', 'a'], ['keyUp', 'a'], ['keyUp', 'Control'],
+    ['keyDown', 'Control'], ['keyDown', 'b'], ['keyUp', 'b'], ['keyUp', 'Control']
+  ]);
+});
+
+test('select_date tolerates one asynchronous calendar-open turn and still completes as one browser action', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.dateWidgetDelay = true;
+  FakeWebSocket.dateSelectEvaluations = 0;
+  t.after(() => {
+    FakeWebSocket.dateWidgetDelay = false;
+    FakeWebSocket.dateSelectEvaluations = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'date-select-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'select_date', target: { ref: 'b-date' }, value: '2016-03-17' },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.equal(FakeWebSocket.dateSelectEvaluations, 2);
+    assert.equal((result.output as any).stateDelta.progress, true);
+    const postcondition = result.evidence?.find((item: any) => item.kind === 'postcondition');
+    assert.equal(postcondition?.data?.after?.date, '2016-03-17');
+  });
 });
 
 test('browser provider prevents a second equivalent no-progress action and preserves side-effect truth', async (t) => {
@@ -454,7 +588,52 @@ test('browser provider prevents a second equivalent no-progress action and prese
   });
 });
 
-test('browser no-progress detection groups parameter-varied drag attempts against unchanged state', async (t) => {
+test('browser progress ignores unrelated document mutation-version noise', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.mutationNoise = true;
+  FakeWebSocket.mutationVersion = 0;
+  t.after(() => {
+    FakeWebSocket.mutationNoise = false;
+    FakeWebSocket.mutationVersion = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const first = await provider.execute({
+      id: 'mutation-noise-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(first.ok, true, first.error?.message);
+    assert.equal((first.output as any).stateDelta.progress, false);
+    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
+  });
+});
+
+test('target-local subtree change counts as browser progress', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  FakeWebSocket.localTreeProgress = true;
+  FakeWebSocket.localTreeVersion = 0;
+  t.after(() => {
+    FakeWebSocket.localTreeProgress = false;
+    FakeWebSocket.localTreeVersion = 0;
+    Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true });
+  });
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'local-tree-progress-1', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'click', target: { role: 'textbox', name: 'Email' } },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, true, result.error?.message);
+    assert.equal((result.output as any).stateDelta.progress, true);
+  });
+});
+
+test('drag verification fails on the first dispatched attempt when source and objective state remain unchanged', async (t) => {
   const original = globalThis.WebSocket;
   Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
   t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
@@ -466,15 +645,10 @@ test('browser no-progress detection groups parameter-varied drag attempts agains
       provenance: { kind: 'runtime' }
     });
     const first = await drag('drag-family-1', 80);
-    assert.equal(first.ok, true, first.error?.message);
-    assert.equal((first.output as any).stateDelta.progress, false);
-    assert.equal((first.output as any).stateDelta.repeatedNoProgress, 1);
-
-    const second = await drag('drag-family-2', 240);
-    assert.equal(second.ok, false);
-    assert.equal(second.error?.code, 'BROWSER_NO_PROGRESS');
-    assert.deepEqual((second.error?.details as any)?.actionFamily, { family: 'drag-displacement' });
-    assert.equal((second.error?.details as any)?.repeatedNoProgress, 2);
+    assert.equal(first.ok, false);
+    assert.equal(first.error?.code, 'BROWSER_NO_PROGRESS');
+    assert.equal(first.error?.executionPhase, 'effect_observed');
+    assert.equal(first.error?.sideEffectState, 'none');
   });
 });
 
@@ -511,7 +685,7 @@ test('click_relative stays inside an observed object and dispatches the verified
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
-        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 20, y: 30 } } } };
+        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 120, y: 230 } } } };
         if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
       }
       if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
@@ -535,6 +709,50 @@ test('click_relative stays inside an observed object and dispatches the verified
 });
 
 
+test('click_relative accepts bounded observed-local pixel coordinates', async () => {
+  const nativeEvents: any[] = [];
+  const sample = { tag: 'div', role: 'pointer', name: 'Canvas cell', identity: '#cell', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 100, y: 200, width: 80, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedRelativePointFunction')) return { result: { value: { ok: true, local: { x: 110, y: 215 }, offset: { xPx: 10, yPx: 15 } } } };
+        if (expression.includes('semanticLocatorFunction')) return { result: { value: { count: 1, matches: [sample] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+  const result = await performSemanticInteraction(session as any, {
+    operation: 'click_relative', target: { ref: 'b-test-px' }, value: null, xPx: 10, yPx: 15
+  });
+  assert.equal(result.value.ok, true);
+  assert.deepEqual(nativeEvents.map((event) => [event.type, event.x, event.y]), [
+    ['mouseMoved', 110, 215], ['mousePressed', 110, 215], ['mouseReleased', 110, 215]
+  ]);
+});
+
+test('browser provider rejects a non-scrollable target before dispatch', async (t) => {
+  const original = globalThis.WebSocket;
+  Object.defineProperty(globalThis, 'WebSocket', { value: FakeWebSocket, configurable: true, writable: true });
+  t.after(() => Object.defineProperty(globalThis, 'WebSocket', { value: original, configurable: true, writable: true }));
+  await withCdpServer(t, async (endpoint) => {
+    const provider = new BrowserCdpProvider(endpoint); t.after(() => provider.close());
+    const result = await provider.execute({
+      id: 'scroll-invalid-target', capability: 'browser.interact', risk: 'external',
+      input: { targetId: 'tab-1', operation: 'scroll', target: { ref: 'observed-scroll-1' }, deltaX: 0, deltaY: 180 },
+      provenance: { kind: 'runtime' }
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, 'BROWSER_TARGET_NOT_SCROLLABLE');
+    assert.equal(result.error?.retryable, true);
+    assert.equal(result.error?.sideEffectState, 'none');
+    assert.equal(result.error?.executionPhase, 'pre_dispatch');
+  });
+});
+
 test('browser scroll uses native CDP wheel input scoped to an observed target', async () => {
   const nativeEvents: any[] = [];
   const sample = { tag: 'div', role: 'pointer', name: 'Scrollable list', identity: '#list', actionable: true, documentMutationVersion: 3, scroll: { top: 20, left: 0, scrollHeight: 500, scrollWidth: 100, clientHeight: 120, clientWidth: 100, canScrollY: true, canScrollX: false }, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 20, y: 40, width: 120, height: 100 }, context: { frameDepth: 0, shadowDepth: 0 } };
@@ -557,7 +775,7 @@ test('browser scroll uses native CDP wheel input scoped to an observed target', 
   ]);
 });
 
-test('drag_between revalidates two observed refs and uses native center-to-center input', async () => {
+test('drag_between revalidates two observed refs and uses a verified free point inside the destination', async () => {
   const nativeEvents: any[] = [];
   const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };
   const destination = { tag: 'div', role: 'pointer', name: 'Drop zone', identity: '#destination', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 210, y: 120, width: 60, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
@@ -566,6 +784,7 @@ test('drag_between revalidates two observed refs and uses native center-to-cente
     async send(method: string, params: any) {
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
+        if (expression.includes('observedDropPointFunction')) return { result: { value: { ok: true, xRatio: 0.25, yRatio: 0.75 } } };
         const sample = expression.includes('b-destination') ? destination : source;
         return { result: { value: { count: 1, matches: [sample] } } };
       }
@@ -584,6 +803,86 @@ test('drag_between revalidates two observed refs and uses native center-to-cente
   assert.equal((result.value as any).destination.identity, '#destination');
   assert.deepEqual(nativeEvents[0], { type: 'mouseMoved', x: 30, y: 30, button: 'none', buttons: 0 });
   assert.deepEqual(nativeEvents[1], { type: 'mousePressed', x: 30, y: 30, button: 'left', buttons: 1, clickCount: 1 });
-  assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 240, y: 140, button: 'left', buttons: 0, clickCount: 1 });
+  assert.deepEqual(nativeEvents.at(-1), { type: 'mouseReleased', x: 225, y: 150, button: 'left', buttons: 0, clickCount: 1 });
   assert.ok(nativeEvents.length > 6);
+});
+
+test('observed drop point skips an occupied center and uses a bounded alternate point', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const occupied = {};
+  const destination: any = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 100, y: 200, width: 80, height: 40 }),
+    contains: (candidate: unknown) => candidate === destination,
+    ownerDocument: {
+      elementFromPoint: (x: number, y: number) => x === 140 && y === 220 ? occupied : destination
+    }
+  };
+  (globalThis as any)[registryKey] = { refs: new Map([['b-destination', destination]]) };
+  t.after(() => { delete (globalThis as any)[registryKey]; });
+
+  assert.deepEqual(observedDropPointFunction('b-destination'), { ok: true, xRatio: 0.25, yRatio: 0.25 });
+});
+
+test('observed drop point can use the painted edge of an otherwise transparent SVG region', (t) => {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const svgRoot = {};
+  const destination: any = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ x: 100, y: 200, width: 80, height: 40 }),
+    contains: (candidate: unknown) => candidate === destination,
+    ownerDocument: {
+      elementFromPoint: (x: number, y: number) => x === 100.5 && y === 220 ? destination : svgRoot
+    }
+  };
+  (globalThis as any)[registryKey] = { refs: new Map([['b-destination', destination]]) };
+  t.after(() => { delete (globalThis as any)[registryKey]; });
+
+  assert.deepEqual(observedDropPointFunction('b-destination'), { ok: true, xRatio: 0.00625, yRatio: 0.5 });
+});
+
+test('drag_between fails closed before native input when every destination point is blocked', async () => {
+  const nativeEvents: any[] = [];
+  const source = { tag: 'div', role: 'pointer', name: 'Card', identity: '#source', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 10, y: 20, width: 40, height: 20 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const destination = { tag: 'div', role: 'pointer', name: 'Drop zone', identity: '#destination', actionable: true, geometry: { coordinateSpace: 'viewport', frameDepth: 0, x: 210, y: 120, width: 60, height: 40 }, context: { frameDepth: 0, shadowDepth: 0 } };
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        if (expression.includes('observedDropPointFunction')) return { result: { value: { ok: false, occluded: true, error: 'Observed drop target has no currently hit-testable point.' } } };
+        return { result: { value: { count: 1, matches: [expression.includes('b-destination') ? destination : source] } } };
+      }
+      if (method === 'Input.dispatchMouseEvent') nativeEvents.push(params);
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+
+  await assert.rejects(
+    performSemanticInteraction(session as any, { operation: 'drag_between', target: { ref: 'b-source' }, toTarget: { ref: 'b-destination' }, value: null }),
+    (error: any) => error?.code === 'BROWSER_TARGET_STALE' && error?.retryable === true
+  );
+  assert.deepEqual(nativeEvents, []);
+});
+
+test('drag_between keeps source actionability strict when the source is occluded', async () => {
+  const session = {
+    on() { return () => undefined; },
+    async send(method: string, params: any) {
+      if (method === 'Runtime.evaluate') {
+        const expression = String(params?.expression ?? '');
+        assert.ok(!expression.includes("'drop'"));
+        return { result: { value: { count: 0, matches: [] } } };
+      }
+      assert.notEqual(method, 'Input.dispatchMouseEvent');
+      return {};
+    },
+    async sendInSession() { return {}; }
+  };
+
+  await assert.rejects(
+    performSemanticInteraction(session as any, { operation: 'drag_between', target: { ref: 'b-source' }, toTarget: { ref: 'b-destination' }, value: null }),
+    (error: any) => error?.code === 'BROWSER_TARGET_STALE' && error?.retryable === true
+  );
 });

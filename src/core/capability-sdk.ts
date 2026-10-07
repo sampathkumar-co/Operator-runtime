@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { capabilityRiskRule, type CapabilityRiskRule } from './capability-policy.ts';
 import { OperatorError } from './errors.ts';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from './types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 
 export interface CapabilityManifestEntry {
   capability: string;
@@ -10,6 +10,11 @@ export interface CapabilityManifestEntry {
   deterministic: boolean;
   reversible: boolean;
   verification: 'provider' | 'runtime' | 'external';
+  reconciliation: 'provider' | 'not-required';
+  inputSchemaVersion: 1;
+  inputMaxBytes: number;
+  outputMaxBytes: number;
+  cancellation: 'required';
   resourceKinds: string[];
 }
 
@@ -19,6 +24,7 @@ export interface CapabilityExtensionManifest {
   version: string;
   displayName: string;
   vendor?: string;
+  provenance: { source: string; packageDigest: string };
   capabilities: CapabilityManifestEntry[];
 }
 
@@ -34,6 +40,12 @@ export class CapabilityExtensionRegistry {
 
   register(manifestInput: CapabilityExtensionManifest, provider: CapabilityProvider): CapabilityProvider {
     const manifest = validateManifest(manifestInput);
+    if (!provider || typeof provider.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(provider.name) || provider.name.startsWith('extension:')) {
+      throw new OperatorError('CAPABILITY_EXTENSION_PROVIDER_INVALID', 'Extension provider identity is invalid.');
+    }
+    if (manifest.capabilities.some((entry) => entry.reconciliation === 'provider') && typeof provider.reconcile !== 'function') {
+      throw new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_REQUIRED', 'A mutable extension capability requires a provider reconciliation implementation.');
+    }
     if (this.#extensions.has(manifest.id)) throw new OperatorError('CAPABILITY_EXTENSION_DUPLICATE', `Extension ${manifest.id} is already registered.`);
     const digest = capabilityManifestDigest(manifest);
     this.#extensions.set(manifest.id, { manifest, digest });
@@ -58,12 +70,14 @@ class ManifestBoundProvider implements CapabilityProvider {
   #manifest: CapabilityExtensionManifest;
   #provider: CapabilityProvider;
   #allowed: Set<string>;
+  #entries: Map<string, CapabilityManifestEntry>;
 
   constructor(manifest: CapabilityExtensionManifest, provider: CapabilityProvider) {
     this.#manifest = manifest;
     this.#provider = provider;
     this.name = `extension:${manifest.id}:${provider.name}`;
     this.#allowed = new Set(manifest.capabilities.map((entry) => entry.capability));
+    this.#entries = new Map(manifest.capabilities.map((entry) => [entry.capability, entry]));
   }
 
   supports(action: ActionRequest): boolean | Promise<boolean> {
@@ -93,8 +107,12 @@ class ManifestBoundProvider implements CapabilityProvider {
 
   async execute(action: ActionRequest, context?: CapabilityExecutionContext): Promise<ActionResult> {
     if (!this.#allowed.has(action.capability)) throw new OperatorError('CAPABILITY_EXTENSION_SCOPE_DENIED', 'Extension cannot execute an undeclared capability.');
+    const contract = this.#entries.get(action.capability)!;
+    if (jsonBytes(action.input) > contract.inputMaxBytes) throw new OperatorError('CAPABILITY_EXTENSION_INPUT_TOO_LARGE', 'Extension input exceeds its declared bound.');
+    if (context?.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Extension execution was cancelled before dispatch.');
     const result = await this.#provider.execute(action, context);
-    if (result.capability !== action.capability) {
+    if (context?.signal?.aborted) throw new OperatorError('EXECUTION_ABORTED', 'Extension execution was cancelled.');
+    if (!validResult(result) || result.capability !== action.capability || result.provider !== this.#provider.name || jsonBytes(result.output) > contract.outputMaxBytes) {
       return {
         ok: false,
         capability: action.capability,
@@ -102,7 +120,7 @@ class ManifestBoundProvider implements CapabilityProvider {
         evidence: [],
         error: {
           code: 'CAPABILITY_EXTENSION_RESULT_INVALID',
-          message: 'Extension returned a result for a different capability.',
+          message: 'Extension result violated capability, provider identity, schema, or output-bound contract.',
           retryable: false,
           sideEffectState: action.risk === 'read' ? 'none' : 'uncertain'
         },
@@ -110,6 +128,20 @@ class ManifestBoundProvider implements CapabilityProvider {
       };
     }
     return { ...result, provider: this.name };
+  }
+
+  async reconcile(request: ProviderReconciliationRequest, context?: CapabilityExecutionContext): Promise<ProviderReconciliationResult> {
+    if (!this.#allowed.has(request.action.capability)) throw new OperatorError('CAPABILITY_EXTENSION_SCOPE_DENIED', 'Extension cannot reconcile an undeclared capability.');
+    const contract = this.#entries.get(request.action.capability)!;
+    if (contract.reconciliation !== 'provider' || !this.#provider.reconcile) {
+      throw new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_UNAVAILABLE', 'Extension capability has no provider reconciliation contract.');
+    }
+    const outcome = await this.#provider.reconcile(request, context);
+    if (!outcome || !['completed', 'not_applied', 'uncertain'].includes(outcome.status) || !Array.isArray(outcome.evidence)) {
+      throw new OperatorError('CAPABILITY_EXTENSION_RECONCILIATION_INVALID', 'Extension returned an invalid reconciliation result.');
+    }
+    if (outcome.result && jsonBytes(outcome.result.output) > contract.outputMaxBytes) throw new OperatorError('CAPABILITY_EXTENSION_RESULT_INVALID', 'Reconciled extension output exceeds its declared bound.');
+    return outcome.result ? { ...outcome, result: { ...outcome.result, provider: this.name } } : outcome;
   }
 
   async close(): Promise<void> {
@@ -123,6 +155,12 @@ export function validateManifest(input: CapabilityExtensionManifest): Capability
   const version = semver(input.version);
   const displayName = bounded(input.displayName, 256, 'displayName');
   const vendor = input.vendor === undefined ? undefined : bounded(input.vendor, 256, 'vendor');
+  if (!input.provenance || typeof input.provenance !== 'object') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Extension provenance is required.');
+  const provenance = {
+    source: bounded(input.provenance.source, 512, 'provenance.source'),
+    packageDigest: bounded(input.provenance.packageDigest, 64, 'provenance.packageDigest')
+  };
+  if (!/^[0-9a-f]{64}$/.test(provenance.packageDigest)) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'provenance.packageDigest must be a lowercase SHA-256 digest.');
   if (!Array.isArray(input.capabilities) || input.capabilities.length < 1 || input.capabilities.length > MAX_CAPABILITIES) {
     throw new OperatorError('CAPABILITY_MANIFEST_INVALID', `Capability manifest must declare 1-${MAX_CAPABILITIES} capabilities.`);
   }
@@ -139,10 +177,15 @@ export function validateManifest(input: CapabilityExtensionManifest): Capability
     }
     if (typeof entry.deterministic !== 'boolean' || typeof entry.reversible !== 'boolean') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability deterministic/reversible flags are required.');
     if (entry.verification !== 'provider' && entry.verification !== 'runtime' && entry.verification !== 'external') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability verification mode is invalid.');
+    if (entry.reconciliation !== 'provider' && entry.reconciliation !== 'not-required') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability reconciliation mode is invalid.');
+    if (canonical !== 'read' && entry.reconciliation !== 'provider') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Mutable extension capabilities require provider reconciliation.');
+    if (entry.inputSchemaVersion !== 1 || entry.cancellation !== 'required') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Capability schema version and cancellation contract are required.');
+    const inputMaxBytes = contractBytes(entry.inputMaxBytes, `capabilities[${index}].inputMaxBytes`);
+    const outputMaxBytes = contractBytes(entry.outputMaxBytes, `capabilities[${index}].outputMaxBytes`);
     const resourceKinds = uniqueResourceKinds(entry.resourceKinds, index);
-    return { capability, risk: canonical, deterministic: entry.deterministic, reversible: entry.reversible, verification: entry.verification, resourceKinds };
+    return { capability, risk: canonical, deterministic: entry.deterministic, reversible: entry.reversible, verification: entry.verification, reconciliation: entry.reconciliation, inputSchemaVersion: 1 as const, inputMaxBytes, outputMaxBytes, cancellation: 'required' as const, resourceKinds };
   }).sort((a, b) => a.capability.localeCompare(b.capability));
-  return { sdkVersion: 1, id, version, displayName, ...(vendor ? { vendor } : {}), capabilities };
+  return { sdkVersion: 1, id, version, displayName, ...(vendor ? { vendor } : {}), provenance, capabilities };
 }
 
 export function capabilityManifestDigest(manifest: CapabilityExtensionManifest): string {
@@ -185,4 +228,22 @@ function semver(input: unknown): string {
 function bounded(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || input.length < 1 || input.length > max || input.includes('\0') || /[\r\n]/.test(input)) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', `${label} is invalid.`);
   return input;
+}
+
+function contractBytes(input: unknown, label: string): number {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value < 1024 || value > 4 * 1024 * 1024) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', `${label} must be 1024-4194304.`);
+  return value;
+}
+
+function jsonBytes(input: unknown): number {
+  try { return Buffer.byteLength(JSON.stringify(input ?? null), 'utf8'); }
+  catch { return Number.POSITIVE_INFINITY; }
+}
+
+function validResult(result: unknown): result is ActionResult {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+  const value = result as ActionResult;
+  return typeof value.ok === 'boolean' && typeof value.capability === 'string' && typeof value.provider === 'string'
+    && Array.isArray(value.evidence) && Number.isFinite(value.durationMs) && value.durationMs >= 0;
 }

@@ -2,10 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
 import { readDurableStateBytes, readDurableStateText } from '../core/durable-state.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { PathScope } from './path-scope.ts';
 import { ProcessProvider } from './process.ts';
 
@@ -101,6 +102,10 @@ export class ProjectCommandProvider implements CapabilityProvider {
   }
 
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async resolveRisk(action: ActionRequest): Promise<ActionRisk> {
     if (action.capability === 'project.command.inspect') return 'read';

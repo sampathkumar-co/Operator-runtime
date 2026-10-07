@@ -114,6 +114,8 @@ export class SessionApprovalStore {
 function permissionScopeFingerprint(permissions: PermissionProfile): string {
   return crypto.createHash('sha256').update(canonicalJson({
     allowedCapabilities: [...permissions.allowedCapabilities].sort(),
-    allowedRoots: [...permissions.allowedRoots].sort()
+    allowedRoots: [...permissions.allowedRoots].sort(),
+    enterprisePolicyDigest: permissions.enterprisePolicyDigest ?? null,
+    enterprisePolicyGeneration: permissions.enterprisePolicyGeneration ?? null
   }), 'utf8').digest('hex');
 }

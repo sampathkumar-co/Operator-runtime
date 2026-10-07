@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ActionRisk, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
+import type { ActionRisk, EpistemicStatus, Evidence, ExecutionPhase, IntentBinding, SideEffectState, TaskState } from './types.ts';
 import { OperatorError } from './errors.ts';
 import type { TaskPlannerEvent } from './task-planner-event.ts';
 
@@ -57,12 +57,34 @@ export interface TaskObservationSummaryV2 {
   observedAt: string;
   stateVersion: string;
   importantState: Record<string, unknown>;
+  epistemicStatus: EpistemicStatus;
+  epistemicReason: string;
   ambiguous: boolean;
   confidence: number;
   evidenceRefs: string[];
 }
 
 export type TaskObservationSummary = TaskObservationSummaryV1 | TaskObservationSummaryV2;
+
+export interface TaskRejectedDecision {
+  taskId: string;
+  /** Deterministic correlation for the rejected candidate, not a dispatched action ID. */
+  actionCorrelation?: string;
+  decisionDigest: string;
+  decisionType: 'invalid' | 'complete' | 'step';
+  code: string;
+  reason: string;
+  authorityState: 'INTENT_BOUND' | 'TASK_SCOPE_BOUND';
+  resourceContext: {
+    capability?: string;
+    targetDigest?: string;
+  };
+  observationDigest: string;
+  at: string;
+  retryAllowed: boolean;
+  reobserveAllowed: boolean;
+  replanAllowed: boolean;
+}
 
 export interface TaskExecution {
   schemaVersion: 1;
@@ -75,12 +97,18 @@ export interface TaskExecution {
   /** Backwards-compatible environment-action count. Pre-dispatch failures do not consume it. */
   stepCount: number;
   plannerIterations?: number;
+  /** Verified objective-relevant progress may extend only the planner loop, never environment actions. */
+  progressExtensions?: number;
+  /** Durable deduplication keys for progress proofs that already earned an extension. */
+  progressProofDigests?: string[];
   preDispatchReobserves?: number;
   dispatchedActions?: number;
   startedAt?: string;
   deadlineAt?: string;
   records: TaskActionRecord[];
   plannerEvents?: TaskPlannerEvent[];
+  /** Bounded, secret-minimized evidence for candidates refused before dispatch. */
+  rejectedDecisions?: TaskRejectedDecision[];
 }
 
 export interface TaskCapsule {

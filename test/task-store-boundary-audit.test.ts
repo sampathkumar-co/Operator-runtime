@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/core/task-store.ts';
 import { createTask, type TaskCapsule } from '../src/core/task.ts';
 import { createDurableTaskPlan } from '../src/core/task-plan.ts';
@@ -252,6 +253,45 @@ test('TaskStore rejects oversized persisted collections and strings', async (t) 
   await expectCorrupt(() => new TaskStore(state).get(stringTask.id), /userObjective is invalid/);
 });
 
+test('TaskStore bounds and validates durable rejected-decision evidence', async (t) => {
+  const state = await tempDir(t, 'operator-task-rejected-decisions-');
+  const value = task();
+  const rejectedDecision = {
+    taskId: value.id,
+    actionCorrelation: 'a'.repeat(64),
+    decisionDigest: 'b'.repeat(64),
+    decisionType: 'step',
+    code: 'TASK_LOOP_DETECTED',
+    reason: 'Repeated candidate made no progress.',
+    authorityState: 'TASK_SCOPE_BOUND',
+    resourceContext: { capability: 'file.read', targetDigest: 'c'.repeat(64) },
+    observationDigest: 'd'.repeat(64),
+    at: value.createdAt,
+    retryAllowed: false,
+    reobserveAllowed: true,
+    replanAllowed: true
+  };
+  value.execution = {
+    schemaVersion: 1, plannerId: 'test.planner', goalKind: 'test-goal', plannerState: {},
+    maxSteps: 10, maxAttemptsPerStep: 2, timeoutMs: 1000, stepCount: 0, records: [],
+    rejectedDecisions: [rejectedDecision]
+  };
+  await new TaskStore(state).put(value);
+  assert.deepEqual((await new TaskStore(state).get(value.id)).execution?.rejectedDecisions, [rejectedDecision]);
+
+  await writePersisted(state, value.id, {
+    ...value,
+    execution: { ...value.execution, rejectedDecisions: Array.from({ length: 101 }, () => rejectedDecision) }
+  });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /at most 100 entries/);
+
+  await writePersisted(state, value.id, {
+    ...value,
+    execution: { ...value.execution, rejectedDecisions: [{ ...rejectedDecision, observationDigest: 'not-a-digest' }] }
+  });
+  await expectCorrupt(() => new TaskStore(state).get(value.id), /observationDigest is invalid/);
+});
+
 test('TaskStore rejects symlinked task files instead of reading their targets', async (t) => {
   const state = await tempDir(t, 'operator-task-file-link-');
   const value = task();
@@ -361,7 +401,17 @@ test('TaskStore reclaims an execution lease left by a crashed child process', as
     execFile(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, state, value.id], { cwd: process.cwd() }, (error) => error ? reject(error) : resolve());
   });
 
-  const recovered = await new TaskStore(state).acquireExecutionLease(value.id);
+  const restarted = new TaskStore(state);
+  const deadline = Date.now() + 5_000;
+  let recovered;
+  while (!recovered) {
+    try {
+      recovered = await restarted.acquireExecutionLease(value.id);
+    } catch (error) {
+      if ((error as any)?.code !== 'TASK_ALREADY_RUNNING' || Date.now() >= deadline) throw error;
+      await delay(50);
+    }
+  }
   await recovered.assertOwned();
   await recovered.release();
 });
@@ -436,4 +486,31 @@ test('TaskStore recent listing sorts by updatedAt before applying the page limit
   const recent = await store.list(10);
   assert.equal(recent[0]?.id, lexicallyLast.id);
   assert.ok(recent.some((item) => item.id === lexicallyLast.id));
+});
+
+
+test('TaskStore never steals an execution lease when owner liveness is unknown', async (t) => {
+  const state = await tempDir(t, 'operator-task-lease-unknown-');
+  const value = task();
+  const leases = path.join(state, 'task-leases');
+  await fs.mkdir(leases, { mode: 0o700 });
+  const leasePath = path.join(leases, `${value.id}.json`);
+  await fs.writeFile(leasePath, JSON.stringify({
+    version: 2,
+    taskId: value.id,
+    ownerId: crypto.randomUUID(),
+    pid: 42101,
+    processInstance: { pid: 42101, started: 'existing-instance' },
+    acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+
+  const store = new TaskStore(state, {
+    processInstance: { pid: 42102, started: 'new-owner' },
+    observeProcessInstance: async () => ({ status: 'unknown' })
+  });
+  await assert.rejects(
+    () => store.acquireExecutionLease(value.id),
+    (error: any) => error?.code === 'TASK_ALREADY_RUNNING' && error?.details?.liveness === 'unknown'
+  );
+  assert.equal(JSON.parse(await fs.readFile(leasePath, 'utf8')).pid, 42101);
 });

@@ -1,6 +1,6 @@
 import { OperatorError } from '../core/errors.ts';
 import type { CdpConnection, JsonMap } from './browser-cdp-connection.ts';
-import { browserDomContractFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
+import { browserDomContractFunction, dateSelectFunction, interactionFunction, semanticSnapshotFunction, unwrapRuntimeValue, type BrowserObservationOptions } from './browser-cdp-page.ts';
 
 const MAX_OOPIF_SESSIONS = 16;
 const MAX_OOPIF_DEPTH = 4;
@@ -113,7 +113,7 @@ async function evaluate(
     : session.send('Runtime.evaluate', params, 8_000, signal);
 }
 
-export function semanticLocatorFunction(target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer = false) {
+export function semanticLocatorFunction(target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }, contract = browserDomContractFunction(), prepareForPointer: boolean | 'drop' = false) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
@@ -132,12 +132,12 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const seenScopes = new Set<unknown>();
     let scanned = 0;
     const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
-      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 20_000) return;
       seenScopes.add(scope);
       let elements: Element[] = [];
-      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 12_000); } catch { return; }
       for (const element of elements) {
-        if (found.length >= max || scanned++ >= 5000) break;
+        if (found.length >= max || scanned++ >= 20_000) break;
         try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector becomes no match */ }
         const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
         if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
@@ -190,6 +190,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -204,7 +205,22 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     }
     return '';
   };
-  const eligible = (element: Element) => { const state = contract.stateOf(element); return state.rendered && !state.pointerBlocked && !state.disabled && (!state.inViewport || !state.occluded); };
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
+  const eligible = (element: Element) => {
+    const state = contract.stateOf(element);
+    const activeKeyboardSink = !prepareForPointer && editableElement(element) && element.ownerDocument?.activeElement === element;
+    const allowOccludedDropTarget = prepareForPointer === 'drop';
+    return (state.rendered || activeKeyboardSink)
+      && !state.pointerBlocked
+      && !state.disabled
+      && (activeKeyboardSink || !state.inViewport || allowOccludedDropTarget || !state.occluded);
+  };
   const identityOf = (element: Element) => {
     const parts: string[] = [];
     let current: Element | null = element;
@@ -258,12 +274,104 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     if (![top, left, scrollHeight, scrollWidth, clientHeight, clientWidth].every(Number.isFinite)) return undefined;
     return { top, left, scrollHeight, scrollWidth, clientHeight, clientWidth, canScrollY: scrollHeight > clientHeight + 1, canScrollX: scrollWidth > clientWidth + 1 };
   };
+  const subtreeSignatureOf = (element: Element) => {
+    let hash = 2166136261 >>> 0;
+    let count = 0;
+    const mix = (value: string) => {
+      for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619) >>> 0;
+      }
+    };
+    const queue = Array.from(element.children ?? []).slice(0, 96);
+    while (queue.length && count < 96) {
+      const child = queue.shift()!;
+      count += 1;
+      mix(child.tagName.toLowerCase());
+      mix('|'); mix(child.id || '');
+      mix('|'); mix(child.getAttribute('class') || '');
+      mix('|'); mix(child.getAttribute('role') || '');
+      mix('|'); mix(child.getAttribute('aria-expanded') || '');
+      mix('|'); mix(child.getAttribute('aria-selected') || '');
+      mix('|'); mix(child.getAttribute('aria-checked') || '');
+      mix('|'); mix(child.getAttribute('aria-pressed') || '');
+      mix('|'); mix(child.getAttribute('aria-current') || '');
+      mix('|'); mix(child.getAttribute('aria-valuenow') || '');
+      mix('|'); mix(child.getAttribute('aria-valuetext') || '');
+      const childValue = child.tagName === 'INPUT' && trim(child.getAttribute('type')).toLowerCase() === 'password'
+        ? ''
+        : (child as HTMLInputElement).value;
+      mix('|'); mix(trim(childValue || child.textContent).slice(0, 240));
+      const style = child.ownerDocument?.defaultView?.getComputedStyle?.(child);
+      mix('|'); mix(`${style?.color ?? ''};${style?.backgroundColor ?? ''};${style?.fill ?? ''};${style?.stroke ?? ''}`);
+      if (queue.length < 96) queue.push(...Array.from(child.children ?? []).slice(0, 96 - queue.length));
+    }
+    return { descendantCount: count, digest: hash.toString(16).padStart(8, '0') };
+  };
+  const associatedStateOf = (element: Element) => {
+    const regions: Element[] = [];
+    const add = (candidate: Element | null | undefined) => {
+      if (!candidate || ['BODY', 'HTML'].includes(candidate.tagName) || regions.includes(candidate) || regions.length >= 6) return;
+      regions.push(candidate);
+    };
+    const root = element.getRootNode() as Document | ShadowRoot;
+    for (const attribute of ['aria-controls', 'aria-owns', 'aria-describedby']) {
+      for (const id of trim(element.getAttribute(attribute)).split(/\s+/).filter(Boolean).slice(0, 8)) add((root as Document).getElementById?.(id));
+    }
+    let current = element.parentElement;
+    for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      if (['form','group','region','status','alert','log','feed','list','listbox','grid','tree','menu','dialog'].includes(role)
+        || ['FORM','SECTION','ARTICLE','LI','TD'].includes(current.tagName)) { add(current); break; }
+      if (depth === 0 && current.children.length <= 64) add(current);
+    }
+    return regions.map((region) => ({
+      identity: identityOf(region), role: roleOf(region), name: nameOf(region),
+      text: trim((region as HTMLElement).innerText ?? region.textContent).slice(0, 500),
+      value: trim(region.tagName === 'INPUT' && trim(region.getAttribute('type')).toLowerCase() === 'password'
+        ? ''
+        : (region as HTMLInputElement).value || region.getAttribute('aria-valuenow') || region.getAttribute('aria-valuetext')).slice(0, 240),
+      expanded: region.hasAttribute('aria-expanded') ? region.getAttribute('aria-expanded') === 'true' : undefined,
+      selected: region.hasAttribute('aria-selected') ? region.getAttribute('aria-selected') === 'true' : undefined,
+      checked: region.hasAttribute('aria-checked') ? region.getAttribute('aria-checked') === 'true' : undefined,
+      pressed: region.hasAttribute('aria-pressed') ? region.getAttribute('aria-pressed') === 'true' : undefined,
+      current: trim(region.getAttribute('aria-current')).slice(0, 80) || undefined,
+      subtreeSignature: subtreeSignatureOf(region)
+    }));
+  };
   const desiredColor = target.renderedColor ? normalizeColor(target.renderedColor) : '';
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
-  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string };
+  type HistoricalFingerprint = { tag?: string; id?: string; role?: string; semanticName?: string; ariaLabel?: string; name?: string; text?: string; groupRole?: string; groupName?: string; repeatedOrdinal?: number; repeatedCount?: number; ancestorPath?: string };
   const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element>; history?: Map<string, HistoricalFingerprint>; mutationVersion?: number } | undefined })[registryKey];
   const observed = target.ref ? registry?.refs?.get(target.ref) : undefined;
   const historical = target.ref && !observed ? registry?.history?.get(target.ref) : undefined;
+  const structuralContextOf = (element: Element) => {
+    let group: Element | null = element.parentElement;
+    for (let depth = 0; group && depth < 8; depth += 1, group = group.parentElement) {
+      const candidateRole = trim(group.getAttribute('role')).toLowerCase();
+      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(candidateRole)
+        || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    }
+    let repeatedElement = element;
+    let peers: Element[] = [element];
+    for (let current: Element | null = element, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      const candidates = current.parentElement ? Array.from(current.parentElement.children).filter((peer) =>
+        peer.tagName === current!.tagName && trim(peer.getAttribute('role')).toLowerCase() === role
+      ) : [current];
+      if (candidates.length > 1) { repeatedElement = current; peers = candidates; break; }
+    }
+    const path: string[] = [];
+    for (let current: Element | null = element.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      const label = trim(current.getAttribute('aria-label') || current.getAttribute('data-testid') || current.id || '');
+      path.unshift(`${current.tagName.toLowerCase()}${label ? `:${label}` : ''}`);
+    }
+    return {
+      groupRole: group ? trim(group.getAttribute('role')).toLowerCase() || group.tagName.toLowerCase() : '',
+      groupName: group ? trim(group.getAttribute('aria-label') || group.getAttribute('title') || group.id || '') : '',
+      repeatedOrdinal: Math.max(1, peers.indexOf(repeatedElement) + 1), repeatedCount: peers.length, ancestorPath: path.join('>')
+    };
+  };
   const matchesHistorical = (element: Element, fingerprint: HistoricalFingerprint) => {
     if (fingerprint.tag && element.tagName.toLowerCase() !== fingerprint.tag) return false;
     if (fingerprint.id && element.id !== fingerprint.id) return false;
@@ -271,6 +379,12 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     if (fingerprint.name && trim(element.getAttribute('name')) !== fingerprint.name) return false;
     if (fingerprint.role && roleOf(element) !== fingerprint.role) return false;
     if (fingerprint.semanticName && nameOf(element) !== fingerprint.semanticName) return false;
+    const structural = structuralContextOf(element);
+    if (fingerprint.groupRole && structural.groupRole !== fingerprint.groupRole) return false;
+    if (fingerprint.groupName && structural.groupName !== fingerprint.groupName) return false;
+    if (fingerprint.repeatedCount !== undefined && structural.repeatedCount !== fingerprint.repeatedCount) return false;
+    if (fingerprint.repeatedOrdinal !== undefined && structural.repeatedOrdinal !== fingerprint.repeatedOrdinal) return false;
+    if (fingerprint.ancestorPath && structural.ancestorPath !== fingerprint.ancestorPath) return false;
     const strongSignals = [fingerprint.id, fingerprint.ariaLabel, fingerprint.name, fingerprint.semanticName].filter(Boolean).length;
     if (strongSignals > 0) return true;
     return Boolean(fingerprint.role && fingerprint.text && trim(element.textContent) === fingerprint.text);
@@ -279,7 +393,7 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
   let matches = (target.ref
     ? (observed && observed.isConnected !== false
       ? [{ element: observed, context: { frameDepth: observed.ownerDocument === document ? 0 : 1, shadowDepth: 0 } }]
-      : historical ? deepQuery('*', 1000).filter(({ element }) => matchesHistorical(element, historical)) : [])
+      : historical ? deepQuery('*', 12_000).filter(({ element }) => matchesHistorical(element, historical)) : [])
     : deepQuery(selector, 1000)).filter(({ element }) => {
     if (!eligible(element)) return false;
     if (target.text && !trim(element.textContent).toLowerCase().includes(target.text.toLowerCase())) return false;
@@ -314,7 +428,9 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
     const element = matches[0]!.element;
     (element as HTMLElement).scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'instant' as ScrollBehavior });
     const state = contract.stateOf(element);
-    if (!state.actionable) matches = [];
+    if (prepareForPointer === 'drop') {
+      if (!state.rendered || state.disabled || state.pointerBlocked) matches = [];
+    } else if (!state.actionable) matches = [];
   }
   return {
     count: matches.length,
@@ -345,6 +461,8 @@ export function semanticLocatorFunction(target: { ref?: string; css?: string; te
       ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current')) } : {}),
       active: element.ownerDocument?.activeElement === element,
       actionable: contract.stateOf(element).actionable,
+      subtreeSignature: subtreeSignatureOf(element),
+      associatedState: associatedStateOf(element),
       documentMutationVersion: Number.isSafeInteger(registry?.mutationVersion) ? registry?.mutationVersion : 0,
       ...(scrollStateOf(element) ? { scroll: scrollStateOf(element), scrollable: Boolean(scrollStateOf(element)?.canScrollY || scrollStateOf(element)?.canScrollX) } : {}),
       geometry: geometryOf(element, context),
@@ -402,22 +520,125 @@ export async function inspectOopifFrames(session: CdpConnection, signal: AbortSi
 
 
 
-export function observedRelativePointFunction(ref: string, xRatio: number, yRatio: number) {
+export function observedRelativePointFunction(ref: string, point: { xRatio?: number; yRatio?: number; xPx?: number; yPx?: number }) {
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
   const element = registry?.refs?.get(ref);
   if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed browser target is stale.' };
-  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
-    return { ok: false, error: 'Relative pointer ratios must be finite values between 0 and 1.' };
-  }
+  const ratioMode = point.xRatio !== undefined || point.yRatio !== undefined;
+  const pixelMode = point.xPx !== undefined || point.yPx !== undefined;
+  if (ratioMode === pixelMode) return { ok: false, error: 'Provide exactly one observed-local pointer coordinate mode.' };
   const rect = element.getBoundingClientRect();
-  const localX = rect.x + rect.width * xRatio;
-  const localY = rect.y + rect.height * yRatio;
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Observed browser target geometry is invalid.' };
+  }
+  let xOffset: number;
+  let yOffset: number;
+  if (ratioMode) {
+    const xRatio = Number(point.xRatio); const yRatio = Number(point.yRatio);
+    if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio) || xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
+      return { ok: false, error: 'Relative pointer ratios must be finite values between 0 and 1.' };
+    }
+    xOffset = rect.width * xRatio; yOffset = rect.height * yRatio;
+  } else {
+    const xPx = Number(point.xPx); const yPx = Number(point.yPx);
+    if (!Number.isFinite(xPx) || !Number.isFinite(yPx) || xPx < 0 || xPx > rect.width || yPx < 0 || yPx > rect.height) {
+      return { ok: false, error: 'Observed-local pointer pixels must lie within the observed element bounds.', width: rect.width, height: rect.height };
+    }
+    xOffset = xPx; yOffset = yPx;
+  }
+  const localX = rect.x + xOffset;
+  const localY = rect.y + yOffset;
   let hit: Element | null = null;
   try { hit = element.ownerDocument?.elementFromPoint?.(localX, localY) ?? null; } catch { hit = null; }
   if (!hit) return { ok: false, error: 'Relative pointer point is not hit-testable in the observed document.' };
   if (hit !== element && !element.contains(hit)) return { ok: false, occluded: true, error: 'Relative pointer point is occluded by another element.' };
-  return { ok: true, local: { x: localX, y: localY }, tag: element.tagName.toLowerCase() };
+  return { ok: true, local: { x: localX, y: localY }, offset: { xPx: xOffset, yPx: yOffset }, tag: element.tagName.toLowerCase() };
+}
+
+export function observedDropPointFunction(ref: string) {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed drop target is stale.' };
+  const rect = element.getBoundingClientRect();
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Observed drop target geometry is invalid.' };
+  }
+  const candidates = [
+    [0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+    [0.5, 0.25], [0.5, 0.75], [0.25, 0.5], [0.75, 0.5],
+    [0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9],
+    [Math.min(0.5, 0.5 / rect.width), 0.5], [Math.max(0.5, 1 - 0.5 / rect.width), 0.5],
+    [0.5, Math.min(0.5, 0.5 / rect.height)], [0.5, Math.max(0.5, 1 - 0.5 / rect.height)]
+  ];
+  for (const [xRatio, yRatio] of candidates) {
+    const x = rect.x + rect.width * xRatio;
+    const y = rect.y + rect.height * yRatio;
+    let hit: Element | null = null;
+    try { hit = element.ownerDocument?.elementFromPoint?.(x, y) ?? null; } catch { hit = null; }
+    if (!hit) continue;
+    if (hit === element || element.contains(hit)) return { ok: true, xRatio, yRatio };
+  }
+  return { ok: false, occluded: true, error: 'Observed drop target has no currently hit-testable point.' };
+}
+
+export function observedResizeHandleFunction(ref: string, delta: { deltaX?: number; deltaY?: number }) {
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, stale: true, error: 'Observed resize target is stale.' };
+  const dx = Number(delta.deltaX ?? 0); const dy = Number(delta.deltaY ?? 0);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return { ok: false, error: 'Resize requires a non-zero finite delta.' };
+  const documentView = element.ownerDocument?.defaultView;
+  const visible = (candidate: Element) => {
+    const rect = candidate.getBoundingClientRect();
+    const style = documentView?.getComputedStyle?.(candidate);
+    return rect.width > 0 && rect.height > 0 && style?.display !== 'none' && style?.visibility !== 'hidden';
+  };
+  const wrapper = element.parentElement?.classList?.contains('ui-wrapper') ? element.parentElement : element;
+  const handles = Array.from(wrapper.querySelectorAll?.('.ui-resizable-handle') ?? []).filter(visible);
+  const desiredClasses = dx !== 0 && dy !== 0
+    ? ['ui-resizable-se', 'ui-resizable-e', 'ui-resizable-s']
+    : dx !== 0 ? ['ui-resizable-se', 'ui-resizable-e', 'ui-resizable-w']
+    : ['ui-resizable-se', 'ui-resizable-s', 'ui-resizable-n'];
+  let handle: Element | undefined;
+  let handleClass = '';
+  let handlePoint: { x: number; y: number } | undefined;
+  for (const className of desiredClasses) {
+    const candidate = handles.find((entry) => entry.classList?.contains(className));
+    if (!candidate) continue;
+    const rect = candidate.getBoundingClientRect();
+    const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2;
+    if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) continue;
+    let hit: Element | null = null;
+    try { hit = element.ownerDocument?.elementFromPoint?.(x, y) ?? null; } catch { hit = null; }
+    if (hit && hit !== candidate && !candidate.contains(hit)) continue;
+    handle = candidate; handleClass = className; handlePoint = { x, y }; break;
+  }
+  if (handle && handlePoint) {
+    const targetRect = element.getBoundingClientRect();
+    return {
+      ok: true, local: handlePoint, handleClass, source: 'generated-handle',
+      targetRect: { x: targetRect.x, y: targetRect.y, width: targetRect.width, height: targetRect.height }
+    };
+  }
+  const style = documentView?.getComputedStyle?.(element);
+  const resizeMode = String(style?.resize ?? '').toLowerCase();
+  const allowsHorizontal = resizeMode === 'both' || resizeMode === 'horizontal';
+  const allowsVertical = resizeMode === 'both' || resizeMode === 'vertical';
+  if ((dx !== 0 && !allowsHorizontal) || (dy !== 0 && !allowsVertical)) {
+    return { ok: false, error: 'Observed target does not expose a compatible resize affordance.' };
+  }
+  const rect = element.getBoundingClientRect();
+  const x = rect.x + Math.max(1, rect.width - 2); const y = rect.y + Math.max(1, rect.height - 2);
+  if (![x, y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0) {
+    return { ok: false, stale: true, error: 'Resize target geometry is invalid.' };
+  }
+  return {
+    ok: true, local: { x, y }, handleClass: 'native-resize-corner', source: 'native-resize',
+    targetRect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  };
 }
 
 export async function observeSemanticTargetState(
@@ -452,20 +673,21 @@ export async function observeSemanticTargetState(
 
 export async function performSemanticInteraction(
   session: CdpConnection,
-  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; key?: string; keys?: string[]; start?: number; end?: number },
+  input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; toTarget?: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; scope?: string; deltaX?: number; deltaY?: number; xRatio?: number; yRatio?: number; xPx?: number; yPx?: number; key?: string; keys?: string[]; start?: number; end?: number },
   signal?: AbortSignal
 ): Promise<{ value: JsonMap; frame?: { targetId: string; url: string; depth: number } }> {
   const scope = await attachOopifSessions(session, signal);
+  let providerDispatchStarted = false;
   try {
     const contexts: FrameContext[] = [{ kind: 'main' }, ...scope.frames.map((frame): FrameContext => ({ kind: 'oopif', frame }))];
     const locateExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.target)}, (${browserDomContractFunction.toString()})())`;
-    const matches: Array<{ context: FrameContext; count: number; samples: unknown }> = [];
+    const matches: Array<{ context: FrameContext; count: number; samples: unknown; refHealed: boolean }> = [];
 
     for (const context of contexts) {
       try {
         const located = unwrapRuntimeValue(await evaluate(session, context, locateExpression, false, signal)) as JsonMap | undefined;
         const count = typeof located?.count === 'number' ? located.count : 0;
-        if (count > 0) matches.push({ context, count, samples: located?.matches });
+        if (count > 0) matches.push({ context, count, samples: located?.matches, refHealed: located?.refHealed === true });
       } catch {
         if (signal?.aborted) throw abortError();
         // Cross-origin frame may disappear or deny execution while the page is changing; continue bounded search.
@@ -486,15 +708,150 @@ export async function performSemanticInteraction(
       });
     }
 
+    if (input.target.ref && matches[0]?.refHealed) {
+      throw new OperatorError('BROWSER_TARGET_STALE', 'The observed target was replaced after observation. Re-observe before dispatch so the new element receives a fresh authority-bound reference.', {
+        retryable: true,
+        details: { target: input.target, sideEffectState: 'none', executionPhase: 'pre_dispatch', recoveredCandidateCount: 1 }
+      });
+    }
+
     const chosen = matches[0]!.context;
+    if (input.operation === 'select_date') {
+      const expression = `(${dateSelectFunction.toString()})(${JSON.stringify({ target: input.target, value: input.value })}, (${browserDomContractFunction.toString()})())`;
+      providerDispatchStarted = true;
+      let raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      const widgetPending = raw?.recoverable === true && typeof raw.error === 'string' && /No supported visible calendar widget/i.test(raw.error);
+      if (widgetPending) {
+        await delay(60, signal);
+        raw = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal)) as JsonMap | undefined;
+      }
+      if (!raw || raw.ok !== true) {
+        const message = typeof raw?.error === 'string' ? raw.error : 'Calendar date selection did not complete.';
+        if (raw?.staleRef === true) throw new OperatorError('BROWSER_TARGET_STALE', message, { retryable: true, details: { target: input.target } });
+        if (raw?.recoverable === true) throw new OperatorError('BROWSER_DATE_SELECTION_REQUIRED', message, { retryable: true, details: { target: input.target, value: input.value, sideEffectState: 'uncertain', executionPhase: 'dispatched' } });
+        throw new OperatorError('BROWSER_INTERACTION_FAILED', message, { retryable: false, details: { target: input.target, value: input.value } });
+      }
+      return {
+        value: raw,
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
+    if (input.operation === 'resize') {
+      if (!input.target.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'resize requires an observed semantic target ref.', { retryable: false });
+      const matched = firstLocatedSample(matches[0]!.samples);
+      const pointExpression = `(${observedResizeHandleFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify({ deltaX: input.deltaX, deltaY: input.deltaY })})`;
+      const point = unwrapRuntimeValue(await evaluate(session, chosen, pointExpression, false, signal)) as JsonMap | undefined;
+      if (!point || point.ok !== true) {
+        const message = typeof point?.error === 'string' ? point.error : 'Observed target does not expose a usable resize handle.';
+        throw new OperatorError(point?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_RESIZE_NOT_ACTIONABLE', message, {
+          retryable: point?.stale === true,
+          details: { target: input.target, deltaX: input.deltaX, deltaY: input.deltaY, point }
+        });
+      }
+      const local = point.local as JsonMap | undefined;
+      const startX = Number(local?.x); const startY = Number(local?.y);
+      const dx = Number(input.deltaX ?? 0); const dy = Number(input.deltaY ?? 0);
+      const endX = startX + dx; const endY = startY + dy;
+      if (![startX, startY, endX, endY].every(Number.isFinite)) {
+        throw new OperatorError('BROWSER_RESIZE_NOT_ACTIONABLE', 'Resize handle geometry is invalid.', { retryable: true });
+      }
+      const dispatch = (params: JsonMap) => chosen.frame
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
+      await dispatch({ type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0 });
+      await dispatch({ type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1 });
+      const steps = Math.max(4, Math.min(20, Math.ceil(Math.hypot(dx, dy) / 20)));
+      for (let step = 1; step <= steps; step += 1) {
+        await dispatch({ type: 'mouseMoved', x: startX + dx * step / steps, y: startY + dy * step / steps, button: 'left', buttons: 1 });
+      }
+      await dispatch({ type: 'mouseReleased', x: endX, y: endY, button: 'left', buttons: 0, clickCount: 1 });
+      await delay(50, signal);
+      const afterLocated = unwrapRuntimeValue(await evaluate(session, chosen, locateExpression, false, signal)) as JsonMap | undefined;
+      const afterSample = firstLocatedSample(afterLocated?.matches);
+      const beforeRect = point.targetRect as JsonMap | undefined;
+      const afterRect = afterSample?.geometry as JsonMap | undefined;
+      const beforeWidth = Number(beforeRect?.width); const beforeHeight = Number(beforeRect?.height);
+      const afterWidth = Number(afterRect?.width); const afterHeight = Number(afterRect?.height);
+      const widthSatisfied = dx === 0 || (Number.isFinite(beforeWidth) && Number.isFinite(afterWidth) && (dx > 0 ? afterWidth > beforeWidth + 0.5 : afterWidth < beforeWidth - 0.5));
+      const heightSatisfied = dy === 0 || (Number.isFinite(beforeHeight) && Number.isFinite(afterHeight) && (dy > 0 ? afterHeight > beforeHeight + 0.5 : afterHeight < beforeHeight - 0.5));
+      if (!afterSample || !widthSatisfied || !heightSatisfied) {
+        throw new OperatorError('BROWSER_RESIZE_NO_EFFECT', 'Resize input was dispatched but the observed target geometry did not change in the requested direction.', {
+          retryable: true,
+          details: {
+            target: input.target, deltaX: dx, deltaY: dy,
+            before: beforeRect, after: afterRect,
+            handleClass: point.handleClass, source: point.source,
+            sideEffectState: 'known', executionPhase: 'dispatched'
+          }
+        });
+      }
+      return {
+        value: {
+          ok: true, matched,
+          after: {
+            nativeResizeDispatched: true, handleClass: point.handleClass, source: point.source, deltaX: dx, deltaY: dy,
+            beforeGeometry: beforeRect, afterGeometry: afterRect
+          }
+        },
+        ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+      };
+    }
     const sendKey = (params: JsonMap) => chosen.frame
-      ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal)
-      : session.send('Input.dispatchKeyEvent', params, 8_000, signal);
-    if (input.operation === 'key_press' || input.operation === 'hotkey') {
+      ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchKeyEvent', params, 8_000, signal))
+      : (providerDispatchStarted = true, session.send('Input.dispatchKeyEvent', params, 8_000, signal));
+    if (input.operation === 'key_press' || input.operation === 'hotkey' || input.operation === 'keyboard_text' || input.operation === 'format_text') {
       const focusExpression = `(${interactionFunction.toString()})(${JSON.stringify({ ...input, operation: 'focus' })}, (${browserDomContractFunction.toString()})())`;
       const focused = unwrapRuntimeValue(await evaluate(session, chosen, focusExpression, true, signal)) as JsonMap | undefined;
       if (!focused || focused.ok !== true) {
         throw new OperatorError('BROWSER_INTERACTION_FAILED', typeof focused?.error === 'string' ? focused.error : 'Browser target could not be focused before keyboard input.', { retryable: true, details: { target: input.target } });
+      }
+      if (input.operation === 'format_text') {
+        const format = String(input.value ?? '').toLowerCase();
+        const styleKey: Record<string, string> = { bold: 'b', italic: 'i', italics: 'i', underline: 'u', underlined: 'u' };
+        const key = styleKey[format];
+        const formatScope = String(input.scope ?? 'all').toLowerCase();
+        if (!key || !['all', 'selection'].includes(formatScope)) {
+          throw new OperatorError('INVALID_BROWSER_FORMAT', 'format_text supports bold, italic, or underline with scope all or selection.', { retryable: false });
+        }
+        const chord = async (letter: string) => {
+          await sendKey({ type: 'keyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, modifiers: 2 });
+          await sendKey({ type: 'keyDown', key: letter, code: `Key${letter.toUpperCase()}`, windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0), modifiers: 2 });
+          await sendKey({ type: 'keyUp', key: letter, code: `Key${letter.toUpperCase()}`, windowsVirtualKeyCode: letter.toUpperCase().charCodeAt(0), modifiers: 2 });
+          await sendKey({ type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, modifiers: 0 });
+        };
+        if (formatScope === 'all') await chord('a');
+        await chord(key);
+        return {
+          value: {
+            ok: true,
+            matched: firstLocatedSample(matches[0]!.samples),
+            after: { nativeTextFormatDispatched: true, format: format === 'italics' ? 'italic' : format === 'underlined' ? 'underline' : format, scope: formatScope }
+          },
+          ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+        };
+      }
+      if (input.operation === 'keyboard_text') {
+        const text = String(input.value ?? '');
+        if (!text.length || text.length > 4096) throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text requires 1-4096 characters.', { retryable: false });
+        for (const char of Array.from(text)) {
+          if (/\r|\n/.test(char)) {
+            await sendKey({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            await sendKey({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+            continue;
+          }
+          const codePoint = char.codePointAt(0) ?? 0;
+          if (codePoint < 0x20 || codePoint === 0x7f) {
+            throw new OperatorError('INVALID_BROWSER_TEXT', 'keyboard_text accepts printable text plus newline only.', { retryable: false });
+          }
+          const upper = /^[A-Za-z]$/.test(char) ? char.toUpperCase() : '';
+          const code = upper ? `Key${upper}` : /^\d$/.test(char) ? `Digit${char}` : '';
+          await sendKey({ type: 'keyDown', key: char, ...(code ? { code } : {}), text: char, unmodifiedText: char });
+          await sendKey({ type: 'keyUp', key: char, ...(code ? { code } : {}) });
+        }
+        return {
+          value: { ok: true, matched: firstLocatedSample(matches[0]!.samples), after: { nativeKeyboardTextDispatched: true, textLength: text.length } },
+          ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
+        };
       }
       const requested = input.operation === 'key_press' ? [String(input.key ?? '')] : Array.isArray(input.keys) ? input.keys.map(String) : [];
       const allowedKeys = new Set(['Enter','Escape','Tab','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Backspace','Delete','Home','End','PageUp','PageDown','Shift','Control','Alt','Meta','a','c','v','b','i','A','C','V','B','I']);
@@ -553,27 +910,38 @@ export async function performSemanticInteraction(
       let y = Number(geometry.y) + Number(geometry.height) / 2;
       if (input.operation === 'click_relative') {
         if (!input.target.ref) throw new OperatorError('INVALID_BROWSER_TARGET', 'click_relative requires an observed target ref.', { retryable: false });
-        const xRatio = Number(input.xRatio); const yRatio = Number(input.yRatio);
-        const pointExpression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(xRatio)}, ${JSON.stringify(yRatio)})`;
+        const pointSpec = { xRatio: input.xRatio, yRatio: input.yRatio, xPx: input.xPx, yPx: input.yPx };
+        const pointExpression = `(${observedRelativePointFunction.toString()})(${JSON.stringify(input.target.ref)}, ${JSON.stringify(pointSpec)})`;
         const point = unwrapRuntimeValue(await evaluate(session, chosen, pointExpression, false, signal)) as JsonMap | undefined;
         if (!point || point.ok !== true) {
           throw new OperatorError(point?.stale === true ? 'BROWSER_TARGET_STALE' : 'BROWSER_POINT_NOT_ACTIONABLE', typeof point?.error === 'string' ? point.error : 'Relative pointer point is not actionable.', {
             retryable: point?.stale === true,
-            details: { target: input.target, xRatio, yRatio, point }
+            details: { target: input.target, pointSpec, point }
           });
         }
-        x = Number(geometry.x) + Number(geometry.width) * xRatio;
-        y = Number(geometry.y) + Number(geometry.height) * yRatio;
+        const pointLocal = point.local as JsonMap | undefined;
+        x = Number(pointLocal?.x);
+        y = Number(pointLocal?.y);
       }
       if (![x, y, geometry.width, geometry.height].every((value) => Number.isFinite(Number(value))) || Number(geometry.width) <= 0 || Number(geometry.height) <= 0) {
         throw new OperatorError('BROWSER_STALE_TARGET', 'Semantic target geometry is not actionable.', { retryable: true });
+      }
+      if (input.operation === 'scroll') {
+        const scroll = second.scroll && typeof second.scroll === 'object' && !Array.isArray(second.scroll) ? second.scroll as JsonMap : undefined;
+        const scrollable = second.scrollable === true || scroll?.canScrollY === true || scroll?.canScrollX === true;
+        if (!scrollable) {
+          throw new OperatorError('BROWSER_TARGET_NOT_SCROLLABLE', 'Scroll requires an observed scrollable target or page scroller; re-observe and choose a valid scroller.', {
+            retryable: true,
+            details: { target: input.target }
+          });
+        }
       }
       let dragDestination: { x: number; y: number; sample: JsonMap } | undefined;
       if (input.operation === 'drag_between') {
         if (!input.target.ref || !input.toTarget?.ref) {
           throw new OperatorError('INVALID_BROWSER_TARGET', 'drag_between requires observed source and destination refs.', { retryable: false });
         }
-        const destinationExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), true)`;
+        const destinationExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), 'drop')`;
         const destinationPrepared = unwrapRuntimeValue(await evaluate(session, chosen, destinationExpression, false, signal)) as JsonMap | undefined;
         const destinationFirst = firstLocatedSample(destinationPrepared?.matches);
         if (destinationPrepared?.count !== 1 || !destinationFirst) {
@@ -590,7 +958,7 @@ export async function performSemanticInteraction(
             details: { source: input.target, destination: input.toTarget, before: second, after: sourceAfterDestinationScroll }
           });
         }
-        const destinationConfirmedExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})())`;
+        const destinationConfirmedExpression = `(${semanticLocatorFunction.toString()})(${JSON.stringify(input.toTarget)}, (${browserDomContractFunction.toString()})(), 'drop')`;
         const destinationConfirmed = unwrapRuntimeValue(await evaluate(session, chosen, destinationConfirmedExpression, false, signal)) as JsonMap | undefined;
         const destinationSecond = firstLocatedSample(destinationConfirmed?.matches);
         if (destinationConfirmed?.count !== 1 || !destinationSecond || !sameLocatedTarget(destinationFirst, destinationSecond)) {
@@ -602,18 +970,26 @@ export async function performSemanticInteraction(
         const sourceGeometry = sourceAfterDestinationScroll.geometry as JsonMap | undefined;
         const destinationGeometry = destinationSecond.geometry as JsonMap | undefined;
         if (!sourceGeometry || !destinationGeometry) throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is unavailable.', { retryable: true });
+        const dropPointExpression = `(${observedDropPointFunction.toString()})(${JSON.stringify(input.toTarget.ref)})`;
+        const dropPoint = unwrapRuntimeValue(await evaluate(session, chosen, dropPointExpression, false, signal)) as JsonMap | undefined;
+        if (!dropPoint || dropPoint.ok !== true) {
+          throw new OperatorError('BROWSER_TARGET_STALE', typeof dropPoint?.error === 'string' ? dropPoint.error : 'Observed drag destination has no usable drop point.', {
+            retryable: true,
+            details: { source: input.target, destination: input.toTarget, dropPoint }
+          });
+        }
         x = Number(sourceGeometry.x) + Number(sourceGeometry.width) / 2;
         y = Number(sourceGeometry.y) + Number(sourceGeometry.height) / 2;
-        const destinationX = Number(destinationGeometry.x) + Number(destinationGeometry.width) / 2;
-        const destinationY = Number(destinationGeometry.y) + Number(destinationGeometry.height) / 2;
+        const destinationX = Number(destinationGeometry.x) + Number(destinationGeometry.width) * Number(dropPoint.xRatio);
+        const destinationY = Number(destinationGeometry.y) + Number(destinationGeometry.height) * Number(dropPoint.yRatio);
         if (![x, y, destinationX, destinationY].every(Number.isFinite)) {
           throw new OperatorError('BROWSER_STALE_TARGET', 'Drag source or destination geometry is invalid.', { retryable: true });
         }
         dragDestination = { x: destinationX, y: destinationY, sample: destinationSecond };
       }
       const dispatch = (params: JsonMap) => chosen.frame
-        ? session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal)
-        : session.send('Input.dispatchMouseEvent', params, 8_000, signal);
+        ? (providerDispatchStarted = true, session.sendInSession(chosen.frame.sessionId, 'Input.dispatchMouseEvent', params, 8_000, signal))
+        : (providerDispatchStarted = true, session.send('Input.dispatchMouseEvent', params, 8_000, signal));
       if (input.operation === 'hover') {
         await dispatch({ type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
       } else if (input.operation === 'scroll') {
@@ -641,6 +1017,7 @@ export async function performSemanticInteraction(
       };
     }
     const expression = `(${interactionFunction.toString()})(${JSON.stringify(input)}, (${browserDomContractFunction.toString()})())`;
+    providerDispatchStarted = true;
     let value = unwrapRuntimeValue(await evaluate(session, chosen, expression, true, signal));
     if (!value || typeof value !== 'object') {
       throw new OperatorError('BROWSER_INTERACTION_FAILED', 'Browser interaction returned no semantic result.', { retryable: true });
@@ -669,6 +1046,21 @@ export async function performSemanticInteraction(
       value: value as JsonMap,
       ...(chosen.frame ? { frame: { targetId: chosen.frame.targetId, url: chosen.frame.url, depth: chosen.frame.depth } } : {})
     };
+  } catch (error) {
+    if (providerDispatchStarted && error instanceof OperatorError
+      && error.details?.executionPhase === undefined && error.details?.sideEffectState === undefined) {
+      throw new OperatorError(error.code, error.message, {
+        retryable: error.retryable,
+        details: { ...(error.details ?? {}), sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+      });
+    }
+    if (providerDispatchStarted && !(error instanceof OperatorError)) {
+      throw new OperatorError('BROWSER_PROVIDER_EXECUTION_FAILED', error instanceof Error ? error.message : String(error), {
+        retryable: true,
+        details: { sideEffectState: 'uncertain', executionPhase: 'dispatched' }
+      });
+    }
+    throw error;
   } finally {
     await scope.stop();
   }

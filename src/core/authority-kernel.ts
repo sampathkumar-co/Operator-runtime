@@ -4,6 +4,7 @@ import { capabilityRiskRule, assertCanonicalRisk } from './capability-policy.ts'
 import { PolicyError } from './errors.ts';
 import { PolicyEngine } from './policy.ts';
 import { normalizeScopedPathSyntax } from './scoped-path-syntax.ts';
+import { resourcePathOperandsForAction } from './resource-identity.ts';
 import type { ActionRequest, ActionRisk, PermissionProfile } from './types.ts';
 
 const RISK_ORDER: Record<ActionRisk, number> = {
@@ -55,17 +56,15 @@ function pathWithin(child: string, root: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function targetPath(action: ActionRequest, parentRoots: readonly string[]): string | undefined {
-  const raw = typeof action.input.path === 'string'
-    ? action.input.path
-    : typeof action.input.cwd === 'string'
-      ? action.input.cwd
-      : undefined;
-  if (!raw) return undefined;
-  const syntax = normalizeScopedPathSyntax(raw);
-  if (syntax.kind === 'native-absolute') return path.resolve(syntax.value);
-  if (syntax.kind === 'foreign-windows-absolute' || parentRoots.length !== 1) return undefined;
-  return path.resolve(parentRoots[0]!, syntax.value);
+function targetPaths(action: ActionRequest, parentRoots: readonly string[]): string[] | undefined {
+  const resolved: string[] = [];
+  for (const raw of resourcePathOperandsForAction(action)) {
+    const syntax = normalizeScopedPathSyntax(raw);
+    if (syntax.kind === 'native-absolute') resolved.push(path.resolve(syntax.value));
+    else if (syntax.kind === 'foreign-windows-absolute' || parentRoots.length !== 1) return undefined;
+    else resolved.push(path.resolve(parentRoots[0]!, syntax.value));
+  }
+  return resolved;
 }
 
 function tokenPayload(claims: CapabilityTokenClaims): string {
@@ -213,11 +212,14 @@ export class AuthorityKernel {
       throw new PolicyError('AUTHORITY_TOKEN_ACTION_MISMATCH', 'Capability token is bound to a different action.');
     }
 
-    const candidate = targetPath(action, permissions.allowedRoots);
-    if (token.claims.roots.length > 0) {
-      if (!candidate || !token.claims.roots.some((root) => pathWithin(candidate, root))) {
-        throw new PolicyError('AUTHORITY_TOKEN_SCOPE_MISMATCH', 'Capability token does not authorize this resource scope.');
+    const candidates = targetPaths(action, permissions.allowedRoots);
+    if (token.claims.roots.length > 0 && candidates && candidates.length > 0) {
+      const denied = candidates.find((candidate) => !token.claims.roots.some((root) => pathWithin(candidate, root)));
+      if (denied) {
+        throw new PolicyError('AUTHORITY_TOKEN_SCOPE_MISMATCH', 'Capability token does not authorize every path operand in this action.', { targetPath: denied });
       }
+    } else if (token.claims.roots.length > 0 && candidates === undefined) {
+      throw new PolicyError('AUTHORITY_TOKEN_SCOPE_MISMATCH', 'Capability token path scope could not be resolved safely.');
     }
   }
 

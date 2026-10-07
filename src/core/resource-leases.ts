@@ -6,10 +6,11 @@ import { resourceKeysConflict } from './resource-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
   sameProcessInstance,
   type ProcessInstanceIdentity,
-  type ProcessInstanceInspector,
+  type ProcessInstanceObservation,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from './process-instance.ts';
 
@@ -29,9 +30,16 @@ interface ResourceEntry {
   holders: Holder[];
 }
 
+interface ResourceQuarantine {
+  actionId: string;
+  key: string;
+  armedAt: string;
+}
+
 interface LeaseState {
-  version: 1;
+  version: 2;
   resources: ResourceEntry[];
+  quarantines: ResourceQuarantine[];
 }
 
 export interface ResourceLease {
@@ -45,6 +53,7 @@ export interface ResourceLease {
 
 const MAX_RESOURCES = 20_000;
 const MAX_HOLDERS = 512;
+const MAX_QUARANTINES = 20_000;
 const STATE_OPTIONS = {
   maxBytes: 16 * 1024 * 1024,
   errorCode: 'RESOURCE_LEASE_CORRUPT',
@@ -54,27 +63,61 @@ const STATE_OPTIONS = {
 export class ResourceLeaseStore {
   #file: string;
   #lockFile: string;
-  #inspectProcessInstance: ProcessInstanceInspector;
+  #observeProcessInstance: ProcessInstanceObserver;
   #processInstance?: ProcessInstanceIdentity;
 
-  constructor(stateDir: string, options: { inspectProcessInstance?: ProcessInstanceInspector; processInstance?: ProcessInstanceIdentity } = {}) {
+  constructor(stateDir: string, options: {
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated test-only compatibility hook; null is treated as unknown, never confirmed dead. */
+    inspectProcessInstance?: (pid: number) => Promise<ProcessInstanceIdentity | null>;
+    processInstance?: ProcessInstanceIdentity;
+  } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'resource-leases.json');
     this.#lockFile = path.join(root, 'resource-leases.lock');
-    this.#inspectProcessInstance = options.inspectProcessInstance ?? inspectProcessInstance;
+    this.#observeProcessInstance = options.observeProcessInstance
+      ?? (options.inspectProcessInstance
+        ? async (pid) => {
+            try {
+              const identity = await options.inspectProcessInstance!(pid);
+              return identity ? { status: 'live', identity } : { status: 'unknown' };
+            } catch {
+              return { status: 'unknown' };
+            }
+          }
+        : observeProcessInstance);
     this.#processInstance = options.processInstance;
   }
 
-  async acquire(ownerIdInput: string, keysInput: string[], mode: ResourceLeaseMode): Promise<ResourceLease> {
+  async acquire(
+    ownerIdInput: string,
+    keysInput: string[],
+    mode: ResourceLeaseMode,
+    options: { mutationActionId?: string } = {}
+  ): Promise<ResourceLease> {
     const ownerId = bounded(ownerIdInput, 256, 'ownerId');
     const keys = normalizeKeys(keysInput);
     if (keys.length === 0) return noOpLease(ownerId, mode);
     if (mode !== 'shared' && mode !== 'exclusive') throw new OperatorError('RESOURCE_LEASE_INPUT_INVALID', 'Resource lease mode is invalid.');
 
     const leaseId = crypto.randomUUID();
+    const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
     const processInstance = this.#processInstance ?? await currentProcessInstance();
     await this.#mutate(async (state) => {
-      await reapDeadHolders(state, this.#inspectProcessInstance);
+      await reapDeadHolders(state, this.#observeProcessInstance);
+      if (mode === 'exclusive') {
+        for (const key of keys) {
+          const quarantine = state.quarantines.find((item) =>
+            item.actionId !== mutationActionId && resourceKeysConflict(item.key, key)
+          );
+          if (quarantine) {
+            throw new OperatorError('RESOURCE_QUARANTINED', `Resource ${key} has unresolved mutation state from action ${quarantine.actionId}.`, {
+              retryable: true,
+              details: { key, quarantinedKey: quarantine.key, actionId: quarantine.actionId, armedAt: quarantine.armedAt }
+            });
+          }
+        }
+      }
       for (const key of keys) {
         const conflictingEntries = state.resources.filter((item) => resourceKeysConflict(item.key, key));
         for (const entry of conflictingEntries) {
@@ -139,9 +182,40 @@ export class ResourceLeaseStore {
     };
   }
 
+  async quarantine(actionIdInput: string, keysInput: string[]): Promise<void> {
+    const actionId = bounded(actionIdInput, 512, 'actionId');
+    const keys = normalizeKeys(keysInput);
+    if (keys.length === 0) return;
+    await this.#mutate((state) => {
+      for (const key of keys) {
+        const conflict = state.quarantines.find((item) => item.actionId !== actionId && resourceKeysConflict(item.key, key));
+        if (conflict) {
+          throw new OperatorError('RESOURCE_QUARANTINED', `Resource ${key} is already quarantined by unresolved action ${conflict.actionId}.`, {
+            retryable: true,
+            details: { key, quarantinedKey: conflict.key, actionId: conflict.actionId, armedAt: conflict.armedAt }
+          });
+        }
+      }
+      const now = new Date().toISOString();
+      for (const key of keys) {
+        if (state.quarantines.some((item) => item.actionId === actionId && item.key === key)) continue;
+        if (state.quarantines.length >= MAX_QUARANTINES) throw new OperatorError('RESOURCE_QUARANTINE_LIMIT', 'Resource quarantine table is full.');
+        state.quarantines.push({ actionId, key, armedAt: now });
+      }
+      state.quarantines.sort((a, b) => a.key.localeCompare(b.key) || a.actionId.localeCompare(b.actionId));
+    });
+  }
+
+  async clearQuarantine(actionIdInput: string): Promise<void> {
+    const actionId = bounded(actionIdInput, 512, 'actionId');
+    await this.#mutate((state) => {
+      state.quarantines = state.quarantines.filter((item) => item.actionId !== actionId);
+    });
+  }
+
   async inspect(): Promise<LeaseState> {
     const state = await this.#read();
-    await reapDeadHolders(state, this.#inspectProcessInstance);
+    await reapDeadHolders(state, this.#observeProcessInstance);
     return structuredClone(state);
   }
 
@@ -149,7 +223,7 @@ export class ResourceLeaseStore {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STATE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, resources: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, resources: [], quarantines: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state could not be read.');
     }
@@ -194,8 +268,14 @@ export class ResourceLeaseStore {
         const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { pid?: unknown; processInstance?: unknown };
         const pid = Number(current.pid);
         const storedIdentity = validProcessInstance(current.processInstance);
-        const liveIdentity = Number.isSafeInteger(pid) && pid > 0 ? await this.#inspectProcessInstance(pid) : null;
-        if (Number.isSafeInteger(pid) && pid > 0 && (storedIdentity ? !sameProcessInstance(storedIdentity, liveIdentity) : liveIdentity === null)) {
+        const observation: ProcessInstanceObservation = Number.isSafeInteger(pid) && pid > 0
+          ? await this.#observeProcessInstance(pid)
+          : { status: 'dead' };
+        const stale = observation.status === 'dead'
+          || (observation.status === 'live' && storedIdentity && observation.identity
+            ? !sameProcessInstance(storedIdentity, observation.identity)
+            : false);
+        if (Number.isSafeInteger(pid) && pid > 0 && stale) {
           await fs.rm(this.#lockFile, { force: true });
           continue;
         }
@@ -228,12 +308,14 @@ function normalizeKeys(input: string[]): string[] {
 
 function validateState(input: unknown): LeaseState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state must be an object.');
-  const state = input as LeaseState;
-  if (state.version !== 1 || !Array.isArray(state.resources) || state.resources.length > MAX_RESOURCES) {
+  const raw = input as { version?: unknown; resources?: unknown; quarantines?: unknown };
+  const version = Number(raw.version);
+  if (![1, 2].includes(version) || !Array.isArray(raw.resources) || raw.resources.length > MAX_RESOURCES) {
     throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state shape is invalid.');
   }
+  const resources = raw.resources as ResourceEntry[];
   const keys = new Set<string>();
-  for (const entry of state.resources) {
+  for (const entry of resources) {
     const key = bounded(entry.key, 1024, 'resource key');
     if (keys.has(key)) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state contains duplicate resource keys.');
     keys.add(key);
@@ -252,17 +334,44 @@ function validateState(input: unknown): LeaseState {
       if (!Number.isFinite(Date.parse(holder.acquiredAt))) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource holder timestamp is invalid.');
     }
   }
-  return state;
+
+  const quarantines = version === 1 ? [] : raw.quarantines;
+  if (!Array.isArray(quarantines) || quarantines.length > MAX_QUARANTINES) {
+    throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine state is invalid.');
+  }
+  const quarantineIds = new Set<string>();
+  const normalizedQuarantines: ResourceQuarantine[] = quarantines.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine entry is invalid.');
+    const value = item as ResourceQuarantine;
+    const actionId = bounded(value.actionId, 512, 'quarantine actionId');
+    const key = bounded(value.key, 1024, 'quarantine key');
+    const armedAt = String(value.armedAt ?? '');
+    if (!Number.isFinite(Date.parse(armedAt))) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine timestamp is invalid.');
+    const identity = actionId + '\u0000' + key;
+    if (quarantineIds.has(identity)) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine entries must be unique.');
+    quarantineIds.add(identity);
+    return { actionId, key, armedAt };
+  });
+
+  return { version: 2, resources, quarantines: normalizedQuarantines };
 }
 
-async function reapDeadHolders(state: LeaseState, inspector: ProcessInstanceInspector): Promise<void> {
-  const identities = new Map<number, ProcessInstanceIdentity | null>();
+async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObserver): Promise<void> {
+  const observations = new Map<number, ProcessInstanceObservation>();
   for (const holder of state.resources.flatMap((entry) => entry.holders)) {
-    if (!identities.has(holder.pid)) identities.set(holder.pid, await inspector(holder.pid));
+    if (!observations.has(holder.pid)) {
+      let observation: ProcessInstanceObservation;
+      try { observation = await observer(holder.pid); }
+      catch { observation = { status: 'unknown' }; }
+      observations.set(holder.pid, observation);
+    }
   }
   for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
-    const live = identities.get(holder.pid) ?? null;
-    return holder.processInstance ? sameProcessInstance(holder.processInstance, live) : live !== null;
+    const observation = observations.get(holder.pid) ?? { status: 'unknown' };
+    if (observation.status === 'dead') return false;
+    if (observation.status === 'unknown') return true;
+    if (!holder.processInstance || !observation.identity) return true;
+    return sameProcessInstance(holder.processInstance, observation.identity);
   });
   state.resources = state.resources.filter((entry) => entry.holders.length > 0);
 }

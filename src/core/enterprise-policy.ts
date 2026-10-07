@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -35,10 +36,12 @@ export interface EnterpriseAuthorizationContext {
   deviceGroups?: string[];
 }
 
-interface EnterprisePolicyState {
-  version: 1;
+export interface EnterprisePolicyState {
+  version: 2;
+  generation: number;
   roles: EnterpriseRole[];
   bindings: EnterpriseBinding[];
+  recordDigest: string;
 }
 
 export interface EnterprisePermissionDecision {
@@ -64,11 +67,24 @@ export class EnterprisePolicyStore {
     this.#file = path.join(path.resolve(stateDir), 'enterprise-policy.json');
   }
 
-  async configure(input: { roles: EnterpriseRole[]; bindings: EnterpriseBinding[] }): Promise<void> {
-    const state = validateState({ version: 1, roles: input.roles, bindings: input.bindings });
-    const run = this.#serial.then(() => writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS));
+  async configure(input: { roles: EnterpriseRole[]; bindings: EnterpriseBinding[] }): Promise<EnterprisePolicyState> {
+    const policy = validatePolicy(input.roles, input.bindings);
+    let configured!: EnterprisePolicyState;
+    const run = this.#serial.then(async () => {
+      const current = await this.#read();
+      if (enterprisePolicyDigest(current) === enterprisePolicyDigest(policy)) {
+        configured = current;
+        return;
+      }
+      if (current.generation >= Number.MAX_SAFE_INTEGER) {
+        throw new OperatorError('ENTERPRISE_POLICY_GENERATION_EXHAUSTED', 'Enterprise policy generation cannot advance safely.');
+      }
+      configured = sealState({ version: 2, generation: current.generation + 1, roles: policy.roles, bindings: policy.bindings });
+      await writeDurableStateText(this.#file, JSON.stringify(configured, null, 2), STORE_OPTIONS);
+    });
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
+    return structuredClone(configured);
   }
 
   async inspect(): Promise<EnterprisePolicyState> {
@@ -85,6 +101,7 @@ export class EnterprisePolicyStore {
   async narrow(base: PermissionProfile, contextInput: EnterpriseAuthorizationContext): Promise<EnterprisePermissionDecision> {
     await this.#serial;
     const state = await this.#read();
+    const policyDigest = enterprisePolicyDigest(state);
     const context = normalizeContext(contextInput);
     const matches = state.bindings
       .filter((binding) => binding.enabled && binding.principalId === context.principalId)
@@ -127,7 +144,9 @@ export class EnterprisePolicyStore {
       maxRisk,
       allowExternalWrites: base.allowExternalWrites === true && RISK_ORDER[maxRisk] >= RISK_ORDER.external,
       allowSystemChanges: base.allowSystemChanges === true && RISK_ORDER[maxRisk] >= RISK_ORDER.system,
-      allowDestructive: base.allowDestructive === true && RISK_ORDER[maxRisk] >= RISK_ORDER.destructive
+      allowDestructive: base.allowDestructive === true && RISK_ORDER[maxRisk] >= RISK_ORDER.destructive,
+      enterprisePolicyDigest: policyDigest,
+      enterprisePolicyGeneration: state.generation
     };
     return {
       roleIds: roles.map((role) => role.id).sort(),
@@ -136,23 +155,81 @@ export class EnterprisePolicyStore {
     };
   }
 
+  async currentDigest(): Promise<string> {
+    await this.#serial;
+    return enterprisePolicyDigest(await this.#read());
+  }
+
+  async currentAuthority(): Promise<{ digest: string; generation: number }> {
+    await this.#serial;
+    const state = await this.#read();
+    return { digest: enterprisePolicyDigest(state), generation: state.generation };
+  }
+
+  async assertCurrentAuthority(expectedInput: { digest: string; generation: number }): Promise<void> {
+    const expectedDigest = String(expectedInput?.digest ?? '').toLowerCase();
+    const expectedGeneration = Number(expectedInput?.generation);
+    if (!/^[0-9a-f]{64}$/.test(expectedDigest) || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
+      throw new OperatorError('ENTERPRISE_POLICY_AUTHORITY_INVALID', 'Enterprise policy digest or generation is invalid.');
+    }
+    const actual = await this.currentAuthority();
+    if (actual.digest !== expectedDigest || actual.generation !== expectedGeneration) {
+      throw new OperatorError('ENTERPRISE_POLICY_STALE', 'Enterprise policy changed after authority was derived; permissions must be recomputed.', {
+        retryable: true,
+        details: {
+          expectedDigest, actualDigest: actual.digest,
+          expectedGeneration, actualGeneration: actual.generation,
+          sideEffectState: 'none', executionPhase: 'pre_dispatch'
+        }
+      });
+    }
+  }
+
   async #read(): Promise<EnterprisePolicyState> {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, roles: [], bindings: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return sealState({ version: 2, generation: 0, roles: [], bindings: [] });
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy state could not be read.');
     }
   }
 }
 
-function validateState(input: EnterprisePolicyState): EnterprisePolicyState {
-  if (!input || input.version !== 1 || !Array.isArray(input.roles) || input.roles.length > MAX_ROLES || !Array.isArray(input.bindings) || input.bindings.length > MAX_BINDINGS) {
+function validateState(input: unknown): EnterprisePolicyState {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy state shape is invalid.');
+  }
+  const raw = input as Record<string, unknown>;
+  if (raw.version === 1) {
+    if (Object.keys(raw).some((key) => !['version', 'roles', 'bindings'].includes(key))) {
+      throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Legacy enterprise policy contains unexpected fields.');
+    }
+    const legacy = validatePolicy(raw.roles, raw.bindings);
+    return sealState({ version: 2, generation: 1, roles: legacy.roles, bindings: legacy.bindings });
+  }
+  if (Object.keys(raw).some((key) => !['version', 'generation', 'roles', 'bindings', 'recordDigest'].includes(key))
+    || raw.version !== 2 || typeof raw.generation !== 'number' || !Number.isSafeInteger(raw.generation) || raw.generation < 0
+    || !/^[0-9a-f]{64}$/.test(String(raw.recordDigest ?? '').toLowerCase())) {
+    throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy state shape is invalid.');
+  }
+  const policy = validatePolicy(raw.roles, raw.bindings);
+  const state = { version: 2 as const, generation: raw.generation, roles: policy.roles, bindings: policy.bindings, recordDigest: String(raw.recordDigest).toLowerCase() };
+  if (state.recordDigest !== enterprisePolicyRecordDigest(state)) {
+    throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy generation or content integrity check failed.');
+  }
+  if (state.generation === 0 && (state.roles.length > 0 || state.bindings.length > 0)) {
+    throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Configured enterprise policy requires a positive generation.');
+  }
+  return state;
+}
+
+function validatePolicy(rolesInput: unknown, bindingsInput: unknown): Pick<EnterprisePolicyState, 'roles' | 'bindings'> {
+  if (!Array.isArray(rolesInput) || rolesInput.length > MAX_ROLES || !Array.isArray(bindingsInput) || bindingsInput.length > MAX_BINDINGS) {
     throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy state shape is invalid.');
   }
   const roleIds = new Set<string>();
-  const roles = input.roles.map((role, index) => {
+  const roles = (rolesInput as EnterpriseRole[]).map((role, index) => {
     const id = idValue(role.id, `roles[${index}].id`);
     if (roleIds.has(id)) throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise role IDs must be unique.');
     roleIds.add(id);
@@ -169,7 +246,7 @@ function validateState(input: EnterprisePolicyState): EnterprisePolicyState {
   });
 
   const bindingIds = new Set<string>();
-  const bindings = input.bindings.map((binding, index) => {
+  const bindings = (bindingsInput as EnterpriseBinding[]).map((binding, index) => {
     const id = idValue(binding.id, `bindings[${index}].id`);
     if (bindingIds.has(id)) throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise binding IDs must be unique.');
     bindingIds.add(id);
@@ -187,7 +264,7 @@ function validateState(input: EnterprisePolicyState): EnterprisePolicyState {
       enabled: binding.enabled === true
     };
   });
-  return { version: 1, roles, bindings };
+  return { roles, bindings };
 }
 
 function normalizeContext(input: EnterpriseAuthorizationContext) {
@@ -287,4 +364,27 @@ function uniqueText(input: unknown, maxItems: number, maxLength: number, label: 
   const values = input.map((value, index) => bounded(value, maxLength, `${label}[${index}]`));
   if (new Set(values).size !== values.length) throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', `${label} contains duplicates.`);
   return values.sort();
+}
+
+function enterprisePolicyDigest(state: Pick<EnterprisePolicyState, 'roles' | 'bindings'>): string {
+  const canonical = {
+    version: 1,
+    roles: [...state.roles].sort((a, b) => a.id.localeCompare(b.id)),
+    bindings: [...state.bindings].sort((a, b) => a.id.localeCompare(b.id))
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function sealState(input: Omit<EnterprisePolicyState, 'recordDigest'>): EnterprisePolicyState {
+  const state = { ...input, recordDigest: '' };
+  state.recordDigest = enterprisePolicyRecordDigest(state);
+  return state;
+}
+
+function enterprisePolicyRecordDigest(state: Pick<EnterprisePolicyState, 'version' | 'generation' | 'roles' | 'bindings'>): string {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    version: state.version,
+    generation: state.generation,
+    policyDigest: enterprisePolicyDigest(state)
+  })).digest('hex');
 }

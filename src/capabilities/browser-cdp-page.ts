@@ -432,8 +432,12 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
   const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
   const host = globalThis as typeof globalThis & { [key: symbol]: unknown };
-  type ObservedFingerprint = { tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string };
-  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: MutationObserver[] };
+  type ObservedFingerprint = {
+    tag: string; id: string; role: string; semanticName: string; ariaLabel: string; name: string; text: string;
+    groupRole?: string; groupName?: string; repeatedOrdinal?: number; repeatedCount?: number; ancestorPath?: string;
+  };
+  type ObservedMutationObserver = { doc: Document; observer: MutationObserver };
+  type ObservedRegistry = { nonce: string; generation: number; next: number; refs: Map<string, Element>; history: Map<string, ObservedFingerprint>; mutationVersion: number; observedDocs: WeakSet<Document>; observers: ObservedMutationObserver[] };
   let observedRegistry = host[registryKey] as ObservedRegistry | undefined;
   const priorFocusElement = focus.ref && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.ref) : undefined;
   const priorGroupElement = focus.groupRef && observedRegistry?.refs instanceof Map ? observedRegistry.refs.get(focus.groupRef) : undefined;
@@ -447,6 +451,33 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   if (!Number.isSafeInteger(observedRegistry.mutationVersion)) observedRegistry.mutationVersion = 0;
   if (!(observedRegistry.observedDocs instanceof WeakSet)) observedRegistry.observedDocs = new WeakSet();
   if (!Array.isArray(observedRegistry.observers)) observedRegistry.observers = [];
+  const rawObservers = observedRegistry.observers as unknown[];
+  if (rawObservers.some((entry) => !entry || typeof entry !== 'object' || !('doc' in entry) || !('observer' in entry))) {
+    for (const entry of rawObservers) {
+      try { (entry as { disconnect?: () => void })?.disconnect?.(); } catch { /* already detached */ }
+    }
+    observedRegistry.observers = [];
+    observedRegistry.observedDocs = new WeakSet();
+  }
+  const documentIsActive = (doc: Document) => {
+    if (doc === document) return true;
+    try {
+      const frame = doc.defaultView?.frameElement as HTMLIFrameElement | null | undefined;
+      if (!frame || frame.isConnected === false) return false;
+      return frame.contentDocument === doc;
+    } catch { return false; }
+  };
+  const liveObservers: ObservedMutationObserver[] = [];
+  for (const entry of observedRegistry.observers) {
+    if (documentIsActive(entry.doc)) liveObservers.push(entry);
+    else {
+      try { entry.observer.disconnect(); } catch { /* observer already inert */ }
+    }
+  }
+  if (liveObservers.length !== observedRegistry.observers.length) {
+    observedRegistry.observers = liveObservers;
+    observedRegistry.observedDocs = new WeakSet(liveObservers.map((entry) => entry.doc));
+  }
   const ensureMutationObserver = (doc: Document | null | undefined) => {
     if (!doc || observedRegistry!.observedDocs.has(doc)) return;
     const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
@@ -456,7 +487,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       const observer = new Observer(() => { observedRegistry!.mutationVersion += 1; });
       observer.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
       observedRegistry!.observedDocs.add(doc);
-      observedRegistry!.observers.push(observer);
+      observedRegistry!.observers.push({ doc, observer });
     } catch { /* same-origin document may disappear while observation is being built */ }
   };
   ensureMutationObserver(document);
@@ -466,6 +497,36 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   while (observedRegistry.history.size > 512) observedRegistry.history.delete(observedRegistry.history.keys().next().value as string);
   const observationGeneration = `${observedRegistry.nonce}-${observedRegistry.generation.toString(36)}`;
   const refByElement = new WeakMap<Element, string>();
+  const structuralContextOf = (element: Element) => {
+    let group: Element | null = element.parentElement;
+    for (let depth = 0; group && depth < 8; depth += 1, group = group.parentElement) {
+      const candidateRole = trim(group.getAttribute('role')).toLowerCase();
+      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(candidateRole)
+        || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    }
+    let repeatedElement = element;
+    let peers: Element[] = [element];
+    for (let current: Element | null = element, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = trim(current.getAttribute('role')).toLowerCase();
+      const candidates = current.parentElement ? Array.from(current.parentElement.children).filter((peer) =>
+        peer.tagName === current!.tagName && trim(peer.getAttribute('role')).toLowerCase() === role
+      ) : [current];
+      if (candidates.length > 1) { repeatedElement = current; peers = candidates; break; }
+    }
+    const path: string[] = [];
+    for (let current: Element | null = element.parentElement, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
+      const label = trim(current.getAttribute('aria-label') || current.getAttribute('data-testid') || current.id || '', 80);
+      path.unshift(`${current.tagName.toLowerCase()}${label ? `:${label}` : ''}`);
+    }
+    return {
+      group,
+      groupRole: group ? trim(group.getAttribute('role')).toLowerCase() || group.tagName.toLowerCase() : '',
+      groupName: group ? trim(group.getAttribute('aria-label') || group.getAttribute('title') || group.id || '', 160) : '',
+      repeatedOrdinal: Math.max(1, peers.indexOf(repeatedElement) + 1),
+      repeatedCount: peers.length,
+      ancestorPath: path.join('>')
+    };
+  };
   const observedRefOf = (element: Element) => {
     ensureMutationObserver(element.ownerDocument);
     const existing = refByElement.get(element);
@@ -473,6 +534,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const ref = `b-${observationGeneration}-${(++observedRegistry!.next).toString(36)}`;
     refByElement.set(element, ref);
     observedRegistry!.refs.set(ref, element);
+    const structural = structuralContextOf(element);
     observedRegistry!.history.set(ref, {
       tag: element.tagName.toLowerCase(),
       id: trim(element.id, 160),
@@ -480,28 +542,92 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       semanticName: '',
       ariaLabel: trim(element.getAttribute('aria-label'), 240),
       name: trim(element.getAttribute('name'), 240),
-      text: trim(element.textContent, 240)
+      text: trim(element.textContent, 240),
+      groupRole: structural.groupRole,
+      groupName: structural.groupName,
+      repeatedOrdinal: structural.repeatedOrdinal,
+      repeatedCount: structural.repeatedCount,
+      ancestorPath: structural.ancestorPath
     });
     return ref;
+  };
+  let ariaOwnersById: Map<string, Element[]> | undefined;
+  const ariaOwnerIndex = () => {
+    if (ariaOwnersById) return ariaOwnersById;
+    ariaOwnersById = new Map();
+    for (const { element: owner } of deepQuery('[aria-controls],[aria-owns]', 2000)) {
+      const ids = `${owner.getAttribute('aria-controls') ?? ''} ${owner.getAttribute('aria-owns') ?? ''}`.split(/\s+/).filter(Boolean).slice(0, 32);
+      for (const id of ids) ariaOwnersById.set(id, [...(ariaOwnersById.get(id) ?? []), owner]);
+    }
+    return ariaOwnersById;
   };
   const relationshipOf = (element: Element) => {
     const parent = element.parentElement;
     const ownText = trim((element as HTMLElement).innerText ?? element.textContent, 240);
     let contextLabel = '';
-    for (let current = parent, depth = 0; current && depth < 4; current = current.parentElement, depth += 1) {
+    const ancestorContextLabels: string[] = [];
+    for (let current = parent, depth = 0; current && depth < 5; current = current.parentElement, depth += 1) {
       const candidate = trim((current as HTMLElement).innerText ?? current.textContent, 240);
-      if (candidate && candidate !== ownText && candidate.length <= 240) { contextLabel = candidate; break; }
+      if (candidate && candidate !== ownText && candidate.length <= 240) {
+        if (!contextLabel) contextLabel = candidate;
+        if (!ancestorContextLabels.includes(candidate) && ancestorContextLabels.length < 4) ancestorContextLabels.push(candidate);
+      }
+      const classes = trim(current.getAttribute('class'), 160).split(/\s+/).filter(Boolean).slice(0, 4);
+      const repeatedItem = classes.length > 0 && Boolean(current.parentElement && Array.from(current.parentElement.children).some((sibling) => {
+        if (sibling === current || sibling.tagName !== current.tagName) return false;
+        const siblingClasses = trim(sibling.getAttribute('class'), 160).split(/\s+/).filter(Boolean);
+        return classes.every((name) => siblingClasses.includes(name));
+      }));
+      if (repeatedItem) break;
     }
-    let group: Element | null = parent;
-    for (let depth = 0; group && depth < 6; depth += 1, group = group.parentElement) {
-      const groupRole = trim(group.getAttribute('role')).toLowerCase();
-      if (['menu','menubar','tablist','tabpanel','tree','treeitem','list','listbox','grid','row','group','form','dialog','article','feed'].includes(groupRole) || ['FORM','LI','TR','TD','SECTION','ARTICLE','NAV'].includes(group.tagName)) break;
+    const structural = structuralContextOf(element);
+    const ownedContainer = (() => {
+      let current: Element | null = element;
+      for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+        if (!current.id) continue;
+        const owners = ariaOwnerIndex().get(current.id) ?? [];
+        if (owners.length === 1) return { container: current, owner: owners[0]! };
+      }
+      return undefined;
+    })();
+    const hierarchy: Array<{ ref: string; role: string; name: string; relationship: 'dom' | 'aria-owner' }> = [];
+    const appendHierarchy = (candidate: Element, relationship: 'dom' | 'aria-owner') => {
+      const role = roleOf(candidate);
+      const name = accessibleName(candidate);
+      if (!role && !name) return;
+      const ref = observedRefOf(candidate);
+      if (!hierarchy.some((entry) => entry.ref === ref)) hierarchy.push({ ref, role, name, relationship });
+    };
+    const domAncestors: Element[] = [];
+    for (let current = element.parentElement, depth = 0; current && depth < 6; current = current.parentElement, depth += 1) {
+      const role = roleOf(current);
+      if (['menu','menubar','menuitem','tree','treeitem','listbox','option','group','dialog','navigation'].includes(role)) domAncestors.unshift(current);
     }
+    for (const candidate of domAncestors) appendHierarchy(candidate, 'dom');
+    if (ownedContainer) appendHierarchy(ownedContainer.owner, 'aria-owner');
+    const group = structural.group;
+    const siblingLabels = parent ? Array.from(parent.children).slice(0, 12)
+      .map((sibling) => trim(sibling.getAttribute('aria-label') || (sibling as HTMLElement).innerText || sibling.textContent, 80))
+      .filter(Boolean) : [];
     const children = Array.from(element.children ?? []).slice(0, 12).map((child) => observedRefOf(child));
     return {
       ...(parent ? { parentRef: observedRefOf(parent) } : {}),
       ...(group ? { groupRef: observedRefOf(group) } : {}),
       ...(contextLabel ? { contextLabel } : {}),
+      ...(ancestorContextLabels.length ? { ancestorContextLabels } : {}),
+      ...(structural.groupRole ? { groupRole: structural.groupRole } : {}),
+      ...(structural.groupName ? { groupName: structural.groupName } : {}),
+      ...(siblingLabels.length ? { siblingLabels } : {}),
+      repeatedOrdinal: structural.repeatedOrdinal,
+      repeatedCount: structural.repeatedCount,
+      ordinalWithinRole: structural.repeatedOrdinal,
+      semanticPath: structural.ancestorPath,
+      ...(hierarchy.length ? {
+        hierarchyPath: hierarchy,
+        logicalParentRef: hierarchy[hierarchy.length - 1]!.ref,
+        logicalParentRole: hierarchy[hierarchy.length - 1]!.role,
+        logicalParentName: hierarchy[hierarchy.length - 1]!.name
+      } : {}),
       ...(children.length ? { children } : {}),
       ordinal: parent ? Array.from(parent.children).indexOf(element) + 1 : 1,
       depth: (() => { let d = 0; for (let current = element.parentElement; current; current = current.parentElement) d += 1; return d; })()
@@ -551,7 +677,22 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       if (priorGroupElement && (priorGroupElement === element || priorGroupElement.contains(element) || element.contains(priorGroupElement))) score += 650;
     } catch { /* detached/cross-realm relationship changed */ }
     if (focus.role && role.toLowerCase() === focus.role) score += 300;
-    if (focus.text && text.toLowerCase().includes(focus.text)) score += 350;
+    if (focus.text) {
+      const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const desired = normalized(focus.text);
+      const structural = structuralContextOf(element);
+      const actual = normalized([text, structural.groupName, structural.ancestorPath].filter(Boolean).join(' '));
+      if (actual.includes(desired)) score += 350;
+      const desiredTokens = new Set(desired.split(' ').filter(Boolean));
+      const actualTokens = new Set(actual.split(' ').filter(Boolean));
+      const overlap = [...desiredTokens].filter((token) => actualTokens.has(token)).length;
+      if (desiredTokens.size > 0) score += Math.round(180 * overlap / desiredTokens.size);
+      const ordinalWords: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+      const wordOrdinal = Object.entries(ordinalWords).find(([word]) => desiredTokens.has(word))?.[1];
+      const numericOrdinal = Number(desired.match(/(?:^|\s)(\d+)(?:st|nd|rd|th)?(?:\s|$)/)?.[1]);
+      const wantedOrdinal = wordOrdinal ?? (Number.isSafeInteger(numericOrdinal) && numericOrdinal > 0 ? numericOrdinal : undefined);
+      if (wantedOrdinal && structural.repeatedOrdinal === wantedOrdinal) score += 260;
+    }
     const region = focus.region;
     if (region) {
       const right = geometry.x + geometry.width; const bottom = geometry.y + geometry.height;
@@ -606,6 +747,33 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     if (tag === 'rect') return { svgRect: { coordinateSpace: 'svg-local', x: finiteAttr('x'), y: finiteAttr('y'), width: finiteAttr('width'), height: finiteAttr('height'), rx: finiteAttr('rx'), ry: finiteAttr('ry') }, ...grid };
     return grid;
   };
+  const perceptibleStateOf = (element: Element) => {
+    const input = element as HTMLInputElement | HTMLOptionElement;
+    const style = styleOf(element);
+    const stateTokenPattern = /^(?:active|checked|chosen|complete|current|disabled|empty|error|expanded|failed|filled|focused|healthy|highlighted|inactive|invalid|loading|occupied|open|pending|pressed|ready|selected|success|today|warning)$/i;
+    const classTokens = trim(element.getAttribute('class'), 240).split(/\s+/).filter((token) => stateTokenPattern.test(token)).slice(0, 12);
+    const rawDataState = trim(element.getAttribute('data-state') || element.getAttribute('data-status'), 80);
+    const dataState = stateTokenPattern.test(rawDataState) ? rawDataState : '';
+    const text = readableText(element, 240);
+    const value = element.tagName === 'INPUT' && trim(element.getAttribute('type')).toLowerCase() === 'password'
+      ? ''
+      : trim((input as HTMLInputElement).value || element.getAttribute('aria-valuetext') || element.getAttribute('aria-valuenow'), 240);
+    return {
+      ...(text ? { text } : {}),
+      ...(value ? { value } : {}),
+      ...(element.hasAttribute('aria-checked') || ['checkbox', 'radio'].includes(trim(element.getAttribute('type')).toLowerCase()) ? { checked: element.hasAttribute('aria-checked') ? element.getAttribute('aria-checked') === 'true' : Boolean((input as HTMLInputElement).checked) } : {}),
+      ...(element.hasAttribute('aria-selected') || element.tagName === 'OPTION' ? { selected: element.hasAttribute('aria-selected') ? element.getAttribute('aria-selected') === 'true' : Boolean((input as HTMLOptionElement).selected) } : {}),
+      ...(element.hasAttribute('aria-expanded') ? { expanded: element.getAttribute('aria-expanded') === 'true' } : {}),
+      ...(element.hasAttribute('aria-pressed') ? { pressed: element.getAttribute('aria-pressed') === 'true' } : {}),
+      ...(element.hasAttribute('aria-current') ? { current: trim(element.getAttribute('aria-current'), 80) } : {}),
+      ...(dataState ? { status: dataState } : {}),
+      ...(classTokens.length ? { stateTokens: classTokens } : {}),
+      colors: {
+        color: trim(style?.color, 64).toLowerCase(), background: trim(style?.backgroundColor, 64).toLowerCase(),
+        fill: trim(style?.fill, 64).toLowerCase(), stroke: trim(style?.stroke, 64).toLowerCase()
+      }
+    };
+  };
   const legacySliderRoot = (element: Element) => {
     let current: Element | null = element;
     for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
@@ -624,24 +792,25 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const root = legacySliderRoot(element);
     const parent = root?.parentElement;
     const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
-    for (const sibling of Array.from(parent?.children ?? [])) {
-      if (sibling === root) continue;
-      const candidate = trim(sibling.textContent, 80);
-      if (numeric.test(candidate)) return candidate;
-    }
-    return '';
+    const siblings = Array.from(parent?.children ?? []);
+    const rootIndex = root ? siblings.indexOf(root) : -1;
+    return siblings
+      .map((sibling, index) => ({ index, candidate: sibling === root ? '' : trim(sibling.textContent, 80) }))
+      .filter(entry => numeric.test(entry.candidate))
+      .sort((left, right) => Math.abs(left.index - rootIndex) - Math.abs(right.index - rootIndex)
+        || Number(left.index < rootIndex) - Number(right.index < rootIndex))[0]?.candidate ?? '';
   };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
     const seenScopes = new Set<unknown>();
     let scanned = 0;
     const visit = (scope: Document | ShadowRoot | Element, frameDepth: number, shadowDepth: number) => {
-      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 5000) return;
+      if (!scope || seenScopes.has(scope) || found.length >= max || scanned >= 50_000) return;
       seenScopes.add(scope);
       let elements: Element[] = [];
-      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 2500); } catch { return; }
+      try { elements = Array.from(scope.querySelectorAll('*')).slice(0, 50_000); } catch { return; }
       for (const element of elements) {
-        if (found.length >= max || scanned++ >= 5000) break;
+        if (found.length >= max || scanned++ >= 50_000) break;
         try { if (element.matches(selector)) found.push({ element, context: { frameDepth, shadowDepth } }); } catch { /* invalid selector */ }
         const shadow = (element as Element & { shadowRoot?: ShadowRoot | null }).shadowRoot;
         if (shadow && shadowDepth < 8) visit(shadow, frameDepth, shadowDepth + 1);
@@ -660,11 +829,13 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   const styleOf = (element: Element) => viewOf(element)?.getComputedStyle?.(element);
   const visible = (element: Element) => contract.stateOf(element).visible;
   const readableText = (element: Element, max = 180) => {
+    if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName)) return '';
     const style = styleOf(element);
     const fontSize = Number.parseFloat(String(style?.fontSize ?? ''));
     if (Number.isFinite(fontSize) && fontSize <= 0) return '';
     if (style && Number(style.opacity) === 0) return '';
-    return trim(element.textContent, max);
+    const renderedText = (element as HTMLElement).innerText;
+    return trim(typeof renderedText === 'string' ? renderedText : element.textContent, max);
   };
   const cssEscape = (value: string) => {
     const css = (viewOf(document.documentElement) as Window & { CSS?: { escape?: (input: string) => string } } | undefined)?.CSS;
@@ -731,6 +902,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -745,26 +917,67 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     }
     return '';
   };
-  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 320);
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
+  const hoverPointerSelectors = (() => {
+    const selectors: string[] = [];
+    const visitRules = (rules: CSSRuleList | ArrayLike<CSSRule> | undefined, depth = 0) => {
+      if (!rules || depth > 4 || selectors.length >= 256) return;
+      for (const rule of Array.from(rules).slice(0, 512)) {
+        if (selectors.length >= 256) break;
+        const styleRule = rule as CSSStyleRule;
+        const nested = rule as CSSGroupingRule;
+        try {
+          if (typeof styleRule.selectorText === 'string' && styleRule.style?.cursor === 'pointer') {
+            for (const raw of styleRule.selectorText.split(',')) {
+              const selector = raw.replace(/:(?:hover|focus|active)(?:\([^)]*\))?/gi, '').trim();
+              if (selector && selector.length <= 512 && !selectors.includes(selector)) selectors.push(selector);
+            }
+          }
+          if (nested.cssRules) visitRules(nested.cssRules, depth + 1);
+        } catch { /* cross-origin or unsupported stylesheet rule */ }
+      }
+    };
+    for (const sheet of Array.from(document.styleSheets ?? []).slice(0, 128)) {
+      try { visitRules(sheet.cssRules); } catch { /* cross-origin stylesheet stays opaque */ }
+    }
+    return selectors;
+  })();
+  const pointerStyled = (element: Element) => {
+    const style = viewOf(element)?.getComputedStyle?.(element);
+    if (style?.cursor === 'pointer') return true;
+    return hoverPointerSelectors.some((selector) => {
+      try { return element.matches(selector); } catch { return false; }
+    });
+  };
+  const semanticControls = deepQuery('button,a[href],input,textarea,select,option,summary,[role],[aria-valuenow],[tabindex],[contenteditable="true"]', 50_000);
   const seenControls = new Set(semanticControls.map(({ element }) => element));
-  const pointerControls = deepQuery('*', 600)
+  const pointerControls = deepQuery('*', 50_000)
     .filter(({ element }) => {
       if (seenControls.has(element) || !visible(element)) return false;
-      const style = viewOf(element)?.getComputedStyle?.(element);
-      return contract.stateOf(element).actionable
-        && style?.cursor === 'pointer'
-        && Boolean(accessibleName(element));
+      return contract.stateOf(element).actionable && pointerStyled(element);
     });
   const controlCandidates = [...semanticControls, ...pointerControls]
-    .filter(({ element }) => visible(element))
+    .filter(({ element }) => visible(element) || (editableElement(element) && element.ownerDocument?.activeElement === element))
     .map(({ element, context }) => {
       const state = contract.stateOf(element);
       const semanticRole = roleOf(element);
-      const role = semanticRole || (viewOf(element)?.getComputedStyle?.(element)?.cursor === 'pointer' ? 'pointer' : '');
+      const role = semanticRole || (pointerStyled(element) ? 'pointer' : '');
       const semanticName = accessibleName(element);
       const ref = observedRefOf(element);
+      const relationship = relationshipOf(element);
       const priorFingerprint = observedRegistry!.history.get(ref)!;
-      observedRegistry!.history.set(ref, { ...priorFingerprint, role, semanticName });
+      observedRegistry!.history.set(ref, {
+        ...priorFingerprint, role, semanticName,
+        groupRole: String(relationship.groupRole ?? ''), groupName: String(relationship.groupName ?? ''),
+        repeatedOrdinal: Number(relationship.repeatedOrdinal), repeatedCount: Number(relationship.repeatedCount),
+        ancestorPath: String(relationship.semanticPath ?? '')
+      });
       const rect = element.getBoundingClientRect();
       const inputType = element.tagName === 'INPUT' ? trim(element.getAttribute('type') || 'text').toLowerCase() : '';
       const control = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLOptionElement;
@@ -788,6 +1001,10 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         name: semanticName,
         type: inputType,
         semanticType: inputType || semanticRole || element.tagName.toLowerCase(),
+        ...(editableElement(element) ? { editable: true } : {}),
+        ...(!state.visible ? { visuallyHidden: true } : {}),
+        ...(!state.visible && editableElement(element) && element.ownerDocument?.activeElement === element ? { keyboardSink: true } : {}),
+        ...(inputType === 'date' ? { nativeValueFormat: 'YYYY-MM-DD' } : {}),
         ...(readableValue ? { value: readableValue } : {}),
         ...(autocomplete ? { autocomplete: true, ...(ariaAutocomplete ? { autocompleteMode: ariaAutocomplete } : {}), ...(popupId ? { popupId } : {}) } : {}),
         ...(['checkbox', 'radio'].includes(inputType) ? { checked: Boolean((element as HTMLInputElement).checked) } : element.hasAttribute('aria-checked') ? { checked: element.getAttribute('aria-checked') === 'true' } : {}),
@@ -802,9 +1019,10 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}),
         disabled: state.disabled,
         actionable: state.actionable,
+        perceptibleState: perceptibleStateOf(element),
         ...(state.pointerBlocked ? { pointerBlocked: true } : {}),
         ...(state.occluded ? { occluded: true } : {}),
-        ...relationshipOf(element),
+        ...relationship,
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         geometry: geometryOf(element, context),
         ...(semanticRole === 'slider' ? {
@@ -818,7 +1036,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         context
       };
     })
-    .filter((item) => (item.role && (item.name || item.role === 'slider')) || item.href)
+    .filter((item) => (item.role && (item.name || item.editable === true || item.role === 'slider' || item.role === 'pointer' || item.keyboardSink === true)) || item.href)
     .sort((left, right) => {
       const score = (item: typeof left) => item._focusScore
         + (item.actionable ? 50 : 0)
@@ -832,7 +1050,7 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
         || left.selector.localeCompare(right.selector);
     });
   const controls = controlCandidates.slice(budget.controlOffset, budget.controlOffset + budget.maxControls).map(({ _focusScore, ...item }) => item);
-  const visibleTextCandidates = deepQuery('*', 600)
+  const visibleTextCandidates = deepQuery('*', 50_000)
     .filter(({ element }) => visible(element)
       && Array.from(element.children ?? []).length === 0
       && Boolean(readableText(element)))
@@ -869,17 +1087,22 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
       context
     };
   });
-  const visualCandidates = deepQuery('*', 600).flatMap(({ element, context }) => {
+  const visualCandidates = deepQuery('*', 50_000).flatMap(({ element, context }) => {
     const state = contract.stateOf(element);
     if (!state.visible) return [];
     const style = viewOf(element)?.getComputedStyle?.(element);
     const colors = {
+      color: trim(style?.color, 64).toLowerCase(),
       background: trim(style?.backgroundColor, 64).toLowerCase(),
       fill: trim(style?.fill, 64).toLowerCase(),
-      stroke: trim(style?.stroke, 64).toLowerCase()
+      stroke: trim(style?.stroke, 64).toLowerCase(),
+      border: trim(style?.borderColor, 64).toLowerCase(),
+      outline: trim(style?.outlineColor, 64).toLowerCase()
     };
+    const scroll = scrollStateOf(element);
+    const scrollable = Boolean(scroll?.canScrollY || scroll?.canScrollX);
     const meaningful = Object.values(colors).some((color) => color && color !== 'none' && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)');
-    if (!meaningful) return [];
+    if (!meaningful && !scrollable) return [];
     const rect = element.getBoundingClientRect();
     if (rect.width * rect.height < 16) return [];
     const role = roleOf(element);
@@ -887,12 +1110,17 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
     const interactive = Boolean(pointer || role || ['BUTTON', 'A', 'INPUT', 'SUMMARY'].includes(element.tagName));
     const effectiveRole = role || (pointer ? 'pointer' : '');
     const geometry = geometryOf(element, context);
-    const scroll = scrollStateOf(element);
-    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), colors, opacity: trim(style?.opacity, 32), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
+    const area = Math.round(rect.width * rect.height);
+    const viewportWidth = Number(viewOf(element)?.innerWidth ?? 0); const viewportHeight = Number(viewOf(element)?.innerHeight ?? 0);
+    const zone = `${rect.y + rect.height / 2 < viewportHeight / 3 ? 'top' : rect.y + rect.height / 2 > viewportHeight * 2 / 3 ? 'bottom' : 'middle'}-${rect.x + rect.width / 2 < viewportWidth / 3 ? 'left' : rect.x + rect.width / 2 > viewportWidth * 2 / 3 ? 'right' : 'center'}`;
+    const numericText = trim((element as HTMLInputElement).value || element.getAttribute('aria-valuenow') || readableText(element), 80);
+    const numericValue = /^-?(?:\d+\.?\d*|\.\d+)$/.test(numericText) ? Number(numericText) : undefined;
+    return [{ ref: observedRefOf(element), tag: element.tagName.toLowerCase(), primitive: element.tagName.toLowerCase(), selector: selectorOf(element), name: accessibleName(element), role: effectiveRole, ...relationshipOf(element), ...visualFactsOf(element), perceptibleState: perceptibleStateOf(element), colors, opacity: trim(style?.opacity, 32), fontSize: trim(style?.fontSize, 32), area, aspectRatio: rect.height > 0 ? Math.round((rect.width / rect.height) * 1000) / 1000 : undefined, viewportZone: zone, ...(numericValue !== undefined ? { numericValue } : {}), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, geometry, ...(scroll ? { scrollable: scroll.canScrollY || scroll.canScrollX, scroll } : {}), actionable: state.actionable && interactive, ...(state.occluded ? { occluded: true } : {}), _focusScore: focusScoreOf(element, effectiveRole, accessibleName(element) || readableText(element), geometry), context }];
   }).sort((left, right) => {
     const score = (item: typeof left) => item._focusScore
       + (item.actionable ? 50 : 0)
       + (['circle', 'rect', 'polygon', 'path', 'ellipse', 'svg'].includes(item.tag) ? 40 : 0)
+      + (item.scrollable ? 60 : 0)
       + (item.role ? 10 : 0)
       + (item.name ? 5 : 0);
     const leftArea = left.rect.width * left.rect.height;
@@ -938,6 +1166,118 @@ export function semanticSnapshotFunction(options: Partial<BrowserObservationOpti
   };
 }
 
+export function dateSelectFunction(
+  input: { target: { ref?: string }; value: unknown },
+  contract = browserDomContractFunction()
+) {
+  const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(input.value ?? ''));
+  if (!match) return { ok: false, recoverable: true, error: 'select_date requires an ISO YYYY-MM-DD value.' };
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    return { ok: false, recoverable: true, error: 'select_date received an invalid calendar date.' };
+  }
+  const ref = input.target?.ref;
+  if (!ref) return { ok: false, error: 'select_date requires an observed target ref.' };
+  const registryKey = Symbol.for('mecord.browser.observed-targets.v2');
+  const registry = (globalThis as typeof globalThis & { [key: symbol]: { refs?: Map<string, Element> } | undefined })[registryKey];
+  const element = registry?.refs?.get(ref);
+  if (!element || element.isConnected === false) return { ok: false, staleRef: true, error: 'Observed date target is stale; re-observe before retrying.' };
+  const state = contract.stateOf(element);
+  if (!state.rendered || state.disabled) return { ok: false, error: 'Observed date target is not currently usable.' };
+  if (element.tagName !== 'INPUT') return { ok: false, recoverable: true, error: 'select_date requires an observed input control.' };
+  const control = element as HTMLInputElement;
+  const view = element.ownerDocument?.defaultView ?? window;
+  const emitValueEvents = () => {
+    control.dispatchEvent(new view.Event('input', { bubbles: true }));
+    control.dispatchEvent(new view.Event('change', { bubbles: true }));
+  };
+  const inputType = trim(element.getAttribute('type') || 'text').toLowerCase();
+  if (inputType === 'date') {
+    control.focus?.();
+    control.value = String(input.value);
+    emitValueEvents();
+    return control.value === input.value
+      ? { ok: true, matched: { ref, role: 'textbox', name: trim(element.getAttribute('aria-label') || element.getAttribute('name') || element.id) }, after: { value: control.value, date: String(input.value), widget: 'native-date' } }
+      : { ok: false, error: 'Native date input postcondition failed.', expected: input.value, actual: control.value };
+  }
+
+  control.focus?.();
+  control.click?.();
+  const visible = (candidate: Element) => contract.stateOf(candidate).visible;
+  const roots = Array.from(element.ownerDocument?.querySelectorAll?.('.ui-datepicker,[role="dialog"],[role="grid"]') ?? [])
+    .filter((candidate) => visible(candidate));
+  const root = roots.find((candidate) => candidate.matches?.('.ui-datepicker'))
+    ?? roots.find((candidate) => candidate.querySelector?.('.ui-datepicker-calendar'))
+    ?? null;
+  if (!root) return { ok: false, recoverable: true, error: 'No supported visible calendar widget was associated with the observed input.' };
+
+  const months: Record<string, number> = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+  };
+  const readMonth = () => {
+    const monthNode = root.querySelector?.('.ui-datepicker-month');
+    const yearNode = root.querySelector?.('.ui-datepicker-year');
+    const monthNumber = months[trim(monthNode?.textContent).toLowerCase()];
+    const yearNumber = Number(trim(yearNode?.textContent));
+    return Number.isSafeInteger(monthNumber) && Number.isSafeInteger(yearNumber)
+      ? { month: monthNumber, year: yearNumber }
+      : undefined;
+  };
+  let displayed = readMonth();
+  if (!displayed) return { ok: false, recoverable: true, error: 'Visible calendar widget did not expose a readable month/year heading.' };
+  const requestedIndex = year * 12 + (month - 1);
+  let displayedIndex = displayed.year * 12 + (displayed.month - 1);
+  const initialDelta = requestedIndex - displayedIndex;
+  if (Math.abs(initialDelta) > 120) return { ok: false, recoverable: true, error: 'Calendar month navigation exceeds the bounded 120-month select_date window.' };
+
+  let navigationSteps = 0;
+  while (displayedIndex !== requestedIndex) {
+    const forward = requestedIndex > displayedIndex;
+    const selector = forward ? '.ui-datepicker-next' : '.ui-datepicker-prev';
+    const navigation = root.querySelector?.(selector);
+    if (!navigation || !visible(navigation)) return { ok: false, recoverable: true, error: 'Calendar widget did not expose the required month navigation control.' };
+    const beforeIndex = displayedIndex;
+    (navigation as HTMLElement).click?.();
+    const next = readMonth();
+    if (!next) return { ok: false, recoverable: true, error: 'Calendar month heading disappeared during bounded navigation.' };
+    displayedIndex = next.year * 12 + (next.month - 1);
+    const expectedIndex = beforeIndex + (forward ? 1 : -1);
+    if (displayedIndex !== expectedIndex) return { ok: false, recoverable: true, error: 'Calendar month navigation did not advance by exactly one month.' };
+    displayed = next;
+    navigationSteps += 1;
+    if (navigationSteps > 120) return { ok: false, recoverable: true, error: 'Calendar month navigation exceeded its bounded step limit.' };
+  }
+
+  const dayCandidates = Array.from(root.querySelectorAll?.('.ui-datepicker-calendar a') ?? [])
+    .filter((candidate) => visible(candidate)
+      && trim(candidate.textContent) === String(day)
+      && !candidate.parentElement?.classList?.contains('ui-datepicker-other-month'));
+  if (dayCandidates.length !== 1) {
+    return { ok: false, recoverable: true, error: 'Calendar day did not resolve to one unique actionable control.', matches: dayCandidates.length };
+  }
+  (dayCandidates[0] as HTMLElement).click?.();
+
+  const parseActual = (raw: string) => {
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (iso) return { year: Number(iso[1]), month: Number(iso[2]), day: Number(iso[3]) };
+    const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw);
+    if (slash) return { year: Number(slash[3]), month: Number(slash[1]), day: Number(slash[2]) };
+    return undefined;
+  };
+  const actual = parseActual(String(control.value ?? ''));
+  if (!actual || actual.year !== year || actual.month !== month || actual.day !== day) {
+    return { ok: false, error: 'Calendar date postcondition failed.', expected: { year, month, day }, actual: control.value };
+  }
+  return {
+    ok: true,
+    matched: { ref, role: 'textbox', name: trim(element.getAttribute('aria-label') || element.getAttribute('name') || element.id) },
+    after: { value: control.value, date: String(input.value), widget: 'calendar', navigationSteps, displayedMonth: displayed.month, displayedYear: displayed.year }
+  };
+}
+
 export function interactionFunction(input: { operation: string; target: { ref?: string; css?: string; text?: string; role?: string; name?: string; renderedColor?: string }; value: unknown; deltaX?: number; deltaY?: number; key?: string; keys?: string[]; start?: number; end?: number }, contract = browserDomContractFunction()) {
   const trim = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const legacySliderRoot = (element: Element) => {
@@ -955,12 +1295,13 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
   const displayedSliderValue = (element: Element) => {
     const root = legacySliderRoot(element);
     const numeric = /^-?(?:\d+\.?\d*|\.\d+)$/;
-    for (const sibling of Array.from(root?.parentElement?.children ?? [])) {
-      if (sibling === root) continue;
-      const candidate = trim(sibling.textContent);
-      if (numeric.test(candidate)) return candidate;
-    }
-    return '';
+    const siblings = Array.from(root?.parentElement?.children ?? []);
+    const rootIndex = root ? siblings.indexOf(root) : -1;
+    return siblings
+      .map((sibling, index) => ({ index, candidate: sibling === root ? '' : trim(sibling.textContent) }))
+      .filter(entry => numeric.test(entry.candidate))
+      .sort((left, right) => Math.abs(left.index - rootIndex) - Math.abs(right.index - rootIndex)
+        || Number(left.index < rootIndex) - Number(right.index < rootIndex))[0]?.candidate ?? '';
   };
   const deepQuery = (selector: string, max = 1000) => {
     const found: Array<{ element: Element; context: { frameDepth: number; shadowDepth: number } }> = [];
@@ -1025,6 +1366,7 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     const tag = element.tagName;
     if (tag === 'A' && element.hasAttribute('href')) return 'link';
     if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return 'textbox';
     if (tag === 'TEXTAREA') return 'textbox';
     if (tag === 'SELECT') return 'combobox';
     if (tag === 'OPTION') return 'option';
@@ -1039,7 +1381,16 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     }
     return '';
   };
+  const editableElement = (element: Element) => {
+    if ((element as HTMLElement).isContentEditable === true || trim(element.getAttribute('contenteditable')).toLowerCase() === 'true') return true;
+    if (element.tagName === 'TEXTAREA') return true;
+    if (element.tagName !== 'INPUT') return false;
+    const type = trim(element.getAttribute('type') || 'text').toLowerCase();
+    return !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes(type);
+  };
   const visible = (element: Element) => { const state = contract.stateOf(element); return state.visible && !state.pointerBlocked && !state.occluded; };
+  const eligibleForOperation = (element: Element) => visible(element)
+    || (input.operation === 'focus' && editableElement(element) && element.ownerDocument?.activeElement === element);
   const normalizeColor = (raw: string) => {
     const probe = document.createElement?.('span');
     if (!probe) return trim(raw).toLowerCase();
@@ -1079,7 +1430,7 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     : deepQuery(selector, 1000);
   const desiredColor = input.target.renderedColor ? normalizeColor(input.target.renderedColor) : '';
   let matching = candidates.filter(({ element }) => {
-    if (!visible(element)) return false;
+    if (!eligibleForOperation(element)) return false;
     if (input.target.text && !trim(element.textContent).toLowerCase().includes(input.target.text.toLowerCase())) return false;
     if (input.target.role && roleOf(element) !== input.target.role.toLowerCase()) return false;
     if (input.target.name && nameOf(element).toLowerCase() !== input.target.name.toLowerCase()) return false;
@@ -1161,36 +1512,34 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
       if (selectedStart !== start || selectedEnd !== end) return { ok: false, error: 'Text selection postcondition failed.', expected: { start, end }, actual: { start: selectedStart, end: selectedEnd } };
       return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
     }
-    if (control.isContentEditable === true) {
-      const textNodes: Text[] = [];
-      const visit = (node: Node) => {
-        if (textNodes.length >= 2000) return;
-        if (node.nodeType === 3) { textNodes.push(node as Text); return; }
-        for (const child of Array.from(node.childNodes ?? [])) visit(child);
-      };
-      visit(element);
-      const totalLength = textNodes.reduce((sum, node) => sum + (node.data?.length ?? 0), 0);
-      if (end > totalLength) return { ok: false, error: 'Text selection range exceeds editable text.', length: totalLength };
-      const locate = (offset: number) => {
-        let remaining = offset;
-        for (const node of textNodes) {
-          const length = node.data?.length ?? 0;
-          if (remaining <= length) return { node, offset: remaining };
-          remaining -= length;
-        }
-        const last = textNodes[textNodes.length - 1];
-        return last ? { node: last, offset: last.data?.length ?? 0 } : undefined;
-      };
-      const from = locate(start); const to = locate(end);
-      if (!from || !to) return { ok: false, error: 'Editable text does not contain a selectable text node.' };
-      const range = element.ownerDocument.createRange();
-      range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
-      const selection = element.ownerDocument.getSelection?.();
-      selection?.removeAllRanges(); selection?.addRange(range);
-      if (!selection || selection.rangeCount !== 1 || selection.toString().length !== end - start) return { ok: false, error: 'Editable text selection postcondition failed.' };
-      return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
-    }
-    return { ok: false, error: 'Matched element does not support bounded text selection.' };
+    const textNodes: Text[] = [];
+    const visit = (node: Node) => {
+      if (textNodes.length >= 2000) return;
+      if (node.nodeType === 3) { textNodes.push(node as Text); return; }
+      for (const child of Array.from(node.childNodes ?? [])) visit(child);
+    };
+    visit(element);
+    const totalLength = textNodes.reduce((sum, node) => sum + (node.data?.length ?? 0), 0);
+    if (end > totalLength) return { ok: false, error: 'Text selection range exceeds observed text.', length: totalLength };
+    const locate = (offset: number) => {
+      let remaining = offset;
+      for (const node of textNodes) {
+        const length = node.data?.length ?? 0;
+        if (remaining <= length) return { node, offset: remaining };
+        remaining -= length;
+      }
+      const last = textNodes[textNodes.length - 1];
+      return last ? { node: last, offset: last.data?.length ?? 0 } : undefined;
+    };
+    const from = locate(start); const to = locate(end);
+    if (!from || !to) return { ok: false, error: 'Matched text container does not expose selectable text nodes.' };
+    if (control.isContentEditable === true) control.focus?.();
+    const range = element.ownerDocument.createRange();
+    range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
+    const selection = element.ownerDocument.getSelection?.();
+    selection?.removeAllRanges(); selection?.addRange(range);
+    if (!selection || selection.rangeCount !== 1 || selection.toString().length !== end - start) return { ok: false, error: 'DOM text selection postcondition failed.' };
+    return { ok: true, matched: { tag: element.tagName.toLowerCase(), ...before, context }, after: { ...before, selection: { start, end } } };
   }
 
   if (input.operation === 'verify_value') {
@@ -1243,9 +1592,36 @@ export function interactionFunction(input: { operation: string; target: { ref?: 
     const endY = start.y + deltaY;
     dispatchPointer(element.ownerDocument?.elementFromPoint?.(endX, endY) || element, 'mouseup', endX, endY, 0);
   } else if (input.operation === 'type') {
-    const value = String(input.value ?? '');
+    const requestedValue = String(input.value ?? '');
+    let value = requestedValue;
     const tag = element.tagName;
     if (!(tag === 'INPUT' || tag === 'TEXTAREA' || control.isContentEditable === true)) return { ok: false, error: 'Matched element is not text-editable.' };
+    if (tag === 'INPUT' && trim(element.getAttribute('type') || 'text').toLowerCase() === 'date') {
+      const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(requestedValue);
+      const human = /^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})$/.exec(requestedValue);
+      const validDate = (year: number, month: number, day: number) => {
+        if (!Number.isSafeInteger(year) || !Number.isSafeInteger(month) || !Number.isSafeInteger(day) || month < 1 || month > 12 || day < 1 || day > 31) return false;
+        const probe = new Date(Date.UTC(year, month - 1, day));
+        return probe.getUTCFullYear() === year && probe.getUTCMonth() === month - 1 && probe.getUTCDate() === day;
+      };
+      if (iso) {
+        const year = Number(iso[1]); const month = Number(iso[2]); const day = Number(iso[3]);
+        if (!validDate(year, month, day)) return { ok: false, recoverable: true, error: 'Native date input received an invalid calendar date.' };
+      } else if (human) {
+        const first = Number(human[1]); const second = Number(human[2]); const year = Number(human[3]);
+        const language = trim((element.ownerDocument?.documentElement as Element | undefined)?.getAttribute?.('lang') || element.ownerDocument?.defaultView?.navigator?.language || '').toLowerCase();
+        const dayFirstLocale = /^(en-gb|en-au|en-nz|en-in|fr|de|es|it|pt|nl|ru|ja|zh)/.test(language);
+        let month: number; let day: number;
+        if (first > 12 && second <= 12) { day = first; month = second; }
+        else if (second > 12 && first <= 12) { month = first; day = second; }
+        else if (first <= 12 && second <= 12 && language) { month = dayFirstLocale ? second : first; day = dayFirstLocale ? first : second; }
+        else return { ok: false, recoverable: true, error: 'Native date input requires ISO YYYY-MM-DD or an unambiguous locale-aware date.' };
+        if (!validDate(year, month, day)) return { ok: false, recoverable: true, error: 'Native date input received an invalid calendar date.' };
+        value = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      } else {
+        return { ok: false, recoverable: true, error: 'Native date input requires ISO YYYY-MM-DD or a supported locale-aware numeric date.' };
+      }
+    }
     control.focus?.();
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       const ctor = tag === 'INPUT' ? view.HTMLInputElement : view.HTMLTextAreaElement;

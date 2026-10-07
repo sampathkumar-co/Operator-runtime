@@ -56,6 +56,9 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
   });
   const plannerTerminal = builtinPlannerStateIsTerminal(task);
   const semanticObservationPresent = execution?.records.some((record) => record.observation !== undefined) ?? false;
+  const epistemicallyUnresolved = execution?.records.filter((record) => record.state === 'SUCCEEDED'
+    && record.observation?.schemaVersion === 2
+    && record.observation.epistemicStatus !== 'KNOWN') ?? [];
 
   checks.push({
     name: 'required-nodes-resolved',
@@ -110,6 +113,13 @@ export function verifyTaskCompletion(task: TaskCapsule): { ok: boolean; bundle: 
       });
     }
   }
+  checks.push({
+    name: 'epistemic-state-resolved',
+    ok: epistemicallyUnresolved.length === 0,
+    detail: epistemicallyUnresolved.length === 0
+      ? 'Every successful machine observation is explicitly KNOWN; ambiguity, contradiction, unavailability, and execution uncertainty cannot promote completion.'
+      : `${epistemicallyUnresolved.length} successful action observation(s) remain epistemically unresolved.`
+  });
   checks.push({
     name: 'evidence-present',
     ok: semanticObservationPresent || (execution?.records.some((record) => record.evidence.length > 0) ?? false),

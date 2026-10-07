@@ -48,7 +48,13 @@ function gitText(args) {
 }
 
 function assertTrackedRuntimeSourcesClean() {
-  const status = gitText(['status', '--porcelain=v1', '--untracked-files=no', '--', 'src', 'apps/local-agent/src']);
+  const status = gitText([
+    'status', '--porcelain=v1', '--untracked-files=no', '--',
+    'src',
+    'apps/local-agent/src',
+    'packages/adaptive-intelligence/src',
+    'packages/verified-plan-runtime/src'
+  ]);
   if (status) throw new Error('Runtime source tree contains tracked changes; refusing to bind modified bytes to HEAD.');
 }
 
@@ -114,6 +120,8 @@ await fs.rm(runtimeRoot, { recursive: true, force: true });
 await fs.mkdir(nativeRoot, { recursive: true });
 await compileTrackedTree('src', path.join(appRoot, 'src'));
 await compileTrackedTree('apps/local-agent/src', path.join(appRoot, 'apps', 'local-agent', 'src'));
+await compileTrackedTree('packages/adaptive-intelligence/src', path.join(appRoot, 'packages', 'adaptive-intelligence', 'src'));
+await compileTrackedTree('packages/verified-plan-runtime/src', path.join(appRoot, 'packages', 'verified-plan-runtime', 'src'));
 
 await fs.writeFile(path.join(appRoot, 'package.json'), JSON.stringify({ private: true, type: 'module' }, null, 2) + '\n', 'utf8');
 

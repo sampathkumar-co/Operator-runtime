@@ -7,9 +7,14 @@ import { CRITICAL_RESILIENCE_EVIDENCE } from '../src/core/resilience-evidence.ts
 test('critical resilience claims are bound to implementation symbols and executable fault tests', async () => {
   const expected = new Set([
     'uncertain-effect-crash', 'stale-intent-predispatch', 'approval-replay', 'duplicate-delivery',
-    'process-restart', 'stale-resource-identity', 'verification-false-positive', 'compensation-crash', 'relay-partition'
+    'process-restart', 'stale-resource-identity', 'verification-false-positive', 'compensation-crash', 'relay-partition',
+    'cross-action-resource-quarantine', 'hierarchical-resource-conflict', 'unknown-process-liveness',
+    'snapshot-crash-transaction', 'emergency-stop-mid-dispatch', 'terminal-orphan-restart',
+    'receipt-partial-commit', 'authority-generation-rotation', 'browser-any-target-conflict'
   ]);
   assert.deepEqual(new Set(CRITICAL_RESILIENCE_EVIDENCE.map((entry) => entry.id)), expected);
+  assert.equal(CRITICAL_RESILIENCE_EVIDENCE.length, expected.size);
+  assert.equal(new Set(CRITICAL_RESILIENCE_EVIDENCE.map((entry) => `${entry.executableTestFile}\0${entry.executableTestName}`)).size, expected.size);
 
   for (const entry of CRITICAL_RESILIENCE_EVIDENCE) {
     assert.equal(entry.status, 'EXECUTABLE');

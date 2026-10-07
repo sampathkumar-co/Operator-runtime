@@ -4,10 +4,13 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
-  inspectProcessInstance,
+  observeProcessInstance,
+  observerFromLegacyInspector,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceInspector,
+  type ProcessInstanceObserver,
   validProcessInstance
 } from '../../../src/core/process-instance.ts';
 
@@ -33,8 +36,10 @@ export async function acquireLocalAgentStateInstanceLock(
     token?: string;
     clock?: () => Date;
     processInstance?: ProcessInstanceIdentity;
+    observeProcessInstance?: ProcessInstanceObserver;
+    /** @deprecated Legacy identity-only seam. A null result is UNKNOWN, never confirmed dead. */
     inspectProcessInstance?: ProcessInstanceInspector;
-    /** Compatibility seam for legacy PID-only lock tests and records. */
+    /** @deprecated Test-only PID seam. false is explicit confirmed-dead input from the test. */
     isProcessAlive?: (pid: number) => boolean;
   } = {}
 ): Promise<LocalAgentStateInstanceLock> {
@@ -43,7 +48,8 @@ export async function acquireLocalAgentStateInstanceLock(
   const pid = options.pid ?? process.pid;
   const token = options.token ?? crypto.randomUUID();
   const clock = options.clock ?? (() => new Date());
-  const inspector = options.inspectProcessInstance ?? inspectProcessInstance;
+  const observer = options.observeProcessInstance
+    ?? (options.inspectProcessInstance ? observerFromLegacyInspector(options.inspectProcessInstance) : observeProcessInstance);
   const identity = options.processInstance ?? (pid === process.pid
     ? await currentProcessInstance()
     : { pid, started: `injected:${pid}` });
@@ -84,15 +90,16 @@ export async function acquireLocalAgentStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      const live = options.isProcessAlive
-        ? options.isProcessAlive(existing.pid)
-        : existing.version === 1
-          ? (await inspector(existing.pid)) !== null
-          : sameProcessInstance(existing.processInstance, await inspector(existing.pid));
-      if (live) {
+      const stale = options.isProcessAlive
+        ? !options.isProcessAlive(existing.pid)
+        : processInstanceDefinitelyStale(
+            existing.version === 2 ? existing.processInstance : undefined,
+            await observer(existing.pid)
+          );
+      if (!stale) {
         throw new OperatorError(
           'LOCAL_AGENT_ALREADY_RUNNING',
-          `Another Mecord local agent is already using this state directory (pid ${existing.pid}). Stop the other runtime before starting a new one.`,
+          `Another Mecord local agent may still be using this state directory (pid ${existing.pid}). Ownership is retained unless process death or identity replacement is positively proven.`,
           { details: { pid: existing.pid, stateDir: root } }
         );
       }

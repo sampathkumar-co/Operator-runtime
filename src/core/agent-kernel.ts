@@ -5,7 +5,7 @@ import { kernelVerificationEvidence, verifyActionOutcome } from './action-verifi
 import { evidence } from './evidence.ts';
 import { IntentRegistry } from './intent-registry.ts';
 import { OperatorError } from './errors.ts';
-import { resolvePhysicalResourceKeysForAction } from './resource-identity.ts';
+import { canonicalResourceKeys, resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type {
@@ -28,6 +28,8 @@ export class AgentKernel {
   #journal: ActionTransitionJournal;
   #intents: IntentRegistry;
   #observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
+  #beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
+  #globalAbortSignal?: () => AbortSignal | undefined;
 
   constructor(options: {
     stateDir: string;
@@ -36,12 +38,16 @@ export class AgentKernel {
     journal?: ActionTransitionJournal;
     intents?: IntentRegistry;
     observeResult?: (action: ActionRequest, result: ActionResult) => Promise<void>;
+    beforeProviderDispatch?: (action: ActionRequest, providerName: string, permissions: PermissionProfile) => void | Promise<void>;
+    globalAbortSignal?: () => AbortSignal | undefined;
   }) {
     this.#runtime = options.runtime;
     this.#leases = options.leases;
     this.#journal = options.journal ?? new ActionTransitionJournal(options.stateDir);
     this.#intents = options.intents ?? new IntentRegistry(options.stateDir);
     this.#observeResult = options.observeResult;
+    this.#beforeProviderDispatch = options.beforeProviderDispatch;
+    this.#globalAbortSignal = options.globalAbortSignal;
   }
 
   get journal(): ActionTransitionJournal { return this.#journal; }
@@ -54,6 +60,7 @@ export class AgentKernel {
   ): Promise<ActionResult> {
     const ownerKind = bounded(context.ownerKind ?? inferOwnerKind(action), 128);
     const ownerId = bounded(context.ownerId ?? action.taskId ?? action.id, 512);
+    const executionSignal = combineAbortSignals(context.signal, this.#globalAbortSignal?.());
     const initialIntentFailure = await this.#intentFailure(action, context.recoveryMode);
     if (initialIntentFailure) return initialIntentFailure;
 
@@ -97,6 +104,7 @@ export class AgentKernel {
     }
 
     prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+    if (action.risk !== 'read') prepared = await this.#journal.recoverPendingCompletion(action.id, action);
 
     if (prepared.state === 'COMPLETED' && action.risk !== 'read') {
       const replay = await this.#journal.replayCompleted(action.id);
@@ -161,33 +169,56 @@ export class AgentKernel {
       }
     }
 
+    if (action.risk !== 'read') {
+      const unresolved = await this.#journal.unresolvedMutations();
+      for (const entry of unresolved) {
+        if (!entry.resourceKeys.some((left) => resourceKeys.some((right) => resourceKeysConflict(left, right)))) continue;
+        await this.#leases.quarantine(entry.actionId, entry.resourceKeys);
+      }
+    }
+
     const lease = await this.#leases.acquire(
       `kernel:${ownerKind}:${ownerId}:${crypto.randomUUID()}`,
       resourceKeys,
-      action.risk === 'read' ? 'shared' : 'exclusive'
+      action.risk === 'read' ? 'shared' : 'exclusive',
+      action.risk === 'read' ? {} : { mutationActionId: action.id }
     );
+    let quarantineArmed = false;
+    let retainQuarantine = false;
     try {
       const preDispatchIntentFailure = await this.#intentFailure(action, context.recoveryMode);
       if (preDispatchIntentFailure) return preDispatchIntentFailure;
-      if (context.signal?.aborted) return abortedBeforeDispatch(action);
+      if (executionSignal?.aborted) return abortedBeforeDispatch(action);
 
       let dispatched = false;
       let result = await this.#runtime.execute(action, permissions, {
         ...context,
+        ...(executionSignal ? { signal: executionSignal } : {}),
         onProviderDispatch: async (providerName) => {
-          await context.onProviderDispatch?.(providerName);
+          await this.#beforeProviderDispatch?.(action, providerName, permissions);
+          if (action.risk !== 'read') {
+            await this.#leases.quarantine(action.id, resourceKeys);
+            quarantineArmed = true;
+            retainQuarantine = true;
+          }
           await this.#journal.markDispatched(action.id, providerName);
           dispatched = true;
+          await context.onProviderDispatch?.(providerName);
         }
       });
       let journalEntry = !dispatched && result.error?.executionPhase === 'pre_dispatch'
         ? await this.#journal.defer(action.id, result)
         : await this.#journal.observe(action.id, result);
+      if (quarantineArmed) retainQuarantine = journalEntry.state === 'DISPATCHED' || journalEntry.state === 'UNCERTAIN';
 
       if (!result.ok && action.risk !== 'read' && result.error?.sideEffectState === 'uncertain'
         && result.provider !== 'policy' && result.provider !== 'router') {
-        const reconciliation = await this.#runtime.reconcile(action, result.provider, result, context);
+        const reconciliation = await this.#runtime.reconcile(action, result.provider, result, {
+          ...context,
+          ...(executionSignal ? { signal: executionSignal } : {})
+        });
         journalEntry = await this.#journal.reconcile(action.id, reconciliation);
+        retainQuarantine = journalEntry.state === 'UNCERTAIN';
         result = reconciledResult(action, result, reconciliation);
       }
 
@@ -213,6 +244,7 @@ export class AgentKernel {
       }
       result = { ...result, evidence: [...result.evidence, kernelVerificationEvidence(receipt)] };
       await this.#journal.complete(action.id, receipt.digest, result);
+      retainQuarantine = false;
       if (action.intent && !context.recoveryMode) {
         try {
           await this.#intents.assertExecutable(action.intent);
@@ -231,7 +263,11 @@ export class AgentKernel {
       }
       return result;
     } finally {
-      await lease.release();
+      try {
+        if (quarantineArmed && !retainQuarantine) await this.#leases.clearQuarantine(action.id);
+      } finally {
+        await lease.release();
+      }
     }
   }
 
@@ -292,10 +328,11 @@ export class AgentKernel {
     priorResult?: ActionResult,
     context: CapabilityExecutionContext = {}
   ): Promise<ProviderReconciliationResult> {
+    const reconciliationSignal = combineAbortSignals(context.signal, this.#globalAbortSignal?.());
     const resourceKeys = await resolvePhysicalResourceKeysForAction(action);
     const existing = await this.#journal.inspect(action.id);
     if (existing.actionDigest !== actionHash(action)
-      || canonicalJson(existing.resourceKeys) !== canonicalJson(resourceKeys)) {
+      || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(resourceKeys))) {
       throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Reconciliation action does not match the durable action journal identity.');
     }
     if (!['DISPATCHED', 'OBSERVED', 'UNCERTAIN', 'RECONCILED', 'COMPLETED'].includes(existing.state)) {
@@ -306,17 +343,26 @@ export class AgentKernel {
       throw new OperatorError('ACTION_RECONCILIATION_PROVIDER_MISMATCH', 'Reconciliation provider must match the provider recorded at dispatch.');
     }
 
+    await this.#leases.quarantine(action.id, resourceKeys);
     const lease = await this.#leases.acquire(
       `kernel-reconcile:${action.id}:${crypto.randomUUID()}`,
       resourceKeys,
-      'exclusive'
+      'exclusive',
+      { mutationActionId: action.id }
     );
+    let retainQuarantine = true;
     try {
-      const outcome = await this.#runtime.reconcile(action, providerName, priorResult, context);
+      const outcome = await this.#runtime.reconcile(action, providerName, priorResult, {
+        ...context,
+        ...(reconciliationSignal ? { signal: reconciliationSignal } : {})
+      });
       const journalEntry = existing.state === 'COMPLETED'
         ? existing
         : await this.#journal.reconcile(action.id, outcome);
-      if (outcome.status !== 'completed' || !outcome.result) return outcome;
+      if (outcome.status !== 'completed' || !outcome.result) {
+        retainQuarantine = outcome.status === 'uncertain';
+        return outcome;
+      }
 
       const observedResult = await this.#publishObservation(action, outcome.result);
       const receipt = verifyActionOutcome({ action, result: observedResult, journal: journalEntry });
@@ -331,13 +377,18 @@ export class AgentKernel {
         evidence: [...observedResult.evidence, kernelVerificationEvidence(receipt)]
       };
       await this.#journal.complete(action.id, receipt.digest, result);
+      retainQuarantine = false;
       return {
         status: 'completed',
         result,
         evidence: [...outcome.evidence, kernelVerificationEvidence(receipt)]
       };
     } finally {
-      await lease.release();
+      try {
+        if (!retainQuarantine) await this.#leases.clearQuarantine(action.id);
+      } finally {
+        await lease.release();
+      }
     }
   }
 }
@@ -433,6 +484,12 @@ function abortedBeforeDispatch(action: ActionRequest): ActionResult {
     },
     durationMs: 0
   };
+}
+
+function combineAbortSignals(first?: AbortSignal, second?: AbortSignal): AbortSignal | undefined {
+  if (!first) return second;
+  if (!second || first === second) return first;
+  return AbortSignal.any([first, second]);
 }
 
 function inferOwnerKind(action: ActionRequest): string {

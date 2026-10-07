@@ -13,25 +13,58 @@ export interface ProcessInstanceIdentity {
 }
 
 export type ProcessInstanceInspector = (pid: number) => Promise<ProcessInstanceIdentity | null>;
+export type ProcessInstanceObservation =
+  | { status: 'live'; identity?: ProcessInstanceIdentity }
+  | { status: 'dead' }
+  | { status: 'unknown' };
+export type ProcessInstanceObserver = (pid: number) => Promise<ProcessInstanceObservation>;
+
+export function observerFromLegacyInspector(inspector: ProcessInstanceInspector): ProcessInstanceObserver {
+  return async (pid) => {
+    try {
+      const identity = await inspector(pid);
+      return identity ? { status: 'live', identity } : { status: 'unknown' };
+    } catch {
+      return { status: 'unknown' };
+    }
+  };
+}
+
+export function processInstanceDefinitelyStale(
+  storedIdentity: ProcessInstanceIdentity | undefined,
+  observation: ProcessInstanceObservation
+): boolean {
+  if (observation.status === 'dead') return true;
+  if (observation.status !== 'live' || !storedIdentity || !observation.identity) return false;
+  return !sameProcessInstance(storedIdentity, observation.identity);
+}
 
 let currentIdentity: Promise<ProcessInstanceIdentity> | undefined;
 
-export function inspectProcessInstance(pid: number): Promise<ProcessInstanceIdentity | null> {
-  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fff_ffff) return Promise.resolve(null);
-  if (pid === process.pid && currentIdentity) return currentIdentity;
-  return inspectProcessInstanceUncached(pid);
+export async function inspectProcessInstance(pid: number): Promise<ProcessInstanceIdentity | null> {
+  if (pid === process.pid && currentIdentity) return await currentIdentity;
+  const observation = await observeProcessInstance(pid);
+  return observation.status === 'live' && observation.identity ? observation.identity : null;
 }
 
-function inspectProcessInstanceUncached(pid: number): Promise<ProcessInstanceIdentity | null> {
-  if (process.platform === 'win32') return inspectWindowsProcess(pid);
-  if (process.platform === 'linux') return inspectLinuxProcess(pid);
-  return inspectPortableProcess(pid);
+export async function observeProcessInstance(pid: number): Promise<ProcessInstanceObservation> {
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fff_ffff) return { status: 'dead' };
+  if (pid === process.pid && currentIdentity) return { status: 'live', identity: await currentIdentity };
+  return await observeProcessInstanceUncached(pid);
+}
+
+function observeProcessInstanceUncached(pid: number): Promise<ProcessInstanceObservation> {
+  if (process.platform === 'win32') return observeWindowsProcess(pid);
+  if (process.platform === 'linux') return observeLinuxProcess(pid);
+  return observePortableProcess(pid);
 }
 
 export function currentProcessInstance(): Promise<ProcessInstanceIdentity> {
-  currentIdentity ??= inspectProcessInstanceUncached(process.pid).then((identity) => {
-    if (!identity) throw new Error('Unable to establish the current process instance identity.');
-    return identity;
+  currentIdentity ??= observeProcessInstanceUncached(process.pid).then((observation) => {
+    if (observation.status !== 'live' || !observation.identity) {
+      throw new Error('Unable to establish the current process instance identity.');
+    }
+    return observation.identity;
   });
   return currentIdentity;
 }
@@ -53,7 +86,7 @@ export function validProcessInstance(input: unknown): ProcessInstanceIdentity | 
   return { pid, started };
 }
 
-async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
+async function observeWindowsProcess(pid: number): Promise<ProcessInstanceObservation> {
   const nativeHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
   if (nativeHelper && path.isAbsolute(nativeHelper)) {
     try {
@@ -65,16 +98,17 @@ async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdenti
         env: safeChildEnvironment('windows-native')
       });
       const started = stdout.trim();
-      return /^\d{15,20}$/.test(started) ? { pid, started: `windows-filetime:${started}` } : null;
+      if (/^\d{15,20}$/.test(started)) return { status: 'live', identity: { pid, started: `windows-filetime:${started}` } };
     } catch {
-      return null;
+      // Fall through to the independent OS probe so helper failure is not
+      // conflated with confirmed process death.
     }
   }
   const systemRoot = process.env.SystemRoot || 'C:\\Windows';
   const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  // Get-Process uses the Win32 process handle path and remains available to
-  // packaged full-trust applications where the WMI/CIM provider may not be.
-  const script = `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($null-ne$p){$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()}`;
+  // Distinguish confirmed absence from probe failure. A lease may be reclaimed
+  // only from confirmed absence or a confirmed different process instance.
+  const script = `$p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue;if($null-eq$p){'dead'}else{try{'live:'+$p.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()}catch{'unknown'}}`;
   try {
     const { stdout } = await execFileAsync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
       windowsHide: true,
@@ -82,10 +116,13 @@ async function inspectWindowsProcess(pid: number): Promise<ProcessInstanceIdenti
       maxBuffer: 16 * 1024,
       encoding: 'utf8'
     });
-    const started = stdout.trim();
-    return /^\d{15,20}$/.test(started) ? { pid, started: `windows-filetime:${started}` } : null;
+    const observed = stdout.trim();
+    if (observed === 'dead') return { status: 'dead' };
+    const live = /^live:(\d{15,20})$/.exec(observed);
+    if (live) return { status: 'live', identity: { pid, started: `windows-filetime:${live[1]}` } };
+    return { status: 'unknown' };
   } catch {
-    return null;
+    return { status: 'unknown' };
   }
 }
 
@@ -99,26 +136,38 @@ function windowsStartedMillisecond(value: string): bigint | null {
   return BigInt(Math.trunc(parsed)) + WINDOWS_EPOCH_FILETIME_MS;
 }
 
-async function inspectLinuxProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
+async function observeLinuxProcess(pid: number): Promise<ProcessInstanceObservation> {
   try {
     const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
     const closingName = stat.lastIndexOf(')');
-    if (closingName < 0) return null;
+    if (closingName < 0) return { status: 'unknown' };
     const fields = stat.slice(closingName + 2).trim().split(/\s+/);
     const startTicks = fields[19]; // field 22 overall; fields begin at process-state field 3.
-    return startTicks ? { pid, started: `linux-boot-ticks:${startTicks}` } : null;
-  } catch {
-    return null;
+    return startTicks
+      ? { status: 'live', identity: { pid, started: `linux-boot-ticks:${startTicks}` } }
+      : { status: 'unknown' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ESRCH' ? { status: 'dead' } : { status: 'unknown' };
   }
 }
 
-async function inspectPortableProcess(pid: number): Promise<ProcessInstanceIdentity | null> {
+async function observePortableProcess(pid: number): Promise<ProcessInstanceObservation> {
   try {
     process.kill(pid, 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return { status: 'dead' };
+    if (code === 'EPERM' || code === 'EACCES') return { status: 'live' };
+    return { status: 'unknown' };
+  }
+  try {
     const { stdout } = await execFileAsync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 5_000, maxBuffer: 16 * 1024, encoding: 'utf8' });
     const started = stdout.trim();
-    return started ? { pid, started: `ps-lstart:${started}` } : null;
+    return started ? { status: 'live', identity: { pid, started: `ps-lstart:${started}` } } : { status: 'live' };
   } catch {
-    return null;
+    // kill(pid, 0) already proved the process existed. Failure to read a
+    // creation identity is uncertainty about identity, not process death.
+    return { status: 'live' };
   }
 }

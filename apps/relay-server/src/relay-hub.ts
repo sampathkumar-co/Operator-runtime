@@ -12,6 +12,14 @@ import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authorit
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
 import { RelayDeliveryStore, type RelayDeliveryAuthority, type StoredRelayDelivery } from '../../../src/core/relay-delivery-store.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
+import {
+  createRelayCapabilitySessionBinding,
+  relayCapabilitySessionDigest,
+  sameRelayAccountAuthority,
+  type RelayAccountAuthority,
+  type RelayCapabilitySessionBinding
+} from '../../../src/core/relay-capability-binding.ts';
 
 const MAX_FRAME_BYTES = 256 * 1024;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -36,6 +44,10 @@ type Connection = {
   logicalSessionId: string;
   sessionJti: string;
   capabilities: string[];
+  capabilityAuthority?: {
+    binding: Readonly<RelayCapabilitySessionBinding>;
+    digest: string;
+  };
   resourceProfile?: {
     cpuSlots: number;
     memoryMb: number;
@@ -537,9 +549,31 @@ export class RelayHub {
     const authorizedCapabilities = new Set(session.scopes.filter((scope) => scope.startsWith('cap:')).map((scope) => scope.slice(4)).filter(Boolean));
     const capabilities = capabilityBindingRequested
       ? locallySupportedCapabilities.filter((capability) => authorizedCapabilities.has(capability))
-      : [...authorizedCapabilities].sort();
+      : [...authorizedCapabilities].filter(isLegacyReadCapability).sort();
+    let accountAuthority: RelayAccountAuthority | undefined;
+    if (capabilityBindingRequested) {
+      const membership = await this.#accounts.activeMembershipForDevice(deviceId);
+      if (!membership) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Capability-bound relay connection requires active account-device authority.');
+      accountAuthority = { accountId: membership.accountId, deviceId, generation: membership.authorityGeneration };
+    }
     const reconciled = await this.#deliveries.reconcileClientCursor(deviceId, resumeAfterSeq);
     const sessionId = crypto.randomUUID();
+    const logicalSessionBindingId = logicalSessionId;
+    const capabilityAuthority = accountAuthority
+      ? (() => {
+          const binding = createRelayCapabilitySessionBinding({
+            protocol: 1,
+            capabilityBinding: 1,
+            connectionId: sessionId,
+            logicalSessionId: logicalSessionBindingId,
+            deviceId,
+            deviceFingerprint: fingerprint,
+            authority: accountAuthority,
+            capabilities
+          });
+          return { binding, digest: relayCapabilitySessionDigest(binding) };
+        })()
+      : undefined;
     const now = this.#clock().toISOString();
     const previous = this.#connections.get(deviceId);
     if (previous) {
@@ -547,6 +581,7 @@ export class RelayHub {
     }
     const connection: Connection = {
       socket, deviceId, sessionId, logicalSessionId, sessionJti: session.jti, capabilities,
+      ...(capabilityAuthority ? { capabilityAuthority } : {}),
       ...(resourceProfile ? { resourceProfile } : {}),
       connectedAt: now, lastSeenAt: now,
       readConcurrency,
@@ -562,7 +597,12 @@ export class RelayHub {
       ...(reconciled.expiredThroughSeq === undefined ? {} : { expiredThroughSeq: reconciled.expiredThroughSeq }),
       heartbeatMs: HEARTBEAT_MS,
       readConcurrency,
-      ...(capabilityBindingRequested ? { capabilityBinding: 1, capabilities: [...capabilities] } : {})
+      ...(capabilityAuthority ? {
+        capabilityBinding: 1,
+        capabilities: [...capabilities],
+        authority: { ...capabilityAuthority.binding.authority },
+        capabilityBindingDigest: capabilityAuthority.digest
+      } : {})
     });
     return connection;
   }
@@ -592,6 +632,9 @@ export class RelayHub {
     if (!(await this.#sessions.isConnectionContinuable(connection.sessionJti, authority.deviceId))) {
       this.invalidateSession(connection.sessionJti, 'session no longer authorized');
       throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay credential authority is no longer valid for this device.');
+    }
+    if (connection.capabilityAuthority && !sameRelayAccountAuthority(connection.capabilityAuthority.binding.authority, authority)) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection was negotiated under a different account authority generation.');
     }
     const missing = requiredCapabilities.filter((capability) => !connection.capabilities.includes(capability));
     if (missing.length > 0) throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Relay connection capabilities changed before delivery authorization.');
@@ -626,14 +669,15 @@ export class RelayHub {
       if (readOnly && connection.inFlight.size >= connection.readConcurrency) return;
       if (heavy && [...connection.inFlight.values()].some((item) => item.heavy)) return;
 
+      const authority = next.authority;
       const requiredCapabilities = next.requiredCapabilities;
       const missingCapabilities = requiredCapabilities?.filter((capability) => !connection.capabilities.includes(capability)) ?? [];
-      const unroutable = !next.authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
+      const unroutable = !authority || requiredCapabilities === undefined || missingCapabilities.length > 0;
       if (unroutable) {
         // Never retire a delivery behind an in-flight prefix. Wait until it
         // becomes the durable head so expiry remains contiguous.
         if (connection.inFlight.size > 0) return;
-        if (next.authority) await this.#assertDispatchAuthority(next.authority, connection.sessionId);
+        if (authority) await this.#assertDispatchAuthority(authority, connection.sessionId);
         const capabilitySnapshot = [...connection.capabilities];
         const isCurrentSnapshot = () => {
           const active = this.#connections.get(deviceId);
@@ -652,10 +696,23 @@ export class RelayHub {
         return;
       }
 
-      await this.#assertDispatchAuthority(next.authority, connection.sessionId, requiredCapabilities);
+      if (!authority || requiredCapabilities === undefined) {
+        throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING', 'Routable delivery lost its authority or capability binding before dispatch.');
+      }
+      await this.#assertDispatchAuthority(authority, connection.sessionId, requiredCapabilities);
       connection.inFlight.set(next.seq, { readOnly, heavy });
       try {
-        send(connection.socket, { type: 'delivery', seq: next.seq, id: next.id, kind: next.kind, payload: next.payload });
+        send(connection.socket, {
+          type: 'delivery', seq: next.seq, id: next.id, kind: next.kind,
+          payload: connection.capabilityAuthority
+            ? { ...next.payload, approvalAuthority: { ...next.authority } }
+            : next.payload,
+          ...(connection.capabilityAuthority ? {
+            authority: { ...next.authority },
+            requiredCapabilities: [...requiredCapabilities],
+            capabilityBindingDigest: connection.capabilityAuthority.digest
+          } : {})
+        });
       } catch (error) {
         connection.inFlight.delete(next.seq);
         throw error;
@@ -672,6 +729,11 @@ function boundedReadConcurrency(value: unknown): number {
     throw new OperatorError('RELAY_READ_CONCURRENCY_INVALID', `Relay read concurrency must be an integer between 1 and ${MAX_NEGOTIATED_CONCURRENT_READS}.`);
   }
   return parsed;
+}
+
+function isLegacyReadCapability(capability: string): boolean {
+  try { return capabilityRiskRule(capability) === 'read'; }
+  catch { return false; }
 }
 
 function isConcurrentReadDelivery(delivery: StoredRelayDelivery): boolean {

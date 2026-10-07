@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +24,17 @@ async function makeFileSymlinkOrSkip(t: test.TestContext, target: string, link: 
     }
     throw error;
   }
+}
+
+function auditAuthenticator() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  return {
+    keyId: crypto.createHash('sha256').update(publicPem).digest('base64url'),
+    sign: async (payload: Uint8Array) => crypto.sign(null, payload, privateKey).toString('base64url'),
+    verify: async (payload: Uint8Array, signature: string) =>
+      crypto.verify(null, payload, publicKey, Buffer.from(signature, 'base64url'))
+  };
 }
 
 test('audit append refuses a symlinked log without modifying its target', async (t) => {
@@ -56,6 +68,51 @@ test('audit verification refuses a symlinked head anchor without modifying its t
     (error: any) => error?.code === 'AUDIT_INTEGRITY_FAILED' && /head metadata is unreadable/.test(error.message)
   );
   assert.equal(await fs.readFile(outside, 'utf8'), original);
+});
+
+test('authenticated audit verification refuses a symlinked freshness authority without modifying its target', async (t) => {
+  const state = await tempState(t, 'operator-audit-freshness-link-');
+  const authenticator = auditAuthenticator();
+  await new AuditLog(state, { authenticator }).append({ capability: 'one', result: 'success', risk: 'read' });
+
+  const freshnessFile = path.join(state, 'audit-freshness.json');
+  const outside = path.join(state, 'outside-freshness.json');
+  const original = '{"outside":true}\n';
+  await fs.rm(freshnessFile);
+  await fs.writeFile(outside, original, { mode: 0o600 });
+  if (!(await makeFileSymlinkOrSkip(t, outside, freshnessFile))) return;
+
+  await assert.rejects(
+    () => new AuditLog(state, { authenticator }).verifyIntegrity(),
+    (error: any) => error?.code === 'AUDIT_FRESHNESS_STALE' && /authority is unreadable/.test(error.message)
+  );
+  assert.equal(await fs.readFile(outside, 'utf8'), original);
+});
+
+test('authenticated audit verification refuses a hard-linked freshness authority', async (t) => {
+  const state = await tempState(t, 'operator-audit-freshness-hardlink-');
+  const authenticator = auditAuthenticator();
+  await new AuditLog(state, { authenticator }).append({ capability: 'one', result: 'success', risk: 'read' });
+
+  const freshnessFile = path.join(state, 'audit-freshness.json');
+  const outside = path.join(state, 'outside-freshness.json');
+  await fs.rename(freshnessFile, outside);
+  try {
+    await fs.link(outside, freshnessFile);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EPERM' || code === 'EACCES' || code === 'ENOTSUP') {
+      t.skip(`hard-link creation is unavailable on this runner (${code})`);
+      return;
+    }
+    throw error;
+  }
+
+  await assert.rejects(
+    () => new AuditLog(state, { authenticator }).verifyIntegrity(),
+    (error: any) => error?.code === 'AUDIT_FRESHNESS_STALE' && /authority is unreadable/.test(error.message)
+  );
+  assert.equal((await fs.stat(outside)).nlink, 2);
 });
 
 test('audit rejects an oversized event before appending any record', async (t) => {

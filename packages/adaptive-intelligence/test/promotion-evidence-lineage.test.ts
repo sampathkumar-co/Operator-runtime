@@ -1,0 +1,359 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  assessBoundPolicyPromotion,
+  createEvaluationFreezeManifest,
+  createTaskCohortManifest,
+  validatePolicyPromotionEvidenceBundle
+} from '../src/index.ts';
+import type {
+  EvaluationFreezeManifest,
+  PolicyPromotionCriteria,
+  PolicyPromotionEvidenceBundle
+} from '../src/index.ts';
+
+const A='a'.repeat(64),B='b'.repeat(64),C='c'.repeat(64),D='d'.repeat(64);
+const E='e'.repeat(64),F='f'.repeat(64);
+const T0='2026-10-05T00:00:00.000Z';
+const RUN='promotion-run-1';
+const TASK_IDS=Array.from({length:200},(_,index)=>'task-'+String(index).padStart(3,'0'));
+
+function manifest(policyVersion:string,policyDigest:string,adaptiveDigest:string):EvaluationFreezeManifest{
+  return createEvaluationFreezeManifest({
+    sourceRevision:'a'.repeat(40),
+    intelligencePolicyVersion:policyVersion,
+    intelligencePolicyDigest:policyDigest,
+    adaptiveStateDigest:adaptiveDigest,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:B,
+    modelProvider:'provider',
+    modelId:'model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+}
+
+function metrics(taskCohortDigest:string){
+  return{
+    evaluationRunId:RUN,
+    taskCohortDigest,
+    taskCount:200,
+    firstStrategySuccessRate:0.8,
+    recoverySuccessRate:0.75,
+    falseGoalProgressRate:0.005,
+    repeatedEquivalentFailureRate:0.04,
+    averageStepsPerTask:8
+  };
+}
+
+function calibration(){
+  return{
+    samples:200,
+    brierScore:0.08,
+    expectedCalibrationError:0.04,
+    meanPrediction:0.73,
+    empiricalSuccess:0.69,
+    buckets:[{
+      lower:0,
+      upper:1,
+      count:200,
+      meanPrediction:0.73,
+      empiricalSuccess:0.69,
+      absoluteGap:0.04
+    }]
+  };
+}
+
+function shadow(taskCohortDigest:string){
+  return{
+    evaluationRunId:RUN,
+    taskCohortDigest,
+    shadowPolicyVersion:'candidate-v2',
+    controlPolicyVersion:'baseline-v1',
+    pairedDecisions:200,
+    pairedOutcomeDecisions:190,
+    outcomeCoverage:0.95,
+    progressCoverage:0.9,
+    costCoverage:0.9,
+    agreementRate:0.6,
+    divergenceRate:0.4,
+    shadowWinRate:0.25,
+    controlWinRate:0.1,
+    tiedOutcomeRate:0.65,
+    meanShadowProgressDelta:0.08,
+    meanShadowCostDelta:-0.05,
+    unmatchedShadow:0,
+    unmatchedControl:0
+  };
+}
+
+function criteria():PolicyPromotionCriteria{
+  return{
+    minPairedDecisions:100,
+    minCandidateTasks:100,
+    minBaselineTasks:100,
+    minCalibrationSamples:100,
+    minOutcomeCoverage:0.9,
+    minProgressCoverage:0.8,
+    minCostCoverage:0.8,
+    minNetShadowWinRate:0.05,
+    minMeanShadowProgressDelta:0,
+    maxMeanShadowCostDelta:0.1,
+    maxFalseGoalProgressRate:0.02,
+    maxRepeatedEquivalentFailureRate:0.1,
+    maxExpectedCalibrationError:0.1,
+    maxBrierScore:0.2,
+    maxFirstStrategySuccessRegression:0.02,
+    maxRecoverySuccessRegression:0.02
+  };
+}
+
+function bundle():PolicyPromotionEvidenceBundle{
+  const taskCohort=createTaskCohortManifest(TASK_IDS);
+  const candidate=manifest('candidate-v2',A,B);
+  const baseline=manifest('baseline-v1',B,C);
+  return{
+    taskCohort,
+    candidateManifest:candidate,
+    baselineManifest:baseline,
+    candidateMetrics:{
+      runId:RUN,
+      evaluationManifestDigest:candidate.manifestDigest,
+      policyVersion:candidate.intelligencePolicyVersion,
+      taskCohortDigest:taskCohort.cohortDigest,
+      value:{...metrics(taskCohort.cohortDigest),firstStrategySuccessRate:0.82,recoverySuccessRate:0.78}
+    },
+    baselineMetrics:{
+      runId:RUN,
+      evaluationManifestDigest:baseline.manifestDigest,
+      policyVersion:baseline.intelligencePolicyVersion,
+      taskCohortDigest:taskCohort.cohortDigest,
+      value:metrics(taskCohort.cohortDigest)
+    },
+    calibration:{
+      runId:RUN,
+      evaluationManifestDigest:candidate.manifestDigest,
+      policyVersion:candidate.intelligencePolicyVersion,
+      taskCohortDigest:taskCohort.cohortDigest,
+      value:calibration()
+    },
+    shadow:{
+      runId:RUN,
+      candidateManifestDigest:candidate.manifestDigest,
+      baselineManifestDigest:baseline.manifestDigest,
+      candidatePolicyVersion:candidate.intelligencePolicyVersion,
+      baselinePolicyVersion:baseline.intelligencePolicyVersion,
+      taskCohortDigest:taskCohort.cohortDigest,
+      report:shadow(taskCohort.cohortDigest)
+    }
+  };
+}
+
+test('fully bound promotion evidence produces a stable lineage digest and advisory assessment',()=>{
+  const one=validatePolicyPromotionEvidenceBundle(bundle());
+  const two=validatePolicyPromotionEvidenceBundle(bundle());
+  assert.match(one.lineageDigest,/^[0-9a-f]{64}$/);
+  assert.equal(one.lineageDigest,two.lineageDigest);
+
+  const assessment=assessBoundPolicyPromotion(bundle(),criteria());
+  assert.equal(assessment.eligible,true);
+  assert.equal(assessment.lineageDigest,one.lineageDigest);
+  assert.match(assessment.candidateManifestDigest,/^[0-9a-f]{64}$/);
+});
+
+test('candidate metrics from another evaluation run are rejected',()=>{
+  const input=bundle();
+  input.candidateMetrics.runId='other-run';
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/different evaluation run/);
+});
+
+test('calibration cannot be detached from candidate manifest or policy',()=>{
+  const input=bundle();
+  input.calibration.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/calibration manifest binding mismatch/);
+
+  const other=bundle();
+  other.calibration.policyVersion='baseline-v1';
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(other),/calibration policy version mismatch/);
+});
+
+test('shadow evidence cannot claim a different candidate manifest',()=>{
+  const input=bundle();
+  input.shadow.candidateManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/Shadow candidate manifest binding mismatch/);
+});
+
+test('tampered evaluation freeze manifest is rejected before promotion statistics are considered',()=>{
+  const input=bundle();
+  input.candidateManifest={...input.candidateManifest,modelId:'tampered-model'};
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/failed freeze-manifest verification/);
+});
+
+test('candidate and baseline must share fair evaluation context',()=>{
+  const input=bundle();
+  input.baselineManifest=createEvaluationFreezeManifest({
+    sourceRevision:'a'.repeat(40),
+    intelligencePolicyVersion:'baseline-v1',
+    intelligencePolicyDigest:B,
+    adaptiveStateDigest:C,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:B,
+    modelProvider:'provider',
+    modelId:'different-model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+  input.baselineMetrics.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  input.shadow.baselineManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/evaluation context mismatch: modelId/);
+});
+
+test('forged calibration cannot enter a bound promotion bundle',()=>{
+  const input=bundle();
+  input.calibration.value={
+    ...input.calibration.value,
+    expectedCalibrationError:0.001
+  };
+  assert.throws(()=>validatePolicyPromotionEvidenceBundle(input),/expectedCalibrationError mismatch/);
+});
+
+
+test('policy comparison cannot hide a different procedure-memory snapshot',()=>{
+  const input=bundle();
+  input.baselineManifest=createEvaluationFreezeManifest({
+    sourceRevision:'a'.repeat(40),
+    intelligencePolicyVersion:'baseline-v1',
+    intelligencePolicyDigest:B,
+    adaptiveStateDigest:C,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:E,
+    modelProvider:'provider',
+    modelId:'model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+  input.baselineMetrics.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  input.shadow.baselineManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /evaluation context mismatch: procedureSnapshotDigest/
+  );
+});
+
+
+test('candidate and baseline aggregates cannot use different task cohorts',()=>{
+  const input=bundle();
+  input.candidateMetrics.taskCohortDigest='8'.repeat(64);
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /candidateMetrics task cohort mismatch/
+  );
+
+  const other=bundle();
+  other.calibration.taskCohortDigest='7'.repeat(64);
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(other),
+    /calibration task cohort mismatch/
+  );
+});
+
+
+test('promotion evidence rejects a tampered task cohort manifest',()=>{
+  const input=bundle();
+  input.taskCohort={...input.taskCohort,taskIds:[...input.taskCohort.taskIds].reverse()};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /failed cohort-manifest verification/
+  );
+});
+
+test('candidate and baseline metric counts must cover the canonical cohort exactly',()=>{
+  const input=bundle();
+  input.candidateMetrics.value={...input.candidateMetrics.value,taskCount:199};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /Candidate metrics task count does not match/
+  );
+
+  const other=bundle();
+  other.baselineMetrics.value={...other.baselineMetrics.value,taskCount:201};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(other),
+    /Baseline metrics task count does not match/
+  );
+});
+
+
+test('policy comparison cannot cross source revisions',()=>{
+  const input=bundle();
+  input.baselineManifest=createEvaluationFreezeManifest({
+    sourceRevision:'b'.repeat(40),
+    intelligencePolicyVersion:'baseline-v1',
+    intelligencePolicyDigest:B,
+    adaptiveStateDigest:C,
+    authorityPolicyDigest:A,
+    procedureSnapshotDigest:B,
+    modelProvider:'provider',
+    modelId:'model',
+    modelConfigDigest:C,
+    environmentId:'env',
+    environmentDigest:D,
+    runnerDigest:E,
+    benchmarkId:'suite',
+    benchmarkDigest:F,
+    seed:0
+  },{clock:()=>new Date(T0)});
+  input.baselineMetrics.evaluationManifestDigest=input.baselineManifest.manifestDigest;
+  input.shadow.baselineManifestDigest=input.baselineManifest.manifestDigest;
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(input),
+    /evaluation context mismatch: sourceRevision/
+  );
+});
+
+test('bound metrics cannot hide a different internal run or task cohort',()=>{
+  const wrongRun=bundle();
+  wrongRun.candidateMetrics.value={...wrongRun.candidateMetrics.value,evaluationRunId:'other-run'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongRun),
+    /internal run lineage/
+  );
+
+  const wrongCohort=bundle();
+  wrongCohort.baselineMetrics.value={...wrongCohort.baselineMetrics.value,taskCohortDigest:'9'.repeat(64)};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongCohort),
+    /internal task cohort/
+  );
+});
+
+test('shadow report cannot hide different internal evaluation lineage',()=>{
+  const wrongRun=bundle();
+  wrongRun.shadow.report={...wrongRun.shadow.report,evaluationRunId:'other-run'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongRun),
+    /Shadow report internal run lineage mismatch/
+  );
+
+  const wrongPolicy=bundle();
+  wrongPolicy.shadow.report={...wrongPolicy.shadow.report,shadowPolicyVersion:'other-policy'};
+  assert.throws(
+    ()=>validatePolicyPromotionEvidenceBundle(wrongPolicy),
+    /candidate policy lineage mismatch/
+  );
+});

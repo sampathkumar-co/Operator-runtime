@@ -1,6 +1,7 @@
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { GitCheckpointProvider } from './git-checkpoint.ts';
 import { ProjectCommandProvider } from './project-command.ts';
 
@@ -35,6 +36,10 @@ export class ProjectTransactionProvider implements CapabilityProvider {
 
   supports(action: ActionRequest): boolean { return action.capability === 'project.transaction.run'; }
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();

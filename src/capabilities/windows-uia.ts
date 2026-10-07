@@ -2,9 +2,10 @@ import crypto from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
-import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { safeChildEnvironment } from '../core/child-environment.ts';
 import { createRenderedDeltaEvidence, createRenderedEvidence, type RenderedEvidence, type RenderedEvidenceTier } from '../core/rendered-evidence.ts';
 
@@ -65,7 +66,7 @@ export type WindowsUiaOptions = {
   binaryPath?: string;
   timeoutMs?: number;
   platform?: NodeJS.Platform;
-  client?: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void };
+  client?: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void | Promise<void> };
 };
 
 class WindowsUiaSidecarClient {
@@ -108,7 +109,7 @@ class WindowsUiaSidecarClient {
         this.#pending.delete(id);
         cleanupAbort();
         reject(new OperatorError('EXECUTION_ABORTED', 'Windows UIA execution was cancelled.', { retryable: false }));
-        this.close();
+        void this.close();
       };
       cleanupAbort = () => signal?.removeEventListener('abort', onAbort);
       this.#pending.set(id, { resolve, reject, timer, cleanup: cleanupAbort });
@@ -136,7 +137,7 @@ class WindowsUiaSidecarClient {
     return response.result;
   }
 
-  close(): void {
+  async close(): Promise<void> {
     const child = this.#process;
     this.#process = undefined;
     this.#starting = undefined;
@@ -147,9 +148,7 @@ class WindowsUiaSidecarClient {
       pending.reject(error);
     }
     this.#pending.clear();
-    if (child && child.exitCode === null && !child.killed) {
-      try { child.kill('SIGTERM'); } catch { /* noop */ }
-    }
+    if (child && child.exitCode === null && child.signalCode === null) await terminateSidecar(child);
   }
 
   async #ensureStarted(): Promise<void> {
@@ -179,7 +178,7 @@ class WindowsUiaSidecarClient {
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on('line', (line) => {
       if (Buffer.byteLength(line) > MAX_RESPONSE_LINE_BYTES) {
-        this.close();
+        void this.close();
         return;
       }
       let response: SidecarResponse;
@@ -224,7 +223,7 @@ class WindowsUiaSidecarClient {
     try {
       await this.call('health', {});
     } catch (error) {
-      this.close();
+      await this.close();
       throw error;
     }
   }
@@ -233,7 +232,7 @@ class WindowsUiaSidecarClient {
 export class WindowsUiaProvider implements CapabilityProvider {
   readonly name = 'windows.uia';
   #platform: NodeJS.Platform;
-  #client: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void };
+  #client: { call(method: string, params: unknown, signal?: AbortSignal): Promise<unknown>; close(): void | Promise<void> };
   #captureLeases = new Map<string, CaptureLease>();
 
   constructor(options: WindowsUiaOptions = {}) {
@@ -249,6 +248,10 @@ export class WindowsUiaProvider implements CapabilityProvider {
   }
 
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
     const started = performance.now();
@@ -531,10 +534,26 @@ export class WindowsUiaProvider implements CapabilityProvider {
     for (const [captureId, lease] of this.#captureLeases) if (lease.expiresAt <= now) this.#captureLeases.delete(captureId);
   }
 
-  close(): void {
-    this.#captureLeases.clear();
-    this.#client.close();
+  async emergencyStop(): Promise<void> {
+    await this.close();
   }
+
+  async close(): Promise<void> {
+    this.#captureLeases.clear();
+    await this.#client.close();
+  }
+}
+
+async function terminateSidecar(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  try { child.kill('SIGTERM'); } catch { /* postcondition below decides */ }
+  await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+  if (child.exitCode === null && child.signalCode === null) {
+    try { child.kill('SIGKILL'); } catch { /* postcondition below decides */ }
+    await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 1_000))]);
+  }
+  if (child.exitCode === null && child.signalCode === null) throw new OperatorError('UIA_SIDECAR_TERMINATE_FAILED', 'Windows UIA sidecar remained alive after shutdown.', { retryable: false });
 }
 
 function normalizeSelector(input: unknown) {

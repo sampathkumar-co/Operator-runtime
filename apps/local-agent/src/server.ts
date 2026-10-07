@@ -38,6 +38,17 @@ import { publishPerceptionFromActionResult } from '../../../src/core/perception-
 import type { StudioWorkflowExecutor } from '../../../src/core/studio-executor.ts';
 import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSemanticCheckpoint } from '../../../src/core/semantic-checkpoint.ts';
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
+import { OperatorError } from '../../../src/core/errors.ts';
+import {
+  boundedString,
+  decodeEnterpriseContextHeader,
+  readJson,
+  relayRequestMarker,
+  timingSafeSecretMatch,
+  timingSafeTokenMatch,
+  validateActionEnvelope,
+  validateApprovalAuthority
+} from './server-boundary.ts';
 import {
   assertMigrationCapabilities,
   buildMigrationArtifacts,
@@ -48,130 +59,10 @@ import {
   verifyMigrationWorldAssumption
 } from './migration-proofs.ts';
 
-const MAX_BODY_BYTES = 1024 * 1024;
 // Stay below the official MCP client's default ~60s request budget so approval can never execute after the caller has already timed out.
 const MAX_INLINE_APPROVAL_WAIT_MS = 45_000;
 
 type CompanionSettings = Record<string, boolean | number | string | string[]>;
-
-function timingSafeTokenMatch(actual: string | undefined, expected: string): boolean {
-  if (!actual?.startsWith('Bearer ')) return false;
-  return timingSafeSecretMatch(actual.slice('Bearer '.length), expected);
-}
-
-function timingSafeSecretMatch(actual: string | undefined, expected: string): boolean {
-  if (typeof actual !== 'string') return false;
-  const supplied = Buffer.from(actual);
-  const wanted = Buffer.from(expected);
-  return supplied.length === wanted.length && crypto.timingSafeEqual(supplied, wanted);
-}
-
-async function readJson(req: http.IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.byteLength;
-    if (bytes > MAX_BODY_BYTES) throw new Error('REQUEST_TOO_LARGE');
-    chunks.push(buffer);
-  }
-  if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
-const ACTION_RISKS = new Set(['read', 'write', 'external', 'system', 'destructive']);
-const PROVENANCE_KINDS = new Set(['user', 'chatgpt', 'trusted_policy', 'runtime', 'website', 'file', 'application', 'terminal']);
-
-function validateActionEnvelope(value: unknown): ActionRequest {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('action must be a JSON object.');
-  const raw = value as Record<string, unknown>;
-  const id = boundedString(raw.id, 'action.id', 256);
-  const capability = boundedString(raw.capability, 'action.capability', 128);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(capability)) throw new Error('action.capability contains unsupported characters.');
-  if (typeof raw.risk !== 'string' || !ACTION_RISKS.has(raw.risk)) throw new Error('action.risk is invalid.');
-  if (!raw.input || typeof raw.input !== 'object' || Array.isArray(raw.input)) throw new Error('action.input must be a JSON object.');
-  if (!raw.provenance || typeof raw.provenance !== 'object' || Array.isArray(raw.provenance)) throw new Error('action.provenance must be a JSON object.');
-  const provenanceRaw = raw.provenance as Record<string, unknown>;
-  if (typeof provenanceRaw.kind !== 'string' || !PROVENANCE_KINDS.has(provenanceRaw.kind)) throw new Error('action.provenance.kind is invalid.');
-  const source = provenanceRaw.source === undefined ? undefined : boundedString(provenanceRaw.source, 'action.provenance.source', 512);
-  const taskId = raw.taskId === undefined ? undefined : boundedString(raw.taskId, 'action.taskId', 256);
-  const target = raw.target === undefined ? undefined : boundedString(raw.target, 'action.target', 4096);
-  const intent = raw.intent === undefined ? undefined : validIntentBinding(raw.intent);
-  return {
-    id,
-    capability,
-    risk: raw.risk as ActionRequest['risk'],
-    input: raw.input as Record<string, unknown>,
-    provenance: { kind: provenanceRaw.kind as ActionRequest['provenance']['kind'], source },
-    taskId,
-    target,
-    ...(intent ? { intent } : {})
-  };
-}
-
-function validateApprovalAuthority(input: unknown): ApprovalAuthorityContext {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('approvalAuthority must be an object.');
-  const raw = input as Record<string, unknown>;
-  const accountId = String(raw.accountId ?? '');
-  const deviceId = String(raw.deviceId ?? '');
-  const generation = Number(raw.generation);
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (!uuid.test(accountId) || !uuid.test(deviceId) || !Number.isSafeInteger(generation) || generation < 1) {
-    throw new Error('approvalAuthority is invalid.');
-  }
-  return { accountId: accountId.toLowerCase(), deviceId: deviceId.toLowerCase(), generation };
-}
-
-function relayRequestMarker(input: unknown): boolean {
-  if (input === undefined) return false;
-  const value = Array.isArray(input) ? (input.length === 1 ? input[0] : undefined) : input;
-  if (value !== '1') throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Internal relay request marker is invalid.');
-  return true;
-}
-
-function decodeEnterpriseContextHeader(input: unknown, relayRequest: boolean): EnterpriseAuthorizationContext | undefined {
-  if (input === undefined) return undefined;
-  if (!relayRequest) throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context is accepted only on an internal relay request.');
-  const encoded = Array.isArray(input) ? (input.length === 1 ? input[0] : undefined) : input;
-  if (typeof encoded !== 'string' || encoded.length < 1 || encoded.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header is invalid.');
-  }
-  let bytes: Buffer;
-  try { bytes = Buffer.from(encoded, 'base64url'); }
-  catch { throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header is not valid base64url.'); }
-  if (bytes.length < 2 || bytes.length > 4096 || bytes.toString('base64url') !== encoded) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header encoding is non-canonical or oversized.');
-  }
-  let parsed: unknown;
-  try { parsed = JSON.parse(bytes.toString('utf8')); }
-  catch { throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context header must contain valid JSON.'); }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context must be an object.');
-  }
-  const raw = parsed as Record<string, unknown>;
-  const allowedKeys = new Set(['principalId', 'deviceId', 'projectKey']);
-  if (Object.keys(raw).some((key) => !allowedKeys.has(key))) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context contains fields not issued by the trusted relay identity path.');
-  }
-  const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-  const principalId = String(raw.principalId ?? '').toLowerCase();
-  const deviceId = String(raw.deviceId ?? '').toLowerCase();
-  if (!new RegExp(`^account:${uuid}$`, 'i').test(principalId) || !new RegExp(`^${uuid}$`, 'i').test(deviceId)) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise context account/device identity is invalid.');
-  }
-  const projectKey = raw.projectKey === undefined ? undefined : String(raw.projectKey);
-  if (projectKey !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(projectKey) || projectKey.includes('\\'))) {
-    throw new OperatorError('ENTERPRISE_CONTEXT_INVALID', 'Enterprise project context is invalid.');
-  }
-  return { principalId, deviceId, ...(projectKey ? { projectKey } : {}) };
-}
-
-function boundedString(value: unknown, field: string, maxLength: number): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength || value.includes('\0')) {
-    throw new Error(`${field} must be a non-empty string of at most ${maxLength} characters without NUL bytes.`);
-  }
-  return value;
-}
 
 function send(res: http.ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
@@ -210,6 +101,7 @@ export function createLocalAgentServer(options: {
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
   actionExecutions?: LocalActionExecutionStore;
+  beforeActionReceiptCompletion?: (input: { action: ActionRequest; result: ActionResult }) => Promise<void> | void;
   sessionApprovals?: SessionApprovalStore;
   recoveryToken?: string;
   onEmergencyStop?: () => Promise<void> | void;
@@ -254,13 +146,17 @@ export function createLocalAgentServer(options: {
   };
   const approvalWaiters = new Map<string, Set<InlineApprovalWaiter>>();
   const activeTeamActions = new Map<string, { missionId: string; workItemId: string; workerId: string; controller: AbortController }>();
+  let emergencyExecutionGeneration = new AbortController();
 
   const abortTeamActions = (predicate: (entry: { missionId: string; workItemId: string; workerId: string }) => boolean) => {
+    const aborted: Array<{ missionId: string; workItemId: string; workerId: string }> = [];
     for (const [key, entry] of activeTeamActions) {
       if (!predicate(entry)) continue;
-      entry.controller.abort();
+      aborted.push({ missionId: entry.missionId, workItemId: entry.workItemId, workerId: entry.workerId });
+      entry.controller.abort('EMERGENCY_STOPPED');
       activeTeamActions.delete(key);
     }
+    return aborted;
   };
 
   const notifyApprovalDecision = (actionId: string, approvalRequestId: string, decision: InlineApprovalDecision): number => {
@@ -312,12 +208,28 @@ export function createLocalAgentServer(options: {
     approvalWaiters.clear();
   };
 
+  const abortEmergencyExecutions = () => {
+    if (!emergencyExecutionGeneration.signal.aborted) {
+      emergencyExecutionGeneration.abort('EMERGENCY_STOPPED');
+    }
+    const teamActions = abortTeamActions(() => true);
+    const taskIds = options.taskOrchestrator?.emergencyStopActive() ?? [];
+    clearApprovalWaiters();
+    return { teamActions, taskIds };
+  };
+
+  const resetEmergencyExecutionGeneration = () => {
+    emergencyExecutionGeneration = new AbortController();
+  };
+
   const executeActionWithCurrentApproval = async (
     action: ActionRequest,
     approvalAuthority: ApprovalAuthorityContext | undefined,
     signal?: AbortSignal,
     basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
+    const emergencySignal = emergencyExecutionGeneration.signal;
+    const executionSignal = signal ? AbortSignal.any([signal, emergencySignal]) : emergencySignal;
     let approvalLeaseId: string | null = null;
     if (options.approvals) {
       try {
@@ -348,8 +260,8 @@ export function createLocalAgentServer(options: {
     let result: ActionResult;
     try {
       result = options.agentKernel
-        ? await options.agentKernel.execute(action, permissions, { signal })
-        : await options.runtime.execute(action, permissions, { signal });
+        ? await options.agentKernel.execute(action, permissions, { signal: executionSignal })
+        : await options.runtime.execute(action, permissions, { signal: executionSignal });
     } catch (error) {
       if (approvalLeaseId) {
         await options.approvals!.settle(action, approvalLeaseId, 'consume', approvalAuthority);
@@ -701,14 +613,14 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as Record<string, unknown>;
         const roles = Array.isArray(body.roles) ? body.roles as any : [];
         const bindings = Array.isArray(body.bindings) ? body.bindings as any : [];
-        await options.enterprisePolicy.configure({ roles, bindings });
+        const configured = await options.enterprisePolicy.configure({ roles, bindings });
         await options.audit?.append({
           capability: 'enterprise.policy.configure',
           result: 'success',
           risk: 'system',
-          details: { roleCount: roles.length, bindingCount: bindings.length }
+          details: { roleCount: roles.length, bindingCount: bindings.length, policyGeneration: configured.generation }
         });
-        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured() });
+        send(res, 200, { ok: true, configured: await options.enterprisePolicy.isConfigured(), generation: configured.generation });
       } catch (error) {
         send(res, 400, { ok: false, error: { code: typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_POLICY_INVALID', message: error instanceof Error ? error.message : String(error) } });
       }
@@ -739,11 +651,14 @@ export function createLocalAgentServer(options: {
     if (pathname === '/v1/control-center/runtime' && req.method === 'GET') {
       const requested = Number(requestUrl.searchParams.get('limit') ?? 100);
       const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 200) : 100;
-      const [tasks, journal, approvals] = await Promise.all([
+      const [summaries, journal, approvals] = await Promise.all([
         options.tasks ? options.tasks.list(limit) : [],
         options.agentKernel ? options.agentKernel.journal.list(Math.min(1000, limit * 5)) : [],
         options.approvals ? options.approvals.list() : []
       ]);
+      const tasks = options.tasks
+        ? await Promise.all(summaries.map((summary) => options.tasks!.get(summary.id)))
+        : [];
       send(res, 200, {
         ok: true,
         projections: tasks.map((task) => projectTaskRuntime(task, { journal, approvals })),
@@ -1135,6 +1050,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (operation === 'execute' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Studio execution is frozen by the local emergency stop.' } });
+            return;
+          }
           const body = await readJson(req) as Record<string, unknown>;
           const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
           const maxSteps = body.maxSteps === undefined ? 1 : Number(body.maxSteps);
@@ -1223,6 +1142,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (action === 'reconcile' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Desired-state reconciliation is frozen by the local emergency stop.' } });
+            return;
+          }
           send(res, 200, { ok: true, contract: await options.desiredState.reconcile(id) });
           return;
         }
@@ -1232,6 +1155,10 @@ export function createLocalAgentServer(options: {
           return;
         }
         if (action === 'resume' && req.method === 'POST') {
+          if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+            send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Desired-state resume is frozen by the local emergency stop.' } });
+            return;
+          }
           send(res, 200, { ok: true, contract: await options.desiredState.resume(id) });
           return;
         }
@@ -1368,6 +1295,10 @@ export function createLocalAgentServer(options: {
       try {
         const body = await readJson(req) as Record<string, unknown>;
         if (body.device !== undefined) throw new Error('Device advertisements are relay-authority data and cannot be supplied through the local agent operation API.');
+        if (body.run === true && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Digital operation execution is frozen by the local emergency stop.' } });
+          return;
+        }
         const operation = await options.operations.submit(body as unknown as DigitalOperationSubmit);
         send(res, body.run === true ? 200 : 202, { ok: true, operation });
       } catch (error) {
@@ -1389,6 +1320,11 @@ export function createLocalAgentServer(options: {
         const id = operationRoute[1]!;
         const op = operationRoute[2]!;
         const body = await readJson(req) as Record<string, unknown>;
+        if ((op === 'start' || op === 'refresh' || op === 'promote')
+          && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Digital operation advancement is frozen by the local emergency stop.' } });
+          return;
+        }
         const operation = op === 'start' ? await options.operations.start(id)
           : op === 'refresh' ? await options.operations.refresh(id)
           : op === 'pause' ? await options.operations.pause(id)
@@ -1442,6 +1378,11 @@ export function createLocalAgentServer(options: {
         const id = teamRoute[1]!;
         const operation = teamRoute[2]!;
         const body = await readJson(req) as Record<string, unknown>;
+        if ((operation === 'start' || operation === 'resume' || operation === 'claim')
+          && options.emergencyStop && (await options.emergencyStop.status()).engaged) {
+          send(res, 423, { ok: false, error: { code: 'EMERGENCY_STOPPED', message: 'Team orchestration is frozen by the local emergency stop.' } });
+          return;
+        }
         if (operation === 'claim') {
           const result = await options.teams.claim(id, { workerId: String(body.workerId ?? '') });
           send(res, 200, { ok: true, mission: result.mission, ...(result.workItem ? { workItem: result.workItem } : {}) });
@@ -2087,13 +2028,22 @@ export function createLocalAgentServer(options: {
         const body = await readJson(req) as { reason?: unknown };
         const reason = body.reason === undefined ? undefined : String(body.reason);
         const state = await options.emergencyStop.engage(reason);
+        const aborted = abortEmergencyExecutions();
         options.sessionApprovals?.clear();
+        if (options.teams && aborted.teamActions.length > 0) {
+          const missionIds = [...new Set(aborted.teamActions.map((entry) => entry.missionId))].sort();
+          await Promise.allSettled(missionIds.map((missionId) => options.teams!.pause(missionId)));
+        }
         await options.onEmergencyStop?.();
         await options.audit?.append({
           capability: 'agent.emergency-stop',
           result: 'success',
           risk: 'destructive',
-          details: { operation: 'engage' }
+          details: {
+            operation: 'engage',
+            abortedTaskCount: aborted.taskIds.length,
+            abortedTeamActionCount: aborted.teamActions.length
+          }
         });
         send(res, 200, { ok: true, state });
       } catch (error) {
@@ -2113,10 +2063,14 @@ export function createLocalAgentServer(options: {
         return;
       }
       const state = await options.emergencyStop.clear();
+      resetEmergencyExecutionGeneration();
       try {
         await options.onEmergencyClear?.();
       } catch (error) {
-        await options.emergencyStop.engage('relay recovery callback failed');
+        await options.emergencyStop.engage('emergency recovery callback failed');
+        abortEmergencyExecutions();
+        options.sessionApprovals?.clear();
+        await options.onEmergencyStop?.();
         send(res, 503, { ok: false, error: { code: 'EMERGENCY_CLEAR_FAILED', message: error instanceof Error ? error.message : String(error) } });
         return;
       }
@@ -2144,7 +2098,10 @@ export function createLocalAgentServer(options: {
         const action = validateActionEnvelope(body.action);
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
-        const receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        let receipt = await options.actionExecutions.lookup(action, approvalAuthority);
+        if (options.agentKernel && receipt.status !== 'missing') {
+          receipt = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+        }
         if (receipt.status === 'missing') {
           send(res, 404, { ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND', message: 'No durable execution receipt exists for this exact action.' } });
           return;
@@ -2202,7 +2159,14 @@ export function createLocalAgentServer(options: {
         const approvalAuthority = body.approvalAuthority === undefined ? undefined : validateApprovalAuthority(body.approvalAuthority);
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if (options.actionExecutions) {
-          const receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          let receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (options.agentKernel && receipt.status !== 'started') {
+            const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+            if (reconciled.status === 'missing') {
+              throw new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', 'Local action execution receipt disappeared during kernel reconciliation.', { retryable: false });
+            }
+            receipt = reconciled;
+          }
           if (receipt.status === 'completed') {
             send(res, receipt.result.ok ? 200 : 409, receipt.result);
             return;
@@ -2282,7 +2246,17 @@ export function createLocalAgentServer(options: {
         } catch (error) {
           result = resultWithAuditDegradation(result, error);
         }
-        if (options.actionExecutions) await options.actionExecutions.complete(action, result, approvalAuthority);
+        if (options.actionExecutions) {
+          await options.beforeActionReceiptCompletion?.({ action, result });
+          if (options.agentKernel && action.risk !== 'read' && result.ok) {
+            const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
+            if (reconciled.status !== 'completed') {
+              throw new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', 'Kernel reported success without a durable completed mutation result.', { retryable: false });
+            }
+          } else {
+            await options.actionExecutions.complete(action, result, approvalAuthority);
+          }
+        }
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

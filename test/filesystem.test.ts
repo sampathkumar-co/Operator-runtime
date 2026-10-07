@@ -24,6 +24,34 @@ test('filesystem provider performs atomic write/read with SHA postcondition', as
   assert.equal(read.ok, true);
   assert.equal((read.output as { content: string }).content, 'hello operator');
   assert.equal((read.output as { sha256: string }).sha256, (write.output as { afterSha256: string }).afterSha256);
+  const identity = (read.output as any).identity;
+  assert.match(identity.digest, /^[0-9a-f]{64}$/);
+  assert.equal(identity.size, 14);
+  assert.equal(typeof identity.device, 'string');
+  assert.equal(typeof identity.inode, 'string');
+});
+
+test('file observations fail closed when bytes change while a handle-bound snapshot is being verified', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-stable-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'race.txt');
+  await fs.writeFile(filePath, 'before');
+  let injected = false;
+  const provider = new FilesystemProvider({
+    allowedRoots: [root],
+    observationHook: async (observedPath, phase) => {
+      if (!injected && phase === 'before-verify') {
+        injected = true;
+        await fs.writeFile(observedPath, 'after!');
+      }
+    }
+  });
+  const read = await provider.execute(action('file.read', { path: filePath }));
+  assert.equal(read.ok, false);
+  assert.equal(read.error?.code, 'FILE_OBSERVATION_CHANGED');
+  assert.equal(read.error?.sideEffectState, 'none');
+  assert.equal(read.error?.executionPhase, 'pre_dispatch');
+  assert.equal(await fs.readFile(filePath, 'utf8'), 'after!');
 });
 
 test('file.read paginates large content below the hosted relay result ceiling', async (t) => {
@@ -197,6 +225,19 @@ test('file.replace never overwrites a concurrent recreation after claiming the e
   assert.equal((await fs.readdir(root)).some((name) => name.endsWith('.bak') || name.endsWith('.tmp')), false);
 });
 
+
+test('file.list exposes deterministic continuation for large directories', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-list-page-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await Promise.all(['c.txt', 'a.txt', 'b.txt'].map((name) => fs.writeFile(path.join(root, name), name)));
+  const provider = new FilesystemProvider({ allowedRoots: [root] });
+  const first = await provider.execute(action('file.list', { path: root, offset: 0, limit: 2 }));
+  assert.deepEqual((first.output as any).entries.map((entry: any) => entry.name), ['a.txt', 'b.txt']);
+  assert.deepEqual({ truncated: (first.output as any).truncated, nextOffset: (first.output as any).nextOffset, total: (first.output as any).total }, { truncated: true, nextOffset: 2, total: 3 });
+  const second = await provider.execute(action('file.list', { path: root, offset: 2, limit: 2 }));
+  assert.deepEqual((second.output as any).entries.map((entry: any) => entry.name), ['c.txt']);
+  assert.equal((second.output as any).truncated, false);
+});
 
 test('file.search recursively finds bounded matches without following symlinks', async (ctx) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-fs-search-'));

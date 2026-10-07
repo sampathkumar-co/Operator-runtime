@@ -5,6 +5,7 @@ import { evidence } from './evidence.ts';
 import { OperatorError } from './errors.ts';
 import type { ProviderLearning } from './provider-learning.ts';
 import { conservativeExecutionPhase, conservativeSideEffectState, retrySafeWithoutReconciliation, validExecutionPhase, validSideEffectState } from './side-effect.ts';
+import { MUTATION_RECONCILIATION_POLICIES, assertRegisteredMutationReconciliation, reconcileFromDurableResult } from './reconciliation-coverage.ts';
 
 export class OperatorRuntime {
   readonly router: CapabilityRouter;
@@ -20,6 +21,18 @@ export class OperatorRuntime {
   register(provider: CapabilityProvider): this {
     this.router.register(provider);
     return this;
+  }
+
+  async initialize(): Promise<void> {
+    await this.router.initializeAll();
+  }
+
+  async emergencyStop(): Promise<void> {
+    await this.router.emergencyStopAll();
+  }
+
+  async assertMutationReconciliationCoverage(): Promise<void> {
+    await assertRegisteredMutationReconciliation(this.router.providers());
   }
 
   async supportedCapabilities(capabilities: readonly string[]): Promise<string[]> {
@@ -92,6 +105,24 @@ export class OperatorRuntime {
     for (const { provider, score, baseScore, learnedAdjustment } of ranked) {
       try {
         if (context.signal?.aborted) return abortedResult(canonicalAction, start);
+        if (!await provider.supports(canonicalAction)) {
+          failures.push({ code: 'PROVIDER_SUPPORT_CHANGED', message: `${provider.name} no longer supports the canonical action.`, retryable: true, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const });
+          continue;
+        }
+        try {
+          const dispatchDecision = await this.authority.authorize(
+            canonicalAction,
+            permissions,
+            async (candidate) => {
+              if (!provider.resolveRisk) throw new OperatorError('CAPABILITY_RISK_UNRESOLVED', `Selected provider ${provider.name} has no dynamic-risk contract.`);
+              return await provider.resolveRisk(candidate);
+            },
+            context.authorityToken
+          );
+          canonicalAction = dispatchDecision.canonicalAction;
+        } catch (error) {
+          return policyDeniedBeforeDispatch(canonicalAction, error, start);
+        }
         await context.onProviderDispatch?.(provider.name);
         const result = await provider.execute(canonicalAction, context);
         result.evidence.unshift(evidence('routing', 'info', `Selected ${provider.name}.`, { score, baseScore, learnedAdjustment }));
@@ -156,10 +187,9 @@ export class OperatorRuntime {
       throw new OperatorError('PROVIDER_RECONCILIATION_UNAVAILABLE', `Provider ${providerName} is not available for reconciliation.`);
     }
     if (!provider.reconcile) {
-      return {
-        status: 'uncertain',
-        evidence: [evidence('reconciliation', 'info', 'Selected provider does not implement an action reconciliation contract.', { provider: providerName })]
-      };
+      const policy = MUTATION_RECONCILIATION_POLICIES[action.capability];
+      if (policy?.mode === 'side_effect_free') return reconcileFromDurableResult(providerName, action.capability, priorResult);
+      throw new OperatorError('PROVIDER_RECONCILIATION_CONTRACT_MISSING', `Provider ${providerName} has no reconciliation contract for mutable capability ${action.capability}.`);
     }
     return await provider.reconcile({ action, ...(priorResult ? { priorResult } : {}) }, context);
   }
@@ -167,6 +197,18 @@ export class OperatorRuntime {
   async close(): Promise<void> {
     await this.router.closeAll();
   }
+}
+
+function policyDeniedBeforeDispatch(action: ActionRequest, error: unknown, start: number): ActionResult {
+  const op = error instanceof OperatorError ? error : new OperatorError('POLICY_ERROR', String(error));
+  return {
+    ok: false,
+    capability: action.capability,
+    provider: 'policy',
+    evidence: [evidence('policy_dispatch', 'fail', 'Authority changed or could not be revalidated immediately before provider dispatch.', { code: op.code })],
+    error: { code: op.code, message: op.message, retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' },
+    durationMs: Math.round(performance.now() - start)
+  };
 }
 
 function isAbortError(error: unknown): boolean {

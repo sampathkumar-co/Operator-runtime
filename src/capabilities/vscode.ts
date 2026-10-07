@@ -2,9 +2,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../core/types.ts';
+import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { reconcileFromDurableResult } from '../core/reconciliation-coverage.ts';
 import { resolveTrustedExecutable } from '../core/trusted-executable.ts';
 import { PathScope } from './path-scope.ts';
 
@@ -42,6 +43,10 @@ export class VsCodeProvider implements CapabilityProvider {
   }
 
   score(): CapabilityScore { return SCORE; }
+
+  async reconcile(request: ProviderReconciliationRequest): Promise<ProviderReconciliationResult> {
+    return reconcileFromDurableResult(this.name, request.action.capability, request.priorResult);
+  }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
     const started = performance.now();

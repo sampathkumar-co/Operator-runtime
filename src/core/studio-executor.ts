@@ -8,7 +8,7 @@ import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
 import { conservativeSideEffectState } from './side-effect.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
-import { resourceKeysForAction } from './resource-identity.ts';
+import { resolvePhysicalResourceKeysForAction } from './resource-identity.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
 import type { AgentKernel } from './agent-kernel.ts';
 import { kernelVerificationDigest } from './action-verification.ts';
@@ -205,7 +205,7 @@ export class StudioWorkflowExecutor {
           taskId: current.id,
           ...(current.intent ? { intent: current.intent } : {})
         };
-        const derivedResources = resourceKeysForAction(action);
+        const derivedResources = await resolvePhysicalResourceKeysForAction(action);
         const resources = [...new Set([...freshStep.resourceKeys, ...derivedResources])].sort();
         const leaseMode = freshStep.risk === 'read' ? 'shared' as const : 'exclusive' as const;
         const stepLease = this.#agentKernel
