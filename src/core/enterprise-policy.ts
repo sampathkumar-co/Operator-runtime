@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import type { ActionRisk, PermissionProfile } from './types.ts';
 
@@ -70,7 +71,7 @@ export class EnterprisePolicyStore {
   async configure(input: { roles: EnterpriseRole[]; bindings: EnterpriseBinding[] }): Promise<EnterprisePolicyState> {
     const policy = validatePolicy(input.roles, input.bindings);
     let configured!: EnterprisePolicyState;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
       if (enterprisePolicyDigest(current) === enterprisePolicyDigest(policy)) {
         configured = current;
@@ -81,7 +82,7 @@ export class EnterprisePolicyStore {
       }
       configured = sealState({ version: 2, generation: current.generation + 1, roles: policy.roles, bindings: policy.bindings });
       await writeDurableStateText(this.#file, JSON.stringify(configured, null, 2), STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(configured);

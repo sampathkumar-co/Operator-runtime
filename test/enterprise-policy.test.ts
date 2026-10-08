@@ -366,3 +366,41 @@ test('enterprise policy rejects generation tamper and migrates legacy v1 authori
     (error: any) => error?.code === 'ENTERPRISE_POLICY_CORRUPT'
   );
 });
+
+test('independent enterprise policy instances preserve every generation and deduplicate identical policy updates', async (t) => {
+  const state = await temp(t);
+  const stores = Array.from({ length: 8 }, () => new EnterprisePolicyStore(state));
+  const policy = (name: string) => ({
+    roles: [{
+      id: 'role-' + name,
+      capabilities: ['file.read'],
+      rootPrefixes: [],
+      maxRisk: 'read' as const,
+      environments: [],
+      projectPrefixes: [],
+      deviceGroups: []
+    }],
+    bindings: [{
+      id: 'binding-' + name,
+      principalId: 'human:policy-operator',
+      roleId: 'role-' + name,
+      enabled: true
+    }]
+  });
+  const updates = await Promise.all(Array.from({ length: 16 }, (_, i) =>
+    stores[i % stores.length]!.configure(policy(String(i)))
+  ));
+  assert.deepEqual(updates.map((item) => item.generation).sort((a, b) => a - b),
+    Array.from({ length: 16 }, (_, i) => i + 1));
+  const current = await new EnterprisePolicyStore(state).inspect();
+  assert.equal(current.generation, 16);
+  assert.equal(current.roles.length, 1);
+  assert.equal(current.bindings.length, 1);
+  const finalPolicy = policy('restrict-to-readonly');
+  const identical = await Promise.all([stores[0]!.configure(finalPolicy), stores[1]!.configure(finalPolicy)]);
+  assert.deepEqual(identical.map((item) => item.generation), [17, 17]);
+  const persisted = await new EnterprisePolicyStore(state).inspect();
+  assert.equal(persisted.generation, 17);
+  assert.equal(persisted.roles[0]?.id, finalPolicy.roles[0]!.id);
+  assert.equal(persisted.bindings[0]?.roleId, finalPolicy.roles[0]!.id);
+});
