@@ -447,12 +447,12 @@ export class DurableSagaKernel {
 
   async #mutate<T>(fn: (state: SagaStateFile, now: Date) => T | Promise<T>): Promise<T> {
     let output!: T;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       output = await fn(state, new Date());
       validateState(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(output);
