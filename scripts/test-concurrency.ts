@@ -1,6 +1,6 @@
-// Bounded across platforms: reserve headroom for child processes, file I/O and
-// runtime-internal workers during parallel integration test execution.
-const MAX_FILE_WORKERS = 4;
+// Test files spawn additional terminal, Git and filesystem workloads.
+// Keep enough scheduler headroom for *child* processes on modest and busy hosts.
+const MAX_FILE_WORKERS = 2;
 
 export function boundedTestConcurrency(availableParallelism: number): number {
   if (!Number.isSafeInteger(availableParallelism) || availableParallelism < 1) {

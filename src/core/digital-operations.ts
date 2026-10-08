@@ -256,11 +256,11 @@ export class DigitalOperationsLayer {
         const failed: string[] = [];
         if (teamMissionId) {
           try { await this.#teams.cancel(teamMissionId); }
-          catch { failed.push('cancel-team-mission'); }
+          catch (error) { if ((error as { code?: unknown } | null)?.code !== 'TEAM_NOT_FOUND') failed.push('cancel-team-mission'); }
         }
         if (organizationProgramId) {
           try { await this.#organizations.cancel(organizationProgramId); }
-          catch { failed.push('cancel-organization-program'); }
+          catch (error) { if ((error as { code?: unknown } | null)?.code !== 'ORGANIZATION_PROGRAM_NOT_FOUND') failed.push('cancel-organization-program'); }
         }
         if (deviceReservationId) {
           try { await this.#devices.release(deviceReservationId); }
@@ -277,22 +277,28 @@ export class DigitalOperationsLayer {
       };
       try {
         if (resolved.execution.kind === 'team') {
+          const missionId = crypto.randomUUID();
+          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', missionId));
+          teamMissionId = missionId;
           const mission = await this.#teams.submit({
+            missionId,
             objective: normalized.objective,
             workItems: resolved.execution.workItems,
             ...(resolved.execution.budget ? { budget: resolved.execution.budget } : {})
           });
-          teamMissionId = mission.id;
-          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', mission.id));
+          if (mission.id !== missionId) throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
+          const programId = crypto.randomUUID();
+          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', programId));
+          organizationProgramId = programId;
           const program = await this.#organizations.create({
+            programId,
             objective: normalized.objective,
             targets: resolved.execution.targets,
             ...(resolved.execution.policy ? { policy: resolved.execution.policy } : {})
           });
-          organizationProgramId = program.id;
-          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', program.id));
+          if (program.id !== programId) throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Program creator did not honor the journal-bound program identity.');
           if (normalized.run) await this.#organizations.start(program.id);
         }
       } catch (error) {

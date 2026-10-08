@@ -162,7 +162,10 @@ test('stage10 creation cleanup persists compensation failure and restart recover
       return { id, state: 'RELEASED' };
     }
   };
-  const teams = { async submit() { throw new Error('mission creation failed'); } };
+  const teams = {
+    async submit() { throw new Error('mission creation failed'); },
+    async cancel() { throw Object.assign(new Error('mission absent'), { code: 'TEAM_NOT_FOUND' }); }
+  };
   const compensations = new DurableCompensationJournal(base.state);
   const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, teams: teams as any, compensations });
   await assert.rejects(() => ops.submit({
@@ -411,9 +414,9 @@ test('stage10 world postcondition follows the resolved value rather than any sta
 test('stage10 compensates a newly created team mission when start fails before operation persistence', async (t) => {
   const state = await tempDir(t);
   const cancelled: string[] = [];
-  const missionId = crypto.randomUUID();
+  let missionId = crypto.randomUUID();
   const fakeTeams = {
-    async submit() { return { id: missionId }; },
+    async submit(input: { missionId: string }) { missionId = input.missionId; return { id: missionId }; },
     async start() { throw new Error('simulated start failure'); },
     async cancel(id: string) { cancelled.push(id); return { id, state: 'CANCELLED' }; }
   };
@@ -672,4 +675,78 @@ test('restart after reservation commit and before operation commit releases exac
   assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
   assert.equal((await devices.list({ activeOnly: true })).length, 0);
   assert.deepEqual(await compensations.pending('digital-operation'), []);
+});
+
+test('team mission response loss keeps write-ahead cancel intent across restart without replaying creation', async (t) => {
+  const base = await setup(t);
+  let missionId = '';
+  let creates = 0;
+  let cancels = 0;
+  let allowCancel = false;
+  const teams = {
+    async submit(input: { missionId: string }) {
+      missionId = input.missionId; creates++;
+      throw Object.assign(new Error('mission created but response lost'), { code: 'TEAM_RESPONSE_LOST' });
+    },
+    async cancel(id: string) {
+      assert.equal(id, missionId); cancels++;
+      if (!allowCancel) throw Object.assign(new Error('cleanup unavailable'), { code: 'TEAM_CANCEL_UNAVAILABLE' });
+      return { id, state: 'CANCELLED' };
+    }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any, compensations });
+  await assert.rejects(ops.submit({
+    objective: 'Recover unacknowledged mission', scopeKey: 'project:lost-team',
+    successConditions: ['no duplicate work'], execution: { kind: 'team', workItems: work() }
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
+  const pending = await compensations.pending('digital-operation');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.operation, 'cancel-team-mission');
+  assert.equal(pending[0]?.targetId, missionId);
+  allowCancel = true;
+  const restarted = new DigitalOperationsLayer(base.state, {
+    ...base, teams: teams as any, compensations: new DurableCompensationJournal(base.state)
+  });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(creates, 1);
+  assert.equal(cancels, 2);
+});
+
+test('organization program response loss keeps the exact cancel identity for restart', async (t) => {
+  const base = await setup(t);
+  let programId = '';
+  let creates = 0;
+  let cancels = 0;
+  let allowCancel = false;
+  const organizations = {
+    async create(input: { programId: string }) {
+      programId = input.programId; creates++;
+      throw Object.assign(new Error('program created but response lost'), { code: 'ORG_RESPONSE_LOST' });
+    },
+    async cancel(id: string) {
+      assert.equal(id, programId); cancels++;
+      if (!allowCancel) throw Object.assign(new Error('cleanup unavailable'), { code: 'ORG_CANCEL_UNAVAILABLE' });
+      return { id, state: 'CANCELLED' };
+    }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, { ...base, organizations: organizations as any, compensations });
+  await assert.rejects(ops.submit({
+    objective: 'Recover unacknowledged program', scopeKey: 'org:lost-program',
+    successConditions: ['no duplicated rollout'], execution: { kind: 'organization', targets: [
+      { key: 'service', scopeKey: 'org:lost-program:service', workItems: work() }
+    ] }
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
+  const pending = await compensations.pending('digital-operation');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.operation, 'cancel-organization-program');
+  assert.equal(pending[0]?.targetId, programId);
+  allowCancel = true;
+  const restarted = new DigitalOperationsLayer(base.state, {
+    ...base, organizations: organizations as any, compensations: new DurableCompensationJournal(base.state)
+  });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(creates, 1);
+  assert.equal(cancels, 2);
 });

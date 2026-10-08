@@ -323,3 +323,18 @@ test('stage8 successful parent commit clears durable child compensation intent',
   const pending = await new DurableCompensationJournal(state).pending('organization');
   assert.equal(pending.length, 0);
 });
+
+test('preassigned program identity cannot be reallocated to a second organization rollout', async (t) => {
+  const state = await tempDir(t);
+  const org = new OrganizationCoordinator(state, new TeamCoordinator(state));
+  const programId = crypto.randomUUID();
+  const input = {
+    programId, objective: 'Write-ahead program identity',
+    policy: { allowedScopePrefixes: ['org:identity'] },
+    targets: [{ key: 'one', scopeKey: 'org:identity:one', workItems: work('one') }]
+  };
+  const first = await org.create(input);
+  assert.equal(first.id, programId);
+  await assert.rejects(org.create(input), (error: any) => error?.code === 'ORGANIZATION_PROGRAM_ID_CONFLICT');
+  assert.equal((await org.list()).length, 1);
+});
