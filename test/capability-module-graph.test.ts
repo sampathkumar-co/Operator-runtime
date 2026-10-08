@@ -139,10 +139,10 @@ test('full signed module graph loads only pinned in-memory bytes and never reope
 test('signed graph rejects undeclared imports and external native/bare modules', async (t) => {
   if (!HAS_HOOKS) return t.skip('Node 22.15+ synchronous module hooks required');
   for (const source of [
-    "import './undeclared.mjs'; export const message='no';",
-    "import fs from 'node:fs'; export const message='no';",
-    "import pkg from 'some-external-package'; export const message='no';",
-    "await import('data:text/javascript,export default 42'); export const message='no';"
+    "import './undeclared.mjs'; export const value='no';",
+    "import fs from 'node:fs'; export const value='no';",
+    "import pkg from 'some-external-package'; export const value='no';",
+    "await import('data:text/javascript,export default 42'); export const value='no';"
   ]) {
     const files = { 'provider.mjs': providerCode, 'lib/helper.mjs': source };
     const { root, entry } = await graphFiles(t, files);
