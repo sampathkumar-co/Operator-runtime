@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { TeachModeStore, TeachWorkflowStep } from './studio-teach.ts';
 import type { OperatorRuntime } from './runtime.ts';
 import type { ActionRequest, ActionResult, IntentBinding, PermissionProfile, SideEffectState } from './types.ts';
@@ -542,12 +543,12 @@ export class StudioWorkflowExecutor {
 
   async #mutate<T>(fn: (state: StudioRunStateFile, now: Date) => T | Promise<T>): Promise<T> {
     let output!: T;
-    const operation = this.#serial.then(async () => {
+    const operation = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       output = await fn(state, this.#clock());
       validateState(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
-    });
+    }));
     this.#serial = operation.then(() => undefined, () => undefined);
     await operation;
     return structuredClone(output);
