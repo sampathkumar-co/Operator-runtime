@@ -5,6 +5,7 @@ import type { AgentKernel } from './agent-kernel.ts';
 import { kernelVerificationDigest } from './action-verification.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ActionRequest, IntentBinding, PermissionProfile } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
 
@@ -175,7 +176,11 @@ export class DurableSagaKernel {
     const sagaId = uuid(sagaIdInput, 'sagaId');
     const active = this.#active.get(sagaId);
     if (active) return await active;
-    const promise = this.#run(sagaId, options).finally(() => this.#active.delete(sagaId));
+    // Execution ownership is separate from the short JSON transaction lock.
+    // Another kernel instance may not execute this saga while this process
+    // still owns its external side effects; a dead process can be reconciled.
+    const promise = withDurableStateLock(this.#file + '.' + sagaId + '.run',
+      () => this.#run(sagaId, options)).finally(() => this.#active.delete(sagaId));
     this.#active.set(sagaId, promise);
     return await promise;
   }
