@@ -6,6 +6,7 @@ import type { SignedCapabilityPackage } from './capability-package-registry.ts';
 import { CapabilityGovernanceRegistry } from './capability-governance.ts';
 import { OperatorError } from './errors.ts';
 import { isBuiltInCapability, registerExtensionCapabilityRisk } from './capability-policy.ts';
+import { registerVerifiedModuleGraph, snapshotVerifiedModuleGraph } from './verified-module-graph.ts';
 
 export interface CapabilityModuleFactory {
   createCapabilityProvider?: (input: { manifest: SignedCapabilityPackage['manifest'] }) => CapabilityProvider | Promise<CapabilityProvider>;
@@ -37,8 +38,21 @@ export async function loadGovernedCapabilityModule(input: {
     for (const release of riskReleases.reverse()) release();
     throw error;
   }
+  let graphRelease: (() => void) | undefined;
   try {
     const modulePath = await resolveAllowedExisting(input.modulePath, input.allowedRoots);
+    let namespace: CapabilityModuleFactory;
+    if (input.package.manifest.provenance.moduleGraph) {
+      const graph = input.package.manifest.provenance.moduleGraph;
+      const snapshots = await snapshotVerifiedModuleGraph({
+        entryPath: modulePath,
+        graph,
+        readModuleBytes: input.readModuleBytes ?? fs.readFile
+      });
+      const registered = registerVerifiedModuleGraph(graph, snapshots);
+      graphRelease = registered.release;
+      namespace = await import(registered.entryUrl) as CapabilityModuleFactory;
+    } else {
     const stat = await fs.stat(modulePath);
     if (!stat.isFile() || stat.size < 1 || stat.size > 8 * 1024 * 1024) {
       throw new OperatorError('CAPABILITY_MODULE_SIZE_INVALID', 'Capability module must be a regular file between 1 byte and 8 MiB.');
@@ -52,7 +66,8 @@ export async function loadGovernedCapabilityModule(input: {
     // verification. This closes hash→execute TOCTOU and makes packageDigest
     // cover every executable byte in the extension entry module.
     const encoded = bytes.toString('base64');
-    const namespace = await import(`data:text/javascript;base64,${encoded}#sha256=${digest}`) as CapabilityModuleFactory;
+    namespace = await import(`data:text/javascript;base64,${encoded}#sha256=${digest}`) as CapabilityModuleFactory;
+    }
     const factory = typeof namespace.createCapabilityProvider === 'function'
       ? namespace.createCapabilityProvider
       : typeof namespace.default === 'function'
@@ -63,8 +78,9 @@ export async function loadGovernedCapabilityModule(input: {
     if (!provider || typeof provider.name !== 'string' || typeof provider.execute !== 'function') {
       throw new OperatorError('CAPABILITY_MODULE_PROVIDER_INVALID', 'Capability module factory returned an invalid provider.');
     }
-    return new RiskPolicyBoundProvider(input.governance.wrap(input.package, provider), riskReleases);
+    return new RiskPolicyBoundProvider(input.governance.wrap(input.package, provider), riskReleases, graphRelease);
   } catch (error) {
+    graphRelease?.();
     for (const release of riskReleases.reverse()) release();
     throw error;
   }
@@ -74,10 +90,12 @@ class RiskPolicyBoundProvider implements CapabilityProvider {
   readonly name: string;
   #provider: CapabilityProvider;
   #releases: Array<() => void>;
+  #graphRelease?: () => void;
   #closed = false;
-  constructor(provider: CapabilityProvider, releases: Array<() => void>) {
+  constructor(provider: CapabilityProvider, releases: Array<() => void>, graphRelease?: () => void) {
     this.#provider = provider;
     this.#releases = releases;
+    this.#graphRelease = graphRelease;
     this.name = provider.name;
   }
   supports(action: ActionRequest): boolean | Promise<boolean> { return this.#provider.supports(action); }
@@ -100,7 +118,12 @@ class RiskPolicyBoundProvider implements CapabilityProvider {
     if (this.#closed) return;
     this.#closed = true;
     try { await this.#provider.close?.(); }
-    finally { for (const release of this.#releases.reverse()) release(); this.#releases = []; }
+    finally {
+      this.#graphRelease?.();
+      this.#graphRelease = undefined;
+      for (const release of this.#releases.reverse()) release();
+      this.#releases = [];
+    }
   }
 }
 
