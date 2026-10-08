@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { canonicalJson } from './action-identity.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ControlPlaneStore } from './control-plane-store.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
@@ -97,8 +98,16 @@ export class RelayDeliveryStore {
           const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
           if (!existing) continue;
           if (existingStream.deviceId !== deviceId) throw new OperatorError('RELAY_IDEMPOTENCY_ROUTE_CHANGED', 'An unacknowledged action retry resolved to a different device.');
-          if (existing.status === 'pending' && (existing.requiredCapabilities === undefined || !sameCapabilities(existing.requiredCapabilities, requiredCapabilities))) {
-            throw new OperatorError('RELAY_IDEMPOTENCY_CAPABILITY_CHANGED', 'An unacknowledged action retry changed its durable capability requirements.');
+          if (existing.status === 'pending') {
+            if (existing.requiredCapabilities === undefined || !sameCapabilities(existing.requiredCapabilities, requiredCapabilities)) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_CAPABILITY_CHANGED', 'An unacknowledged action retry changed its durable capability requirements.');
+            }
+            if (existing.kind !== kind || canonicalJson(existing.payload) !== canonicalJson(payload)) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_INPUT_CHANGED', 'An unacknowledged action retry changed its durable operation identity.');
+            }
+            if (!sameAuthority(existing.authority, authority)) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_AUTHORITY_CHANGED', 'An unacknowledged action retry changed its account-device authority.');
+            }
           }
           return cloneDelivery(existing);
         }
@@ -643,6 +652,11 @@ function legacyRequiredCapabilities(kind: string, payload: JsonObject, status: S
 
 function sameCapabilities(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameAuthority(left: RelayDeliveryAuthority | undefined, right: RelayDeliveryAuthority | undefined): boolean {
+  if (!left || !right) return left === right;
+  return left.accountId === right.accountId && left.deviceId === right.deviceId && left.generation === right.generation;
 }
 
 function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {
