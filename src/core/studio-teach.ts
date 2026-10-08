@@ -4,6 +4,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 import { VerificationKernel, type VerificationCheck, type VerificationReceipt } from './verification-kernel.ts';
 import type { ActionRequest, ActionResult, ActionRisk, IntentBinding, PermissionProfile } from './types.ts';
 import type { ActionTransitionJournal } from './action-transition-journal.ts';
@@ -103,6 +104,7 @@ const WORKFLOW_OPTIONS = {
 
 export class TeachModeStore {
   #file: string;
+  #ownership: ResourceLeaseStore;
   #workflowDir: string;
   #clock: () => Date;
   #maxWorkflows: number;
@@ -124,6 +126,7 @@ export class TeachModeStore {
   } = {}) {
     const root = path.resolve(stateDir);
     this.#file = path.join(root, 'studio-teach.json');
+    this.#ownership = new ResourceLeaseStore(stateDir);
     this.#workflowDir = path.join(root, 'studio-workflows');
     this.#clock = options.clock ?? (() => new Date());
     this.#maxWorkflows = boundedStoreInteger(options.maxWorkflows ?? MAX_WORKFLOWS, 2, MAX_WORKFLOWS, 'maxWorkflows');
@@ -437,10 +440,28 @@ export class TeachModeStore {
   async #mutate<T>(fn: (state: TeachState, now: Date) => T | Promise<T>): Promise<T> {
     let output!: T;
     const run = this.#serial.then(async () => {
-      const state = await this.#read();
-      output = await fn(state, this.#clock());
-      validateState(state);
-      await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+      // Cross-instance ownership spans long workflow compilation/verification.
+      // We cannot hold a short JSON file lock during arbitrary async callbacks.
+      let owner;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        try {
+          owner = await this.#ownership.acquire(
+            `studio-teach-owner:${crypto.randomUUID()}`, ['studio-teach:state'], 'exclusive'
+          );
+          break;
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+          if (attempt === 299) throw new OperatorError('TEACH_STORE_BUSY', 'Another process owns Teach state.', { retryable: true });
+          await new Promise<void>(resolve => setTimeout(resolve, 25));
+        }
+      }
+      if (!owner) throw new OperatorError('TEACH_STORE_BUSY', 'Teach state owner unavailable.', { retryable: true });
+      try {
+        const state = await this.#read();
+        output = await fn(state, this.#clock());
+        validateState(state);
+        await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+      } finally { await owner.release(); }
     });
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
