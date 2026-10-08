@@ -577,3 +577,44 @@ test('stage10 outcome-only mutation fails closed without an explicit authority e
     (error: any) => error?.code === 'OUTCOME_PLAN_AUTHORITY_REQUIRED'
   );
 });
+
+
+test('reservation is released when durable compensation registration fails before operation creation', async (t) => {
+  const base = await setup(t);
+  const reservationId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
+  let releaseFails = false;
+  let releases = 0;
+  const devices = {
+    async reserve() { return { id: reservationId, sessionId, state: 'ACTIVE' }; },
+    async release(id: string) {
+      assert.equal(id, reservationId);
+      releases += 1;
+      if (releaseFails) throw Object.assign(new Error('release fault'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
+      return { id, state: 'RELEASED' };
+    }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  compensations.prepare = async () => {
+    throw Object.assign(new Error('synthetic compensation journal failure'), { code: 'JOURNAL_WRITE_FAILED' });
+  };
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations });
+  const submit = () => ops.submit({
+    objective: 'Exercise general recovery handoff', scopeKey: 'project:compensation',
+    successConditions: ['release reservation if handoff fails'],
+    execution: { kind: 'team' as const, workItems: work() },
+    device: { request: { workloadKey: 'job:handoff' }, advertisements: [] }
+  });
+
+  await assert.rejects(submit, /synthetic compensation journal failure/);
+  assert.equal(releases, 1);
+  assert.deepEqual(await compensations.pending('digital-operation'), []);
+
+  releaseFails = true;
+  await assert.rejects(submit, (error: any) =>
+    error?.code === 'COMPENSATION_BLOCKED' &&
+    error?.details?.reservationId === reservationId &&
+    error?.details?.prepareCode === 'JOURNAL_WRITE_FAILED' &&
+    error?.details?.releaseCode === 'DEVICE_RELEASE_UNAVAILABLE');
+  assert.equal(releases, 2);
+});
