@@ -798,3 +798,98 @@ test('failed mission start cannot report compensated when its cancellation remai
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.operation, 'cancel-team-mission');
 });
+
+test('two independent recovery workers never execute one compensation twice',async t=>{
+ const base=await setup(t);
+ const missionId=crypto.randomUUID(),ownerId=crypto.randomUUID();
+ const journal=new DurableCompensationJournal(base.state);
+ await journal.prepare({
+  id:crypto.randomUUID(),ownerKind:'digital-operation',ownerId,
+  operation:'cancel-team-mission',targetId:missionId
+ });
+ let cancels=0;
+ const teams={
+  async cancel(id:string){
+    assert.equal(id,missionId);cancels+=1;
+    await new Promise(resolve=>setTimeout(resolve,120));
+    return {id,state:'CANCELLED'};
+  }
+ };
+ const left=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const right=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ await Promise.all([left.recoverPendingCompensations(),right.recoverPendingCompensations()]);
+ assert.equal(cancels,1,'one compensated identity must have one physical cancel owner');
+ assert.equal((await journal.pending('digital-operation')).length,0);
+});
+
+test('two independent operation creators reuse one requestId without duplicated mission side effects',async t=>{
+ const base=await setup(t);
+ let creates=0;
+ const teams={
+  async submit(input:{missionId:string}){
+   creates+=1;
+   await new Promise(resolve=>setTimeout(resolve,80));
+   return {id:input.missionId,state:'PENDING'};
+  },
+  async cancel(id:string){return {id,state:'CANCELLED'}}
+ };
+ const left=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const right=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const input={
+  requestId:crypto.randomUUID(),objective:'One bounded workflow',
+  scopeKey:'project:duplicate-submission',successConditions:['one mission'],
+  execution:{kind:'team' as const,workItems:work()},run:false
+ };
+ const [a,b]=await Promise.all([left.submit(input),right.submit(input)]);
+ assert.equal(a.id,input.requestId);
+ assert.equal(b.id,input.requestId);
+ assert.equal(a.teamMissionId,b.teamMissionId);
+ assert.equal(creates,1);
+});
+
+test('external RESOURCE_BUSY error is not mistaken for acquisition contention and retried',async t=>{
+ const base=await setup(t);
+ let submits=0;
+ const teams={
+  async submit(){submits++;throw Object.assign(new Error('provider busy after effect attempt'),{code:'RESOURCE_BUSY'})},
+  async cancel(id:string){return {id,state:'CANCELLED'}}
+ };
+ const ops=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ await assert.rejects(ops.submit({
+  requestId:crypto.randomUUID(),objective:'Do not replay unknown effects',
+  scopeKey:'project:no-retry',successConditions:['no duplicate'],
+  execution:{kind:'team',workItems:work()}
+ }),/provider busy after effect attempt/);
+ assert.equal(submits,1);
+});
+
+test('independent OS processes execute one pending compensation only once',async t=>{
+ const base=await setup(t);
+ const id=crypto.randomUUID(),missionId=crypto.randomUUID();
+ await new DurableCompensationJournal(base.state).prepare({
+  id,ownerKind:'digital-operation',ownerId:crypto.randomUUID(),
+  operation:'cancel-team-mission',targetId:missionId
+ });
+ const {execFile}=await import('node:child_process');
+ const {promisify}=await import('node:util');
+ const {pathToFileURL}=await import('node:url');
+ const exec=promisify(execFile);
+ const url=pathToFileURL(path.resolve('src/core/digital-operations.ts')).href;
+ const log=path.join(base.state,'physical-cancels.log');
+ const script=`import fs from 'node:fs/promises';
+import {DigitalOperationsLayer} from ${JSON.stringify(url)};
+const dir=process.argv[1],log=process.argv[2];
+const teams={cancel:async id=>{
+ await fs.appendFile(log,id+'\\n');
+ await new Promise(resolve=>setTimeout(resolve,90));
+ return {id,state:'CANCELLED'};
+}};
+const ops=new DigitalOperationsLayer(dir,{teams});
+await ops.recoverPendingCompensations();`;
+ await Promise.all(Array.from({length:3},()=>exec(process.execPath,[
+  '--experimental-strip-types','--input-type=module','-e',script,base.state,log
+ ],{windowsHide:true,cwd:process.cwd(),timeout:30000})));
+ const calls=(await fs.readFile(log,'utf8')).trim().split('\n');
+ assert.deepEqual(calls,[missionId]);
+ assert.equal((await new DurableCompensationJournal(base.state).pending('digital-operation')).length,0);
+});

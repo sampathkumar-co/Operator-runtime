@@ -11,6 +11,7 @@ import { OrganizationCoordinator, type OrganizationPolicy } from './organization
 import { OutcomePlanner } from './outcome-planner.ts';
 import type { ActionRisk } from './types.ts';
 import { DurableCompensationJournal, type DurableCompensationIntent } from './compensation-journal.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 
 const MAX_OPERATIONS = 2000;
 const MAX_CONDITIONS = 200;
@@ -112,6 +113,7 @@ const STORE_OPTIONS = {
 
 export class DigitalOperationsLayer {
   #file: string;
+  #ownership: ResourceLeaseStore;
   #procedures: ProcedureMemoryStore;
   #world: WorldModelStore;
   #devices: DevicePoolScheduler;
@@ -137,6 +139,7 @@ export class DigitalOperationsLayer {
     compensations?: DurableCompensationJournal;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'digital-operations.json');
+    this.#ownership = new ResourceLeaseStore(stateDir);
     this.#procedures = dependencies.procedures;
     this.#world = dependencies.world;
     this.#devices = dependencies.devices;
@@ -150,7 +153,11 @@ export class DigitalOperationsLayer {
   }
 
   async submit(input: DigitalOperationSubmit): Promise<DigitalOperation> {
-    const recovery = await this.recoverPendingCompensations();
+    return await this.#withOperationOwnership(() => this.#submitOwned(input));
+  }
+
+  async #submitOwned(input: DigitalOperationSubmit): Promise<DigitalOperation> {
+    const recovery = await this.#recoverPendingCompensationsOwned();
     if (recovery.pending > 0) throw new OperatorError('COMPENSATION_BLOCKED', 'Digital operations has unresolved durable compensation work.', { retryable: true, details: recovery });
     const normalized = normalizeSubmit(input);
     const generatedPlan = normalized.execution ? undefined : this.#planner.plan({
@@ -363,6 +370,10 @@ export class DigitalOperationsLayer {
   }
 
   async recoverPendingCompensations(): Promise<{ recovered: number; pending: number }> {
+    return await this.#withOperationOwnership(() => this.#recoverPendingCompensationsOwned());
+  }
+
+  async #recoverPendingCompensationsOwned(): Promise<{ recovered: number; pending: number }> {
     const run = this.#serial.then(async () => {
       const intents = await this.#compensations.pending('digital-operation');
       if (intents.length === 0) return { recovered: 0, pending: 0 };
@@ -397,6 +408,28 @@ export class DigitalOperationsLayer {
     });
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
+  }
+
+  async #withOperationOwnership<T>(work: () => Promise<T>): Promise<T> {
+    // A process-bound lease spans externally effectful reserve/cancel work and
+    // its durable recovery record. Never use a short JSON lock for remote RPC.
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      let lease;
+      try {
+        lease = await this.#ownership.acquire(
+          `digital-operation-owner:${crypto.randomUUID()}`, ['digital-operations:recovery'], 'exclusive'
+        );
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+        if (attempt === 299) throw new OperatorError('OPERATIONS_RECOVERY_BUSY', 'Another process owns operation submission or compensation recovery.', { retryable: true });
+        await new Promise<void>(resolve => setTimeout(resolve, 25));
+        continue;
+      }
+      // Errors from effectful work are never a reason to retry that work.
+      try { return await work(); }
+      finally { await lease.release(); }
+    }
+    throw new OperatorError('OPERATIONS_RECOVERY_BUSY', 'Digital operation ownership unavailable.', { retryable: true });
   }
 
   async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
