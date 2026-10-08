@@ -82,17 +82,21 @@ export class DevicePoolScheduler {
 
   async reserve(requestInput: DevicePoolRequest, advertisementsInput: DeviceResourceAdvertisement[]): Promise<DeviceReservation> {
     const request = normalizeRequest(requestInput);
-    const advertisements = validateAdvertisements(advertisementsInput, this.#clock, request.livenessMs);
-    const registered = new Map((await this.#registry.listDevices()).filter((item) => item.status === 'active').map((item) => [item.deviceId, item]));
-    const candidates = advertisements.filter((item) => registered.has(item.deviceId));
-
-    let pinnedDeviceId: string | undefined = request.explicitDeviceId;
-    if (!pinnedDeviceId && request.projectKey) {
-      pinnedDeviceId = (await this.#routing.listBindings()).find((item) => item.projectKey === request.projectKey)?.deviceId;
-    }
-    if (!pinnedDeviceId) pinnedDeviceId = await this.#routing.defaultDevice();
-
     const run = this.#serial.then(async () => {
+      // Revalidate external registry, routing and advertisement state after acquiring
+      // the scheduler queue, rather than relying on a potentially stale preflight.
+      const advertisements = validateAdvertisements(advertisementsInput, this.#clock, request.livenessMs);
+      const registered = new Map((await this.#registry.listDevices()).filter((item) => item.status === 'active').map((item) => [item.deviceId, item]));
+      const candidates = advertisements.filter((item) => registered.has(item.deviceId));
+      const boundDeviceId = request.projectKey
+        ? (await this.#routing.listBindings()).find((item) => item.projectKey === request.projectKey)?.deviceId
+        : undefined;
+      if (request.explicitDeviceId && boundDeviceId && request.explicitDeviceId !== boundDeviceId) {
+        throw new OperatorError('DEVICE_POOL_PROJECT_DEVICE_CONFLICT', 'Explicit device conflicts with the persisted project-to-device binding.');
+      }
+      let pinnedDeviceId = request.explicitDeviceId ?? boundDeviceId;
+      if (!pinnedDeviceId) pinnedDeviceId = await this.#routing.defaultDevice();
+
       const state = await this.#read();
       expireReservations(state, this.#clock().getTime());
       const activeByDevice = new Map<string, number>();
@@ -161,6 +165,8 @@ export class DevicePoolScheduler {
       const reservation = state.reservations.find((item) => item.id === id);
       if (!reservation || reservation.state !== 'ACTIVE') throw new OperatorError('DEVICE_POOL_RESERVATION_LOST', 'Device reservation is no longer active.');
       if (reservation.sessionId !== sessionId) throw new OperatorError('DEVICE_POOL_SESSION_CHANGED', 'Device session changed; reservation must be reacquired.');
+      const paired = (await this.#registry.listDevices()).some((device) => device.deviceId === reservation.deviceId && device.status === 'active');
+      if (!paired) throw new OperatorError('DEVICE_POOL_DEVICE_INACTIVE', 'Revoked or unpaired device cannot renew an execution reservation.');
       const now = this.#clock();
       reservation.heartbeatAt = now.toISOString();
       reservation.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
@@ -241,15 +247,18 @@ function validateAdvertisements(input: DeviceResourceAdvertisement[], clock: () 
   if (!Array.isArray(input) || input.length > MAX_ADVERTISEMENTS) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', 'Device advertisements are invalid.');
   const now = clock().getTime();
   const seen = new Set<string>();
+  const sessions = new Set<string>();
   return input.map((item, index) => {
     const deviceId = validUuid(item.deviceId, `advertisements[${index}].deviceId`);
-    if (seen.has(deviceId)) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', 'Device advertisements contain duplicate device IDs.');
+    const sessionId = validUuid(item.sessionId, `advertisements[${index}].sessionId`);
+    if (seen.has(deviceId) || sessions.has(sessionId)) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', 'Device advertisements contain duplicate device or session IDs.');
     seen.add(deviceId);
+    sessions.add(sessionId);
     const observedAt = validIso(item.observedAt, `advertisements[${index}].observedAt`);
     if (now - Date.parse(observedAt) > livenessMs || Date.parse(observedAt) > now + 5_000) throw new OperatorError('DEVICE_POOL_STALE_ADVERTISEMENT', 'Device resource advertisement is stale or future-dated.');
     return {
       deviceId,
-      sessionId: validUuid(item.sessionId, `advertisements[${index}].sessionId`),
+      sessionId,
       capabilities: uniqueStrings(item.capabilities, MAX_CAPABILITIES, 256, 'capabilities'),
       observedAt,
       cpuSlots: boundedInteger(item.cpuSlots, 1, 1024, 'cpuSlots'),
