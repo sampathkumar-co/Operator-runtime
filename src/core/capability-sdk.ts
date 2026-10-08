@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { CAPABILITY_RISK_RULES, isBuiltInCapability, type CapabilityRiskRule } from './capability-policy.ts';
 import { OperatorError } from './errors.ts';
+import { normalizeVerifiedModuleGraph, verifiedModuleGraphDigest, type VerifiedModuleGraph } from './verified-module-graph.ts';
 import type { ActionRequest, ActionResult, ActionRisk, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationRequest, ProviderReconciliationResult } from './types.ts';
 
 export interface CapabilityManifestEntry {
@@ -24,7 +25,7 @@ export interface CapabilityExtensionManifest {
   version: string;
   displayName: string;
   vendor?: string;
-  provenance: { source: string; packageDigest: string };
+  provenance: { source: string; packageDigest: string; moduleGraph?: VerifiedModuleGraph };
   capabilities: CapabilityManifestEntry[];
 }
 
@@ -158,9 +159,13 @@ export function validateManifest(input: CapabilityExtensionManifest): Capability
   if (!input.provenance || typeof input.provenance !== 'object') throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'Extension provenance is required.');
   const provenance = {
     source: bounded(input.provenance.source, 512, 'provenance.source'),
-    packageDigest: bounded(input.provenance.packageDigest, 64, 'provenance.packageDigest')
+    packageDigest: bounded(input.provenance.packageDigest, 64, 'provenance.packageDigest'),
+    ...(input.provenance.moduleGraph === undefined ? {} : { moduleGraph: normalizeVerifiedModuleGraph(input.provenance.moduleGraph) })
   };
   if (!/^[0-9a-f]{64}$/.test(provenance.packageDigest)) throw new OperatorError('CAPABILITY_MANIFEST_INVALID', 'provenance.packageDigest must be a lowercase SHA-256 digest.');
+  if (provenance.moduleGraph && verifiedModuleGraphDigest(provenance.moduleGraph) !== provenance.packageDigest) {
+    throw new OperatorError('CAPABILITY_MODULE_GRAPH_INVALID', 'Publisher package digest must cover the entire signed module graph manifest.');
+  }
   if (!Array.isArray(input.capabilities) || input.capabilities.length < 1 || input.capabilities.length > MAX_CAPABILITIES) {
     throw new OperatorError('CAPABILITY_MANIFEST_INVALID', `Capability manifest must declare 1-${MAX_CAPABILITIES} capabilities.`);
   }
