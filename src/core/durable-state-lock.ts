@@ -34,8 +34,16 @@ async function lockOwner(file: string): Promise<LockOwner | null> {
 /** Exact-owner interprocess exclusive lock for a durable JSON read/modify/write transaction.
  * An unknown or malformed lock is never treated as stale. It must be reconciled.
  */
-export async function withDurableStateLock<T>(stateFile: string, callback: () => Promise<T>): Promise<T> {
-  const file = path.resolve(stateFile) + '.lock';
+export async function withDurableStateLock<T>(
+  stateFile: string, callback: () => Promise<T>, options: { lockFile?: string } = {}
+): Promise<T> {
+  // The resource-lease coordinator retains its existing legacy lock pathname,
+  // preventing two running versions from silently using distinct lock domains.
+  const statePath = path.resolve(stateFile);
+  const file = options.lockFile === undefined ? statePath + '.lock' : path.resolve(options.lockFile);
+  if (path.dirname(file) !== path.dirname(statePath) || file === statePath) {
+    throw locked();
+  }
   const directory = path.dirname(file);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const parent = await fs.lstat(directory);
