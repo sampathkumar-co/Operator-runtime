@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export interface DurableCompensationIntent {
   id: string;
@@ -57,12 +58,13 @@ export class DurableCompensationJournal {
   }
 
   async pending(ownerKindInput?: string): Promise<DurableCompensationIntent[]> {
-    await this.#serial;
-    const state = await this.#read();
     const ownerKind = ownerKindInput === undefined ? undefined : bounded(ownerKindInput, 128, 'ownerKind');
-    return state.intents
-      .filter((item) => ownerKind === undefined || item.ownerKind === ownerKind)
-      .map((item) => structuredClone(item));
+    return await this.#serialized(async () => {
+      const state = await this.#read();
+      return state.intents
+        .filter((item) => ownerKind === undefined || item.ownerKind === ownerKind)
+        .map((item) => structuredClone(item));
+    });
   }
 
   async #read(): Promise<CompensationState> {
@@ -76,16 +78,19 @@ export class DurableCompensationJournal {
   }
 
   async #mutate<T>(fn: (state: CompensationState) => T | Promise<T>): Promise<T> {
-    let output!: T;
-    const run = this.#serial.then(async () => {
+    return await this.#serialized(async () => {
       const state = await this.#read();
-      output = await fn(state);
+      const output = await fn(state);
       validateState(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+      return structuredClone(output);
     });
+  }
+
+  async #serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, fn));
     this.#serial = run.then(() => undefined, () => undefined);
-    await run;
-    return structuredClone(output);
+    return await run;
   }
 }
 

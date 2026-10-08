@@ -412,3 +412,18 @@ test('organization recovery keeps unrollbackable verified child mission quaranti
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 1, pending: 0 });
   assert.equal(cancelled, 1);
 });
+
+test('independent organization coordinators do not overwrite each others committed programs', async (t) => {
+  const state = await tempDir(t);
+  const coordinators = Array.from({ length: 8 }, () => new OrganizationCoordinator(state, new TeamCoordinator(state)));
+  const ids = Array.from({ length: 8 }, () => crypto.randomUUID());
+  const created = await Promise.all(coordinators.map((org, i) => org.create({
+    programId: ids[i]!,
+    objective: 'Concurrent rollout ' + i,
+    policy: { allowedScopePrefixes: ['org:multi'] },
+    targets: [{ key: 'target', scopeKey: 'org:multi:target', workItems: work('target') }]
+  })));
+  assert.deepEqual(new Set(created.map((item) => item.id)), new Set(ids));
+  const persisted = await new OrganizationCoordinator(state, new TeamCoordinator(state)).list();
+  assert.deepEqual(new Set(persisted.map((item) => item.id)), new Set(ids));
+});

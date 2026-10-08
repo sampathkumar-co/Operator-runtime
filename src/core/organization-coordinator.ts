@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
 import { DurableCompensationJournal, type DurableCompensationIntent } from './compensation-journal.ts';
@@ -125,7 +126,7 @@ export class OrganizationCoordinator {
       createdAt: now,
       updatedAt: now
     };
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       if (state.programs.some((item) => item.id === programId)) throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Existing program identity cannot be reallocated.');
       if (state.programs.length >= MAX_PROGRAMS) {
@@ -139,13 +140,13 @@ export class OrganizationCoordinator {
       state.programs.push(program);
       await this.#write(state);
       return structuredClone(program);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
 
   async recoverPendingCompensations(): Promise<{ recovered: number; pending: number }> {
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const intents = await this.#compensations.pending('organization');
       if (intents.length === 0) return { recovered: 0, pending: 0 };
       const state = await this.#read();
@@ -192,7 +193,7 @@ export class OrganizationCoordinator {
       }
       const remaining = (await this.#compensations.pending('organization')).length;
       return { recovered, pending: remaining };
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
@@ -471,7 +472,7 @@ export class OrganizationCoordinator {
     id: string,
     mutate: (program: OrganizationProgram, transaction: OrganizationMutationTransaction) => Promise<void> | void
   ): Promise<OrganizationProgram> {
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const program = state.programs.find((item) => item.id === id);
       if (!program) throw new OperatorError('ORGANIZATION_PROGRAM_NOT_FOUND', 'Organization program was not found.');
@@ -495,7 +496,7 @@ export class OrganizationCoordinator {
         }
         throw error;
       }
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }

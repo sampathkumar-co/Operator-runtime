@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DeviceRegistryStore } from './device-registry.ts';
 import { DeviceRoutingStore } from './device-routing.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_RESERVATIONS = 5000;
@@ -85,7 +86,7 @@ export class DevicePoolScheduler {
     // Trusted durable callers may preassign an identity before external allocation.
     // The identity cannot replace, renew or replay any existing reservation.
     const reservationId = options.reservationId === undefined ? crypto.randomUUID() : validUuid(options.reservationId, 'reservationId');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       // Revalidate external registry, routing and advertisement state after acquiring
       // the scheduler queue, rather than relying on a potentially stale preflight.
       const advertisements = validateAdvertisements(advertisementsInput, this.#clock, request.livenessMs);
@@ -156,7 +157,7 @@ export class DevicePoolScheduler {
       state.reservations.sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt) || a.id.localeCompare(b.id));
       await this.#write(state);
       return structuredClone(reservation);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
@@ -165,7 +166,7 @@ export class DevicePoolScheduler {
     const id = validUuid(idInput, 'reservationId');
     const sessionId = validUuid(sessionIdInput, 'sessionId');
     const leaseMs = boundedInteger(leaseMsInput ?? 5 * 60_000, MIN_LEASE_MS, MAX_LEASE_MS, 'leaseMs');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       expireReservations(state, this.#clock().getTime());
       const reservation = state.reservations.find((item) => item.id === id);
@@ -178,21 +179,21 @@ export class DevicePoolScheduler {
       reservation.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
       await this.#write(state);
       return structuredClone(reservation);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
 
   async release(idInput: string): Promise<DeviceReservation> {
     const id = validUuid(idInput, 'reservationId');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const reservation = state.reservations.find((item) => item.id === id);
       if (!reservation) throw new OperatorError('DEVICE_POOL_RESERVATION_NOT_FOUND', 'Device reservation was not found.');
       if (reservation.state === 'ACTIVE') reservation.state = 'RELEASED';
       await this.#write(state);
       return structuredClone(reservation);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
