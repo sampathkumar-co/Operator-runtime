@@ -36,11 +36,13 @@ export class FixedWindowRateLimiter {
       entry = undefined;
     }
     if (!entry) {
-      this.#evictForInsert();
+      this.#expireEntries(now);
+      // Never evict a still-active quota merely because other keys flooded the map.
+      if (this.#entries.size >= this.#maxKeys) return this.#saturatedDecision(now);
       entry = { count: 0, windowStartedAt: now };
+      this.#entries.set(key, entry);
     }
     entry.count += 1;
-    this.#touch(key, entry);
     const remaining = Math.max(0, this.#limit - entry.count);
     const retryAfterSeconds = Math.max(1, Math.ceil((entry.windowStartedAt + this.#windowMs - now) / 1000));
     return { allowed: entry.count <= this.#limit, remaining, retryAfterSeconds };
@@ -52,9 +54,10 @@ export class FixedWindowRateLimiter {
     const entry = this.#entries.get(key);
     if (!entry || now - entry.windowStartedAt >= this.#windowMs) {
       if (entry) this.#entries.delete(key);
+      this.#expireEntries(now);
+      if (this.#entries.size >= this.#maxKeys) return this.#saturatedDecision(now);
       return { allowed: true, remaining: this.#limit, retryAfterSeconds: 1 };
     }
-    this.#touch(key, entry);
     return {
       allowed: entry.count < this.#limit,
       remaining: Math.max(0, this.#limit - entry.count),
@@ -68,15 +71,24 @@ export class FixedWindowRateLimiter {
 
   get size(): number { return this.#entries.size; }
 
-  #touch(key: string, entry: Entry): void {
-    this.#entries.delete(key);
-    this.#entries.set(key, entry);
+  #expireEntries(now: number): void {
+    // Windows are inserted in start-time order; hits must not alter that order.
+    // Expired windows are reclaimed in amortized O(1) time without a full scan.
+    for (const [key, entry] of this.#entries) {
+      if (now - entry.windowStartedAt < this.#windowMs) break;
+      this.#entries.delete(key);
+    }
   }
 
-  #evictForInsert(): void {
-    if (this.#entries.size < this.#maxKeys) return;
-    const oldest = this.#entries.keys().next().value as string | undefined;
-    if (oldest !== undefined) this.#entries.delete(oldest);
+  #saturatedDecision(now: number): RateLimitDecision {
+    const earliest = this.#entries.values().next().value as Entry | undefined;
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterSeconds: earliest
+        ? Math.max(1, Math.ceil((earliest.windowStartedAt + this.#windowMs - now) / 1000))
+        : 1
+    };
   }
 }
 

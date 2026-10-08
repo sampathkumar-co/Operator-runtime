@@ -42,3 +42,17 @@ test('verified progress extends only planner iterations under a hard maxSteps ce
   execution.progressExtensions = 99;
   assert.equal(taskDecisionBudget(execution, 0).plannerIterations.limit, 15);
 });
+
+test('invalid persisted start times cannot disable elapsed-time exhaustion', () => {
+  const execution: TaskExecution = {
+    schemaVersion: 1, plannerId: 'test', goalKind: 'test', plannerState: {},
+    maxSteps: 3, maxAttemptsPerStep: 1, timeoutMs: 1_000,
+    stepCount: 0, records: [], startedAt: 'invalid-timestamp'
+  };
+  let budget = taskDecisionBudget(execution, Date.parse('2026-10-08T00:00:00Z'));
+  assert.deepEqual(budget.elapsedMs, { used: 1_000, limit: 1_000, remaining: 0 });
+  assert.equal(decisionBudgetExhaustion(budget), 'elapsedMs');
+  execution.startedAt = '2026-10-08T00:00:00Z';
+  budget = taskDecisionBudget(execution, Number.NaN);
+  assert.equal(decisionBudgetExhaustion(budget), 'elapsedMs');
+});

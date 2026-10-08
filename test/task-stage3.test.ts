@@ -54,6 +54,12 @@ test('stage3 failure taxonomy selects bounded autonomous strategies', () => {
   assert.equal(classifyTaskFailure({ code: 'TARGET_EXISTS', message: 'drift' }).strategy, 'repair');
   assert.equal(classifyTaskFailure({ code: 'RELAY_RESULT_PENDING', message: 'pending', retryable: true }).strategy, 'retry');
   assert.equal(classifyTaskFailure({ code: 'PATH_OUTSIDE_SCOPE', message: 'policy' }).class, 'policy');
+  for (const code of ['PATH_OUTSIDE_SCOPE', 'POLICY_RATE_LIMIT', 'AUTHORITY_EXPIRED']) {
+    assert.deepEqual(classifyTaskFailure({
+      code, message: 'denial must not be retried', retryable: true,
+      epistemicStatus: 'AMBIGUOUS', sideEffectState: 'none'
+    }), { class: 'policy', strategy: 'fail', retryable: false, code });
+  }
   assert.deepEqual(classifyTaskFailure({ code: 'UIA_AMBIGUOUS_SELECTOR', message: 'ambiguous', retryable: false, sideEffectState: 'none', executionPhase: 'pre_dispatch' }), {
     class: 'target-drift', strategy: 'reobserve', retryable: true, code: 'UIA_AMBIGUOUS_SELECTOR'
   });

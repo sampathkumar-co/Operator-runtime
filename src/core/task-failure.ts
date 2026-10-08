@@ -45,6 +45,10 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
   if (code === 'EXECUTION_ABORTED' || code === 'TASK_CANCELLED') {
     return { class: 'cancelled', strategy: 'cancel', retryable: false, code };
   }
+  // Authority and scope denials outrank provider retry hints and ambiguous metadata.
+  if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY|AUTHORITY/i.test(code)) {
+    return { class: 'policy', strategy: 'fail', retryable: false, code };
+  }
   if (/NO_PROGRESS/i.test(code)) {
     return { class: 'postcondition', strategy: 'replan', retryable: false, code };
   }
@@ -82,9 +86,6 @@ export function classifyTaskFailure(error: ActionError | undefined): TaskFailure
       retryable: true,
       code
     };
-  }
-  if (/POLICY|SCOPE|DENIED|NOT_ALLOWED|RESTRICTED|UNAUTHORIZED|RISK_MISMATCH|EMERGENCY/i.test(code)) {
-    return { class: 'policy', strategy: 'fail', retryable: false, code };
   }
   if (epistemic === 'UNKNOWN') {
     if (error?.retryable === false) return { class: 'permanent', strategy: 'fail', retryable: false, code };
