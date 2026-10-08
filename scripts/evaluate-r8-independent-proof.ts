@@ -1,14 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { loadIndependentEvidenceCli } from './independent-evidence-cli.ts';
 import { certifyR8IndependentProofCampaign, type R8IndependentProofCampaign } from '../src/core/r8-independent-proof-campaign.ts';
 
 const inputPath=process.argv[2];
 if(!inputPath){
-  process.stderr.write('usage: node --experimental-strip-types scripts/evaluate-r8-independent-proof.ts <campaign.json>\n');
+  process.stderr.write('usage: node --experimental-strip-types scripts/evaluate-r8-independent-proof.ts <campaign.json> [--evidence <bundle.json> --verifier-id <id> --trusted-public-key <operator-pinned.pem>]\n');
   process.exit(2);
 }
 const campaign=JSON.parse(await fs.readFile(path.resolve(inputPath),'utf8')) as R8IndependentProofCampaign;
-const report=certifyR8IndependentProofCampaign(campaign);
+const evidence=await loadIndependentEvidenceCli(process.argv.slice(3));
+const report=certifyR8IndependentProofCampaign(campaign,evidence);
 const outDir=path.resolve('artifacts','r8-independent-proof');
 await fs.mkdir(outDir,{recursive:true});
 const outPath=path.join(outDir,'report.json');
