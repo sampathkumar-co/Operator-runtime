@@ -750,3 +750,51 @@ test('organization program response loss keeps the exact cancel identity for res
   assert.equal(creates, 1);
   assert.equal(cancels, 2);
 });
+
+test('digital operation reconciliation retains intents until cancellation and release postconditions are proved', async (t) => {
+  const base = await setup(t);
+  const compensations = new DurableCompensationJournal(base.state);
+  const ownerId = crypto.randomUUID();
+  const teamId = crypto.randomUUID();
+  const programId = crypto.randomUUID();
+  const reservationId = crypto.randomUUID();
+  for (const [operation, targetId] of [
+    ['cancel-team-mission', teamId],
+    ['cancel-organization-program', programId],
+    ['release-device-reservation', reservationId]
+  ]) {
+    await compensations.prepare({
+      id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId
+    });
+  }
+  let safe = false;
+  const teams = { async cancel(id: string) { assert.equal(id, teamId); return { id, state: safe ? 'CANCELLED' : 'VERIFIED' }; } };
+  const organizations = { async cancel(id: string) { assert.equal(id, programId); return { id, state: safe ? 'CANCELLED' : 'BLOCKED' }; } };
+  const devices = { async release(id: string) { assert.equal(id, reservationId); return { id, state: safe ? 'RELEASED' : 'ACTIVE' }; } };
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, teams: teams as any, organizations: organizations as any,
+    devices: devices as any, compensations
+  });
+  assert.deepEqual(await ops.recoverPendingCompensations(), { recovered: 0, pending: 3 });
+  safe = true;
+  assert.deepEqual(await ops.recoverPendingCompensations(), { recovered: 3, pending: 0 });
+});
+
+test('failed mission start cannot report compensated when its cancellation remained VERIFIED', async (t) => {
+  const base = await setup(t);
+  const compensations = new DurableCompensationJournal(base.state);
+  const teams = {
+    async submit(input: { missionId: string }) { return { id: input.missionId }; },
+    async start() { throw new Error('simulated startup fault'); },
+    async cancel() { return { state: 'VERIFIED' }; }
+  };
+  const ops = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any, compensations });
+  await assert.rejects(ops.submit({
+    objective: 'Ensure truthful rollback', scopeKey: 'project:rollback',
+    successConditions: ['confirmed cancellation'], execution: { kind: 'team', workItems: work() },
+    run: true
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
+  const pending = await compensations.pending('digital-operation');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.operation, 'cancel-team-mission');
+});

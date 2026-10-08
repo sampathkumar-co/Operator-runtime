@@ -164,9 +164,20 @@ export class OrganizationCoordinator {
         try {
           const mission = await this.#teams.inspect(intent.targetId);
           if (intent.operation === 'cancel-team-mission') {
-            if (!['CANCELLED', 'FAILED', 'VERIFIED'].includes(mission.state)) await this.#teams.cancel(mission.id);
+            // A terminal FAILED/VERIFIED mission may have irreversible effects.
+            // It is not evidence that a requested cancellation succeeded.
+            if (mission.state !== 'CANCELLED') {
+              if (['FAILED', 'VERIFIED'].includes(mission.state)) continue;
+              const cancelled = await this.#teams.cancel(mission.id);
+              if (cancelled.state !== 'CANCELLED') continue;
+            }
           } else if (intent.operation === 'pause-team-mission') {
-            if (mission.state === 'RUNNING') await this.#teams.pause(mission.id);
+            if (mission.state === 'RUNNING' || mission.state === 'BLOCKED') {
+              const paused = await this.#teams.pause(mission.id);
+              if (paused.state !== 'PAUSED') continue;
+            } else if (mission.state !== 'PAUSED') {
+              continue;
+            }
           } else {
             continue;
           }

@@ -255,16 +255,25 @@ export class DigitalOperationsLayer {
       const compensateCreatedExecution = async (): Promise<string[]> => {
         const failed: string[] = [];
         if (teamMissionId) {
-          try { await this.#teams.cancel(teamMissionId); }
-          catch (error) { if ((error as { code?: unknown } | null)?.code !== 'TEAM_NOT_FOUND') failed.push('cancel-team-mission'); }
+          try {
+            if ((await this.#teams.cancel(teamMissionId)).state !== 'CANCELLED') failed.push('cancel-team-mission');
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code !== 'TEAM_NOT_FOUND') failed.push('cancel-team-mission');
+          }
         }
         if (organizationProgramId) {
-          try { await this.#organizations.cancel(organizationProgramId); }
-          catch (error) { if ((error as { code?: unknown } | null)?.code !== 'ORGANIZATION_PROGRAM_NOT_FOUND') failed.push('cancel-organization-program'); }
+          try {
+            if ((await this.#organizations.cancel(organizationProgramId)).state !== 'CANCELLED') failed.push('cancel-organization-program');
+          } catch (error) {
+            if ((error as { code?: unknown } | null)?.code !== 'ORGANIZATION_PROGRAM_NOT_FOUND') failed.push('cancel-organization-program');
+          }
         }
         if (deviceReservationId) {
-          try { await this.#devices.release(deviceReservationId); }
-          catch (error) { if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') failed.push('release-device-reservation'); }
+          try {
+            if (!['RELEASED', 'EXPIRED'].includes((await this.#devices.release(deviceReservationId)).state)) failed.push('release-device-reservation');
+          } catch (error) {
+            if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') failed.push('release-device-reservation');
+          }
         }
         for (const id of compensationIds) {
           const intent = (await this.#compensations.pending('digital-operation')).find((item) => item.id === id);
@@ -367,10 +376,13 @@ export class DigitalOperationsLayer {
           continue;
         }
         try {
-          if (intent.operation === 'cancel-team-mission') await this.#teams.cancel(intent.targetId);
-          else if (intent.operation === 'cancel-organization-program') await this.#organizations.cancel(intent.targetId);
-          else if (intent.operation === 'release-device-reservation') await this.#devices.release(intent.targetId);
-          else continue;
+          if (intent.operation === 'cancel-team-mission') {
+            if ((await this.#teams.cancel(intent.targetId)).state !== 'CANCELLED') continue;
+          } else if (intent.operation === 'cancel-organization-program') {
+            if ((await this.#organizations.cancel(intent.targetId)).state !== 'CANCELLED') continue;
+          } else if (intent.operation === 'release-device-reservation') {
+            if (!['RELEASED', 'EXPIRED'].includes((await this.#devices.release(intent.targetId)).state)) continue;
+          } else continue;
           await this.#compensations.complete(intent.id);
           recovered += 1;
         } catch (error) {
