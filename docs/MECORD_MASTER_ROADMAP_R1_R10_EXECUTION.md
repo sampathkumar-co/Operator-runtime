@@ -874,12 +874,14 @@ Status reconciled: **2026-10-07**.
 | R4 Human-Centered Mecord Product | IMPLEMENTED_NOT_CERTIFIED |
 | R5 Production Trust Platform | IMPLEMENTED_NOT_CERTIFIED |
 | R6 Universal Agent Gateway | IMPLEMENTED_NOT_CERTIFIED |
-| R7 Enterprise Agent Control Plane | IMPLEMENTED_NOT_CERTIFIED |
+| R7 Enterprise Agent Control Plane | CERTIFIED |
 | R8 Counterfactual Twin + Proof Kernel | CERTIFIED |
 | R9 Distributed Autonomous Engineering Fabric | IMPLEMENTED_NOT_CERTIFIED |
 | R10 Verifiable Autonomous Engineering OS | IMPLEMENTED_NOT_CERTIFIED |
 
-R1-R3 and R8 have explicit roadmap certification ledgers. R4-R7 and R9-R10 have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+R1-R3, R7 and R8 have explicit roadmap certification ledgers. R4-R6 and R9-R10 have dedicated repository implementation/certification gates and exact-head evidence, but this master ledger deliberately preserves `IMPLEMENTED_NOT_CERTIFIED` until any non-repository empirical, operational, or external acceptance evidence required by the corresponding exit gate is recorded. In particular, repository-green status must not be reinterpreted as production deployment or external acceptance.
+
+R7 certification is bound to subject SHA `d05b386b7c9c26b2e092041e54e02b3dc83ba248` and campaign `r7-enterprise-20261008004902`: genuine WSO2 SSO/SCIM, 100 governed mutations with complete explanations, 100 historical policy replays, an internal-only on-prem topology, and independently verified network, audit, legal-hold, regional and chargeback evidence.
 
 R8 certification is bound to subject SHA `e8aa52b57fe52605524a091862a836d85bfd02ff` and campaign `r8-independent-20261007182436`: 50 cases across five mutation classes, separate executor/verifier processes and codepaths, independently checked signatures and artifact hashes, 100% verified executed mutations, ten insufficient-fidelity denials and ten rejected inference-promotion attempts.
 

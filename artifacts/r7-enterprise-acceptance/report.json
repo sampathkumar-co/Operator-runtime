@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "sourceSha": "d05b386b7c9c26b2e092041e54e02b3dc83ba248",
+  "campaignId": "r7-enterprise-20261008004902",
+  "status": "CERTIFIED",
+  "reasons": [],
+  "mutationExplanationCoverageRate": 1,
+  "policyReplayActionCount": 100,
+  "privateDeploymentPassed": true,
+  "auditAcceptancePassed": true,
+  "campaignDigest": "17f26361d9191039ef0f0fe556896787201ed816b0b62489b527d0b5f9e34cd2",
+  "reportDigest": "7d7936068dd1b7fe9204327f08d3a58a740f50445b47762ee42e57dd95fda9bb"
+}
