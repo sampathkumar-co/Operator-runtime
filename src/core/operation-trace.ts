@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { appendDurableStateText, readDurableStateText } from './durable-state.ts';
 
 export type OperationTraceStage =
@@ -63,9 +64,9 @@ export class OperationTraceStore {
     if (Buffer.byteLength(line, 'utf8') > MAX_EVENT_BYTES) {
       throw new OperatorError('OPERATION_TRACE_INVALID', 'Operation trace event exceeds bounded size.');
     }
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       await appendDurableStateText(this.#file, line, STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return event;
