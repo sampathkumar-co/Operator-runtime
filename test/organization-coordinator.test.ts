@@ -7,6 +7,7 @@ import test from 'node:test';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
 import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
+import { OperatorError } from '../src/core/errors.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-org-'));
@@ -191,12 +192,11 @@ test('stage8 compensates already-created missions when a later wave target fails
   const cancelled: string[] = [];
   let submits = 0;
   const fakeTeams = {
-    async submit() {
+    async submit(input: { missionId: string }) {
       submits += 1;
       if (submits === 2) throw new Error('simulated second target creation failure');
-      const id = crypto.randomUUID();
-      created.push(id);
-      return { id };
+      created.push(input.missionId);
+      return { id: input.missionId };
     },
     async start(id: string) { return { id, state: 'RUNNING' }; },
     async cancel(id: string) { cancelled.push(id); return { id, state: 'CANCELLED' }; }
@@ -224,7 +224,7 @@ test('stage8 child cancel failure keeps target live and program non-terminal acr
   let failCancel = true;
   const missions = new Map<string, string>();
   const fakeTeams = {
-    async submit() { const id = crypto.randomUUID(); missions.set(id, 'PENDING'); return { id }; },
+    async submit(input: { missionId: string }) { missions.set(input.missionId, 'PENDING'); return { id: input.missionId }; },
     async start(id: string) { missions.set(id, 'RUNNING'); return { id, state: 'RUNNING' }; },
     async cancel(id: string) {
       if (failCancel) throw Object.assign(new Error('child still running'), { code: 'TEAM_CANCEL_FAILED' });
@@ -253,7 +253,7 @@ test('stage8 child cancel failure keeps target live and program non-terminal acr
 test('stage8 child pause failure keeps program blocked instead of falsely paused', async (t) => {
   const state = await tempDir(t);
   const fakeTeams = {
-    async submit() { return { id: crypto.randomUUID() }; },
+    async submit(input: { missionId: string }) { return { id: input.missionId }; },
     async start(id: string) { return { id, state: 'RUNNING' }; },
     async pause() { throw Object.assign(new Error('pause failed'), { code: 'TEAM_PAUSE_FAILED' }); }
   };
@@ -337,4 +337,51 @@ test('preassigned program identity cannot be reallocated to a second organizatio
   assert.equal(first.id, programId);
   await assert.rejects(org.create(input), (error: any) => error?.code === 'ORGANIZATION_PROGRAM_ID_CONFLICT');
   assert.equal((await org.list()).length, 1);
+});
+
+test('organization rollout does not trust a child mission that ignores its write-ahead ID', async (t) => {
+  const state = await tempDir(t);
+  const unexpectedId = crypto.randomUUID();
+  let attempted = 0;
+  const cancelled: string[] = [];
+  const teams = {
+    async submit() { attempted++; return { id: unexpectedId }; },
+    async start() { throw new Error('unexpected mission must never start'); },
+    async inspect(id: string) {
+      if (id === unexpectedId) return { id, state: 'PENDING' };
+      throw new OperatorError('TEAM_NOT_FOUND', 'Planned mission does not exist.');
+    },
+    async cancel(id: string) { cancelled.push(id); return { id, state: 'CANCELLED' }; }
+  };
+  const journal = new DurableCompensationJournal(state);
+  const org = new OrganizationCoordinator(state, teams as any, { compensations: journal });
+  const program = await org.create({
+    objective: 'Test cross-component identity authority',
+    policy: { allowedScopePrefixes: ['org:identity'] },
+    targets: [{ key: 'service', scopeKey: 'org:identity:service', workItems: work('service') }]
+  });
+
+  await assert.rejects(org.start(program.id), (error: any) => error?.code === 'ORGANIZATION_MISSION_ID_CONFLICT');
+  assert.equal(attempted, 1);
+  assert.deepEqual(cancelled, []);
+  const stored = await org.inspect(program.id);
+  assert.equal(stored.state, 'PENDING');
+  assert.equal(stored.targets[0]?.missionId, undefined);
+
+  const pending = await journal.pending('organization');
+  assert.equal(pending.length, 2);
+  assert.ok(pending.some((intent) => intent.targetId === unexpectedId));
+  assert.ok(pending.some((intent) => intent.targetId !== unexpectedId));
+
+  const restarted = new OrganizationCoordinator(state, teams as any, {
+    compensations: new DurableCompensationJournal(state)
+  });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 1 });
+  assert.deepEqual(cancelled, []);
+  const quarantine = await journal.pending('organization');
+  assert.equal(quarantine.length, 1);
+  assert.equal(quarantine[0]?.operation, 'reconcile-untrusted-team-identity');
+  assert.equal(quarantine[0]?.targetId, unexpectedId);
+  await assert.rejects(restarted.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
+  assert.equal(attempted, 1);
 });
