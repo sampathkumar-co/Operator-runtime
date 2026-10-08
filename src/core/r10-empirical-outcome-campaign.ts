@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
+import { verifyIndependentCampaignEvidence, type IndependentCampaignEvidence } from './independent-campaign-evidence.ts';
 import {
   certifyVerifiableEngineeringOS,
   type EngineeringCertificationStandard,
@@ -115,7 +116,7 @@ export function verifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCampa
   try{return digest(input.digest,'campaign digest')===hash(normalizeCampaign(input.body));}catch{return false;}
 }
 
-export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCampaign):R10EmpiricalOutcomeReport{
+export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCampaign, evidence?:IndependentCampaignEvidence):R10EmpiricalOutcomeReport{
   if(!verifyR10EmpiricalOutcomeCampaign(input))throw invalid('Empirical outcome campaign digest verification failed.');
   const b=normalizeCampaign(input.body);
   const reasons:string[]=[];
@@ -150,6 +151,24 @@ export function certifyR10EmpiricalOutcomeCampaign(input:R10EmpiricalOutcomeCamp
   if(interruptionCaseCount<10)reasons.push('fewer than ten R10 interruption/recovery cases were observed');
   if(rollbackCaseCount<10)reasons.push('fewer than ten R10 rollback-required cases were observed');
   if(b.externalEvidenceDigests.length<3)reasons.push('insufficient independent cohort evidence artifacts');
+  reasons.push(...verifyIndependentCampaignEvidence(
+    input.digest,
+    [
+      ...b.externalEvidenceDigests,
+      ...b.priorReleaseCertifications.map((item)=>item.reportDigest),
+      ...b.pairs.flatMap((pair)=>[
+        pair.objectiveDigest,pair.startingStateDigest,pair.environmentDigest,pair.rubricDigest,
+        ...pair.evidenceDigests,
+        ...[pair.baseline,pair.current].flatMap((observation)=>[
+          observation.resultDigest,...observation.evidenceDigests,
+          ...[observation.recoveryReceiptDigest,observation.rollbackReceiptDigest,observation.portableProofDigest].filter((item):item is string=>Boolean(item))
+        ])
+      ])
+    ],
+    b.pairs.flatMap((pair)=>[pair.baseline.executorId,pair.current.executorId]),
+    b.pairs.flatMap((pair)=>[pair.baseline.verifierId,pair.current.verifierId]),
+    evidence
+  ));
 
   const releaseMap=new Map(b.priorReleaseCertifications.map((item)=>[item.release,item]));
   for(const release of REQUIRED_RELEASES){
