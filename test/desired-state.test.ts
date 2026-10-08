@@ -153,7 +153,7 @@ test('stage20 contract ids are idempotent and conflicting reuse is rejected', as
   );
 });
 
-test('stage20 reuses one deterministic remediation after submit succeeds but state persistence fails', async (t) => {
+test('stage20 never dispatches remediation before durable reservation is confirmed', async (t) => {
   const state = await temp(t);
   const world = new FakeWorld();
   const operations = new FakeOperations();
@@ -167,14 +167,14 @@ test('stage20 reuses one deterministic remediation after submit succeeds but sta
   }));
   failNextPersist = true;
   await assert.rejects(() => controller.reconcile(contract.id), /forced desired-state persistence failure/);
-  assert.equal(operations.operations.size, 1);
+  assert.equal(operations.operations.size, 0);
+  assert.equal(operations.submitted.length, 0);
 
   const restarted = new DesiredStateController(state, { world: world as any, operations: operations as any });
   const recovered = await restarted.reconcile(contract.id);
   assert.equal(recovered.status, 'REMEDIATING');
   assert.equal(operations.operations.size, 1);
-  assert.equal(operations.submitted.length, 2);
-  assert.equal(operations.submitted[0].requestId, operations.submitted[1].requestId);
+  assert.equal(operations.submitted.length, 1);
   assert.equal(recovered.activeOperationId, operations.submitted[0].requestId);
 });
 
@@ -233,4 +233,99 @@ test('stage20 reconciliation scheduling rotates oldest active contracts without 
   nowMs += 1_000;
   await controller.pause(second.id);
   assert.deepEqual((await controller.listForReconciliation(2)).map((item) => item.id), [third.id, first.id]);
+});
+
+test('independent controllers reserve one operation durably before dispatch and never double-submit', async t => {
+  const state=await temp(t), world=new FakeWorld(), operations=new FakeOperations();
+  const first=new DesiredStateController(state,{world:world as any,operations:operations as any});
+  const second=new DesiredStateController(state,{world:world as any,operations:operations as any});
+  const contract=await first.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+  let entered!:()=>void,finish!:()=>void;
+  const started=new Promise<void>(resolve=>entered=resolve);
+  const gate=new Promise<void>(resolve=>finish=resolve);
+  const original=operations.submit.bind(operations);
+  operations.submit=async(input:any)=>{const operation=await original(input);entered();await gate;return operation;};
+  const a=first.reconcile(contract.id);
+  await started;
+  const persisted=JSON.parse(await fs.readFile(path.join(state,'desired-state.json'),'utf8'));
+  const reserved=persisted.contracts[0];
+  assert.equal(reserved.activeOperationId,operations.submitted[0].requestId);
+  assert.equal(reserved.remediationHistory.length,1);
+  const b=second.reconcile(contract.id);
+  try {
+    assert.equal(await Promise.race([b.then(()=>true),new Promise<boolean>(resolve=>setTimeout(()=>resolve(false),80))]),false);
+  } finally { finish(); }
+  const [one,two]=await Promise.all([a,b]);
+  assert.equal(one.activeOperationId,two.activeOperationId);
+  assert.equal(operations.submitted.length,1);
+});
+
+test('unknown post-reservation dispatch is quarantined without replay after restart',async t=>{
+  const state=await temp(t),world=new FakeWorld(),ops=new FakeOperations();
+  const controller=new DesiredStateController(state,{world:world as any,operations:ops as any});
+  const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+  ops.submit=async (input:any)=>{ops.submitted.push(structuredClone(input));throw new Error('synthetic crash after write-ahead');};
+  await assert.rejects(controller.reconcile(contract.id),/synthetic crash/);
+  const reserved=(JSON.parse(await fs.readFile(path.join(state,'desired-state.json'),'utf8'))).contracts[0];
+  assert.equal(reserved.status,'REMEDIATING');
+  assert.equal(reserved.activeOperationId,ops.submitted[0].requestId);
+  assert.equal(reserved.remediationHistory.length,1);
+  const restarted=new DesiredStateController(state,{world:world as any,operations:ops as any});
+  const blocked=await restarted.reconcile(contract.id);
+  assert.equal(blocked.status,'BLOCKED');
+  assert.equal(blocked.activeOperationId,reserved.activeOperationId);
+  assert.equal(ops.submitted.length,1);
+});
+
+test('pause persists revocation before effectful cancellation',async t=>{
+  const state=await temp(t), world=new FakeWorld(),ops=new FakeOperations();
+  const controller=new DesiredStateController(state,{world:world as any,operations:ops as any});
+  const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+  await controller.reconcile(contract.id);
+  const previous=ops.cancel.bind(ops);
+  ops.cancel=async id=>{
+    const saved=JSON.parse(await fs.readFile(path.join(state,'desired-state.json'),'utf8'));
+    assert.equal(saved.contracts[0].status,'PAUSED');
+    assert.equal(saved.contracts[0].activeOperationId,id);
+    return await previous(id);
+  };
+  const paused=await controller.pause(contract.id,{cancelActive:true});
+  assert.equal(paused.status,'PAUSED');
+  assert.equal(paused.activeOperationId,undefined);
+  assert.equal(paused.remediationHistory[0]?.outcome,'cancelled');
+});
+
+test('post-dispatch persistence failure keeps write-ahead operation identity and never replays',async t=>{
+ const state=await temp(t),world=new FakeWorld(),ops=new FakeOperations();
+ let writes=0;
+ const controller=new DesiredStateController(state,{
+   world:world as any,operations:ops as any,
+   beforePersist:()=>{writes+=1;if(writes===3)throw new Error('synthetic post-dispatch state loss');}
+ });
+ const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+ await assert.rejects(controller.reconcile(contract.id),/synthetic post-dispatch state loss/);
+ assert.equal(ops.submitted.length,1);
+ const record=JSON.parse(await fs.readFile(path.join(state,'desired-state.json'),'utf8')).contracts[0];
+ assert.equal(record.activeOperationId,ops.submitted[0].requestId);
+ assert.equal(record.remediationHistory.length,1);
+ const restarted=new DesiredStateController(state,{world:world as any,operations:ops as any});
+ const resumed=await restarted.reconcile(contract.id);
+ assert.equal(resumed.status,'REMEDIATING');
+ assert.equal(ops.submitted.length,1);
+ assert.equal(resumed.activeOperationId,record.activeOperationId);
+});
+
+test('cancellation uncertainty leaves persisted pause and blocks unsafe resume',async t=>{
+ const state=await temp(t),world=new FakeWorld(),ops=new FakeOperations();
+ const controller=new DesiredStateController(state,{world:world as any,operations:ops as any});
+ const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+ const active=await controller.reconcile(contract.id);
+ ops.cancel=async()=>{throw new Error('synthetic lost cancellation response')};
+ await assert.rejects(controller.pause(contract.id,{cancelActive:true}),/synthetic lost cancellation response/);
+ const restarted=new DesiredStateController(state,{world:world as any,operations:ops as any});
+ const record=await restarted.inspect(contract.id);
+ assert.equal(record.status,'PAUSED');
+ assert.equal(record.activeOperationId,active.activeOperationId);
+ await assert.rejects(restarted.resume(contract.id),(error:any)=>error?.code==='DESIRED_STATE_RECONCILIATION_REQUIRED');
+ assert.equal(ops.submitted.length,1);
 });

@@ -4,6 +4,7 @@ import { canonicalJson } from './action-identity.ts';
 import type { ActionRisk } from './types.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 import type { DigitalOperation, DigitalOperationsLayer, WorldCondition } from './digital-operations.ts';
 import type { WorldModelStore } from './world-model.ts';
 import { worldValueDigest } from './world-model.ts';
@@ -68,6 +69,7 @@ const STORE_OPTIONS = {
 
 export class DesiredStateController {
   #file: string;
+  #leases: ResourceLeaseStore;
   #world: WorldModelStore;
   #operations: DigitalOperationsLayer;
   #clock: () => Date;
@@ -81,6 +83,7 @@ export class DesiredStateController {
     beforePersist?: () => void | Promise<void>;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'desired-state.json');
+    this.#leases = new ResourceLeaseStore(stateDir);
     this.#world = dependencies.world;
     this.#operations = dependencies.operations;
     this.#clock = dependencies.clock ?? (() => new Date());
@@ -138,7 +141,15 @@ export class DesiredStateController {
       if (contract.status === 'PAUSED') return contract;
 
       if (contract.activeOperationId) {
-        const active = await this.#operations.refresh(contract.activeOperationId);
+        let active: DigitalOperation | undefined;
+        try { active = await this.#operations.refresh(contract.activeOperationId); }
+        catch { /* No proof of non-execution: keep the durable reservation quarantined. */ }
+        if (!active || active.id !== contract.activeOperationId) {
+          contract.status = 'BLOCKED';
+          contract.lastReason = 'Remediation handoff is unresolved; operator reconciliation is required before another dispatch.';
+          contract.updatedAt = now.toISOString();
+          return contract;
+        }
         if (!isTerminal(active)) {
           contract.status = active.state === 'BLOCKED' ? 'BLOCKED' : 'REMEDIATING';
           contract.lastReason = active.state === 'BLOCKED'
@@ -187,8 +198,17 @@ export class DesiredStateController {
         return contract;
       }
 
+      // Write ahead the exact operation identity. A crash or lost response can
+      // never make another process generate a fresh effectful remediation.
+      const requestId = remediationRequestId(contract);
+      contract.activeOperationId = requestId;
+      contract.status = 'REMEDIATING';
+      contract.lastReason = 'Remediation is reserved; dispatch or recovery is pending.';
+      contract.remediationHistory.push({ operationId: requestId, startedAt: now.toISOString() });
+      if (contract.remediationHistory.length > MAX_HISTORY) contract.remediationHistory.splice(0, contract.remediationHistory.length - MAX_HISTORY);
+      await this.#persist(state);
       const operation = await this.#operations.submit({
-        requestId: remediationRequestId(contract),
+        requestId,
         objective: contract.remediation.objective,
         scopeKey: contract.scopeKey,
         successConditions: contract.remediation.successConditions,
@@ -200,11 +220,10 @@ export class DesiredStateController {
         },
         run: true
       });
-      contract.activeOperationId = operation.id;
-      contract.status = 'REMEDIATING';
+      if (operation.id !== requestId) {
+        throw new OperatorError('DESIRED_STATE_OPERATION_IDENTITY_CONFLICT', 'Remediation provider did not honor the durable reserved operation identity.');
+      }
       contract.lastReason = 'Drift detected; bounded remediation operation started.';
-      contract.remediationHistory.push({ operationId: operation.id, startedAt: now.toISOString() });
-      if (contract.remediationHistory.length > MAX_HISTORY) contract.remediationHistory.splice(0, contract.remediationHistory.length - MAX_HISTORY);
       return contract;
     });
   }
@@ -212,14 +231,21 @@ export class DesiredStateController {
   async pause(idInput: string, options: { cancelActive?: boolean } = {}): Promise<DesiredStateContract> {
     return await this.#mutate(async (state, now) => {
       const contract = requireContract(state, idInput);
-      if (options.cancelActive && contract.activeOperationId) {
-        const operation = await this.#operations.cancel(contract.activeOperationId);
-        this.#closeHistory(contract, operation, now);
-        delete contract.activeOperationId;
-      }
+      // Revocation becomes durable *before* we attempt external cancellation.
+      // If the cancel response is lost, the paused contract retains the active
+      // operation identity for explicit, non-replaying reconciliation.
       contract.status = 'PAUSED';
       contract.lastReason = 'Desired-state reconciliation is paused.';
       contract.updatedAt = now.toISOString();
+      await this.#persist(state);
+      if (options.cancelActive && contract.activeOperationId) {
+        const operation = await this.#operations.cancel(contract.activeOperationId);
+        if (operation.id !== contract.activeOperationId || !isTerminal(operation)) {
+          throw new OperatorError('DESIRED_STATE_CANCELLATION_UNRESOLVED', 'Cancellation outcome must be reconciled before resuming.');
+        }
+        this.#closeHistory(contract, operation, now);
+        delete contract.activeOperationId;
+      }
       return contract;
     });
   }
@@ -228,6 +254,7 @@ export class DesiredStateController {
     return await this.#mutate(async (state, now) => {
       const contract = requireContract(state, idInput);
       if (contract.status !== 'PAUSED') throw new OperatorError('DESIRED_STATE_NOT_PAUSED', 'Only paused desired-state contracts can resume.');
+      if (contract.activeOperationId) throw new OperatorError('DESIRED_STATE_RECONCILIATION_REQUIRED', 'An active or uncertain remediation must be reconciled before resume.');
       const check = await this.#checkDesired(contract.desired);
       contract.status = check.ok ? 'HEALTHY' : 'DRIFTED';
       contract.lastReason = check.ok ? undefined : check.reason;
@@ -285,15 +312,39 @@ export class DesiredStateController {
   async #mutate<T>(fn: (state: DesiredStateFile, now: Date) => T | Promise<T>): Promise<T> {
     let output!: T;
     const run = this.#serial.then(async () => {
-      const state = await this.#read();
-      output = await fn(state, this.#clock());
-      validateState(state);
-      await this.#beforePersist?.();
-      await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+      // A process-instance-aware lease spans remote effects. The short file
+      // write is performed separately; we never hold a JSON lock over RPC.
+      let owner;
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        try {
+          owner = await this.#leases.acquire(
+            `desired-state-controller:${crypto.randomUUID()}`, ['desired-state:controller'], 'exclusive'
+          );
+          break;
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+          if (attempt === 299) throw new OperatorError('DESIRED_STATE_BUSY', 'Another process owns desired-state remediation.', { retryable: true });
+          await new Promise<void>(resolve => setTimeout(resolve, 25));
+        }
+      }
+      if (!owner) throw new OperatorError('DESIRED_STATE_BUSY', 'Desired-state owner unavailable.', { retryable: true });
+      try {
+        const state = await this.#read();
+        output = await fn(state, this.#clock());
+        await this.#persist(state);
+      } finally {
+        await owner.release();
+      }
     });
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(output);
+  }
+
+  async #persist(state: DesiredStateFile): Promise<void> {
+    validateState(state);
+    await this.#beforePersist?.();
+    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
   }
 
   async #read(): Promise<DesiredStateFile> {
