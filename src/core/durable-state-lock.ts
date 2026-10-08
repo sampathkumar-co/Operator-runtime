@@ -60,12 +60,10 @@ export async function withDurableStateLock<T>(stateFile: string, callback: () =>
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') {
-        // Windows can return EPERM while another owner is atomically creating
-        // or removing a lock. Retry only when a real lock file exists.
-        if (code !== 'EPERM' && code !== 'EACCES') throw error;
-        try { await fs.lstat(file); } catch { throw error; }
-      }
+      // Windows sometimes reports EPERM/EACCES while a competing lock
+      // disappears before inspection. Treat that as bounded contention,
+      // never as permission to enter the critical section.
+      if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES') throw error;
     }
     try {
       const previous = await lockOwner(file);
