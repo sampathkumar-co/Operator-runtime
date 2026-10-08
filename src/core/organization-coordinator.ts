@@ -88,11 +88,13 @@ export class OrganizationCoordinator {
   }
 
   async create(input: {
+    programId?: string;
     objective: string;
     targets: Array<{ key: string; scopeKey: string; workItems: TeamWorkInput[] }>;
     policy?: Partial<OrganizationPolicy>;
   }): Promise<OrganizationProgram> {
     const objective = boundedText(input.objective, 16_384, 'objective');
+    const programId = input.programId === undefined ? crypto.randomUUID() : validUuid(input.programId, 'programId');
     if (!Array.isArray(input.targets) || input.targets.length < 1 || input.targets.length > MAX_TARGETS) throw new OperatorError('ORGANIZATION_INPUT_INVALID', `targets must contain 1-${MAX_TARGETS} entries.`);
     const policy = normalizePolicy(input.policy, input.targets.length);
     const now = this.#clock().toISOString();
@@ -113,7 +115,7 @@ export class OrganizationCoordinator {
     const targets: OrganizationTarget[] = normalizedTargets.map((item) => ({ ...item, wave: waveByTarget.get(item.key)! }));
     const program: OrganizationProgram = {
       version: 1,
-      id: crypto.randomUUID(),
+      id: programId,
       objective,
       state: 'PENDING',
       policy,
@@ -125,6 +127,7 @@ export class OrganizationCoordinator {
     };
     const run = this.#serial.then(async () => {
       const state = await this.#read();
+      if (state.programs.some((item) => item.id === programId)) throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Existing program identity cannot be reallocated.');
       if (state.programs.length >= MAX_PROGRAMS) {
         const terminal = state.programs
           .map((item, index) => ({ item, index }))
