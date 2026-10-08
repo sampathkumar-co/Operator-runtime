@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { ProcessProvider } from '../src/capabilities/process.ts';
+import { inspectProcessInstance, observeProcessInstance } from '../src/core/process-instance.ts';
 import {
   createDeveloperSession,
   DeveloperSessionStore,
@@ -220,4 +221,48 @@ test('declared ports require durable Developer Session binding and enter canonic
   const keys = resourceKeysForAction(action);
   assert.ok(keys.includes('network:tcp:3000'));
   assert.ok(keys.includes('network:tcp:3001'));
+});
+
+test('Windows detached termination tolerates a transient stale live OS observation but still proves absence', async (t) => {
+  if (process.platform !== 'win32') return t.skip('Windows exact process observer postcondition');
+  const fx = await fixture(t);
+  const provider1 = new ProcessProvider({
+    allowedRoots: [fx.root], allowedExecutables: [process.execPath],
+    requiredRisk: 'destructive', stateDir: fx.stateDir
+  });
+  t.after(async () => provider1.close());
+  const start = await provider1.execute(sessionAction('start', {
+    executable: process.execPath,
+    args: ['-e', 'setInterval(() => {}, 1000)'],
+    cwd: fx.root, developerSessionId: fx.session.id
+  }));
+  assert.equal(start.ok, true, JSON.stringify(start.error ?? null));
+  const { sessionId, pid } = start.output as { sessionId: string; pid: number };
+  const expected = await inspectProcessInstance(pid);
+  assert.ok(expected, 'Must capture the exact owned process instance before shutdown');
+
+  let confirmedAbsent = false;
+  let injectedStaleObservation = false;
+  const provider2 = new ProcessProvider({
+    allowedRoots: [fx.root], allowedExecutables: [process.execPath],
+    requiredRisk: 'destructive', stateDir: fx.stateDir,
+    processObserver: async (observedPid) => {
+      const observed = await observeProcessInstance(observedPid);
+      if (observedPid !== pid || observed.status !== 'dead') return observed;
+      if (!confirmedAbsent) {
+        confirmedAbsent = true;
+        return observed;
+      }
+      if (!injectedStaleObservation) {
+        injectedStaleObservation = true;
+        return { status: 'live', identity: expected };
+      }
+      return observed;
+    }
+  });
+  t.after(async () => provider2.close());
+  const terminated = await provider2.execute(sessionAction('terminate', { sessionId }));
+  assert.equal(terminated.ok, true, JSON.stringify(terminated.error ?? null));
+  assert.equal(injectedStaleObservation, true, 'The test must exercise a stale live observation after confirmed exit');
+  assert.equal((await observeProcessInstance(pid)).status, 'dead');
 });
