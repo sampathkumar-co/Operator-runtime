@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 export interface EnterpriseIdentityProvider {
@@ -42,11 +43,11 @@ export class EnterpriseIdentityStore {
 
   async configureProviders(providersInput: EnterpriseIdentityProvider[]): Promise<void> {
     const providers = normalizeProviders(providersInput);
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       state.providers = providers;
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }
@@ -71,7 +72,7 @@ export class EnterpriseIdentityStore {
       enabled: input.active !== false,
       ...(input.externalId ? { scimExternalId: input.externalId } : {})
     });
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       if (!state.providers.some((provider) => provider.id === subject.providerId && provider.enabled)) {
         throw new OperatorError('ENTERPRISE_IDP_UNKNOWN', 'SCIM subject references an unknown or disabled identity provider.');
@@ -80,7 +81,7 @@ export class EnterpriseIdentityStore {
       if (index >= 0) state.subjects[index] = subject; else state.subjects.push(subject);
       state.subjects.sort((a,b)=>identityKey(a).localeCompare(identityKey(b)));
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(subject);
@@ -88,13 +89,13 @@ export class EnterpriseIdentityStore {
 
   async deactivateScimUser(providerIdInput: string, subjectInput: string): Promise<void> {
     const providerId = id(providerIdInput,'providerId'), subject = text(subjectInput,512,'subject');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const record = state.subjects.find((item) => item.providerId === providerId && item.subject === subject);
       if (!record) throw new OperatorError('ENTERPRISE_IDENTITY_NOT_FOUND', 'Identity subject was not found.');
       record.enabled = false;
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }
