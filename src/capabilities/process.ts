@@ -873,10 +873,13 @@ export class ProcessProvider implements CapabilityProvider {
     if (immediatelyBefore.status !== 'live' || !immediatelyBefore.identity) return 'unknown';
     if (!sameProcessInstance(identity, immediatelyBefore.identity)) return 'stale';
     await terminateProcessTree(child, identity.pid, signal, identity, this.#observeProcess);
-    const after = await this.#observeProcess(identity.pid);
-    if (after.status === 'dead') return 'terminated';
-    if (after.status === 'live' && after.identity && !sameProcessInstance(identity, after.identity)) return 'terminated';
-    throw new OperatorError('PROCESS_TERMINATE_POSTCONDITION_FAILED', 'Exact owned process instance remained after tree termination.', { details: { sideEffectState: 'uncertain' } });
+    // A separate OS observer can briefly lag the tree-termination probe on
+    // Windows. One stale live observation is not proof that termination failed;
+    // equally, a PID disappearing once must not authorize a replacement PID.
+    // Reconfirm absence or a different exact creation identity within a bounded
+    // interval, and fail closed if the original instance remains or is unknown.
+    await waitForExactProcessExit(identity, this.#observeProcess, signal);
+    return 'terminated';
   }
 
   #pruneSessions(): void {
