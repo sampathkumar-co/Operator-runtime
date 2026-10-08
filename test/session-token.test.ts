@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -301,4 +302,38 @@ test('automatic rotation compacts expired predecessors before the global session
   assert.equal(records.filter((record) => record.status === 'active').length, 1);
   assert.ok(records.length <= 3, `rotation history should stay bounded, got ${records.length}`);
   assert.equal(records.some((record) => record.jti === first.payload.jti), false);
+});
+
+test('independent session stores cannot lose issued tokens or resurrect revoked credentials', async (t) => {
+  const a = await device('operator-session-cross-issuer-', 'Issuer');
+  const b = await device('operator-session-cross-peer-', 'Peer');
+  t.after(() => Promise.all([
+    fs.rm(a.state, { recursive: true, force: true }),
+    fs.rm(b.state, { recursive: true, force: true })
+  ]));
+  await pairBoth(a, b);
+  const peerId = (await b.identity.loadOrCreate()).deviceId;
+  const stores = Array.from({ length: 8 }, () => new DeviceSessionTokenStore(a.state, a.identity, a.registry));
+  const options = { subjectDeviceId: peerId, audience: 'operator-relay', scopes: ['relay:connect'], ttlMs: 60_000 };
+  const tokens = await Promise.all(Array.from({ length: 12 }, (_, i) => stores[i % stores.length]!.issue(options)));
+  assert.equal(new Set(tokens.map((entry) => entry.payload.jti)).size, tokens.length);
+  assert.equal((await stores[0]!.listIssued(100)).length, 12);
+
+  const plannedJti = crypto.randomUUID();
+  const recovered = await Promise.all([stores[0]!.issueOrRecover({ ...options, jti: plannedJti }), stores[1]!.issueOrRecover({ ...options, jti: plannedJti })]);
+  assert.equal(recovered[0]!.payload.jti, plannedJti);
+  assert.equal(recovered[1]!.payload.jti, plannedJti);
+  assert.equal((await stores[2]!.listIssued(100)).length, 13);
+
+  await Promise.all([
+    stores[0]!.revoke(tokens[0]!.payload.jti, 'authority retired'),
+    ...Array.from({ length: 8 }, (_, i) => stores[(i + 1) % stores.length]!.issue(options))
+  ]);
+  const final = await new DeviceSessionTokenStore(a.state, a.identity, a.registry).listIssued(100);
+  assert.equal(final.length, 21);
+  assert.equal(new Set(final.map((entry) => entry.jti)).size, 21);
+  assert.equal(final.find((entry) => entry.jti === tokens[0]!.payload.jti)?.status, 'revoked');
+  await assert.rejects(stores[7]!.verify(tokens[0]!.token, { audience: 'operator-relay', expectedSubjectDeviceId: peerId }),
+    (error: any) => error?.code === 'SESSION_REVOKED');
+  assert.equal((await stores[3]!.verify(tokens[1]!.token, { audience: 'operator-relay' })).jti, tokens[1]!.payload.jti);
 });

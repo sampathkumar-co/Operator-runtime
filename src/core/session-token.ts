@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { DeviceRegistryStore, type RegisteredDevice } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const PURPOSE = 'operator-session-v1';
@@ -380,10 +381,12 @@ export class DeviceSessionTokenStore {
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const result = await mutator(state);
-      await this.#write(state);
-      return result;
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const result = await mutator(state);
+        await this.#write(state);
+        return result;
+      });
     } finally {
       release();
     }
