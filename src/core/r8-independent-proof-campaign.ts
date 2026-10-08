@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
+import { verifyIndependentCampaignEvidence, type IndependentCampaignEvidence } from './independent-campaign-evidence.ts';
 
 export interface R8TwinCaseEvidence {
   caseId: string;
@@ -72,7 +73,7 @@ export function verifyR8IndependentProofCampaign(input:R8IndependentProofCampaig
   try{return digest(input.digest,'campaign digest')===hash(normalize(input.body));}catch{return false;}
 }
 
-export function certifyR8IndependentProofCampaign(input:R8IndependentProofCampaign):R8IndependentProofReport{
+export function certifyR8IndependentProofCampaign(input:R8IndependentProofCampaign, evidence?:IndependentCampaignEvidence):R8IndependentProofReport{
   if(!verifyR8IndependentProofCampaign(input))throw invalid('Independent proof campaign digest verification failed.');
   const b=normalize(input.body),reasons:string[]=[];
   const count=b.cases.length;
@@ -106,6 +107,13 @@ export function certifyR8IndependentProofCampaign(input:R8IndependentProofCampai
   if(insufficientDenials<10)reasons.push('fewer than ten insufficient-fidelity denial cases were proven');
   if(verifiedMutationRate!==1)reasons.push('executed mutation did not have verified zero-uncertainty postcondition coverage');
   if(b.externalEvidenceDigests.length<3)reasons.push('insufficient external verifier evidence artifacts');
+  reasons.push(...verifyIndependentCampaignEvidence(
+    input.digest,
+    [...b.externalEvidenceDigests,...b.cases.flatMap((item)=>[item.selectedPlanDigest,item.proofBundleDigest,...item.evidenceDigests])],
+    b.cases.map((item)=>item.executorId),
+    b.cases.map((item)=>item.verifierId),
+    evidence
+  ));
 
   for(const item of b.cases){
     if(item.alternativePlansCompared<2)reasons.push('case '+item.caseId+' did not compare at least two plans');
