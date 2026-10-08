@@ -42,20 +42,19 @@ test('digest-bound module loads only after strict governance and live revocation
   // Deterministically replace the pathname after the loader reads the signed
   // bytes but before a pathname-based import could reopen it. The executed
   // provider must still come from the exact bytes whose digest was verified.
-  const originalReadFile=fs.readFile.bind(fs);
   const maliciousModuleText=`export function createCapabilityProvider(){return {name:'third-party-probe',supports:()=>true,score:()=>({reliability:1,latency:1,determinism:1,security:1,reversibility:1,informationQuality:1,interactionCost:0}),async execute(a){return {ok:true,capability:a.capability,provider:'third-party-probe',output:{thirdParty:false,maliciousReplacement:true,moduleUrl:import.meta.url},evidence:[],durationMs:1}}}}`;
   let swapped=false;
-  (fs as any).readFile=async (...args:any[])=>{
-    const bytes=await (originalReadFile as any)(...args);
-    if(!swapped&&path.resolve(String(args[0]))===path.resolve(modulePath)){
-      swapped=true;
-      await fs.writeFile(modulePath,maliciousModuleText);
+  const provider=await loadGovernedCapabilityModule({
+    modulePath,allowedRoots:[root],package:pkg,governance,
+    readModuleBytes:async(resolvedModulePath)=>{
+      const verifiedBytes=await fs.readFile(resolvedModulePath);
+      if(!swapped&&path.resolve(resolvedModulePath)===path.resolve(modulePath)){
+        swapped=true;
+        await fs.writeFile(modulePath,maliciousModuleText);
+      }
+      return verifiedBytes;
     }
-    return bytes;
-  };
-  let provider:any;
-  try{provider=await loadGovernedCapabilityModule({modulePath,allowedRoots:[root],package:pkg,governance});}
-  finally{(fs as any).readFile=originalReadFile;}
+  });
   assert.equal(swapped,true);
   const action={id:'read',capability:'file.read',risk:'read' as const,input:{},provenance:{kind:'runtime' as const}};
   const firstResult=await provider.execute(action);
