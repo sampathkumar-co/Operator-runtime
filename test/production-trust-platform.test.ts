@@ -233,3 +233,54 @@ test('automatic rollback halts when rollback targets or health fail', () => {
   assert.equal(rollout.state,'HALTED');
   assert.equal(rollout.reason,'AUTOMATIC_ROLLBACK_TARGET_FAILED');
 });
+
+test('rollout rehydration rejects incoherent channel, accounting, and time state', () => {
+  const ready = createUpdateRollout({
+    version:'2.3.0',
+    channel:'canary',
+    waves:[{id:'canary',targetCount:2,minHealthyCount:2}],
+    now:'2026-10-07T02:00:00.000Z'
+  });
+  assert.throws(
+    () => startUpdateRollout({ ...ready, channel:'internal' as any }, '2026-10-07T02:00:01.000Z'),
+    /channel/i
+  );
+
+  const running = startUpdateRollout(ready, '2026-10-07T02:00:01.000Z');
+  assert.throws(
+    () => recordUpdateWaveResult({
+      state:{ ...running, completedTargets:1, healthyTargets:1, failedTargets:1 },
+      completedTargets:2, healthyTargets:2, rollbackAvailable:true, slo:healthySlo(),
+      now:'2026-10-07T02:00:02.000Z'
+    }),
+    /accounting/i
+  );
+  assert.throws(
+    () => recordUpdateWaveResult({
+      state:{ ...running, updatedAt:'2026-10-07T01:59:59.000Z' },
+      completedTargets:2, healthyTargets:2, rollbackAvailable:true, slo:healthySlo(),
+      now:'2026-10-07T02:00:02.000Z'
+    }),
+    /predates/i
+  );
+});
+
+test('relay fence durable reload rejects impossible timestamp order', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'relay-fence-corrupt-time-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let now = new Date('2026-10-07T03:00:00.000Z');
+  const store = new RelayOwnershipFenceStore(root, { clock: () => now });
+  const fence = await store.acquire({ resourceKey:'device:time', ownerInstanceId:'relay:a', leaseMs:5000 });
+  const stateFile = path.join(root, 'relay-cluster-fences.json');
+  const state = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  state.fences[0].renewedAt = '2026-10-07T03:00:06.000Z';
+  state.fences[0].expiresAt = '2026-10-07T03:00:05.000Z';
+  await fs.writeFile(stateFile, JSON.stringify(state));
+  await assert.rejects(
+    () => new RelayOwnershipFenceStore(root, { clock: () => now }).assertCurrent({
+      resourceKey:fence.resourceKey, ownerInstanceId:fence.ownerInstanceId,
+      generation:fence.generation, token:fence.token, now:'2026-10-07T03:00:01.000Z'
+    }),
+    /timestamps are inconsistent/i
+  );
+});
