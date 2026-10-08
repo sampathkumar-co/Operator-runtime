@@ -217,7 +217,25 @@ export class DigitalOperationsLayer {
         const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
         deviceReservationId = reservation.id;
         deviceReservationSessionId = reservation.sessionId;
-        compensationIds.push(await this.#prepareCompensation(operationId, 'release-device-reservation', reservation.id));
+        try {
+          compensationIds.push(await this.#prepareCompensation(operationId, 'release-device-reservation', reservation.id));
+        } catch (prepareError) {
+          // The durable compensation handoff did not confirm success. Never leave
+          // a newly acquired reservation active solely because journaling failed.
+          try {
+            await this.#devices.release(reservation.id);
+          } catch (releaseError) {
+            const code = (error: unknown): string =>
+              typeof (error as { code?: unknown } | null)?.code === 'string'
+                ? String((error as { code: string }).code)
+                : 'UNKNOWN';
+            throw new OperatorError('COMPENSATION_BLOCKED', 'Device reservation handoff and immediate cleanup both failed; manual reconciliation is required.', {
+              retryable: true,
+              details: { reservationId: reservation.id, prepareCode: code(prepareError), releaseCode: code(releaseError) }
+            });
+          }
+          throw prepareError;
+        }
       }
 
       let teamMissionId: string | undefined;
