@@ -16,6 +16,7 @@ internal static class Program
     private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    private const int ERROR_INVALID_PARAMETER = 87;
     private const int MAX_PATH = 260;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -222,17 +223,26 @@ internal static class Program
         int rootPid;
         if (!Int32.TryParse(pidInput, out rootPid) || rootPid < 1)
             throw new InvalidOperationException("invalid process id");
-        foreach (KeyValuePair<uint, int> item in EnumerateProcessTree((uint)rootPid))
+        // Snapshot parentage before reading the root creation identity. If the
+        // PID is reused between those operations, the returned root identity
+        // differs from the caller's expected identity and termination is denied.
+        List<KeyValuePair<uint, int>> tree = EnumerateProcessTree((uint)rootPid);
+        ulong rootStarted;
+        if (!TryProcessCreationFiletime((uint)rootPid, out rootStarted))
         {
-            try
-            {
-                Console.Out.WriteLine(item.Key.ToString() + ":" + ProcessCreationFiletime(item.Key).ToString() + ":" + item.Value.ToString());
-            }
-            catch
-            {
-                // Process exited between the snapshot and identity read. A process
-                // that is already gone needs no termination authority.
-            }
+            // This sentinel is the only successful representation of a root
+            // process proven absent. Identity/access failures remain nonzero
+            // errors and must never be confused with termination proof.
+            Console.Out.WriteLine("absent");
+            return 0;
+        }
+        Console.Out.WriteLine(rootPid.ToString() + ":" + rootStarted.ToString() + ":0");
+        foreach (KeyValuePair<uint, int> item in tree)
+        {
+            if (item.Key == (uint)rootPid) continue;
+            ulong started;
+            if (!TryProcessCreationFiletime(item.Key, out started)) continue;
+            Console.Out.WriteLine(item.Key.ToString() + ":" + started.ToString() + ":" + item.Value.ToString());
         }
         return 0;
     }
@@ -289,9 +299,22 @@ internal static class Program
 
     private static ulong ProcessCreationFiletime(uint pid)
     {
+        ulong value;
+        if (!TryProcessCreationFiletime(pid, out value))
+            throw new InvalidOperationException("process is absent");
+        return value;
+    }
+
+    private static bool TryProcessCreationFiletime(uint pid, out ulong value)
+    {
+        value = 0;
         IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         if (handle == IntPtr.Zero)
-            throw new InvalidOperationException("cannot open process (Win32 " + Marshal.GetLastWin32Error() + ")");
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error == ERROR_INVALID_PARAMETER) return false;
+            throw new InvalidOperationException("cannot open process (Win32 " + error + ")");
+        }
         try
         {
             System.Runtime.InteropServices.ComTypes.FILETIME creation;
@@ -300,7 +323,8 @@ internal static class Program
             System.Runtime.InteropServices.ComTypes.FILETIME user;
             if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
                 throw new InvalidOperationException("cannot inspect process (Win32 " + Marshal.GetLastWin32Error() + ")");
-            return ((ulong)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+            value = ((ulong)(uint)creation.dwHighDateTime << 32) | (uint)creation.dwLowDateTime;
+            return true;
         }
         finally { CloseHandle(handle); }
     }

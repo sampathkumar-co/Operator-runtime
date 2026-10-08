@@ -1172,6 +1172,28 @@ async function waitForProcessIdentity(pid: number, observer: ProcessInstanceObse
 
 type WindowsTreeIdentity = { identity: ProcessInstanceIdentity; depth: number };
 
+export function parseWindowsProcessTreeSnapshot(stdout: string): WindowsTreeIdentity[] {
+  const rows = stdout.split(/\r?\n/).filter(Boolean);
+  if (rows.length === 1 && rows[0] === 'absent') return [];
+  if (rows.length < 1) throw new Error('process tree snapshot omitted the required root status');
+  if (rows.length > 4096) throw new Error('process tree snapshot exceeded the bounded row limit');
+  const parsed = rows.map((row) => {
+    const match = /^(\d{1,10}):(\d{15,20}):(\d{1,4})$/.exec(row);
+    if (!match) throw new Error('process tree snapshot row is malformed');
+    const processPid = Number(match[1]);
+    const depth = Number(match[3]);
+    if (!Number.isSafeInteger(processPid) || processPid < 1 || processPid > 0x7fff_ffff
+      || !Number.isSafeInteger(depth) || depth < 0 || depth > 4096) {
+      throw new Error('process tree snapshot row is out of bounds');
+    }
+    return { identity: { pid: processPid, started: 'windows-filetime:' + match[2] }, depth };
+  });
+  if (parsed.filter((entry) => entry.depth === 0).length !== 1 || parsed[0]?.depth !== 0) {
+    throw new Error('process tree snapshot must begin with exactly one root identity');
+  }
+  return parsed;
+}
+
 async function captureWindowsProcessTree(pid: number): Promise<WindowsTreeIdentity[]> {
   const nativeHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
   if (!nativeHelper || !path.isAbsolute(nativeHelper)) return [];
@@ -1183,19 +1205,7 @@ async function captureWindowsProcessTree(pid: number): Promise<WindowsTreeIdenti
       encoding: 'utf8',
       env: safeChildEnvironment(process.env)
     });
-    const rows = stdout.split(/\r?\n/).filter(Boolean);
-    if (rows.length > 4096) throw new Error('process tree snapshot exceeded the bounded row limit');
-    return rows.map((row) => {
-      const match = /^(\d{1,10}):(\d{15,20}):(\d{1,4})$/.exec(row);
-      if (!match) throw new Error('process tree snapshot row is malformed');
-      const processPid = Number(match[1]);
-      const depth = Number(match[3]);
-      if (!Number.isSafeInteger(processPid) || processPid < 1 || processPid > 0x7fff_ffff
-        || !Number.isSafeInteger(depth) || depth < 0 || depth > 4096) {
-        throw new Error('process tree snapshot row is out of bounds');
-      }
-      return { identity: { pid: processPid, started: 'windows-filetime:' + match[2] }, depth };
-    });
+    return parseWindowsProcessTreeSnapshot(stdout);
   } catch (error) {
     throw new OperatorError(
       'PROCESS_TREE_SNAPSHOT_FAILED',

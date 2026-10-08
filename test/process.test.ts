@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { ProcessProvider, processInstanceFingerprint } from '../src/capabilities/process.ts';
+import { ProcessProvider, parseWindowsProcessTreeSnapshot, processInstanceFingerprint } from '../src/capabilities/process.ts';
 import type { ActionRisk } from '../src/core/types.ts';
 
 // CI runners execute many filesystem/process suites concurrently; allow bounded
@@ -22,6 +22,23 @@ test('process instance fingerprint rejects same-PID reuse with a different creat
   const first = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:00:00.000Z');
   const reused = processInstanceFingerprint('node.exe', 4242, 'Console', 1, '2026-01-01T00:01:00.000Z');
   assert.notEqual(first, reused);
+});
+
+test('Windows process-tree proof distinguishes explicit absence from missing or ambiguous identity output', () => {
+  assert.deepEqual(parseWindowsProcessTreeSnapshot('absent\r\n'), []);
+  assert.throws(() => parseWindowsProcessTreeSnapshot(''), /required root status/);
+  assert.throws(() => parseWindowsProcessTreeSnapshot('absent\n4100:134116992000000000:0\n'), /malformed/);
+  assert.throws(() => parseWindowsProcessTreeSnapshot('4101:134116992000000001:1\n'), /exactly one root/);
+});
+
+test('Windows process-tree proof preserves one exact root and bounded descendants', () => {
+  assert.deepEqual(
+    parseWindowsProcessTreeSnapshot('4100:134116992000000000:0\r\n4101:134116992000000001:1\r\n'),
+    [
+      { identity: { pid: 4100, started: 'windows-filetime:134116992000000000' }, depth: 0 },
+      { identity: { pid: 4101, started: 'windows-filetime:134116992000000001' }, depth: 1 }
+    ]
+  );
 });
 
 test('process provider uses allowlisted argv execution', async (t) => {
