@@ -461,7 +461,7 @@ function normalizeRollout(input: UpdateRolloutState): UpdateRolloutState {
     schemaVersion: 1,
     id: digest(input.id, 'rollout.id'),
     version: semver(input.version),
-    channel: input.channel,
+    channel: validChannel(input.channel),
     waves,
     currentWave: integer(input.currentWave, 0, waves.length - 1, 'currentWave'),
     state,
@@ -478,6 +478,41 @@ function normalizeRollout(input: UpdateRolloutState): UpdateRolloutState {
   };
   const expected = sha256(canonicalJson({ version: normalized.version, channel: normalized.channel, waves: normalized.waves }));
   if (normalized.id !== expected) throw invalid('Update rollout id does not match its immutable definition.');
+  if (normalized.healthyTargets + normalized.failedTargets !== normalized.completedTargets) {
+    throw invalid('Update rollout target accounting is inconsistent.');
+  }
+  if (normalized.startedAt && Date.parse(normalized.updatedAt) < Date.parse(normalized.startedAt)) {
+    throw invalid('Update rollout updatedAt predates startedAt.');
+  }
+  if (normalized.rollbackStartedAt && Date.parse(normalized.rollbackStartedAt) < Date.parse(normalized.startedAt ?? normalized.updatedAt)) {
+    throw invalid('Update rollback predates rollout start.');
+  }
+  if (normalized.rollbackCompletedAt && (!normalized.rollbackStartedAt || Date.parse(normalized.rollbackCompletedAt) < Date.parse(normalized.rollbackStartedAt))) {
+    throw invalid('Update rollback completion predates rollback start.');
+  }
+  const hasRollbackHealthy = normalized.rollbackHealthyTargets !== undefined;
+  const hasRollbackFailed = normalized.rollbackFailedTargets !== undefined;
+  if (hasRollbackHealthy !== hasRollbackFailed || (hasRollbackHealthy && !normalized.rollbackCompletedAt)) {
+    throw invalid('Update rollback result accounting is incomplete.');
+  }
+  if (normalized.state === 'READY' && (normalized.startedAt || normalized.completedTargets !== 0)) {
+    throw invalid('Ready rollout cannot contain execution progress.');
+  }
+  if (normalized.state === 'RUNNING' && !normalized.startedAt) {
+    throw invalid('Running rollout requires startedAt.');
+  }
+  if (normalized.state === 'ROLLING_BACK' && !normalized.rollbackStartedAt) {
+    throw invalid('Rolling-back rollout requires rollbackStartedAt.');
+  }
+  if (normalized.state === 'ROLLED_BACK' && (!normalized.rollbackStartedAt || !normalized.rollbackCompletedAt)) {
+    throw invalid('Rolled-back rollout requires complete rollback timestamps.');
+  }
+  if (normalized.state === 'COMPLETED') {
+    const totalTargets = normalized.waves.reduce((sum, wave) => sum + wave.targetCount, 0);
+    if (normalized.currentWave !== normalized.waves.length - 1 || normalized.completedTargets !== totalTargets) {
+      throw invalid('Completed rollout does not account for every rollout target.');
+    }
+  }
   return normalized;
 }
 
@@ -492,7 +527,12 @@ function validateFenceState(input: unknown): RelayFenceState {
     boundedId(fence.ownerInstanceId, 'ownerInstanceId');
     integer(fence.generation, 1, Number.MAX_SAFE_INTEGER, 'generation');
     if (!/^[A-Za-z0-9_-]{40,128}$/.test(fence.token)) throw corrupt('Fence token is invalid.');
-    iso(fence.acquiredAt, 'acquiredAt'); iso(fence.renewedAt, 'renewedAt'); iso(fence.expiresAt, 'expiresAt');
+    const acquiredAt = iso(fence.acquiredAt, 'acquiredAt');
+    const renewedAt = iso(fence.renewedAt, 'renewedAt');
+    const expiresAt = iso(fence.expiresAt, 'expiresAt');
+    if (Date.parse(renewedAt) < Date.parse(acquiredAt) || Date.parse(expiresAt) < Date.parse(renewedAt)) {
+      throw corrupt('Fence timestamps are inconsistent.');
+    }
     if (resources.has(fence.resourceKey)) throw corrupt('Multiple owners exist for one relay resource.');
     resources.add(fence.resourceKey);
   }
@@ -511,6 +551,10 @@ function boundedId(input: unknown, label: string): string {
 function boundedText(input: unknown, max: number, label: string): string {
   if (typeof input !== 'string' || !input.trim() || input.includes('\0') || Buffer.byteLength(input, 'utf8') > max) throw invalid(label + ' is invalid.');
   return input.trim();
+}
+function validChannel(input: unknown): UpdateRolloutState['channel'] {
+  if (!['canary','beta','stable'].includes(input as UpdateRolloutState['channel'])) throw invalid('Update rollout channel is invalid.');
+  return input as UpdateRolloutState['channel'];
 }
 function semver(input: unknown): string {
   const value = String(input ?? '');
