@@ -153,3 +153,22 @@ test('device pool rejects duplicate cross-device sessions just as routing does',
     (error: any) => error?.code === 'DEVICE_POOL_INPUT_INVALID'
   );
 });
+
+test('preassigned durable reservation IDs cannot be replayed to double allocate capacity', async (t) => {
+  const { scheduler, one } = await setup(t);
+  const session = crypto.randomUUID();
+  const reservationId = crypto.randomUUID();
+  const resources = [advert(one.deviceId, session, { maxConcurrentJobs: 2 })];
+  const allocated = await scheduler.reserve({ workloadKey: 'idempotent:first' }, resources, { reservationId });
+  assert.equal(allocated.id, reservationId);
+  await assert.rejects(
+    scheduler.reserve({ workloadKey: 'idempotent:second' }, resources, { reservationId }),
+    (error: any) => error?.code === 'DEVICE_POOL_RESERVATION_ID_CONFLICT'
+  );
+  assert.equal((await scheduler.list({ activeOnly: true })).length, 1);
+  await scheduler.release(reservationId);
+  await assert.rejects(
+    scheduler.reserve({ workloadKey: 'idempotent:third' }, resources, { reservationId }),
+    (error: any) => error?.code === 'DEVICE_POOL_RESERVATION_ID_CONFLICT'
+  );
+});

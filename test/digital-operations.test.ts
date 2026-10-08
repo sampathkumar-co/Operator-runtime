@@ -7,6 +7,7 @@ import test from 'node:test';
 import { ProcedureMemoryStore, assumptionFingerprint } from '../src/core/procedure-memory.ts';
 import { WorldModelStore, worldValueDigest } from '../src/core/world-model.ts';
 import { DeviceRegistryStore } from '../src/core/device-registry.ts';
+import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { DeviceRoutingStore } from '../src/core/device-routing.ts';
 import { DevicePoolScheduler } from '../src/core/device-pool.ts';
 import { ExecutionOptimizerStore } from '../src/core/execution-optimizer.ts';
@@ -142,12 +143,13 @@ test('stage10 refuses to create execution when declared world precondition is co
 
 test('stage10 creation cleanup persists compensation failure and restart recovery completes it', async (t) => {
   const base = await setup(t);
-  const reservationId = crypto.randomUUID();
+  let reservationId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
   let failRelease = true;
   let releases = 0;
   const devices = {
-    async reserve() {
+    async reserve(_req: unknown, _ads: unknown, options?: { reservationId?: string }) {
+      reservationId = options?.reservationId ?? reservationId;
       return {
         id: reservationId, sessionId, deviceId: crypto.randomUUID(), state: 'ACTIVE',
         acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString()
@@ -276,7 +278,7 @@ test('stage10 requestId is idempotent for identical contract and rejects conflic
 
 test('stage10 running operation renews its device reservation and blocks visibly on reservation loss', async (t) => {
   const base = await setup(t);
-  const reservationId = crypto.randomUUID();
+  let reservationId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
   let heartbeats = 0;
   let loseReservation = false;
@@ -284,7 +286,8 @@ test('stage10 running operation renews its device reservation and blocks visibly
   let expiresAtMs = nowMs + 10_000;
   let activeWorkload = '';
   const devices = {
-    async reserve(request: { workloadKey: string }) {
+    async reserve(request: { workloadKey: string }, _ads?: unknown, options?: { reservationId?: string }) {
+      reservationId = options?.reservationId ?? reservationId;
       if (activeWorkload && activeWorkload !== request.workloadKey && nowMs < expiresAtMs) throw Object.assign(new Error('capacity held'), { code: 'DEVICE_POOL_NO_ELIGIBLE_DEVICE' });
       activeWorkload = request.workloadKey;
       expiresAtMs = nowMs + 10_000;
@@ -579,42 +582,94 @@ test('stage10 outcome-only mutation fails closed without an explicit authority e
 });
 
 
-test('reservation is released when durable compensation registration fails before operation creation', async (t) => {
+
+test('write-ahead compensation journal failure prevents allocation entirely', async (t) => {
   const base = await setup(t);
-  const reservationId = crypto.randomUUID();
-  const sessionId = crypto.randomUUID();
-  let releaseFails = false;
+  let allocations = 0;
+  const devices = {
+    async reserve() { allocations++; throw new Error('allocation should not occur'); },
+    async release() { throw new Error('allocation should not exist'); }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  compensations.prepare = async () => {
+    throw Object.assign(new Error('synthetic journal fault'), { code: 'JOURNAL_WRITE_FAILED' });
+  };
+  const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations });
+  await assert.rejects(ops.submit({
+    objective: 'Persist intent before capacity', scopeKey: 'project:write-ahead',
+    successConditions: ['bounded'], execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'job:write-ahead' }, advertisements: [] }
+  }), /synthetic journal fault/);
+  assert.equal(allocations, 0);
+  assert.deepEqual(await compensations.pending('digital-operation'), []);
+});
+
+test('lost reservation response is reconciled using the preassigned durable identity', async (t) => {
+  const base = await setup(t);
+  let reservationId = '';
+  let allocations = 0;
+  let failRelease = true;
   let releases = 0;
   const devices = {
-    async reserve() { return { id: reservationId, sessionId, state: 'ACTIVE' }; },
+    async reserve(_req: unknown, _ads: unknown, options: { reservationId: string }) {
+      reservationId = options.reservationId;
+      allocations++;
+      throw Object.assign(new Error('response lost after commit'), { code: 'DEVICE_RESPONSE_LOST' });
+    },
     async release(id: string) {
       assert.equal(id, reservationId);
-      releases += 1;
-      if (releaseFails) throw Object.assign(new Error('release fault'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
+      releases++;
+      if (failRelease) throw Object.assign(new Error('release unavailable'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
       return { id, state: 'RELEASED' };
     }
   };
   const compensations = new DurableCompensationJournal(base.state);
-  compensations.prepare = async () => {
-    throw Object.assign(new Error('synthetic compensation journal failure'), { code: 'JOURNAL_WRITE_FAILED' });
-  };
   const ops = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations });
-  const submit = () => ops.submit({
-    objective: 'Exercise general recovery handoff', scopeKey: 'project:compensation',
-    successConditions: ['release reservation if handoff fails'],
-    execution: { kind: 'team' as const, workItems: work() },
-    device: { request: { workloadKey: 'job:handoff' }, advertisements: [] }
-  });
-
-  await assert.rejects(submit, /synthetic compensation journal failure/);
-  assert.equal(releases, 1);
-  assert.deepEqual(await compensations.pending('digital-operation'), []);
-
-  releaseFails = true;
-  await assert.rejects(submit, (error: any) =>
-    error?.code === 'COMPENSATION_BLOCKED' &&
+  await assert.rejects(ops.submit({
+    objective: 'Reconcile lost allocation response', scopeKey: 'project:lost-response',
+    successConditions: ['no resource leak'], execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'job:lost-response' }, advertisements: [] }
+  }), (error: any) => error?.code === 'COMPENSATION_BLOCKED' &&
     error?.details?.reservationId === reservationId &&
-    error?.details?.prepareCode === 'JOURNAL_WRITE_FAILED' &&
-    error?.details?.releaseCode === 'DEVICE_RELEASE_UNAVAILABLE');
+    error?.details?.reserveCode === 'DEVICE_RESPONSE_LOST' &&
+    error?.details?.cleanupCode === 'DEVICE_RELEASE_UNAVAILABLE');
+  assert.equal(allocations, 1);
+  assert.equal((await compensations.pending('digital-operation')).length, 1);
+  failRelease = false;
+  const restarted = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations: new DurableCompensationJournal(base.state) });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(allocations, 1);
   assert.equal(releases, 2);
+});
+
+test('restart after reservation commit and before operation commit releases exactly the orphaned resource', async (t) => {
+  const base = await setup(t);
+  const registry = new DeviceRegistryStore(base.state);
+  const routing = new DeviceRoutingStore(base.state, registry);
+  const devices = new DevicePoolScheduler(base.state, registry, routing);
+  const peer = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('crash-peer');
+  await registry.registerVerifiedPeer(peer);
+  const reservationId = crypto.randomUUID();
+  const ownerId = crypto.randomUUID();
+  const compensations = new DurableCompensationJournal(base.state);
+  const recoveryId = crypto.createHash('sha256').update(['digital-operation', ownerId, 'release-device-reservation', reservationId].join('\0')).digest('hex');
+  await compensations.prepare({
+    id: recoveryId, ownerKind: 'digital-operation', ownerId,
+    operation: 'release-device-reservation', targetId: reservationId
+  });
+  const sessionId = crypto.randomUUID();
+  const reservation = await devices.reserve({ workloadKey: 'work:crash-window' }, [{
+    deviceId: peer.deviceId, sessionId, capabilities: ['file.read'],
+    observedAt: new Date().toISOString(), cpuSlots: 4, memoryMb: 8192,
+    gpu: false, tags: [], activeJobs: 0, maxConcurrentJobs: 1
+  }], { reservationId });
+  assert.equal(reservation.id, reservationId);
+  assert.equal((await devices.list({ activeOnly: true })).length, 1);
+  const restarted = new DigitalOperationsLayer(base.state, {
+    ...base, devices: new DevicePoolScheduler(base.state, registry, routing),
+    compensations: new DurableCompensationJournal(base.state)
+  });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal((await devices.list({ activeOnly: true })).length, 0);
+  assert.deepEqual(await compensations.pending('digital-operation'), []);
 });

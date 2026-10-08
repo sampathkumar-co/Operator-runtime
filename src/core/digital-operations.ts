@@ -214,27 +214,39 @@ export class DigitalOperationsLayer {
       let deviceReservationSessionId: string | undefined;
       const compensationIds: string[] = [];
       if (normalized.device) {
-        const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements);
-        deviceReservationId = reservation.id;
-        deviceReservationSessionId = reservation.sessionId;
+        const reservationId = crypto.randomUUID();
+        // Journal *before* resource allocation: an abrupt restart can now name
+        // the exact allocation without ever receiving the reserve response.
+        const compensationId = await this.#prepareCompensation(operationId, 'release-device-reservation', reservationId);
+        compensationIds.push(compensationId);
         try {
-          compensationIds.push(await this.#prepareCompensation(operationId, 'release-device-reservation', reservation.id));
-        } catch (prepareError) {
-          // The durable compensation handoff did not confirm success. Never leave
-          // a newly acquired reservation active solely because journaling failed.
-          try {
-            await this.#devices.release(reservation.id);
-          } catch (releaseError) {
-            const code = (error: unknown): string =>
-              typeof (error as { code?: unknown } | null)?.code === 'string'
-                ? String((error as { code: string }).code)
-                : 'UNKNOWN';
-            throw new OperatorError('COMPENSATION_BLOCKED', 'Device reservation handoff and immediate cleanup both failed; manual reconciliation is required.', {
+          const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements, { reservationId });
+          if (reservation.id !== reservationId) {
+            // Contract mismatch with a provider is not a safe success.
+            try { await this.#devices.release(reservation.id); } catch { /* unknown effect: retained journal blocks further submissions */ }
+            throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Resource scheduler returned a different reservation identity.');
+          }
+          deviceReservationId = reservation.id;
+          deviceReservationSessionId = reservation.sessionId;
+        } catch (reserveError) {
+          let cleanupError: unknown;
+          try { await this.#devices.release(reservationId); }
+          catch (error) {
+            if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') cleanupError = error;
+          }
+          if (!cleanupError) {
+            try { await this.#compensations.complete(compensationId); }
+            catch (error) { cleanupError = error; }
+          }
+          if (cleanupError) {
+            const code = (error: unknown): string => typeof (error as { code?: unknown } | null)?.code === 'string'
+              ? String((error as { code: string }).code) : 'UNKNOWN';
+            throw new OperatorError('COMPENSATION_BLOCKED', 'Reservation outcome or recovery journal remains unresolved; new work is blocked.', {
               retryable: true,
-              details: { reservationId: reservation.id, prepareCode: code(prepareError), releaseCode: code(releaseError) }
+              details: { reservationId, reserveCode: code(reserveError), cleanupCode: code(cleanupError) }
             });
           }
-          throw prepareError;
+          throw reserveError;
         }
       }
 
