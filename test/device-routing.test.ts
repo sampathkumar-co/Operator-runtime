@@ -199,3 +199,15 @@ test('online routing state rejects duplicate device/session identities and proje
   );
   await assert.rejects(routing.bindProject('../secret/project', a.deviceId), (error: any) => error?.code === 'ROUTE_PROJECT_KEY_INVALID');
 });
+
+test('independent routing instances preserve distinct project bindings under overlapping writes', async (t) => {
+  const { stateDir, registry, a, b } = await fixture(t);
+  const routes = Array.from({ length: 8 }, () => new DeviceRoutingStore(stateDir, registry));
+  await Promise.all(routes.map((store, i) => store.bindProject('independent-project-' + i, i % 2 === 0 ? a.deviceId : b.deviceId)));
+  const bound = await new DeviceRoutingStore(stateDir, registry).listBindings();
+  assert.equal(bound.length, 8);
+  assert.deepEqual(
+    new Set(bound.map((item) => item.projectKey)),
+    new Set(Array.from({ length: 8 }, (_, i) => 'independent-project-' + i))
+  );
+});

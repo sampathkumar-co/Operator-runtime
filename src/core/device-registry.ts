@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { DeviceIdentityStore, type PublicDeviceIdentity } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_DEVICES = 1000;
@@ -305,10 +306,12 @@ export class DeviceRegistryStore {
     this.#queue = new Promise<void>((resolve) => { resolveTurn = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const result = await mutator(state);
-      await this.#write(state);
-      return result;
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const result = await mutator(state);
+        await this.#write(state);
+        return result;
+      });
     } finally {
       resolveTurn();
     }

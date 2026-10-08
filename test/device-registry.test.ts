@@ -141,3 +141,26 @@ test('revocation blocks subsequent signature authentication and cannot be silent
   const rePair = await registry.issuePairingChallenge(issuer, { expectedPeerDeviceId: peer.deviceId });
   await expectCode(registry.completePairing(await answerPairingChallenge(rePair, peerStore)), 'DEVICE_REVOKED');
 });
+
+test('separate device registries do not lose pairings or silently resurrect revocation', async (t) => {
+  const state = await tempDir(t, 'operator-registry-shared-');
+  const peers = await Promise.all(Array.from({ length: 8 }, async (_, i) => {
+    return await new DeviceIdentityStore(await tempDir(t, 'operator-peer-shared-'), { platform: 'linux' }).loadOrCreate('Peer ' + i);
+  }));
+  const registries = Array.from({ length: 8 }, () => new DeviceRegistryStore(state));
+  await Promise.all(peers.map((peer, i) => registries[i]!.registerVerifiedPeer(peer)));
+  assert.deepEqual(
+    new Set((await new DeviceRegistryStore(state).listDevices()).map((device) => device.deviceId)),
+    new Set(peers.map((peer) => peer.deviceId))
+  );
+  await Promise.all([
+    registries[0]!.revokeDevice(peers[0]!.deviceId, 'authority withdrawn'),
+    registries[1]!.registerVerifiedPeer(peers[1]!)
+  ]);
+  const final = await new DeviceRegistryStore(state).listDevices();
+  assert.equal(final.find((item) => item.deviceId === peers[0]!.deviceId)?.status, 'revoked');
+  await assert.rejects(
+    registries[2]!.registerVerifiedPeer(peers[0]!),
+    (error: any) => error?.code === 'DEVICE_REVOKED'
+  );
+});
