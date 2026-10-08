@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import type { PublicDeviceIdentity } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const VERSION = 1 as const;
@@ -224,10 +225,12 @@ export class DeviceEnrollmentStore {
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const value = await mutator(state);
-      await this.#write(state);
-      return value;
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const value = await mutator(state);
+        await this.#write(state);
+        return value;
+      });
     } finally {
       release();
     }
