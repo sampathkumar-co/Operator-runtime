@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export interface ControlPlaneRecord {
   schemaVersion: 1;
@@ -82,7 +83,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 10001) throw invalid('Transaction mutations are invalid.');
     const now = iso(nowInput, 'now');
     let output: ControlPlaneRecord[] = [];
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const index = new Map(state.records.map((item, i) => [recordKey(item.namespace, item.key), i]));
       const seen = new Set<string>();
@@ -127,7 +128,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
       state.records.sort((a, b) => recordKey(a.namespace, a.key).localeCompare(recordKey(b.namespace, b.key)));
       await this.#write(state);
       output = results.map((item) => structuredClone(item));
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return output;
@@ -143,11 +144,11 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
 
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
     const snapshot = normalizeSnapshot(snapshotInput);
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
       if (current.records.length > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite live control-plane state.');
       await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)) });
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }
