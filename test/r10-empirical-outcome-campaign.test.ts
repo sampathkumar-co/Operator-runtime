@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
+import { independentCampaignEvidencePayload, type IndependentCampaignEvidence } from '../src/core/independent-campaign-evidence.ts';
 import {
   certifyR10EmpiricalOutcomeCampaign,
   createR10EmpiricalOutcomeCampaign,
@@ -82,9 +83,37 @@ function body(overrides:Record<string,unknown>={}):any{
   };
 }
 
+function attestCampaign(campaign:ReturnType<typeof createR10EmpiricalOutcomeCampaign>):IndependentCampaignEvidence {
+  const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+  const source=[
+    'cohort-manifest','verifier-manifest','analysis-report',
+    ...Array.from({length:9},(_,i)=>'release-report:'+(i+1)),
+    ...Array.from({length:30},(_,i)=>[
+      'objective:'+i,'start:'+i,'environment:'+i,'rubric:'+i,'pair-evidence:'+i,
+      ...(['direct-tool-access','mecord-r10'] as const).flatMap((mode)=>[
+        mode+':recovery:'+i,mode+':rollback:'+i,mode+':proof:'+i,
+        mode+':result:'+i,mode+':evidence:'+i
+      ])
+    ]).flat()
+  ];
+  const artifacts=source.map((value)=>({
+    digest:sha(value),contentBase64:Buffer.from(value,'utf8').toString('base64')
+  })).sort((a,b)=>a.digest.localeCompare(b.digest));
+  const digests=artifacts.map((artifact)=>artifact.digest);
+  return{
+    trustedVerifierPublicKeys:{'verifier-0':publicKey.export({type:'spki',format:'pem'}).toString()},
+    attestation:{
+      schemaVersion:1,campaignDigest:campaign.digest,verifierId:'verifier-0',
+      artifactDigests:digests,
+      signatureBase64:crypto.sign(null,independentCampaignEvidencePayload(campaign.digest,'verifier-0',digests),privateKey).toString('base64')
+    },
+    artifacts
+  };
+}
+
 test('R10 certifies a counterbalanced paired cohort that materially beats direct tool access',()=>{
   const campaign=createR10EmpiricalOutcomeCampaign(body());
-  const report=certifyR10EmpiricalOutcomeCampaign(campaign);
+  const report=certifyR10EmpiricalOutcomeCampaign(campaign,attestCampaign(campaign));
   assert.equal(report.status,'CERTIFIED');
   assert.equal(report.pairCount,30);
   assert.equal(report.categoryCount,6);
@@ -197,4 +226,18 @@ test('R10 campaign digest detects paired evidence tampering',()=>{
   const tampered=structuredClone(campaign);
   tampered.body.pairs[0]!.current.authorityViolations=1;
   assert.equal(verifyR10EmpiricalOutcomeCampaign(tampered),false);
+});
+
+test('R10 certification rejects unsigned claims, signature substitution and missing report bytes',()=>{
+  const campaign=createR10EmpiricalOutcomeCampaign(body());
+  const unsigned=certifyR10EmpiricalOutcomeCampaign(campaign);
+  assert.equal(unsigned.status,'NOT_CERTIFIED');
+  assert.match(unsigned.reasons.join(' '),/attestation is missing/);
+  const evidence=attestCampaign(campaign);
+  const forged=structuredClone(evidence);
+  forged.attestation.signatureBase64=Buffer.alloc(64,0).toString('base64');
+  assert.match(certifyR10EmpiricalOutcomeCampaign(campaign,forged).reasons.join(' '),/signature is invalid/);
+  const missing=structuredClone(evidence);
+  missing.artifacts=missing.artifacts.filter((item)=>item.digest!==sha('release-report:1'));
+  assert.match(certifyR10EmpiricalOutcomeCampaign(campaign,missing).reasons.join(' '),/count does not match signed manifest/);
 });
