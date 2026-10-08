@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
+import { independentCampaignEvidencePayload, type IndependentCampaignEvidence } from '../src/core/independent-campaign-evidence.ts';
 import {
   certifyR8IndependentProofCampaign,
   createR8IndependentProofCampaign,
@@ -55,9 +56,30 @@ function body(overrides:Record<string,unknown>={}):any{
   };
 }
 
+function attestCampaign(campaign:ReturnType<typeof createR8IndependentProofCampaign>):IndependentCampaignEvidence {
+  const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+  const source=[
+    'verifier-build','proof-report','tamper-report',
+    ...Array.from({length:50},(_,i)=>['plan-'+i,'proof-'+i,'evidence-'+i]).flat()
+  ];
+  const artifacts=source.map((value)=>({
+    digest:sha(value),contentBase64:Buffer.from(value,'utf8').toString('base64')
+  })).sort((a,b)=>a.digest.localeCompare(b.digest));
+  const digests=artifacts.map((artifact)=>artifact.digest);
+  return{
+    trustedVerifierPublicKeys:{'verifier-0':publicKey.export({type:'spki',format:'pem'}).toString()},
+    attestation:{
+      schemaVersion:1,campaignDigest:campaign.digest,verifierId:'verifier-0',
+      artifactDigests:digests,
+      signatureBase64:crypto.sign(null,independentCampaignEvidencePayload(campaign.digest,'verifier-0',digests),privateKey).toString('base64')
+    },
+    artifacts
+  };
+}
+
 test('R8 campaign certifies independent proof verification across representative cases',()=>{
   const campaign=createR8IndependentProofCampaign(body());
-  const report=certifyR8IndependentProofCampaign(campaign);
+  const report=certifyR8IndependentProofCampaign(campaign,attestCampaign(campaign));
   assert.equal(report.status,'CERTIFIED');
   assert.equal(report.caseCount,50);
   assert.equal(report.mutationClassCount,5);
@@ -120,4 +142,22 @@ test('R8 campaign digest detects tampering',()=>{
   const tampered=structuredClone(campaign);
   tampered.body.cases[0]!.proofVerifiedExternally=false;
   assert.equal(verifyR8IndependentProofCampaign(tampered),false);
+});
+
+test('R8 certification fails closed for unsigned observations and mutated artifact bytes',()=>{
+  const campaign=createR8IndependentProofCampaign(body());
+  const unsigned=certifyR8IndependentProofCampaign(campaign);
+  assert.equal(unsigned.status,'NOT_CERTIFIED');
+  assert.match(unsigned.reasons.join(' '),/attestation is missing/);
+  const evidence=attestCampaign(campaign);
+  const altered=structuredClone(evidence);
+  altered.artifacts[0]!.contentBase64=Buffer.from('not the attested bytes').toString('base64');
+  const rejected=certifyR8IndependentProofCampaign(campaign,altered);
+  assert.equal(rejected.status,'NOT_CERTIFIED');
+  assert.match(rejected.reasons.join(' '),/do not match claimed digest/);
+  const unknown=structuredClone(evidence);
+  unknown.trustedVerifierPublicKeys={};
+  const denied=certifyR8IndependentProofCampaign(campaign,unknown);
+  assert.equal(denied.status,'NOT_CERTIFIED');
+  assert.match(denied.reasons.join(' '),/release trust store/);
 });
