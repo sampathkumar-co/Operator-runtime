@@ -305,3 +305,36 @@ test('R7 resource policy prefixes respect resource boundaries',()=>{
   assert.equal(escaped.allowed,false);
   assert.match(escaped.reasons.join(' '),/No enterprise policy rule matches/);
 });
+
+test('independent SCIM stores keep every provisioned subject and preserve deactivation during other writes', async (t) => {
+  const state = await temp(t);
+  const stores = Array.from({ length: 8 }, () => new EnterpriseIdentityStore(state));
+  const provider = { id: 'corp', issuer: 'https://id.example.net', audiences: ['mecord'], enabled: true };
+  await stores[0]!.configureProviders([provider]);
+  const created = await Promise.all(Array.from({ length: 24 }, (_, i) => stores[i % stores.length]!.upsertScimUser({
+    providerId: 'corp', subject: 'person-' + i, principalId: 'human:person-' + i,
+    roleIds: ['viewer'], groups: ['engineering'], active: true
+  })));
+  assert.equal(new Set(created.map((item) => item.subject)).size, 24);
+  assert.equal((await stores[1]!.inspect()).subjects.length, 24);
+  await Promise.all([
+    stores[2]!.deactivateScimUser('corp', 'person-0'),
+    ...Array.from({ length: 8 }, (_, i) => stores[i % stores.length]!.upsertScimUser({
+      providerId: 'corp', subject: 'late-' + i, principalId: 'human:late-' + i,
+      roleIds: ['auditor'], groups: ['security'], active: true
+    }))
+  ]);
+  const after = await new EnterpriseIdentityStore(state).inspect();
+  assert.equal(after.subjects.length, 32);
+  assert.equal(after.subjects.find((item) => item.subject === 'person-0')?.enabled, false);
+  await assert.rejects(stores[4]!.resolveSso({
+    providerId: 'corp', issuer: 'https://id.example.net', audience: 'mecord',
+    subject: 'person-0', verified: true
+  }), (error: any) => error?.code === 'ENTERPRISE_SSO_SUBJECT_DENIED');
+  await stores[5]!.configureProviders([{ ...provider, enabled: false }]);
+  await assert.rejects(stores[6]!.resolveSso({
+    providerId: 'corp', issuer: 'https://id.example.net', audience: 'mecord',
+    subject: 'late-0', verified: true
+  }), (error: any) => error?.code === 'ENTERPRISE_SSO_PROVIDER_MISMATCH');
+  assert.equal((await stores[7]!.inspect()).subjects.length, 32);
+});
