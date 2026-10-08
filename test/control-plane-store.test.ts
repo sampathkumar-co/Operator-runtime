@@ -250,3 +250,38 @@ test('failed rollback marks a pinned pooled Postgres client unsafe on release', 
   );
   assert.match(releaseError?.message??'',/rollback failed/);
 });
+
+test('independent embedded control-plane stores enforce cross-instance CAS and preserve unrelated commits', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-multi-instance-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const stores = Array.from({ length: 8 }, () => new EmbeddedControlPlaneStore(dir));
+  const race = await Promise.allSettled([
+    stores[0]!.transact([{ namespace: 'locks', key: 'same', expectedGeneration: null, value: { owner: 'one' } }]),
+    stores[1]!.transact([{ namespace: 'locks', key: 'same', expectedGeneration: null, value: { owner: 'two' } }])
+  ]);
+  assert.equal(race.filter((item) => item.status === 'fulfilled').length, 1);
+  assert.equal(race.filter((item) => item.status === 'rejected').length, 1);
+  const rejected = race.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+  assert.equal(rejected?.reason?.code, 'CONTROL_PLANE_CAS_MISMATCH');
+  assert.equal((await new EmbeddedControlPlaneStore(dir).get('locks', 'same'))?.generation, 1);
+
+  const writes = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+    stores[i % stores.length]!.transact([{
+      namespace: 'tasks', key: 'task-' + i, expectedGeneration: null, value: { submitted: i }
+    }])
+  ));
+  assert.equal(writes.length, 20);
+  const tasks = await stores[6]!.list('tasks');
+  assert.equal(tasks.length, 20);
+  assert.deepEqual(new Set(tasks.map((item) => item.value.submitted)), new Set(Array.from({ length: 20 }, (_, i) => i)));
+
+  const snapshot = await stores[2]!.snapshot();
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-restore-cas-'));
+  t.after(() => fs.rm(empty, { recursive: true, force: true }));
+  const restore = [new EmbeddedControlPlaneStore(empty), new EmbeddedControlPlaneStore(empty)];
+  const restoreResult = await Promise.allSettled([restore[0]!.restore(snapshot), restore[1]!.restore(snapshot)]);
+  assert.equal(restoreResult.filter((item) => item.status === 'fulfilled').length, 1);
+  assert.equal(restoreResult.filter((item) => item.status === 'rejected').length, 1);
+  assert.equal(restoreResult.find((item): item is PromiseRejectedResult => item.status === 'rejected')?.reason?.code, 'CONTROL_PLANE_RESTORE_CONFLICT');
+  assert.equal((await restore[0]!.list('tasks')).length, 20);
+});
