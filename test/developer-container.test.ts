@@ -439,3 +439,29 @@ test('exact owned container stopped by host reboot is safely restarted', async (
   assert.equal(recovered.state, 'running');
   assert.equal(recovered.record.containerId, active.record.containerId);
 });
+
+test('two independent container managers coordinate physical Docker create for one session',async t=>{
+ const fx=await gitFixture(t);
+ if(!fx)return;
+ const docker=new FakeDocker();
+ let createCalls=0;
+ const runner:DeveloperDockerRunner=async (...args)=>{
+   const argv=args[0];
+   if(argv[0]==='--context' && argv[2]==='create'){
+     createCalls+=1;
+     await new Promise(resolve=>setTimeout(resolve,80));
+   }
+   return await docker.runner(...args);
+ };
+ const make=()=>new DeveloperContainerManager({
+   allowedRepositoryRoots:[fx.repo],worktreeRoot:fx.worktreeRoot,stateDir:fx.stateDir,runner
+ });
+ const settled=await Promise.allSettled([
+  make().create(fx.input),make().create(fx.input)
+ ]);
+ assert.ok(settled.some(x=>x.status==='fulfilled'),'one legitimate owner must commit');
+ assert.equal(createCalls,1,'one session must never dispatch two physical container creations');
+ const inspected=await make().inspect(fx.sessionId);
+ assert.equal(inspected.record.phase,'ACTIVE');
+ assert.equal(inspected.state,'running');
+});

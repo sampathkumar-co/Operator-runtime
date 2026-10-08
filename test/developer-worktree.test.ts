@@ -397,3 +397,45 @@ test('Developer Worktree preflight resolves symlinked ancestors before creating 
     (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
 });
+
+test('independent managers cannot both race one developer worktree session into inconsistent state',async t=>{
+ if(!supportedGitAvailable()){t.skip('Git unavailable');return;}
+ const fx=await fixture(t);
+ const sessionId='parallel-git-worktree';
+ const first=manager(fx),second=manager(fx);
+ const both=await Promise.allSettled([
+  first.create({sessionId,repositoryRoot:fx.repo,baseCommit:fx.commit}),
+  second.create({sessionId,repositoryRoot:fx.repo,baseCommit:fx.commit})
+ ]);
+ const success=both.filter(r=>r.status==='fulfilled');
+ assert.ok(success.length>0,'one legitimate creator must establish a recoverable session');
+ const record=JSON.parse(await readDurableStateText(developerWorktreeRecordPath(fx.stateDir,sessionId),RECORD_OPTIONS));
+ assert.equal(record.phase,'ACTIVE');
+ const verified=await manager(fx).inspect(sessionId);
+ assert.equal(verified.exists,true);
+ assert.equal(verified.record.sessionId,sessionId);
+ assert.equal(verified.record.phase,'ACTIVE');
+});
+
+test('separate process creators cannot lose durable worktree ownership or leave an orphan',async t=>{
+ if(!supportedGitAvailable()){t.skip('Git unavailable');return;}
+ const fx=await fixture(t);
+ const {pathToFileURL}=await import('node:url');
+ const uri=pathToFileURL(path.resolve('src/core/developer-worktree.ts')).href;
+ const code=`import {DeveloperWorktreeManager} from ${JSON.stringify(uri)};
+const [repositoryRoot,worktreeRoot,stateDir,baseCommit,sessionId]=process.argv.slice(1);
+const mgr=new DeveloperWorktreeManager({allowedRepositoryRoots:[repositoryRoot],worktreeRoot,stateDir});
+await mgr.create({sessionId,repositoryRoot,baseCommit});`;
+ const sessionId='cross-process-session';
+ const results=await Promise.allSettled(Array.from({length:3},()=>execFileAsync(process.execPath,[
+  '--experimental-strip-types','--input-type=module','-e',code,
+  fx.repo,fx.worktreeRoot,fx.stateDir,fx.commit,sessionId
+ ],{cwd:process.cwd(),windowsHide:true,timeout:40000})));
+ const successes=results.filter(r=>r.status==='fulfilled');
+ assert.ok(successes.length>0,'at least one valid creator must succeed and commit ownership');
+ const inspected=await manager(fx).inspect(sessionId);
+ assert.equal(inspected.exists,true);
+ assert.equal(inspected.record.phase,'ACTIVE');
+ assert.equal(inspected.head,fx.commit);
+ assert.equal(inspected.clean,true);
+});
