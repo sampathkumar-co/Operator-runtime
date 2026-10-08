@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { canonicalJson } from './action-identity.ts';
 import { twinSupportsClaim, type TwinFidelityDimension } from './counterfactual-twin.ts';
-import type { ReconstructedCounterfactualTwin } from './counterfactual-twin-runtime.ts';
+import { validateReconstructedCounterfactualTwin, type ReconstructedCounterfactualTwin } from './counterfactual-twin-runtime.ts';
 import { OperatorError } from './errors.ts';
 
 export interface CounterfactualPlanStep {
@@ -37,8 +37,9 @@ export function evaluateCounterfactualPlan(
   candidateInput:CounterfactualPlanCandidate
 ):CounterfactualPlanEvaluation{
   const candidate=normalizeCandidate(candidateInput);
-  const support=twinSupportsClaim(twin.manifest,candidate.requiredDimensions);
-  const resources:{[key:string]:string}={...twin.virtualResources};
+  const validatedTwin=validateReconstructedCounterfactualTwin(twin);
+  const support=twinSupportsClaim(validatedTwin.manifest,candidate.requiredDimensions);
+  const resources:{[key:string]:string}={...validatedTwin.virtualResources};
   const conflicts:string[]=[];
   const tests=new Set<string>();
   const touched=new Set<string>();
