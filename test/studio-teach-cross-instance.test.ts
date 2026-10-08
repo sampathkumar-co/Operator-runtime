@@ -17,3 +17,22 @@ test('independent Teach stores persist every accepted session without lost updat
  const state=JSON.parse(await fs.readFile(path.join(dir,'studio-teach.json'),'utf8'));
  assert.equal(state.sessions.length,8);
 });
+
+test('independent OS processes preserve all Teach sessions',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'operator-teach-process-'));
+ t.after(()=>fs.rm(dir,{force:true,recursive:true}));
+ const {execFile}=await import('node:child_process');
+ const {promisify}=await import('node:util');
+ const {pathToFileURL}=await import('node:url');
+ const exec=promisify(execFile);
+ const uri=pathToFileURL(path.resolve('src/core/studio-teach.ts')).href;
+ const script=`import {TeachModeStore} from ${JSON.stringify(uri)};
+await new TeachModeStore(process.argv[1]).start({
+ title:'Independent process '+process.argv[2],objective:'Demo',scopeKey:'project:shared'
+});`;
+ await Promise.all(Array.from({length:4},(_,i)=>exec(process.execPath,[
+  '--experimental-strip-types','--input-type=module','-e',script,dir,String(i)
+ ],{cwd:process.cwd(),windowsHide:true,timeout:30000})));
+ const state=JSON.parse(await fs.readFile(path.join(dir,'studio-teach.json'),'utf8'));
+ assert.equal(state.sessions.length,4);
+});
