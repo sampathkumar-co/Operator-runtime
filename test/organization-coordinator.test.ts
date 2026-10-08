@@ -385,3 +385,30 @@ test('organization rollout does not trust a child mission that ignores its write
   await assert.rejects(restarted.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
   assert.equal(attempted, 1);
 });
+
+test('organization recovery keeps unrollbackable verified child mission quarantined until safe cancellation proof', async (t) => {
+  const state = await tempDir(t);
+  let childState: 'VERIFIED' | 'RUNNING' = 'VERIFIED';
+  let cancelled = 0;
+  const childId = crypto.randomUUID();
+  const teams = {
+    async inspect(id: string) { assert.equal(id, childId); return { id, state: childState }; },
+    async cancel(id: string) { assert.equal(id, childId); cancelled++; return { id, state: 'CANCELLED' }; }
+  };
+  const compensations = new DurableCompensationJournal(state);
+  const org = new OrganizationCoordinator(state, teams as any, { compensations });
+  const program = await org.create({
+    objective: 'Prove truthful compensation', policy: { allowedScopePrefixes: ['org:postcondition'] },
+    targets: [{ key: 'service', scopeKey: 'org:postcondition:service', workItems: work('service') }]
+  });
+  await compensations.prepare({
+    id: crypto.randomUUID(), ownerKind: 'organization', ownerId: program.id,
+    operation: 'cancel-team-mission', targetId: childId, subjectKey: 'service'
+  });
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 0, pending: 1 });
+  assert.equal(cancelled, 0);
+  await assert.rejects(org.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
+  childState = 'RUNNING';
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(cancelled, 1);
+});
