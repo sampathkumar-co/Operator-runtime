@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
 import { requireHttpsUrlForPolicy, type HttpsTargetPolicy } from './network-authority.ts';
+import { createPinnedHttpsArtifactFetch } from './pinned-https-fetch.ts';
 
 const DIGEST=/^[0-9a-f]{64}$/;
 const MAX_BYTES=64*1024*1024;
@@ -41,16 +42,16 @@ export class PresignedHttpsArtifactBlobBackend implements ArtifactBlobBackend {
 
   constructor(
     urls: ArtifactObjectUrlProvider,
-    fetchImpl: ArtifactFetch = globalThis.fetch as unknown as ArtifactFetch,
+    fetchImpl?: ArtifactFetch,
     options: { targetPolicy?: HttpsTargetPolicy } = {}
   ) {
     if (!urls || typeof urls.putUrl !== 'function' || typeof urls.getUrl !== 'function') {
       throw new OperatorError('ARTIFACT_OBJECT_STORE_INVALID','Object URL provider is invalid.');
     }
-    if (typeof fetchImpl !== 'function') throw new OperatorError('ARTIFACT_OBJECT_STORE_INVALID','Object fetch implementation is invalid.');
+    if (fetchImpl !== undefined && typeof fetchImpl !== 'function') throw new OperatorError('ARTIFACT_OBJECT_STORE_INVALID','Object fetch implementation is invalid.');
     this.#urls=urls;
-    this.#fetch=fetchImpl;
     this.#targetPolicy=options.targetPolicy ?? {mode:'public-dns'};
+    this.#fetch=fetchImpl ?? createPinnedHttpsArtifactFetch(this.#targetPolicy);
   }
 
   async put(digestInput:string,bytesInput:Uint8Array):Promise<void>{
