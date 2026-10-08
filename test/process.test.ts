@@ -7,10 +7,14 @@ import { spawn } from 'node:child_process';
 import { ProcessProvider, processInstanceFingerprint } from '../src/capabilities/process.ts';
 import type { ActionRisk } from '../src/core/types.ts';
 
+// CI runners execute many filesystem/process suites concurrently; allow bounded
+// scheduler/antivirus startup slack for ordinary completion tests. Explicit
+// timeout/kill tests keep their own short limits and remain fail-closed.
+const TEST_PROCESS_TIMEOUT_MS = process.env.CI === 'true' ? 20_000 : 5_000;
 function request(executable: string, args: string[], cwd: string, risk: ActionRisk = 'write') {
   return {
     id: crypto.randomUUID(), capability: 'terminal.execute', risk,
-    input: { executable, args, cwd, timeoutMs: 5000 }, provenance: { kind: 'chatgpt' as const }
+    input: { executable, args, cwd, timeoutMs: TEST_PROCESS_TIMEOUT_MS }, provenance: { kind: 'chatgpt' as const }
   };
 }
 
