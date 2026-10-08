@@ -2,6 +2,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { appendDurableStateText, readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { containsRestrictedString, isRestrictedDataKey } from './public-restricted-data.ts';
 
@@ -170,6 +171,7 @@ export class AuditLog {
   #maxSegmentBytes: number;
   #authenticator?: AuditAuthenticator;
   #head: { count: number; headHash: string | null; generation: number } | null = null;
+  #headFingerprint: string | null = null;
   #queue: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, options: { maxSegmentBytes?: number; authenticator?: AuditAuthenticator } = {}) {
@@ -184,7 +186,7 @@ export class AuditLog {
 
   async append(event: AuditEvent): Promise<AuditEvent> {
     let appended!: AuditEvent;
-    const operation = this.#queue.then(async () => {
+    const operation = this.#queue.then(() => withDurableStateLock(this.#file, async () => {
       const head = await this.#loadHead();
       if (this.#authenticator && head.generation >= Number.MAX_SAFE_INTEGER) {
         throw new OperatorError('AUDIT_GENERATION_EXHAUSTED', 'Audit freshness generation cannot advance safely.');
@@ -209,11 +211,13 @@ export class AuditLog {
       try {
         await this.#commitHead(next);
         this.#head = next;
+        this.#headFingerprint = await this.#persistentHeadFingerprint();
       } catch (error) {
         this.#head = null;
+        this.#headFingerprint = null;
         throw error;
       }
-    });
+    }));
     this.#queue = operation.then(() => undefined, () => undefined);
     await operation;
     return appended;
@@ -286,10 +290,38 @@ export class AuditLog {
   }
 
   async #loadHead(): Promise<{ count: number; headHash: string | null; generation: number }> {
-    if (this.#head) return this.#head;
+    // When another process has appended, never trust this instance's cached chain head.
+    // Bounded metadata checks keep the common single-writer path independent of log size.
+    const fingerprint = await this.#persistentHeadFingerprint();
+    if (this.#head && this.#headFingerprint === fingerprint) return this.#head;
+    this.#head = null;
+    this.#headFingerprint = null;
     const verified = await this.#readAndVerify(true);
     this.#head = { count: verified.count, headHash: verified.headHash, generation: verified.generation };
+    this.#headFingerprint = await this.#persistentHeadFingerprint();
     return this.#head;
+  }
+
+  async #persistentHeadFingerprint(): Promise<string> {
+    let active: string;
+    try {
+      const stat = await fs.lstat(this.#file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw integrityError('Active audit file is not a trusted regular file.');
+      active = JSON.stringify({dev:stat.dev, ino:stat.ino, size:stat.size, mtimeMs:stat.mtimeMs, ctimeMs:stat.ctimeMs});
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      active = 'missing';
+    }
+    const fingerprint = async (file: string, options: typeof AUDIT_HEAD_OPTIONS | typeof AUDIT_FRESHNESS_OPTIONS): Promise<string> => {
+      try { return crypto.createHash('sha256').update(await readDurableStateText(file, options)).digest('hex'); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+        throw error;
+      }
+    };
+    const head = await fingerprint(this.#headFile, AUDIT_HEAD_OPTIONS);
+    const freshness = await fingerprint(this.#freshnessFile, AUDIT_FRESHNESS_OPTIONS);
+    return crypto.createHash('sha256').update(JSON.stringify({active, head, freshness})).digest('hex');
   }
 
   async #readAndVerify(reconcileAnchor: boolean): Promise<VerifiedAudit> {
