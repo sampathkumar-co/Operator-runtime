@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ProcessInstanceIdentity } from './process-instance.ts';
 
 export type TerminalSessionState =
@@ -151,12 +152,12 @@ export class TerminalSessionStore {
 
   async #mutate<T>(fn: (state: TerminalSessionStoreState) => T | Promise<T>): Promise<T> {
     let output!: T;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.file, async () => {
       const state = await this.#read();
       output = await fn(state);
       const validated = validateState(state);
       await writeDurableStateText(this.file, `${JSON.stringify(validated, null, 2)}\n`, STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(output);
