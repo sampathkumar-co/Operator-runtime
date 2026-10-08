@@ -158,12 +158,15 @@ test('dependency mutation, missing path and escaped symlinks fail before entry e
   const contents = validFiles();
   const { root, entry } = await graphFiles(t, contents);
   const graph = graphFor(contents);
+  // The production loader always passes a realpath-canonical entry to its
+  // snapshotter; temporary roots can have OS-specific aliases/casing.
+  const realEntry = await fs.realpath(entry);
   await fs.writeFile(path.join(root, 'lib', 'value.mjs'), 'export const message = "tampered";');
   await assert.rejects(() => snapshotVerifiedModuleGraph({
-    entryPath: entry, graph, readModuleBytes: fs.readFile
+    entryPath: realEntry, graph, readModuleBytes: fs.readFile
   }), (e: any) => e?.code === 'CAPABILITY_MODULE_DIGEST_MISMATCH');
   await fs.rm(path.join(root, 'lib', 'value.mjs'));
-  await assert.rejects(() => snapshotVerifiedModuleGraph({ entryPath: entry, graph, readModuleBytes: fs.readFile }));
+  await assert.rejects(() => snapshotVerifiedModuleGraph({ entryPath: realEntry, graph, readModuleBytes: fs.readFile }));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-signed-outside-'));
   t.after(() => fs.rm(outside, { recursive: true, force: true }));
   await fs.writeFile(path.join(outside, 'value.mjs'), contents['lib/value.mjs']);
@@ -173,7 +176,7 @@ test('dependency mutation, missing path and escaped symlinks fail before entry e
     return t.skip('OS policy does not allow symlink creation here');
   }
   await assert.rejects(() => snapshotVerifiedModuleGraph({
-    entryPath: entry, graph, readModuleBytes: fs.readFile
+    entryPath: realEntry, graph, readModuleBytes: fs.readFile
   }), (e: any) => e?.code === 'CAPABILITY_MODULE_GRAPH_INVALID');
 });
 
