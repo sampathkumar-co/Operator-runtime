@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "release": "R7",
+  "status": "CERTIFIED",
+  "sourceSha": "d05b386b7c9c26b2e092041e54e02b3dc83ba248",
+  "campaignId": "r7-enterprise-20261008004902",
+  "evaluatorReport": {
+    "repositoryPath": "artifacts/r7-enterprise-acceptance/report.json",
+    "sha256": "6b458cdf29f2e7758db31a52e3c37273a294ea2c92901abb348b89e0735fd5de",
+    "semanticReportDigest": "7d7936068dd1b7fe9204327f08d3a58a740f50445b47762ee42e57dd95fda9bb"
+  },
+  "campaignEvidence": {
+    "workspacePath": "/workspace/certification-lab/r7/runs/r7-enterprise-20261008004902/campaign.json",
+    "sha256": "8ab3224aa2e757f0a3206ed305ae8d65475ed928d64a1ff3ffa9f637ef6fe426"
+  },
+  "environmentEvidence": {
+    "workspacePath": "/workspace/certification-lab/r7/runs/r7-enterprise-20261008004902/environment.json",
+    "sha256": "a60f380f2a92b2605b65d9b67c959fdb6503d606a17e2a972034de8643677d9b"
+  },
+  "artifactsManifest": {
+    "workspacePath": "/workspace/certification-lab/r7/runs/r7-enterprise-20261008004902/artifacts-manifest.json",
+    "sha256": "4e7862307e44d97aec58843686711c3b8a9b73108ffe73c9ce12d17bfbc270f8"
+  },
+  "independentVerifierReport": {
+    "workspacePath": "/workspace/certification-lab/r7/runs/r7-enterprise-20261008004902/verifier-report.json",
+    "sha256": "20f0efc75c13eebea9aa26894dd0557421b8b19b12730dcab83fa14a77abcd9d",
+    "verifierId": "service:r7-independent-verifier",
+    "containerImageDigest": "sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9"
+  },
+  "identityProvider": {
+    "implementation": "WSO2 Identity Server",
+    "version": "7.1.0",
+    "imageDigest": "sha256:b874455a8add57a0377d3963427a694c700649933b9169a00fb6eb308a502947",
+    "scimLifecycleVerified": true,
+    "oidcSignatureVerified": true
+  },
+  "acceptance": {
+    "governedMutationCount": 100,
+    "mutationExplanationCoverageRate": 1,
+    "policyReplayActionCount": 100,
+    "privateDeploymentMode": "on-prem",
+    "publicIngressDenied": true,
+    "independentPrivateProbePassed": true,
+    "auditDigestVerified": true,
+    "legalHoldVerified": true,
+    "regionalControlsVerified": true,
+    "chargebackVerified": true
+  },
+  "credentialsOrTokensPersisted": false
+}
