@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
+import { boundedTestConcurrency } from './test-concurrency.ts';
 
 const selectors = process.argv.slice(2).map((value) => String(value).trim()).filter(Boolean);
 if (selectors.length === 0) {
@@ -67,6 +69,10 @@ for (const file of files) {
 }
 if (batch.length > 0) batches.push(batch);
 
+// Process-heavy integration tests share CPU and filesystem resources. The Node
+// default can launch a file worker per CPU, which causes timeout assertions to
+// observe host scheduler starvation rather than actual process execution.
+const fileWorkerConcurrency = boundedTestConcurrency(os.availableParallelism());
 const childEnv = { ...process.env };
 if (process.platform === 'win32' && !childEnv.OPERATOR_WINDOWS_PATH_LEASE_PATH) {
   const helper = path.resolve(root, 'native/windows-path-lease/target/release/operator-windows-path-lease.exe');
@@ -80,7 +86,7 @@ if (process.platform === 'win32' && !childEnv.OPERATOR_WINDOWS_PATH_LEASE_PATH) 
 
 async function runBatch(batchFiles: string[]): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, ['--experimental-strip-types', '--test', ...batchFiles], {
+    const child = spawn(process.execPath, ['--experimental-strip-types', '--test', `--test-concurrency=${fileWorkerConcurrency}`, ...batchFiles], {
       cwd: root,
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
