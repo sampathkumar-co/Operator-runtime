@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
+import { canonicalJson } from './action-identity.ts';
 import type { ControlPlaneStore } from './control-plane-store.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
@@ -97,6 +98,9 @@ export class RelayDeliveryStore {
           const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
           if (!existing) continue;
           if (existingStream.deviceId !== deviceId) throw new OperatorError('RELAY_IDEMPOTENCY_ROUTE_CHANGED', 'An unacknowledged action retry resolved to a different device.');
+          if (existing.kind !== kind || canonicalJson(existing.payload) !== canonicalJson(payload) || canonicalJson(existing.authority ?? null) !== canonicalJson(authority ?? null)) {
+            throw new OperatorError('RELAY_IDEMPOTENCY_CONTRACT_CHANGED', 'A replayed idempotency key changed its kind, payload or durable account authority.');
+          }
           if (existing.status === 'pending' && (existing.requiredCapabilities === undefined || !sameCapabilities(existing.requiredCapabilities, requiredCapabilities))) {
             throw new OperatorError('RELAY_IDEMPOTENCY_CAPABILITY_CHANGED', 'An unacknowledged action retry changed its durable capability requirements.');
           }
