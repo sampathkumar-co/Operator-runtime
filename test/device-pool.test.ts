@@ -172,3 +172,22 @@ test('preassigned durable reservation IDs cannot be replayed to double allocate 
     (error: any) => error?.code === 'DEVICE_POOL_RESERVATION_ID_CONFLICT'
   );
 });
+
+test('independent schedulers sharing a state directory cannot overbook one capacity slot', async (t) => {
+  const { state, registry, routing, one } = await setup(t);
+  const schedulerA = new DevicePoolScheduler(state, registry, routing);
+  const schedulerB = new DevicePoolScheduler(state, registry, routing);
+  const advertisements = [advert(one.deviceId, crypto.randomUUID(), { maxConcurrentJobs: 1 })];
+  const results = await Promise.allSettled([
+    schedulerA.reserve({ workloadKey: 'independent:a' }, advertisements),
+    schedulerB.reserve({ workloadKey: 'independent:b' }, advertisements)
+  ]);
+  const successes = results.filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<DevicePoolScheduler['reserve']>>> => item.status === 'fulfilled');
+  const errors = results.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
+  assert.equal(successes.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]?.reason?.code, 'DEVICE_POOL_NO_CAPACITY');
+  assert.equal((await schedulerA.list({ activeOnly: true })).length, 1);
+  await schedulerB.release(successes[0]!.value.id);
+  assert.equal((await schedulerA.list({ activeOnly: true })).length, 0);
+});
