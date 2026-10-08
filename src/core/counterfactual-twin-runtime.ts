@@ -48,12 +48,13 @@ export function reconstructCounterfactualTwin(input:CounterfactualTwinReconstruc
   };
   const fidelity:TwinFidelityDimension[]=DIMENSION_ORDER.map((dimension)=>{
     const value=dimensions[dimension];
-    const modeled=value.artifactIds.length>0;
+    const hasEvidence=value.artifactIds.length>0;
+    const state:TwinFidelityDimension['state']=!hasEvidence?'ABSENT':value.limitation?'PARTIAL':'MODELED';
     return{
       dimension,
-      state:modeled?'MODELED':'ABSENT',
+      state,
       evidenceArtifactIds:value.artifactIds,
-      ...(!modeled?{limitation:value.limitation??('No '+dimension+' reconstruction evidence was supplied.')}:{})
+      ...(state!=='MODELED'?{limitation:value.limitation??('No '+dimension+' reconstruction evidence was supplied.')}:{})
     };
   });
   const allArtifactIds=[...new Set(DIMENSION_ORDER.flatMap((dimension)=>dimensions[dimension].artifactIds))].sort();
@@ -77,8 +78,45 @@ export function reconstructCounterfactualTwin(input:CounterfactualTwinReconstruc
   return{schemaVersion:1,id:hash({manifestId:manifest.id,stateDigest}),manifest,stateDigest,virtualResources};
 }
 
+export function validateReconstructedCounterfactualTwin(input:ReconstructedCounterfactualTwin):ReconstructedCounterfactualTwin{
+  if(!input||typeof input!=='object'||input.schemaVersion!==1||!input.manifest||typeof input.manifest!=='object')throw invalid('Reconstructed twin shape is invalid.');
+  let manifest:CounterfactualTwinManifest;
+  try{
+    manifest=createCounterfactualTwinManifest({
+      workspaceGraphId:input.manifest.workspaceGraphId,
+      environmentDigest:input.manifest.environmentDigest,
+      authorityDigest:input.manifest.authorityDigest,
+      artifactIds:input.manifest.artifactIds,
+      fidelity:input.manifest.fidelity,
+      createdAt:input.manifest.createdAt
+    });
+  }catch{throw invalid('Reconstructed twin manifest is invalid.');}
+  if(manifest.id!==input.manifest.id)throw invalid('Reconstructed twin manifest id does not match its canonical content.');
+  if(manifest.fidelity.length!==DIMENSION_ORDER.length||DIMENSION_ORDER.some((dimension)=>!manifest.fidelity.some((row)=>row.dimension===dimension))){
+    throw invalid('Reconstructed twin must declare every fidelity dimension.');
+  }
+  const artifactIds=[...new Set(manifest.fidelity.flatMap((row)=>row.evidenceArtifactIds))].sort();
+  if(canonicalJson(artifactIds)!==canonicalJson(manifest.artifactIds))throw invalid('Reconstructed twin artifact index does not match fidelity evidence.');
+  const byDimension=new Map(manifest.fidelity.map((row)=>[row.dimension,row.evidenceArtifactIds]));
+  const expectedEnvironmentDigest=hash({
+    dependencies:byDimension.get('dependencies')??[],
+    environment:byDimension.get('environment')??[],
+    services:byDimension.get('services')??[],
+    database:byDimension.get('database')??[],
+    browser:byDimension.get('browser')??[]
+  });
+  if(expectedEnvironmentDigest!==manifest.environmentDigest)throw invalid('Reconstructed twin environment digest does not match modeled environment evidence.');
+  const virtualResources=normalizeVirtualResources(input.virtualResources);
+  const stateDigest=hash({manifestId:manifest.id,virtualResources});
+  if(digest(input.stateDigest,'stateDigest')!==stateDigest)throw invalid('Reconstructed twin state digest does not match virtual resources.');
+  const idValue=hash({manifestId:manifest.id,stateDigest});
+  if(digest(input.id,'twin id')!==idValue)throw invalid('Reconstructed twin id does not match manifest and state.');
+  return{schemaVersion:1,id:idValue,manifest,stateDigest,virtualResources};
+}
+
 export function twinReconstructionDigest(twin:ReconstructedCounterfactualTwin):string{
-  return hash({schemaVersion:twin.schemaVersion,id:twin.id,manifest:twin.manifest,stateDigest:twin.stateDigest,virtualResources:twin.virtualResources});
+  const normalized=validateReconstructedCounterfactualTwin(twin);
+  return hash({schemaVersion:normalized.schemaVersion,id:normalized.id,manifest:normalized.manifest,stateDigest:normalized.stateDigest,virtualResources:normalized.virtualResources});
 }
 
 function normalizeDimension(input:TwinArtifactDimension,label:string):TwinArtifactDimension{

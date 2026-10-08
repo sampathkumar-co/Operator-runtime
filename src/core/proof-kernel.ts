@@ -47,7 +47,7 @@ export function evaluateProofClaim(input:{evidence:ProofEvidenceRef[]; inferred?
   const independentClasses=new Set(passed.filter(e=>e.independent).map(e=>e.evidenceClass));
   if(independentClasses.size>=2)return{level:'CORROBORATED',artifactIds,reason:'Claim is corroborated by multiple independent evidence classes.'};
   if(passed.every(e=>e.evidenceClass==='MODEL_INFERENCE'))return{level:'INFERRED',artifactIds,reason:'Only model inference supports the claim.'};
-  return{level:'CORROBORATED',artifactIds,reason:'Evidence supports the claim but does not satisfy the PROVEN or EMPIRICALLY_VERIFIED criteria.'};
+  return{level:'INFERRED',artifactIds,reason:'Evidence is supportive but is not independently established strongly enough to be corroborated.'};
 }
 function normalizeEvidence(e:ProofEvidenceRef):ProofEvidenceRef{
  if(!e||!/^[0-9a-f]{64}$/i.test(e.artifactId)||!['DETERMINISTIC_POLICY','STATIC_ANALYSIS','TYPE_SYSTEM','DEPENDENCY_GRAPH','INVARIANT_CHECK','STRUCTURAL_DIFF','CRYPTOGRAPHIC_RECEIPT','INDEPENDENT_TEST','RUNTIME_PROBE','INDEPENDENT_VERIFIER','MODEL_INFERENCE'].includes(e.evidenceClass)||typeof e.passed!=='boolean'||typeof e.independent!=='boolean')throw invalid('Proof evidence entry is invalid.');
