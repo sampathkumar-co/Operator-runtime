@@ -222,11 +222,12 @@ export class OrganizationCoordinator {
             transaction.onCommit(async () => { await this.#compensations.complete(compensationId); });
             transaction.onRollback(async () => {
               try {
-                await this.#teams.pause(mission.id);
-                await this.#compensations.complete(compensationId);
+                const paused = await this.#teams.pause(mission.id);
+                if (paused.state === 'PAUSED') await this.#compensations.complete(compensationId);
               } catch {}
             });
-            await this.#teams.resume(mission.id);
+            const resumed = await this.#teams.resume(mission.id);
+            if (resumed.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_RESUME_UNCONFIRMED', 'Child mission did not confirm resume before organization advancement.');
           }
           target.state = mission.state === 'VERIFIED' ? 'VERIFIED' : 'RUNNING';
           target.updatedAt = this.#clock().toISOString();
@@ -344,7 +345,8 @@ export class OrganizationCoordinator {
       for (const target of program.targets.filter((item) => item.state === 'RUNNING' && item.missionId)) {
         try {
           const mission = await this.#teams.pause(target.missionId!);
-          target.state = mission.state === 'PAUSED' || mission.state === 'BLOCKED' ? 'BLOCKED' : target.state;
+          if (mission.state !== 'PAUSED') throw new OperatorError('ORGANIZATION_CHILD_PAUSE_UNCONFIRMED', 'Child mission did not confirm a paused state.');
+          target.state = 'BLOCKED';
           delete target.controlFailure;
         } catch (error) {
           failed = true;
@@ -456,11 +458,12 @@ export class OrganizationCoordinator {
       transaction.onCommit(async () => { await this.#compensations.complete(durableCompensationId); });
       transaction.onRollback(async () => {
         try {
-          await this.#teams.cancel(mission.id);
-          await this.#compensations.complete(durableCompensationId);
+          const cancelled = await this.#teams.cancel(mission.id);
+          if (cancelled.state === 'CANCELLED') await this.#compensations.complete(durableCompensationId);
         } catch {}
       });
-      await this.#teams.start(mission.id);
+      const started = await this.#teams.start(mission.id);
+      if (started.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_START_UNCONFIRMED', 'Child mission did not confirm running state.');
       target.missionId = mission.id;
       target.state = 'RUNNING';
       target.updatedAt = this.#clock().toISOString();
