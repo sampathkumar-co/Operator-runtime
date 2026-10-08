@@ -427,3 +427,86 @@ test('independent organization coordinators do not overwrite each others committ
   const persisted = await new OrganizationCoordinator(state, new TeamCoordinator(state)).list();
   assert.deepEqual(new Set(persisted.map((item) => item.id)), new Set(ids));
 });
+
+test('organization child start requires running proof and retains failed rollback intent', async (t) => {
+  const state = await tempDir(t);
+  let childId = '';
+  let observed: 'VERIFIED' | 'RUNNING' = 'VERIFIED';
+  let cancellable = false;
+  let attempts = 0;
+  const teams = {
+    async submit(input: { missionId: string }) { childId = input.missionId; return { id: childId }; },
+    async start(id: string) { assert.equal(id, childId); return { id, state: 'BLOCKED' }; },
+    async inspect(id: string) { assert.equal(id, childId); return { id, state: observed }; },
+    async cancel(id: string) {
+      assert.equal(id, childId); attempts++;
+      return { id, state: cancellable ? 'CANCELLED' : 'VERIFIED' };
+    }
+  };
+  const org = new OrganizationCoordinator(state, teams as any);
+  const program = await org.create({
+    objective: 'Do not promote blocked child',
+    policy: { allowedScopePrefixes: ['org:proof'] },
+    targets: [{ key: 'one', scopeKey: 'org:proof:one', workItems: work('one') }]
+  });
+  await assert.rejects(org.start(program.id),
+    (error: any) => error?.code === 'ORGANIZATION_CHILD_START_UNCONFIRMED');
+  assert.equal((await org.inspect(program.id)).state, 'PENDING');
+  const journal = new DurableCompensationJournal(state);
+  assert.equal((await journal.pending('organization')).length, 1);
+  assert.equal(attempts, 1);
+  await assert.rejects(org.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
+  assert.equal((await journal.pending('organization')).length, 1);
+  observed = 'RUNNING';
+  cancellable = true;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+});
+
+test('organization direct pause refuses an unconfirmed child state transition', async (t) => {
+  const state = await tempDir(t);
+  const teams = {
+    async submit(input: { missionId: string }) { return { id: input.missionId }; },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async pause(id: string) { return { id, state: 'RUNNING' }; }
+  };
+  const org = new OrganizationCoordinator(state, teams as any);
+  const program = await org.create({
+    objective: 'Do not report false pause',
+    policy: { allowedScopePrefixes: ['org:pause-proof'] },
+    targets: [{ key: 'one', scopeKey: 'org:pause-proof:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  const paused = await org.pause(program.id);
+  assert.equal(paused.state, 'BLOCKED');
+  assert.equal(paused.targets[0]?.state, 'RUNNING');
+  assert.equal(paused.targets[0]?.controlFailure?.code, 'ORGANIZATION_CHILD_PAUSE_UNCONFIRMED');
+});
+
+test('organization resume rollback retains its journal until PAUSED is actually confirmed', async (t) => {
+  const state = await tempDir(t);
+  let pauseCalls = 0;
+  const teams = {
+    async submit(input: { missionId: string }) { return { id: input.missionId }; },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async inspect(id: string) { return { id, state: 'PAUSED' }; },
+    async resume(id: string) { return { id, state: 'PAUSED' }; },
+    async pause(id: string) {
+      pauseCalls++;
+      return { id, state: pauseCalls === 1 ? 'PAUSED' : 'RUNNING' };
+    }
+  };
+  const org = new OrganizationCoordinator(state, teams as any);
+  const program = await org.create({
+    objective: 'Resume needs evidence',
+    policy: { allowedScopePrefixes: ['org:resume-proof'] },
+    targets: [{ key: 'one', scopeKey: 'org:resume-proof:one', workItems: work('one') }]
+  });
+  await org.start(program.id);
+  assert.equal((await org.pause(program.id)).state, 'PAUSED');
+  await assert.rejects(org.start(program.id),
+    (error: any) => error?.code === 'ORGANIZATION_CHILD_RESUME_UNCONFIRMED');
+  const pending = await new DurableCompensationJournal(state).pending('organization');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.operation, 'pause-team-mission');
+  assert.equal((await org.inspect(program.id)).state, 'PAUSED');
+});
