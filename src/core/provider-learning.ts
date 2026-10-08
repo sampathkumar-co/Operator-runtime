@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 const MAX_ENTRIES = 512;
 const MAX_COUNTER_TOTAL = 1000;
@@ -76,7 +77,7 @@ export class ProviderLearningStore implements ProviderLearning {
     const durationMs = boundedDuration(metadata.durationMs);
     if (outcome !== 'verified' && outcome !== 'failed') throw new OperatorError('PROVIDER_LEARNING_INPUT_INVALID', 'Provider learning outcome is invalid.');
 
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       let entry = state.entries.find((item) => item.capability === capability && item.provider === provider && item.context === context);
       if (!entry) {
@@ -110,7 +111,7 @@ export class ProviderLearningStore implements ProviderLearning {
       entry.updatedAt = this.#clock().toISOString();
       state.entries.sort((a, b) => entryKey(a).localeCompare(entryKey(b)));
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STATE_OPTIONS);
-    });
+    }));
     this.#serial = run.catch(() => undefined);
     return await run;
   }
