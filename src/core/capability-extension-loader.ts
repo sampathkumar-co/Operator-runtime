@@ -17,6 +17,8 @@ export async function loadGovernedCapabilityModule(input: {
   allowedRoots: string[];
   package: SignedCapabilityPackage;
   governance: CapabilityGovernanceRegistry;
+  /** Trusted caller-supplied byte reader for deterministic integrity/race testing. */
+  readModuleBytes?: (resolvedModulePath: string) => Promise<Uint8Array>;
 }): Promise<CapabilityProvider> {
   const admission = input.governance.currentAdmission(input.package);
   if (!admission.allowed || !admission.entry) throw new OperatorError('CAPABILITY_PACKAGE_NOT_ADMITTED', `Capability package admission failed before load: ${admission.reason}.`);
@@ -41,7 +43,7 @@ export async function loadGovernedCapabilityModule(input: {
     if (!stat.isFile() || stat.size < 1 || stat.size > 8 * 1024 * 1024) {
       throw new OperatorError('CAPABILITY_MODULE_SIZE_INVALID', 'Capability module must be a regular file between 1 byte and 8 MiB.');
     }
-    const bytes = await fs.readFile(modulePath);
+    const bytes = Buffer.from(await (input.readModuleBytes ?? fs.readFile)(modulePath));
     const digest = crypto.createHash('sha256').update(bytes).digest('hex');
     if (digest !== input.package.manifest.provenance.packageDigest) {
       throw new OperatorError('CAPABILITY_MODULE_DIGEST_MISMATCH', 'Capability module bytes do not match the signed manifest package digest.');
