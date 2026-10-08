@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { OperatorError } from './errors.ts';
 
 export interface RelayReservationReconciliation {
@@ -78,11 +79,11 @@ export class RelayReservationReconciliationStore {
 
   async #mutate<T>(fn: (state: State, now: string) => T): Promise<T> {
     let output!: T;
-    const operation = this.#queue.then(async () => {
+    const operation = this.#queue.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       output = fn(state, new Date().toISOString());
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), OPTIONS);
-    });
+    }));
     this.#queue = operation.then(() => undefined, () => undefined);
     await operation;
     return structuredClone(output);

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { OperatorError } from './errors.ts';
 import type { OperationSloSummary } from './operation-trace.ts';
 
@@ -213,7 +214,7 @@ export class RelayOwnershipFenceStore {
     const ownerInstanceId = boundedId(input.ownerInstanceId, 'ownerInstanceId');
     const leaseMs = integer(input.leaseMs ?? 30_000, MIN_LEASE_MS, MAX_LEASE_MS, 'leaseMs');
     let result!: RelayOwnershipFence;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const now = this.#clock();
       const existingIndex = state.fences.findIndex((fence) => fence.resourceKey === resourceKey);
@@ -247,7 +248,7 @@ export class RelayOwnershipFenceStore {
       if (existingIndex >= 0) state.fences[existingIndex] = result;
       else state.fences.push(result);
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return result;
@@ -281,7 +282,7 @@ export class RelayOwnershipFenceStore {
     token: string;
   }): Promise<boolean> {
     const current = await this.assertCurrent(input);
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const index = state.fences.findIndex((item) =>
         item.resourceKey === current.resourceKey &&
@@ -294,7 +295,7 @@ export class RelayOwnershipFenceStore {
       state.fences[index] = { ...state.fences[index]!, renewedAt: releasedAt, expiresAt: releasedAt };
       await this.#write(state);
       return true;
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
