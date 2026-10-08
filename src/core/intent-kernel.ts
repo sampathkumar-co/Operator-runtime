@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 export type IntentDirective = 'continue' | 'refine' | 'extend' | 'pause' | 'cancel' | 'redirect' | 'authorize' | 'revoke';
@@ -51,7 +52,7 @@ export class IntentKernel {
     sourceTurnId: string;
   }): Promise<IntentEnvelope> {
     let result!: IntentEnvelope;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const previous = await this.current();
       const createdAt = new Date().toISOString();
       const base = {
@@ -68,7 +69,7 @@ export class IntentKernel {
       };
       result = { ...base, digest: digestOf(base) };
       await writeDurableStateText(this.#file, JSON.stringify(result, null, 2), OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return result;
