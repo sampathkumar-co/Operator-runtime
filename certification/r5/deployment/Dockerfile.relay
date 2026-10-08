@@ -1,0 +1,21 @@
+FROM node:22.23.2-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+
+ARG OPERATOR_SOURCE_COMMIT
+LABEL org.opencontainers.image.revision="${OPERATOR_SOURCE_COMMIT}"
+
+WORKDIR /opt/operator
+ENV NODE_ENV=production OPERATOR_SOURCE_COMMIT="${OPERATOR_SOURCE_COMMIT}"
+
+COPY apps/relay-server/package.json apps/relay-server/package-lock.json ./apps/relay-server/
+COPY apps/relay-server/node_modules ./apps/relay-server/node_modules
+RUN npm prune --prefix apps/relay-server --omit=dev --ignore-scripts --no-audit --no-fund
+
+COPY src ./src
+COPY apps/relay-server/src ./apps/relay-server/src
+COPY certification/r5/deployment/relay-healthcheck.mjs ./certification/r5/deployment/relay-healthcheck.mjs
+
+RUN mkdir -p /var/lib/operator-relay && chown -R node:node /var/lib/operator-relay /opt/operator
+USER node
+VOLUME ["/var/lib/operator-relay"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=4 CMD ["node", "certification/r5/deployment/relay-healthcheck.mjs"]
+ENTRYPOINT ["node", "--experimental-strip-types", "apps/relay-server/src/main.ts"]

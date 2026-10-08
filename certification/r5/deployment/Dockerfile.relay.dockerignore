@@ -1,0 +1,7 @@
+**
+!src/**
+!apps/relay-server/package.json
+!apps/relay-server/package-lock.json
+!apps/relay-server/node_modules/**
+!apps/relay-server/src/**
+!certification/r5/deployment/relay-healthcheck.mjs

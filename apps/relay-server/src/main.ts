@@ -1,6 +1,8 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
+import pg from 'pg';
 import { AccountDeviceRegistry } from '../../../src/core/account-device-registry.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { DeviceRegistryStore } from '../../../src/core/device-registry.ts';
@@ -9,7 +11,7 @@ import { DeviceRoutingStore } from '../../../src/core/device-routing.ts';
 import { RelayDeliveryStore } from '../../../src/core/relay-delivery-store.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import { OperationTraceStore } from '../../../src/core/operation-trace.ts';
-import type { ControlPlaneStore } from '../../../src/core/control-plane-store.ts';
+import { PostgresControlPlaneStore, type ControlPlaneStore } from '../../../src/core/control-plane-store.ts';
 import { RelayClusterCoordinator } from '../../../src/core/relay-cluster-control.ts';
 import { RelayReservationReconciliationStore } from '../../../src/core/relay-reservation-reconciliation.ts';
 import { DeviceSessionTokenStore } from '../../../src/core/session-token.ts';
@@ -24,6 +26,7 @@ const DEFAULT_RESULT_PORT = 8789;
 const DEFAULT_CONTROL_PORT = 8790;
 const CONTROL_HOST = '127.0.0.1';
 const PUBLIC_BIND_ACK = 'TLS_TERMINATES_UPSTREAM';
+const { Pool } = pg;
 
 export interface RelayServiceConfig {
   stateDir: string;
@@ -158,11 +161,20 @@ export async function runRelayResultService(
 
 async function main(): Promise<void> {
   const config = readRelayServiceConfig();
-  const instanceLock = await acquireRelayStateInstanceLock(config.stateDir);
-  const stores = createRelayStores(config.stateDir);
+  const controlPlane = await createConfiguredControlPlane(process.env);
+  const instanceLock = await acquireRelayStateInstanceLock(config.stateDir).catch(async (error) => {
+    await controlPlane?.close();
+    throw error;
+  });
+  const stores = createRelayStores(config.stateDir, controlPlane?.store);
   const { identity, devices, sessions, deliveries, results, reservationReconciliations, accounts, enrollments, operationTrace } = stores;
 
-  const hub = new RelayHub({ stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, operationTrace });
+  const cluster = controlPlane ? new RelayClusterCoordinator(controlPlane.store) : undefined;
+  const hub = new RelayHub({
+    stateDir: config.stateDir, identity, devices, sessions, accounts, deliveries, operationTrace,
+    ...(cluster ? { cluster } : {}),
+    ...(controlPlane ? { instanceId: controlPlane.instanceId, clusterLeaseMs: controlPlane.clusterLeaseMs } : {})
+  });
   stores.attachHub(hub);
   await accounts.recoverReleases();
   await accounts.recoverErasures();
@@ -187,6 +199,7 @@ async function main(): Promise<void> {
   } catch (error) {
     await Promise.allSettled([controlService?.close(), resultService.close(), hub.close()].filter(Boolean) as Array<Promise<unknown>>);
     await instanceLock.release();
+    await controlPlane?.close();
     throw error;
   }
 
@@ -203,10 +216,59 @@ async function main(): Promise<void> {
       return;
     }
     await instanceLock.release();
+    await controlPlane?.close();
     process.exitCode = 0;
   };
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
   process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+}
+
+interface ConfiguredControlPlane {
+  store: PostgresControlPlaneStore;
+  instanceId: string;
+  clusterLeaseMs: number;
+  close(): Promise<void>;
+}
+
+async function createConfiguredControlPlane(env: NodeJS.ProcessEnv): Promise<ConfiguredControlPlane | undefined> {
+  const connectionString = env.OPERATOR_CONTROL_PLANE_DATABASE_URL?.trim();
+  const passwordFile = env.OPERATOR_CONTROL_PLANE_PASSWORD_FILE?.trim();
+  if (!connectionString && !passwordFile) return undefined;
+  if (connectionString && passwordFile) throw new Error('Configure one PostgreSQL credential source, not both.');
+  const instanceId = env.OPERATOR_RELAY_INSTANCE_ID?.trim();
+  if (!instanceId || !/^[A-Za-z0-9._:@+-]{1,128}$/.test(instanceId)) {
+    throw new Error('OPERATOR_RELAY_INSTANCE_ID is required for PostgreSQL control-plane mode.');
+  }
+  const clusterLeaseMs = boundedInteger(env.OPERATOR_RELAY_CLUSTER_LEASE_MS, 30_000, 1_000, 300_000, 'OPERATOR_RELAY_CLUSTER_LEASE_MS');
+  const password = passwordFile ? (await fs.readFile(path.resolve(passwordFile), 'utf8')).trim() : undefined;
+  if (passwordFile && (!password || password.length > 1024)) throw new Error('PostgreSQL password file is empty or too large.');
+  const pool = connectionString
+    ? new Pool({ connectionString, max: 10, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000 })
+    : new Pool({
+      host: requiredDatabaseField(env.OPERATOR_CONTROL_PLANE_HOST, 'OPERATOR_CONTROL_PLANE_HOST'),
+      port: boundedInteger(env.OPERATOR_CONTROL_PLANE_PORT, 5432, 1, 65_535, 'OPERATOR_CONTROL_PLANE_PORT'),
+      database: requiredDatabaseField(env.OPERATOR_CONTROL_PLANE_DATABASE, 'OPERATOR_CONTROL_PLANE_DATABASE'),
+      user: requiredDatabaseField(env.OPERATOR_CONTROL_PLANE_USER, 'OPERATOR_CONTROL_PLANE_USER'),
+      password,
+      max: 10,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000
+    });
+  const store = new PostgresControlPlaneStore(pool);
+  try {
+    await store.initialize();
+    await pool.query('SELECT 1');
+  } catch (error) {
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
+  return { store, instanceId, clusterLeaseMs, close: () => pool.end() };
+}
+
+function requiredDatabaseField(input: string | undefined, name: string): string {
+  const value = input?.trim();
+  if (!value || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) throw new Error(`${name} is required and invalid.`);
+  return value;
 }
 
 function releaseLockWhenHubCloses(hub: RelayHub, lock: RelayStateInstanceLock): void {
@@ -228,6 +290,13 @@ function validPort(input: string | undefined, fallback: number, name: string): n
   const port = text === undefined || text === '' ? fallback : Number(text);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${name} must be an integer between 1 and 65535.`);
   return port;
+}
+
+function boundedInteger(input: string | undefined, fallback: number, min: number, max: number, name: string): number {
+  const text = input?.trim();
+  const value = text === undefined || text === '' ? fallback : Number(text);
+  if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer between ${min} and ${max}.`);
+  return value;
 }
 
 function isLoopbackHost(hostInput: string): boolean {

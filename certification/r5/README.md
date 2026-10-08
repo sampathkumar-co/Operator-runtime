@@ -63,3 +63,7 @@ node --experimental-strip-types scripts/evaluate-r5-operational-campaign.ts cert
 ```
 
 The report is written to `artifacts/r5-operational-campaign/report.json` and exits non-zero when any requirement is missing.
+
+## Persistent-host deployment bundle
+
+[`deployment/`](deployment/) contains the source-pinned PostgreSQL and two-relay topology for the real 72-hour campaign. It is a launch bundle, not evidence that a soak is running. Follow its preflight and persistent-host requirements before recording a campaign start.

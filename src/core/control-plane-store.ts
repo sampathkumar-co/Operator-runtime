@@ -186,7 +186,12 @@ export class PostgresControlPlaneStore implements ControlPlaneStore {
   constructor(db: PostgresQueryHost) { this.#db = db; }
 
   async initialize(): Promise<void> {
-    await this.#db.query(`
+    await this.#withTransaction(async (db) => {
+      // PostgreSQL IF NOT EXISTS does not serialize concurrent first creation:
+      // two fresh instances can still race in the system catalogs. Pin DDL to
+      // one transaction and take a stable database-wide advisory fence.
+      await db.query("SELECT pg_advisory_xact_lock(hashtextextended('mecord_control_plane_schema_v1', 0))");
+      await db.query(`
 CREATE TABLE IF NOT EXISTS mecord_control_plane (
   namespace TEXT NOT NULL,
   record_key TEXT NOT NULL,
@@ -199,6 +204,7 @@ CREATE TABLE IF NOT EXISTS mecord_control_plane (
 );
 CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_plane(expires_at);
 `);
+    });
   }
 
   async get(namespace: string, key: string): Promise<ControlPlaneRecord | null> {

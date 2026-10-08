@@ -1,4 +1,5 @@
 node_modules/
+certification/r5/deployment/state/
 dist/
 coverage/
 .operator/
