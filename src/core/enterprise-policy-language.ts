@@ -86,7 +86,7 @@ export function explainEnterpriseMutation(
 function matchesScope(rule:EnterprisePolicyRule,ctx:ReturnType<typeof normalizeContext>):boolean{
   if(rule.principalPrefixes?.length&&!rule.principalPrefixes.some((p)=>ctx.principalId.startsWith(p)))return false;
   if(rule.capabilityPatterns?.length&&!rule.capabilityPatterns.some((p)=>capabilityMatch(ctx.capability,p)))return false;
-  if(rule.resourcePrefixes?.length&&(!ctx.resource||!rule.resourcePrefixes.some((p)=>ctx.resource!.startsWith(p))))return false;
+  if(rule.resourcePrefixes?.length&&(!ctx.resource||!rule.resourcePrefixes.some((p)=>withinResourcePrefix(ctx.resource!,p))))return false;
   if(rule.environments?.length&&(!ctx.environment||!rule.environments.includes(ctx.environment)))return false;
   if(rule.sessionPrefixes?.length&&(!ctx.sessionId||!rule.sessionPrefixes.some((p)=>ctx.sessionId!.startsWith(p))))return false;
   return true;
@@ -163,6 +163,11 @@ function normalizeContext(c:EnterprisePolicyEvaluationContext){
 }
 
 function capabilityMatch(c:string,p:string):boolean{return c===p||(p.endsWith('.*')&&c.startsWith(p.slice(0,-1)));}
+function withinResourcePrefix(resource:string,prefix:string):boolean{
+  if(resource===prefix)return true;
+  if(prefix.endsWith('/')||prefix.endsWith(':'))return resource.startsWith(prefix);
+  return resource.startsWith(prefix+'/')||resource.startsWith(prefix+':');
+}
 function risk(v:unknown):ActionRisk{if(!['read','write','external','system','destructive'].includes(String(v)))throw invalid('risk is invalid.');return v as ActionRisk;}
 function list(v:unknown,max:number,label:string):string[]{if(!Array.isArray(v)||v.length>max)throw invalid(label+' is invalid.');return[...new Set(v.map((x)=>text(x,512,label)))].sort();}
 function id(v:unknown,label:string):string{const s=String(v??'');if(!/^[A-Za-z0-9._:@/+\-=]{1,256}$/.test(s))throw invalid(label+' is invalid.');return s;}

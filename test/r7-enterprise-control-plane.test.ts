@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { validatePrincipalDelegationGraph } from '../src/core/principal-delegation.ts';
+import { effectiveGrant, validatePrincipalDelegationGraph } from '../src/core/principal-delegation.ts';
 import { EnterpriseAuthorityLeaseStore } from '../src/core/enterprise-authority-lease.ts';
 import { EnterpriseIdentityStore } from '../src/core/enterprise-identity.ts';
 import { evaluateEnterprisePolicyLanguage, explainEnterpriseMutation, type EnterprisePolicyRule } from '../src/core/enterprise-policy-language.ts';
@@ -36,6 +36,27 @@ test('R7 principal graph spans organization, project and environment scopes with
   assert.equal(graph.principals.length,5);
 });
 
+test('R7 aggregate delegated authority never outlives the earliest contributing source',()=>{
+  const delegations=[
+    {
+      id:'d-short',parentPrincipalId:'human:short',childPrincipalId:'agent:combined',purpose:'short authority',
+      grant:{capabilities:['deploy.short'],resourcePrefixes:['project:payments'],maxRisk:'write' as const,expiresAt:'2026-10-07T10:05:00.000Z'},
+      createdAt:'2026-10-07T10:00:00.000Z'
+    },
+    {
+      id:'d-long',parentPrincipalId:'human:long',childPrincipalId:'agent:combined',purpose:'long authority',
+      grant:{capabilities:['deploy.long'],resourcePrefixes:['project:payments'],maxRisk:'write' as const,expiresAt:'2026-10-07T11:00:00.000Z'},
+      createdAt:'2026-10-07T10:00:00.000Z'
+    }
+  ];
+  const roots={
+    'human:short':{capabilities:['deploy.short'],resourcePrefixes:['project:payments'],maxRisk:'write' as const,expiresAt:'2026-10-07T10:05:00.000Z'},
+    'human:long':{capabilities:['deploy.long'],resourcePrefixes:['project:payments'],maxRisk:'write' as const,expiresAt:'2026-10-07T11:00:00.000Z'}
+  };
+  const grant=effectiveGrant('agent:combined',delegations,roots);
+  assert.equal(grant.expiresAt,'2026-10-07T10:05:00.000Z');
+});
+
 test('R7 purpose-bound authority leases attenuate, expire, revoke and emergency-halt',async(t)=>{
   const now={value:new Date('2026-10-07T10:00:00.000Z')};
   const store=new EnterpriseAuthorityLeaseStore(await temp(t),{clock:()=>new Date(now.value)});
@@ -49,7 +70,7 @@ test('R7 purpose-bound authority leases attenuate, expire, revoke and emergency-
   });
   assert.equal((await store.assertActive(child.id,{principalId:'agent:deploy',purpose:'release payments',authorityRevision:7})).state,'ACTIVE');
   await assert.rejects(()=>store.issue({
-    principalId:'agent:bad',purpose:'escape',authorityRevision:7,parentLeaseId:parent.id,ttlMs:30_000,
+    principalId:'agent:bad',purpose:'release payments',authorityRevision:7,parentLeaseId:parent.id,ttlMs:30_000,
     grant:{capabilities:['terminal.execute'],resourcePrefixes:['project:payments'],maxRisk:'write'}
   }),/expands capability/);
   assert.equal((await store.revoke(child.id,'release finished')).state,'REVOKED');
@@ -163,4 +184,124 @@ test('R7 fleet/admin proves private deployment, regional posture, quotas, charge
   assert.equal(exported.legalHold,true);
   assert.equal(exported.eventCount,1);
   assert.match(exported.digest,/^[0-9a-f]{64}$/);
+});
+
+
+test('R7 disjoint authority sources cannot be cross-product combined into a new delegation',()=>{
+  const principals=[
+    {id:'human:deploy',kind:'human' as const,enabled:true},
+    {id:'human:files',kind:'human' as const,enabled:true},
+    {id:'agent:combined',kind:'agent' as const,enabled:true},
+    {id:'subagent:escape',kind:'subagent' as const,enabled:true}
+  ];
+  const delegations=[
+    {
+      id:'d-deploy',parentPrincipalId:'human:deploy',childPrincipalId:'agent:combined',purpose:'deploy alpha',
+      grant:{capabilities:['deploy.release'],resourcePrefixes:['project:alpha'],maxRisk:'system' as const},
+      createdAt:'2026-10-07T10:00:00.000Z'
+    },
+    {
+      id:'d-files',parentPrincipalId:'human:files',childPrincipalId:'agent:combined',purpose:'edit beta',
+      grant:{capabilities:['file.write'],resourcePrefixes:['project:beta'],maxRisk:'write' as const},
+      createdAt:'2026-10-07T10:00:00.000Z'
+    }
+  ];
+  const roots={
+    'human:deploy':{capabilities:['deploy.release'],resourcePrefixes:['project:alpha'],maxRisk:'system' as const},
+    'human:files':{capabilities:['file.write'],resourcePrefixes:['project:beta'],maxRisk:'write' as const}
+  };
+  assert.throws(
+    ()=>effectiveGrant('agent:combined',delegations,roots),
+    /cannot be flattened without creating cross-product authority/
+  );
+  assert.throws(
+    ()=>validatePrincipalDelegationGraph({
+      schemaVersion:1,principals,
+      delegations:[...delegations,{
+        id:'d-escape',parentPrincipalId:'agent:combined',childPrincipalId:'subagent:escape',purpose:'invalid cross product',
+        grant:{capabilities:['deploy.release'],resourcePrefixes:['project:beta'],maxRisk:'write' as const},
+        createdAt:'2026-10-07T10:00:01.000Z'
+      }]
+    },roots),
+    /beyond every complete parent grant/
+  );
+});
+
+
+test('R7 child authority leases preserve purpose and revision and die with their ancestor',async(t)=>{
+  const dir=await temp(t);
+  const now={value:new Date('2026-10-07T10:00:00.000Z')};
+  const store=new EnterpriseAuthorityLeaseStore(dir,{clock:()=>new Date(now.value)});
+  const parent=await store.issue({
+    principalId:'human:owner',purpose:'deploy alpha',authorityRevision:12,ttlMs:60_000,
+    grant:{capabilities:['deploy.release'],resourcePrefixes:['project:alpha'],maxRisk:'system'}
+  });
+  await assert.rejects(
+    ()=>store.issue({
+      principalId:'agent:child',purpose:'different purpose',authorityRevision:12,parentLeaseId:parent.id,ttlMs:30_000,
+      grant:{capabilities:['deploy.release'],resourcePrefixes:['project:alpha/prod'],maxRisk:'write'}
+    }),
+    (error:any)=>error?.code==='ENTERPRISE_PARENT_LEASE_PURPOSE_MISMATCH'
+  );
+  await assert.rejects(
+    ()=>store.issue({
+      principalId:'agent:child',purpose:'deploy alpha',authorityRevision:13,parentLeaseId:parent.id,ttlMs:30_000,
+      grant:{capabilities:['deploy.release'],resourcePrefixes:['project:alpha/prod'],maxRisk:'write'}
+    }),
+    (error:any)=>error?.code==='ENTERPRISE_AUTHORITY_STALE'
+  );
+  const child=await store.issue({
+    principalId:'agent:child',purpose:'deploy alpha',authorityRevision:12,parentLeaseId:parent.id,ttlMs:30_000,
+    grant:{capabilities:['deploy.release'],resourcePrefixes:['project:alpha/prod'],maxRisk:'write'}
+  });
+  await store.revoke(parent.id,'owner revoked delegation');
+  const childState=(await store.list()).find((lease)=>lease.id===child.id);
+  assert.equal(childState?.state,'REVOKED');
+  await assert.rejects(
+    ()=>store.assertActive(child.id),
+    (error:any)=>error?.code==='ENTERPRISE_AUTHORITY_LEASE_INACTIVE'
+  );
+});
+
+test('R7 durable lease reload rejects grant and lease expiry divergence',async(t)=>{
+  const dir=await temp(t);
+  const state={
+    version:1,emergencyHalt:false,leases:[{
+      id:'11111111-1111-4111-8111-111111111111',
+      principalId:'agent:tampered',purpose:'deploy alpha',
+      grant:{
+        capabilities:['deploy.release'],resourcePrefixes:['project:alpha'],maxRisk:'write',
+        expiresAt:'2026-10-07T11:00:00.000Z'
+      },
+      authorityRevision:1,
+      issuedAt:'2026-10-07T10:00:00.000Z',
+      expiresAt:'2026-10-07T10:30:00.000Z',
+      state:'ACTIVE'
+    }]
+  };
+  await fs.writeFile(path.join(dir,'enterprise-authority-leases.json'),JSON.stringify(state));
+  await assert.rejects(
+    ()=>new EnterpriseAuthorityLeaseStore(dir).list(),
+    (error:any)=>error?.code==='ENTERPRISE_AUTHORITY_LEASE_CORRUPT'
+  );
+});
+
+
+test('R7 resource policy prefixes respect resource boundaries',()=>{
+  const rules:EnterprisePolicyRule[]=[{
+    id:'payments-only',
+    principalPrefixes:['agent:'],
+    capabilityPatterns:['deploy.*'],
+    resourcePrefixes:['project:payments'],
+    maxRisk:'write'
+  }];
+  const base={
+    principalId:'agent:deploy',capability:'deploy.release',risk:'write' as const,
+    timestamp:'2026-10-07T10:00:00.000Z',purpose:'release'
+  };
+  assert.equal(evaluateEnterprisePolicyLanguage(rules,{...base,resource:'project:payments/prod'}).allowed,true);
+  assert.equal(evaluateEnterprisePolicyLanguage(rules,{...base,resource:'project:payments:prod'}).allowed,true);
+  const escaped=evaluateEnterprisePolicyLanguage(rules,{...base,resource:'project:payments-evil'});
+  assert.equal(escaped.allowed,false);
+  assert.match(escaped.reasons.join(' '),/No enterprise policy rule matches/);
 });
