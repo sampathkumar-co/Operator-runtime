@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 const MAX_ENTITIES = 20_000;
 const MAX_RELATIONS = 50_000;
@@ -115,7 +116,7 @@ export class WorldModelStore {
     ttlMs?: number;
   }): Promise<WorldEntity> {
     const normalized = validateWorldObservation(input);
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const now = this.#clock();
       const nowIso = now.toISOString();
@@ -225,7 +226,7 @@ export class WorldModelStore {
       state.relations.sort((a, b) => relationIdentity(a).localeCompare(relationIdentity(b)));
       await this.#write(state);
       return structuredClone(entity);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }

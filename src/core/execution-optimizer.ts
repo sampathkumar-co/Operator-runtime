@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 const MAX_ENTRIES = 5000;
 const MAX_COUNTER = 10_000;
@@ -68,7 +69,7 @@ export class ExecutionOptimizerStore {
     const strategy = boundedKey(strategyInput, 'strategy');
     const normalized = normalizeOutcome(outcome);
     const receipt = receiptInput === undefined ? undefined : shaDigest(receiptInput, 'receipt');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       state.receipts ??= [];
       if (receipt && state.receipts.includes(receipt)) return;
@@ -103,7 +104,7 @@ export class ExecutionOptimizerStore {
       }
       state.entries.sort((a, b) => identity(a).localeCompare(identity(b)));
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }

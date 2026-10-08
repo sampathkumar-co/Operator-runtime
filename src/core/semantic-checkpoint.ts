@@ -5,6 +5,7 @@ import type { DeviceIdentityStore } from './device-identity.ts';
 import type { DeviceRegistryStore } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export type MigratableWorkloadKind = 'task' | 'mission' | 'operation';
 
@@ -246,11 +247,11 @@ export class SemanticCheckpointManager {
   }
 
   async #mutate(fn: (state: MigrationState) => void): Promise<void> {
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       fn(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }

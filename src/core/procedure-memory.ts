@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ActionRisk } from './types.ts';
 
 const MAX_PROCEDURES = 2000;
@@ -88,7 +89,7 @@ export class ProcedureMemoryStore {
     ttlMs?: number;
   }): Promise<VerifiedProcedure> {
     const normalized = normalizeProcedureInput(input);
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const now = this.#clock();
       const existing = state.procedures.find((item) => item.key === normalized.key && item.scopeKey === normalized.scopeKey);
@@ -147,7 +148,7 @@ export class ProcedureMemoryStore {
       state.procedures.sort((a, b) => procedureIdentity(a).localeCompare(procedureIdentity(b)));
       await this.#write(state);
       return structuredClone(procedure);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
@@ -188,7 +189,7 @@ export class ProcedureMemoryStore {
     const id = validUuid(idInput, 'procedureId');
     const receipt = receiptInput === undefined ? undefined : shaDigest(receiptInput, 'outcome receipt');
     if (outcome !== 'verified' && outcome !== 'failed') throw new OperatorError('PROCEDURE_MEMORY_INPUT_INVALID', 'Procedure outcome is invalid.');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const procedure = state.procedures.find((item) => item.id === id);
       if (!procedure) throw new OperatorError('PROCEDURE_NOT_FOUND', 'Verified procedure was not found.');
@@ -205,7 +206,7 @@ export class ProcedureMemoryStore {
       if (procedure.failedRuns >= 3 && procedure.failedRuns * 2 >= procedure.verifiedRuns) procedure.status = 'SUSPENDED';
       await this.#write(state);
       return structuredClone(procedure);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
@@ -213,7 +214,7 @@ export class ProcedureMemoryStore {
   async invalidate(idInput: string, reasonInput: string): Promise<VerifiedProcedure> {
     const id = validUuid(idInput, 'procedureId');
     const reason = boundedText(reasonInput, 2048, 'invalidation reason');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const procedure = state.procedures.find((item) => item.id === id);
       if (!procedure) throw new OperatorError('PROCEDURE_NOT_FOUND', 'Verified procedure was not found.');
@@ -223,7 +224,7 @@ export class ProcedureMemoryStore {
       procedure.updatedAt = procedure.invalidatedAt;
       await this.#write(state);
       return structuredClone(procedure);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }

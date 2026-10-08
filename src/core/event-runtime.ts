@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export type EventWaitState = 'WAITING' | 'SATISFIED' | 'TIMED_OUT' | 'CANCELLED';
 
@@ -182,7 +183,7 @@ export class DurableEventRuntime {
 
   async #mutate<T>(fn: (state: EventState, now: Date) => T | Promise<T>): Promise<T> {
     let output!: T;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const now = this.#clock();
       pruneTerminalWaits(state, now.getTime(), this.#terminalRetentionMs);
@@ -190,7 +191,7 @@ export class DurableEventRuntime {
       state.events.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
       state.waits.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(output);

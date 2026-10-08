@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { TaskCapsule } from './task.ts';
 
 export type EvaluationCategory =
@@ -229,13 +230,13 @@ export class EvaluationStore {
 
   async #mutate<T>(fn: (state: EvaluationState) => T): Promise<T> {
     let output!: T;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       output = fn(state);
       state.scenarios.sort((a, b) => a.id.localeCompare(b.id) || a.version - b.version);
       state.runs.sort((a, b) => a.finishedAt.localeCompare(b.finishedAt) || a.id.localeCompare(b.id));
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(output);
