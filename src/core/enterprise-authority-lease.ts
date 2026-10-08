@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { assertAttenuates, validateAuthorityGrant, type AuthorityGrant } from './principal-delegation.ts';
 
@@ -58,7 +59,7 @@ export class EnterpriseAuthorityLeaseStore {
     const authorityRevision = boundedInteger(input.authorityRevision, 1, Number.MAX_SAFE_INTEGER, 'authorityRevision');
     const ttlMs = boundedInteger(input.ttlMs, 1_000, MAX_TTL_MS, 'ttlMs');
     let created!: EnterpriseAuthorityLease;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const now = this.#clock();
       expire(state, now);
@@ -88,7 +89,7 @@ export class EnterpriseAuthorityLeaseStore {
       };
       state.leases.push(created);
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return structuredClone(created);
@@ -113,7 +114,7 @@ export class EnterpriseAuthorityLeaseStore {
     const id = uuid(idInput, 'leaseId');
     const reason = boundedText(reasonInput, 2048, 'reason');
     let revoked!: EnterpriseAuthorityLease;
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       expire(state, this.#clock());
       const lease = state.leases.find((item) => item.id === id);
@@ -127,7 +128,7 @@ export class EnterpriseAuthorityLeaseStore {
       }
       revoked = structuredClone(lease);
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return revoked;
@@ -135,7 +136,7 @@ export class EnterpriseAuthorityLeaseStore {
 
   async emergencyHalt(reasonInput: string): Promise<void> {
     const reason = boundedText(reasonInput, 2048, 'reason');
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       state.emergencyHalt = true;
       state.emergencyReason = reason;
@@ -148,18 +149,18 @@ export class EnterpriseAuthorityLeaseStore {
         }
       }
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }
 
   async clearEmergencyHalt(): Promise<void> {
-    const run = this.#serial.then(async () => {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       state.emergencyHalt = false;
       delete state.emergencyReason;
       await this.#write(state);
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
   }

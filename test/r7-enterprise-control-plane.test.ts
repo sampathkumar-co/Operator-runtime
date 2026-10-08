@@ -338,3 +338,35 @@ test('independent SCIM stores keep every provisioned subject and preserve deacti
   }), (error: any) => error?.code === 'ENTERPRISE_SSO_PROVIDER_MISMATCH');
   assert.equal((await stores[7]!.inspect()).subjects.length, 32);
 });
+
+test('independent authority stores serialize issuance, revocation and emergency halt without resurrecting leases', async (t) => {
+  const state = await temp(t);
+  const stores = Array.from({ length: 8 }, () => new EnterpriseAuthorityLeaseStore(state));
+  const input = (index: number) => ({
+    principalId: 'agent:concurrent-' + index,
+    purpose: 'bounded concurrent authority',
+    authorityRevision: 1,
+    ttlMs: 60_000,
+    grant: { capabilities: ['file.read'], resourcePrefixes: ['project:concurrent'], maxRisk: 'read' as const }
+  });
+  const issued = await Promise.all(Array.from({ length: 16 }, (_, i) => stores[i % stores.length]!.issue(input(i))));
+  assert.equal(new Set(issued.map((item) => item.id)).size, 16);
+  assert.equal((await new EnterpriseAuthorityLeaseStore(state).list()).length, 16);
+  const afterConcurrent = await Promise.allSettled([
+    ...Array.from({ length: 16 }, (_, i) => stores[i % stores.length]!.issue(input(i + 16))),
+    stores[3]!.emergencyHalt('revoke every active authority')
+  ]);
+  assert.equal(afterConcurrent.at(-1)?.status, 'fulfilled');
+  for (const result of afterConcurrent.slice(0, -1)) {
+    if (result.status === 'rejected') assert.equal((result.reason as any)?.code, 'ENTERPRISE_EMERGENCY_HALTED');
+  }
+  const all = await stores[5]!.list();
+  assert.equal(all.some((item) => item.state === 'ACTIVE'), false);
+  assert.equal(all.length, 16 + afterConcurrent.slice(0, -1).filter((x) => x.status === 'fulfilled').length);
+  for (const lease of all) await assert.rejects(stores[6]!.assertActive(lease.id),
+    (error: any) => error?.code === 'ENTERPRISE_EMERGENCY_HALTED');
+  await stores[7]!.clearEmergencyHalt();
+  assert.equal((await stores[0]!.list()).some((item) => item.state === 'ACTIVE'), false);
+  await assert.rejects(stores[1]!.assertActive(issued[0]!.id),
+    (error: any) => error?.code === 'ENTERPRISE_AUTHORITY_LEASE_INACTIVE');
+});
