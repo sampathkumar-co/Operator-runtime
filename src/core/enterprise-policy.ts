@@ -106,7 +106,7 @@ export class EnterprisePolicyStore {
     const matches = state.bindings
       .filter((binding) => binding.enabled && binding.principalId === context.principalId)
       .filter((binding) => !binding.teamId || context.teamIds.includes(binding.teamId))
-      .filter((binding) => !binding.projectPrefix || (context.projectKey?.startsWith(binding.projectPrefix) ?? false))
+      .filter((binding) => !binding.projectPrefix || (context.projectKey ? withinProjectPrefix(context.projectKey, binding.projectPrefix) : false))
       .filter((binding) => !binding.environment || binding.environment === context.environment)
       .filter((binding) => !binding.deviceGroup || context.deviceGroups.includes(binding.deviceGroup))
       .filter((binding) => !binding.deviceId || binding.deviceId === context.deviceId);
@@ -116,7 +116,7 @@ export class EnterprisePolicyStore {
     const grants = matches.map((binding) => ({ binding, role: state.roles.find((role) => role.id === binding.roleId) }))
       .filter((entry): entry is { binding: EnterpriseBinding; role: EnterpriseRole } => Boolean(entry.role))
       .filter(({ role }) => role.environments.length === 0 || (context.environment ? role.environments.includes(context.environment) : false))
-      .filter(({ role }) => role.projectPrefixes.length === 0 || (context.projectKey ? role.projectPrefixes.some((prefix) => context.projectKey!.startsWith(prefix)) : false))
+      .filter(({ role }) => role.projectPrefixes.length === 0 || (context.projectKey ? role.projectPrefixes.some((prefix) => withinProjectPrefix(context.projectKey!, prefix)) : false))
       .filter(({ role }) => role.deviceGroups.length === 0 || role.deviceGroups.some((group) => context.deviceGroups.includes(group)))
       .filter(({ role }) => (role.deviceIds ?? []).length === 0 || (context.deviceId ? role.deviceIds!.includes(context.deviceId) : false));
 
@@ -322,6 +322,11 @@ function intersectRoots(baseRoots: string[], enterpriseRoots: string[]): string[
 function isWithin(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+function withinProjectPrefix(projectKey: string, prefix: string): boolean {
+  if (projectKey === prefix) return true;
+  if (prefix.endsWith(':') || prefix.endsWith('/')) return projectKey.startsWith(prefix);
+  return projectKey.startsWith(prefix + ':') || projectKey.startsWith(prefix + '/');
 }
 function union(values: string[]): string[] { return [...new Set(values)].sort(); }
 function risk(input: unknown): ActionRisk {

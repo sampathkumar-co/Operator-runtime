@@ -46,19 +46,19 @@ export function validatePrincipalDelegationGraph(
   for(const d of delegations){ const rows=incoming.get(d.childPrincipalId)??[]; rows.push(d); incoming.set(d.childPrincipalId,rows); }
   for(const principal of principals){
     const roots=rootAuthority[principal.id];
-    if(roots) normalizeGrant(roots);
+    if(roots) validateAuthorityGrant(roots);
     const parents=incoming.get(principal.id)??[];
     if(!roots && parents.length===0) throw invalid(`Principal ${principal.id} has no authority source.`);
     for(const d of parents){
-      const parentGrant=effectiveGrant(d.parentPrincipalId, delegations, rootAuthority, new Set());
-      assertAttenuates(parentGrant,d.grant,d.id);
+      const parentSources=effectiveGrantSources(d.parentPrincipalId,delegations,rootAuthority,new Set());
+      assertAttenuatesAny(parentSources,d.grant,d.id);
     }
   }
   return {schemaVersion:1,principals,delegations};
 }
 
 export function assertAttenuates(parentInput:AuthorityGrant,childInput:AuthorityGrant,label='delegation'):void{
-  const parent=normalizeGrant(parentInput), child=normalizeGrant(childInput);
+  const parent=validateAuthorityGrant(parentInput), child=validateAuthorityGrant(childInput);
   if(RISK[child.maxRisk]>RISK[parent.maxRisk]) throw invalid(`${label} expands risk authority.`);
   for(const cap of child.capabilities){
     if(!parent.capabilities.some(rule=>matchesCapability(cap,rule))) throw invalid(`${label} expands capability authority.`);
@@ -77,27 +77,63 @@ export function effectiveGrant(
   rootAuthority:Readonly<Record<string,AuthorityGrant>>,
   visiting=new Set<string>()
 ):AuthorityGrant{
+  return mergeUnion(effectiveGrantSources(principalId,delegations,rootAuthority,visiting));
+}
+
+function effectiveGrantSources(
+  principalId:string,
+  delegations:Delegation[],
+  rootAuthority:Readonly<Record<string,AuthorityGrant>>,
+  visiting:Set<string>
+):AuthorityGrant[]{
   if(visiting.has(principalId)) throw invalid('Delegation graph contains a cycle.');
-  visiting.add(principalId);
+  const nextVisiting=new Set(visiting); nextVisiting.add(principalId);
   const root=rootAuthority[principalId];
   const incoming=delegations.filter(d=>d.childPrincipalId===principalId);
   const sources:AuthorityGrant[]=[];
-  if(root) sources.push(normalizeGrant(root));
+  if(root) sources.push(validateAuthorityGrant(root));
   for(const d of incoming){
-    const parent=effectiveGrant(d.parentPrincipalId,delegations,rootAuthority,new Set(visiting));
-    assertAttenuates(parent,d.grant,d.id);
-    sources.push(normalizeGrant(d.grant));
+    const parentSources=effectiveGrantSources(d.parentPrincipalId,delegations,rootAuthority,nextVisiting);
+    assertAttenuatesAny(parentSources,d.grant,d.id);
+    sources.push(validateAuthorityGrant(d.grant));
   }
   if(sources.length===0) throw invalid(`Principal ${principalId} has no authority source.`);
-  return mergeUnion(sources);
+  return sources;
+}
+
+function assertAttenuatesAny(parents:AuthorityGrant[],child:AuthorityGrant,label:string):void{
+  for(const parent of parents){
+    try{assertAttenuates(parent,child,label);return;}catch{}
+  }
+  throw invalid(`${label} expands authority beyond every complete parent grant.`);
 }
 
 function mergeUnion(grants:AuthorityGrant[]):AuthorityGrant{
-  const capabilities=[...new Set(grants.flatMap(g=>g.capabilities))].sort();
-  const resourcePrefixes=[...new Set(grants.flatMap(g=>g.resourcePrefixes))].sort();
-  const maxRisk=grants.reduce<ActionRisk>((best,g)=>RISK[g.maxRisk]>RISK[best]?g.maxRisk:best,'read');
-  const expiries=grants.map(g=>g.expiresAt).filter((v):v is string=>Boolean(v));
-  return {capabilities,resourcePrefixes,maxRisk,...(expiries.length?{expiresAt:expiries.sort().at(-1)!}:{})};
+  const normalized=grants.map(validateAuthorityGrant);
+  const capabilities=[...new Set(normalized.flatMap(g=>g.capabilities))].sort();
+  const unrestrictedResources=normalized.some(g=>g.resourcePrefixes.length===0);
+  const resourcePrefixes=unrestrictedResources?[]:[...new Set(normalized.flatMap(g=>g.resourcePrefixes))].sort();
+  // A flat summary cannot safely assign the highest source risk to capabilities
+  // from lower-risk sources, so use the minimum risk. This may understate the
+  // union but can never widen it.
+  const maxRisk=normalized.reduce<ActionRisk>((least,g)=>RISK[g.maxRisk]<RISK[least]?g.maxRisk:least,'destructive');
+  const expiries=normalized.map(g=>g.expiresAt).filter((v):v is string=>Boolean(v));
+  const summary={capabilities,resourcePrefixes,maxRisk,...(expiries.length?{expiresAt:expiries.sort().at(0)!}:{})};
+
+  const resourcesForCheck=resourcePrefixes.length===0?[undefined]:resourcePrefixes;
+  for(const capability of capabilities){
+    for(const resource of resourcesForCheck){
+      const covered=normalized.some(source=>
+        RISK[source.maxRisk]>=RISK[maxRisk]
+        && source.capabilities.some(rule=>matchesCapability(capability,rule))
+        && (resource===undefined
+          ? source.resourcePrefixes.length===0
+          : source.resourcePrefixes.length===0||source.resourcePrefixes.some(prefix=>withinPrefix(resource,prefix)))
+      );
+      if(!covered) throw invalid('Effective authority sources cannot be flattened without creating cross-product authority.');
+    }
+  }
+  return summary;
 }
 function normalizePrincipal(p:Principal):Principal{
   if(!p||!['human','service','agent','subagent','workflow','device','organization','project','environment'].includes(p.kind)||typeof p.enabled!=='boolean') throw invalid('Principal is invalid.');
@@ -105,9 +141,9 @@ function normalizePrincipal(p:Principal):Principal{
 }
 function normalizeDelegation(d:Delegation):Delegation{
   if(!d) throw invalid('Delegation is invalid.');
-  return {id:id(d.id,'delegation id'),parentPrincipalId:id(d.parentPrincipalId,'parent principal'),childPrincipalId:id(d.childPrincipalId,'child principal'),purpose:text(d.purpose,1024,'purpose'),grant:normalizeGrant(d.grant),createdAt:iso(d.createdAt,'createdAt')};
+  return {id:id(d.id,'delegation id'),parentPrincipalId:id(d.parentPrincipalId,'parent principal'),childPrincipalId:id(d.childPrincipalId,'child principal'),purpose:text(d.purpose,1024,'purpose'),grant:validateAuthorityGrant(d.grant),createdAt:iso(d.createdAt,'createdAt')};
 }
-function normalizeGrant(g:AuthorityGrant):AuthorityGrant{
+export function validateAuthorityGrant(g:AuthorityGrant):AuthorityGrant{
   if(!g||!Array.isArray(g.capabilities)||g.capabilities.length>512||!Array.isArray(g.resourcePrefixes)||g.resourcePrefixes.length>2048||!(g.maxRisk in RISK)) throw invalid('Authority grant is invalid.');
   const capabilities=[...new Set(g.capabilities.map((v)=>pattern(v)))].sort();
   const resourcePrefixes=[...new Set(g.resourcePrefixes.map(v=>text(v,4096,'resource prefix')))].sort();
