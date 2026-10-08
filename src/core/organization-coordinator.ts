@@ -158,6 +158,9 @@ export class OrganizationCoordinator {
           recovered += 1;
           continue;
         }
+        // Unknown child identities are not cancellation authority. Preserve the
+        // quarantine intent for explicit operator reconciliation on every restart.
+        if (intent.operation === 'reconcile-untrusted-team-identity') continue;
         try {
           const mission = await this.#teams.inspect(intent.targetId);
           if (intent.operation === 'cancel-team-mission') {
@@ -408,7 +411,7 @@ export class OrganizationCoordinator {
     for (const target of program.targets.filter((item) => item.wave === waveIndex)) {
       if (target.missionId) continue;
       const plannedMissionId = stableOrganizationMissionId(program.id, target.key);
-      let compensationId = compensationIntentId(program.id, 'cancel-team-mission', plannedMissionId);
+      const compensationId = compensationIntentId(program.id, 'cancel-team-mission', plannedMissionId);
       await this.#compensations.prepare({
         id: compensationId,
         ownerKind: 'organization',
@@ -424,16 +427,18 @@ export class OrganizationCoordinator {
         budget: program.policy.teamBudget
       });
       if (mission.id !== plannedMissionId) {
-        await this.#compensations.complete(compensationId);
-        compensationId = compensationIntentId(program.id, 'cancel-team-mission', mission.id);
+        // A child that disregards its write-ahead identity is an untrusted
+        // outcome. Preserve the original intent and quarantine the unverified
+        // returned identity; never cancel work we cannot prove we created.
         await this.#compensations.prepare({
-          id: compensationId,
+          id: compensationIntentId(program.id, 'reconcile-untrusted-team-identity', mission.id),
           ownerKind: 'organization',
           ownerId: program.id,
-          operation: 'cancel-team-mission',
+          operation: 'reconcile-untrusted-team-identity',
           targetId: mission.id,
           subjectKey: target.key
         });
+        throw new OperatorError('ORGANIZATION_MISSION_ID_CONFLICT', 'Child mission identity differs from its write-ahead recovery contract.');
       }
       const durableCompensationId = compensationId;
       transaction.onCommit(async () => { await this.#compensations.complete(durableCompensationId); });
