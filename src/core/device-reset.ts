@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 const MAX_RECORDS = 4096;
 const RETENTION_MS = 24 * 60 * 60_000;
@@ -111,10 +112,13 @@ export class DeviceResetStore {
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const result = await mutator(state);
-      await this.#write(state);
-      return result;
+      // Keep authority-bound reset transitions atomic across runtime instances.
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const result = await mutator(state);
+        await this.#write(state);
+        return result;
+      });
     } finally {
       release();
     }
