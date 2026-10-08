@@ -1,0 +1,10 @@
+{
+  "name": "@operator/real-postgres-certification",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ephemeral real database integration harness only",
+  "dependencies": {
+    "pg": "8.16.3"
+  }
+}
