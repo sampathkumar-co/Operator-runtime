@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DeviceRegistryStore } from './device-registry.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 
 const MAX_ACCOUNTS = 100_000;
 const MAX_MEMBERSHIPS = 500_000;
@@ -71,6 +72,7 @@ export class AccountDeviceRegistry {
   #file: string;
   #stateDir: string;
   #devices: DeviceRegistryStore;
+  #ownership: ResourceLeaseStore;
   #clock: Clock;
   #onReleaseDevice?: ReleaseDeviceHook;
   #onErasurePhase?: ErasurePhaseHook;
@@ -81,6 +83,7 @@ export class AccountDeviceRegistry {
     this.#stateDir = path.resolve(stateDir);
     this.#file = path.join(this.#stateDir, 'account-devices.json');
     this.#devices = devices;
+    this.#ownership = new ResourceLeaseStore(this.#stateDir);
     this.#clock = options.clock ?? (() => new Date());
     this.#onReleaseDevice = options.onReleaseDevice;
     this.#onErasurePhase = options.onErasurePhase;
@@ -308,6 +311,10 @@ export class AccountDeviceRegistry {
 
   async #resumeErasure(erasureIdInput: string): Promise<{ accountId: string; releasedDeviceIds: string[] }> {
     const erasureId = validUuid(erasureIdInput, 'erasureId');
+    // An erasure may span slow external cleanup. Its exact owner must persist
+    // across processes while short registry-state transactions stay independent.
+    const owner = await this.#acquireOwnership(`account-device-erasure:${erasureId}`);
+    try {
     while (true) {
       const state = await this.#read();
       const journal = state.erasures.find((entry) => entry.erasureId === erasureId);
@@ -374,6 +381,9 @@ export class AccountDeviceRegistry {
         continue;
       }
       throw new OperatorError('ACCOUNT_ERASURE_STATE_CORRUPT', 'Account erasure journal phase is invalid.');
+    }
+    } finally {
+      await owner.release();
     }
   }
 
@@ -444,13 +454,35 @@ export class AccountDeviceRegistry {
     });
   }
 
+  async #acquireOwnership(key: string) {
+    // Exact-process-owner durable leases remain valid across asynchronous hooks.
+    // Short JSON locks alone cannot fence a live authority lease or a cleanup hook.
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      try {
+        return await this.#ownership.acquire(
+          `account-device-registry:${crypto.randomUUID()}`, [key], 'exclusive'
+        );
+      } catch (error) {
+        if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+        if (attempt === 399) throw new OperatorError('ACCOUNT_REGISTRY_BUSY', 'Account state is owned by an active or unknown process.', { retryable: true });
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    throw new OperatorError('ACCOUNT_REGISTRY_BUSY', 'Account ownership could not be acquired.', { retryable: true });
+  }
+
   async #withQueue<T>(work: () => Promise<T>): Promise<T> {
     let release!: () => void;
     const previous = this.#queue;
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
-    try { return await work(); }
-    finally { release(); }
+    try {
+      const owner = await this.#acquireOwnership('account-device-registry:state');
+      try { return await work(); }
+      finally { await owner.release(); }
+    } finally {
+      release();
+    }
   }
 }
 
