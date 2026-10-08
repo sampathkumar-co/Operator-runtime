@@ -80,8 +80,11 @@ export class DevicePoolScheduler {
     this.#clock = options.clock ?? (() => new Date());
   }
 
-  async reserve(requestInput: DevicePoolRequest, advertisementsInput: DeviceResourceAdvertisement[]): Promise<DeviceReservation> {
+  async reserve(requestInput: DevicePoolRequest, advertisementsInput: DeviceResourceAdvertisement[], options: { reservationId?: string } = {}): Promise<DeviceReservation> {
     const request = normalizeRequest(requestInput);
+    // Trusted durable callers may preassign an identity before external allocation.
+    // The identity cannot replace, renew or replay any existing reservation.
+    const reservationId = options.reservationId === undefined ? crypto.randomUUID() : validUuid(options.reservationId, 'reservationId');
     const run = this.#serial.then(async () => {
       // Revalidate external registry, routing and advertisement state after acquiring
       // the scheduler queue, rather than relying on a potentially stale preflight.
@@ -98,6 +101,9 @@ export class DevicePoolScheduler {
       if (!pinnedDeviceId) pinnedDeviceId = await this.#routing.defaultDevice();
 
       const state = await this.#read();
+      if (state.reservations.some((item) => item.id === reservationId)) {
+        throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Reservation identity is already allocated; it cannot be replayed or repurposed.');
+      }
       expireReservations(state, this.#clock().getTime());
       const activeByDevice = new Map<string, number>();
       for (const reservation of state.reservations.filter((item) => item.state === 'ACTIVE')) {
@@ -131,7 +137,7 @@ export class DevicePoolScheduler {
         else throw new OperatorError('DEVICE_POOL_RESERVATION_LIMIT', 'Device reservation limit reached.');
       }
       const reservation: DeviceReservation = {
-        id: crypto.randomUUID(),
+        id: reservationId,
         workloadKey: request.workloadKey,
         ...(request.projectKey ? { projectKey: request.projectKey } : {}),
         deviceId: selected.deviceId,
