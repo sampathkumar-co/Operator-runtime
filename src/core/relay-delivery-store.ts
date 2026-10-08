@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { ControlPlaneStore } from './control-plane-store.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
@@ -346,10 +347,12 @@ export class RelayDeliveryStore {
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const result = await mutator(state);
-      await this.#write(state);
-      return result;
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const result = await mutator(state);
+        await this.#write(state);
+        return result;
+      });
     } finally {
       release();
     }
