@@ -114,3 +114,42 @@ test('stage7 revoked paired device is excluded even when advertised with perfect
   ]);
   assert.equal(reservation.deviceId, one.deviceId);
 });
+
+
+test('cross-component project binding cannot be bypassed by an explicit scheduler device', async (t) => {
+  const { scheduler, routing, one, two } = await setup(t);
+  await routing.bindProject('project:locked', one.deviceId);
+  await assert.rejects(
+    scheduler.reserve({ workloadKey: 'build:locked', projectKey: 'project:locked', explicitDeviceId: two.deviceId }, [
+      advert(one.deviceId, crypto.randomUUID()),
+      advert(two.deviceId, crypto.randomUUID())
+    ]),
+    (error: any) => error?.code === 'DEVICE_POOL_PROJECT_DEVICE_CONFLICT'
+  );
+  assert.deepEqual(await scheduler.list({ activeOnly: true }), []);
+});
+
+test('revoked device cannot renew an existing reservation after registry state changes', async (t) => {
+  const { scheduler, registry, one } = await setup(t);
+  const session = crypto.randomUUID();
+  const reservation = await scheduler.reserve({ workloadKey: 'before-revoke' }, [advert(one.deviceId, session)]);
+  await registry.revokeDevice(one.deviceId, 'authority revoked');
+  await assert.rejects(
+    scheduler.heartbeat(reservation.id, session),
+    (error: any) => error?.code === 'DEVICE_POOL_DEVICE_INACTIVE'
+  );
+  const released = await scheduler.release(reservation.id);
+  assert.equal(released.state, 'RELEASED');
+});
+
+test('device pool rejects duplicate cross-device sessions just as routing does', async (t) => {
+  const { scheduler, one, two } = await setup(t);
+  const session = crypto.randomUUID();
+  await assert.rejects(
+    scheduler.reserve({ workloadKey: 'ambiguous-session' }, [
+      advert(one.deviceId, session),
+      advert(two.deviceId, session)
+    ]),
+    (error: any) => error?.code === 'DEVICE_POOL_INPUT_INVALID'
+  );
+});
