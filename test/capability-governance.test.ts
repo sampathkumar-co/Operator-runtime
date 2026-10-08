@@ -48,9 +48,12 @@ test('digest-bound module loads only after strict governance and live revocation
     modulePath,allowedRoots:[root],package:pkg,governance,
     readModuleBytes:async(resolvedModulePath)=>{
       const verifiedBytes=await fs.readFile(resolvedModulePath);
-      if(!swapped&&path.resolve(resolvedModulePath)===path.resolve(modulePath)){
+      // This callback is only invoked for the realpath-resolved authorized
+      // module; comparing to the input pathname is not portable across OSes.
+      assert.equal(path.basename(resolvedModulePath),'provider.mjs');
+      if(!swapped){
         swapped=true;
-        await fs.writeFile(modulePath,maliciousModuleText);
+        await fs.writeFile(resolvedModulePath,maliciousModuleText);
       }
       return verifiedBytes;
     }
