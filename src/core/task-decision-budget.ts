@@ -24,6 +24,10 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
   const records = execution.records;
   const events = execution.plannerEvents ?? [];
   const startedAt = execution.startedAt ? Date.parse(execution.startedAt) : nowMs;
+  // Invalid durable timestamps must exhaust the wall-clock budget, never disable it.
+  const elapsed = Number.isFinite(startedAt) && Number.isFinite(nowMs)
+    ? Math.max(0, nowMs - startedAt)
+    : execution.timeoutMs;
   return {
     // Built-in Task planners are deterministic. Model-backed adapters must
     // charge these dimensions before returning a PlannerDecision.
@@ -37,7 +41,7 @@ export function taskDecisionBudget(execution: TaskExecution, nowMs: number): Tas
     reobserves: dimension(execution.preDispatchReobserves ?? 0, execution.maxSteps),
     retries: dimension(records.filter((record) => record.attempt > 1).length, retryLimit),
     reconciliations: dimension(events.filter((event) => event.decision === 'RECONCILE').length, execution.maxSteps),
-    elapsedMs: dimension(Math.max(0, nowMs - startedAt), execution.timeoutMs)
+    elapsedMs: dimension(elapsed, execution.timeoutMs)
   };
 }
 

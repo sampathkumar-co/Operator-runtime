@@ -36,17 +36,22 @@ test('principal keys are opaque and env limits are bounded', () => {
 });
 
 
-test('limiter stays hard-bounded and evicts least-recently-used keys without scanning the map', () => {
-  const limiter = new FixedWindowRateLimiter({ limit: 2, windowMs: 60_000, maxKeys: 2 });
-  limiter.hit('a');
-  limiter.hit('b');
+test('limiter capacity fails closed without evicting active quotas, and reclaims expired windows', () => {
+  let now = 1_000;
+  const limiter = new FixedWindowRateLimiter({ limit: 2, windowMs: 60_000, maxKeys: 2, clock: () => now });
+  assert.equal(limiter.hit('a').allowed, true);
+  assert.equal(limiter.hit('a').allowed, true);
+  assert.equal(limiter.hit('b').allowed, true);
   assert.equal(limiter.size, 2);
-  assert.equal(limiter.isLimited('a').allowed, true); // a becomes most recent
-  limiter.hit('c');
+  assert.equal(limiter.hit('c').allowed, false);
+  assert.equal(limiter.isLimited('c').allowed, false);
+  assert.equal(limiter.isLimited('a').allowed, false);
+  assert.equal(limiter.isLimited('b').remaining, 1);
   assert.equal(limiter.size, 2);
-  assert.equal(limiter.isLimited('b').remaining, 2); // b was evicted
-  assert.equal(limiter.isLimited('a').remaining, 1);
-  assert.equal(limiter.isLimited('c').remaining, 1);
+  now += 60_001;
+  assert.equal(limiter.hit('c').allowed, true);
+  assert.equal(limiter.size, 1);
+  assert.equal(limiter.isLimited('a').remaining, 2);
 });
 
 test('unique-key saturation remains bounded-amortized at public-edge scale', () => {
