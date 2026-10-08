@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { normalizeCoordinateTransform, type CoordinateTransform } from './coordinate-transform.ts';
 
 export type PerceptionChannel = 'dom' | 'accessibility' | 'uia' | 'visual' | 'application' | 'runtime';
@@ -110,14 +111,19 @@ export class PerceptionGraphStore {
     // member cannot partially publish the preceding observations.
     const normalized = inputs.map((input) => normalizeObservation(input));
     const run = this.#serial.then(async () => {
-      const state = await this.#read();
-      const now = this.#clock();
-      prune(state, now.getTime());
-      const published = normalized.map((observation) => applyObservation(state, observation, now));
-      state.nodes.sort((a, b) => a.sceneKey.localeCompare(b.sceneKey) || a.id.localeCompare(b.id));
-      await this.#write(state);
+      // Keep the entire shared read/modify/write atomic. Notify listeners only
+      // after the lock is released so callbacks cannot reenter a held lock.
+      const published = await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const now = this.#clock();
+        prune(state, now.getTime());
+        const updated = normalized.map((observation) => applyObservation(state, observation, now));
+        state.nodes.sort((a, b) => a.sceneKey.localeCompare(b.sceneKey) || a.id.localeCompare(b.id));
+        await this.#write(state);
+        return structuredClone(updated);
+      });
       this.#onDurableWrite?.();
-      return structuredClone(published);
+      return published;
     });
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
