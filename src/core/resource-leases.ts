@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { resourceKeysConflict } from './resource-identity.ts';
@@ -230,61 +230,14 @@ export class ResourceLeaseStore {
   }
 
   async #mutate(mutator: (state: LeaseState) => void | Promise<void>): Promise<void> {
-    const release = await this.#acquireCoordinatorLock();
-    try {
+    // Share one exact-process-owner coordinator with all runtime instances,
+    // retaining the preexisting resource-leases.lock pathname during upgrades.
+    await withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       await mutator(state);
       validateState(state);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STATE_OPTIONS);
-    } finally {
-      await release();
-    }
-  }
-
-  async #acquireCoordinatorLock(): Promise<() => Promise<void>> {
-    await fs.mkdir(path.dirname(this.#lockFile), { recursive: true, mode: 0o700 });
-    const processInstance = this.#processInstance ?? await currentProcessInstance();
-    const owner = { id: crypto.randomUUID(), pid: processInstance.pid, processInstance };
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      try {
-        const handle = await fs.open(this.#lockFile, 'wx', 0o600);
-        await handle.writeFile(JSON.stringify(owner), 'utf8');
-        await handle.sync();
-        await handle.close();
-        return async () => {
-          try {
-            const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { id?: unknown };
-            if (current.id !== owner.id) throw new OperatorError('RESOURCE_LEASE_LOCK_LOST', 'Resource lease coordinator lock ownership changed.');
-            await fs.rm(this.#lockFile);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new OperatorError('RESOURCE_LEASE_LOCK_LOST', 'Resource lease coordinator lock disappeared.');
-            throw error;
-          }
-        };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      }
-      try {
-        const current = JSON.parse(await fs.readFile(this.#lockFile, 'utf8')) as { pid?: unknown; processInstance?: unknown };
-        const pid = Number(current.pid);
-        const storedIdentity = validProcessInstance(current.processInstance);
-        const observation: ProcessInstanceObservation = Number.isSafeInteger(pid) && pid > 0
-          ? await this.#observeProcessInstance(pid)
-          : { status: 'dead' };
-        const stale = observation.status === 'dead'
-          || (observation.status === 'live' && storedIdentity && observation.identity
-            ? !sameProcessInstance(storedIdentity, observation.identity)
-            : false);
-        if (Number.isSafeInteger(pid) && pid > 0 && stale) {
-          await fs.rm(this.#lockFile, { force: true });
-          continue;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    throw new OperatorError('RESOURCE_LEASE_LOCK_BUSY', 'Resource lease coordinator is busy.', { retryable: true });
+    }, { lockFile: this.#lockFile });
   }
 }
 
