@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import { MecordGatewayClient } from '../src/sdk/gateway-client.ts';
-import { MecordWebhookVerifier as PackagedWebhookVerifier } from '../packages/sdk-typescript/index.js';
+import { gatewayWebhookSubscription as packagedWebhookSubscription, MecordWebhookVerifier as PackagedWebhookVerifier } from '../packages/sdk-typescript/index.js';
 
 test('TypeScript gateway client builds canonical proposals and calls only the gateway endpoint',async()=>{
   let seenUrl='';
@@ -35,6 +35,18 @@ test('TypeScript gateway client refuses insecure non-loopback HTTP',()=>{
   assert.throws(()=>new MecordGatewayClient({baseUrl:'http://example.com',bearerToken:'t'.repeat(32)}),/loopback/);
 });
 
+
+test('packaged TypeScript webhook subscription matches core public-target policy',()=>{
+  assert.equal(packagedWebhookSubscription({id:'sub:ok',endpoint:'https://events.vendor.com/hook',eventKinds:['operation.completed']}).endpoint,'https://events.vendor.com/hook');
+  for(const endpoint of [
+    'https://127.0.0.1/hook',
+    'https://169.254.169.254/hook',
+    'https://[fe80::1]/hook',
+    'https://metadata.internal/hook',
+    'https://example.test/hook',
+    'https://home.arpa/hook'
+  ]) assert.throws(()=>packagedWebhookSubscription({id:'sub:bad',endpoint,eventKinds:['operation.completed']}),/public DNS hostname/);
+});
 
 test('packaged TypeScript webhook verifier accepts exact HMAC and rejects tampering',async()=>{
   const secret='s'.repeat(32);

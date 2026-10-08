@@ -85,6 +85,42 @@ test('stage16 context constraints fail closed outside assigned project/environme
   );
 });
 
+test('stage16 project scope prefixes respect project-key boundaries', async (t) => {
+  const store = new EnterprisePolicyStore(await temp(t));
+  await store.configure({
+    roles: [{
+      id: 'reader',
+      capabilities: ['file.read'],
+      rootPrefixes: [],
+      maxRisk: 'read',
+      environments: [],
+      projectPrefixes: ['project:alpha'],
+      deviceGroups: []
+    }],
+    bindings: [{
+      id: 'reader-binding',
+      principalId: 'principal-1',
+      roleId: 'reader',
+      projectPrefix: 'project:alpha',
+      enabled: true
+    }]
+  });
+
+  await assert.rejects(
+    () => store.narrow({ allowedCapabilities: ['file.read'], allowedRoots: [] }, {
+      principalId: 'principal-1',
+      projectKey: 'project:alphabet'
+    }),
+    (error: any) => error?.code === 'ENTERPRISE_AUTHORITY_DENIED'
+  );
+
+  const allowed = await store.narrow({ allowedCapabilities: ['file.read'], allowedRoots: [] }, {
+    principalId: 'principal-1',
+    projectKey: 'project:alpha/service'
+  });
+  assert.deepEqual(allowed.permissions.allowedCapabilities, ['file.read']);
+});
+
 
 test('stage16 intersects wildcard capabilities and parent roots instead of accidentally dropping narrower grants', async (t) => {
   const parent = path.resolve('/tmp/company');

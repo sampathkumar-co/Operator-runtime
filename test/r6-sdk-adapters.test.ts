@@ -58,7 +58,7 @@ test('webhook SDK creates bounded public subscriptions and verifies signed event
     id:'private-subscription',
     endpoint:'https://127.0.0.1/hook',
     eventKinds:['operation.completed']
-  }),/private hosts/);
+  }),(error:any)=>error?.code==='GATEWAY_WEBHOOK_INVALID');
 
   const secret='s'.repeat(32);
   const event=createGatewayEvent({

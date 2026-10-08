@@ -54,6 +54,19 @@ test('R8 reconstructs a content-addressed twin with explicit full fidelity',()=>
   assert.equal(twin.manifest.fidelity.every((row)=>row.state==='MODELED'),true);
 });
 
+test('R8 evidence with an explicit limitation remains PARTIAL rather than being upgraded to MODELED',()=>{
+  const twin=reconstructCounterfactualTwin({
+    workspaceGraphId:'a'.repeat(64),authorityDigest:'b'.repeat(64),
+    repository:{artifactIds:[ids.repo]},dependencies:{artifactIds:[ids.lock]},environment:{artifactIds:[ids.env]},
+    services:{artifactIds:[ids.service]},database:{artifactIds:[ids.db],limitation:'Fixture omits production triggers.'},
+    browser:{artifactIds:[ids.browser]},policy:{artifactIds:[ids.policy]},worldState:{artifactIds:[ids.world]},
+    createdAt:'2026-10-07T12:00:00.000Z'
+  });
+  const database=twin.manifest.fidelity.find((row)=>row.dimension==='database');
+  assert.equal(database?.state,'PARTIAL');
+  assert.match(database?.limitation??'',/production triggers/);
+});
+
 test('R8 twin requires explicit limitations for absent reconstruction dimensions',()=>{
   assert.throws(()=>reconstructCounterfactualTwin({
     workspaceGraphId:'a'.repeat(64),authorityDigest:'b'.repeat(64),
@@ -110,7 +123,10 @@ function body(overrides:Partial<ProofBundleBody>={}):ProofBundleBody{
       leaseId:'lease-1',principalId:'agent:deploy',purpose:'release verified build',
       authorityDigest:'b'.repeat(64),expiresAt:'2026-10-07T14:00:00.000Z',artifactIds:[ids.authority]
     },
-    planLineage:{planId:'safe',decisionDigest:sha('plan decision')},
+    planLineage:{
+      planId:'safe',decisionDigest:sha('plan decision'),
+      twinId:fullTwin().id,twinStateDigest:fullTwin().stateDigest
+    },
     preconditions:[{id:'source-clean',level:'PROVEN',artifactIds:[ids.precondition]}],
     actionJournal:[{
       actionId:'action-1',effect:'update',resourceKey:'repo:src/app.ts',
@@ -142,6 +158,45 @@ test('R8 proof bundles are externally machine-verifiable and reject tampering or
   const missing=verifySignedProofBundle(bundle,{publicKeyPem,artifactBytes:{...artifactBytes,[ids.verification]:undefined as any}});
   assert.equal(missing.valid,false);
   assert.match(missing.reasons.join(' '),/missing/);
+});
+
+test('R8 proof-carrying execution rejects temporally impossible proof or twin metadata',()=>{
+  const keys=crypto.generateKeyPairSync('ed25519');
+  const privateKeyPem=keys.privateKey.export({format:'pem',type:'pkcs8'}).toString();
+  const publicKeyPem=keys.publicKey.export({format:'pem',type:'spki'}).toString();
+
+  const futureBundle=createSignedProofBundle(body({createdAt:'2026-10-07T12:30:00.000Z'}),{keyId:'proof-key-1',privateKeyPem});
+  const futureDecision=evaluateProofCarryingExecution({
+    twin:fullTwin(),bundle:futureBundle,publicKeyPem,artifactBytes,requiredTwinDimensions:['repository'],
+    irreversible:false,now:'2026-10-07T12:10:00.000Z'
+  });
+  assert.equal(futureDecision.allowed,false);
+  assert.match(futureDecision.reasons.join(' '),/creation time is in the future/);
+
+  const expiredCreation=createSignedProofBundle(body({
+    authority:{...body().authority,expiresAt:'2026-10-07T12:04:00.000Z'},
+    createdAt:'2026-10-07T12:05:00.000Z'
+  }),{keyId:'proof-key-1',privateKeyPem});
+  const expiredDecision=evaluateProofCarryingExecution({
+    twin:fullTwin(),bundle:expiredCreation,publicKeyPem,artifactBytes,requiredTwinDimensions:['repository'],
+    irreversible:false,now:'2026-10-07T12:10:00.000Z'
+  });
+  assert.equal(expiredDecision.allowed,false);
+  assert.match(expiredDecision.reasons.join(' '),/created after its authority lease expired/);
+
+  const futureTwin=reconstructCounterfactualTwin({
+    workspaceGraphId:'a'.repeat(64),authorityDigest:'b'.repeat(64),
+    repository:{artifactIds:[ids.repo]},dependencies:{artifactIds:[ids.lock]},environment:{artifactIds:[ids.env]},
+    services:{artifactIds:[ids.service]},database:{artifactIds:[ids.db]},browser:{artifactIds:[ids.browser]},
+    policy:{artifactIds:[ids.policy]},worldState:{artifactIds:[ids.world]},createdAt:'2026-10-07T12:30:00.000Z'
+  });
+  const normalBundle=createSignedProofBundle(body(),{keyId:'proof-key-1',privateKeyPem});
+  const twinDecision=evaluateProofCarryingExecution({
+    twin:futureTwin,bundle:normalBundle,publicKeyPem,artifactBytes,requiredTwinDimensions:['repository'],
+    irreversible:false,now:'2026-10-07T12:10:00.000Z'
+  });
+  assert.equal(twinDecision.allowed,false);
+  assert.match(twinDecision.reasons.join(' '),/twin creation time is in the future/i);
 });
 
 test('R8 proof-carrying execution allows strong verified proof and fails closed on inference or fidelity gaps',()=>{
@@ -178,4 +233,74 @@ test('R8 proof-carrying execution allows strong verified proof and fails closed 
   });
   assert.equal(noDb.allowed,false);
   assert.match(noDb.reasons.join(' '),/database.*absent/i);
+});
+
+
+test('R8 weak non-independent evidence remains INFERRED rather than being mislabeled corroborated',()=>{
+  const decision=evaluateProofClaim({evidence:[
+    {artifactId:ids.precondition,evidenceClass:'STATIC_ANALYSIS',passed:true,independent:false}
+  ]});
+  assert.equal(decision.level,'INFERRED');
+});
+
+test('R8 plan evaluation rejects a reconstructed twin whose content-addressed state was mutated',()=>{
+  const twin=fullTwin();
+  const tampered=structuredClone(twin);
+  tampered.virtualResources['repo:src/app.ts']=sha('tampered after reconstruction');
+  assert.throws(
+    ()=>evaluateCounterfactualPlan(tampered,{
+      id:'tampered-twin',requiredDimensions:['repository'],
+      steps:[{id:'s1',resourceKey:'repo:src/app.ts',afterDigest:sha('after'),effect:'update',reversible:true}]
+    }),
+    /state digest|twin/i
+  );
+});
+
+test('R8 proof-carrying execution rejects proof replay across different valid twin state',()=>{
+  const keys=crypto.generateKeyPairSync('ed25519');
+  const privateKeyPem=keys.privateKey.export({format:'pem',type:'pkcs8'}).toString();
+  const publicKeyPem=keys.publicKey.export({format:'pem',type:'spki'}).toString();
+  const original=fullTwin();
+  const bundle=createSignedProofBundle(body({
+    planLineage:{planId:'safe',decisionDigest:sha('plan decision'),twinId:original.id,twinStateDigest:original.stateDigest}
+  }),{keyId:'proof-key-1',privateKeyPem});
+  const other=reconstructCounterfactualTwin({
+    workspaceGraphId:'a'.repeat(64),authorityDigest:'b'.repeat(64),
+    repository:{artifactIds:[ids.repo]},dependencies:{artifactIds:[ids.lock]},environment:{artifactIds:[ids.env]},
+    services:{artifactIds:[ids.service]},database:{artifactIds:[ids.db]},browser:{artifactIds:[ids.browser]},
+    policy:{artifactIds:[ids.policy]},worldState:{artifactIds:[ids.world]},
+    virtualResources:{'repo:src/app.ts':sha('different before app'),'repo:src/lib.ts':sha('before lib')},
+    createdAt:'2026-10-07T12:00:00.000Z'
+  });
+  const decision=evaluateProofCarryingExecution({
+    twin:other,bundle,publicKeyPem,artifactBytes,requiredTwinDimensions:['repository'],
+    irreversible:false,now:'2026-10-07T12:10:00.000Z'
+  });
+  assert.equal(decision.allowed,false);
+  assert.match(decision.reasons.join(' '),/twin id|twin state digest/i);
+});
+
+test('R8 proof-carrying execution rejects legacy proof without exact twin binding',()=>{
+  const keys=crypto.generateKeyPairSync('ed25519');
+  const privateKeyPem=keys.privateKey.export({format:'pem',type:'pkcs8'}).toString();
+  const publicKeyPem=keys.publicKey.export({format:'pem',type:'spki'}).toString();
+  const bundle=createSignedProofBundle(body({
+    planLineage:{planId:'safe',decisionDigest:sha('plan decision')}
+  }),{keyId:'proof-key-1',privateKeyPem});
+  const decision=evaluateProofCarryingExecution({
+    twin:fullTwin(),bundle,publicKeyPem,artifactBytes,requiredTwinDimensions:['repository'],
+    irreversible:false,now:'2026-10-07T12:10:00.000Z'
+  });
+  assert.equal(decision.allowed,false);
+  assert.match(decision.reasons.join(' '),/not bound to an exact counterfactual twin/i);
+});
+
+test('R8 proof bundles reject duplicate verification claim identities',()=>{
+  const keys=crypto.generateKeyPairSync('ed25519');
+  const privateKeyPem=keys.privateKey.export({format:'pem',type:'pkcs8'}).toString();
+  const claim={claimId:'release-ok',level:'EMPIRICALLY_VERIFIED' as const,artifactIds:[ids.verification],verifier:'verifier:independent',independent:true};
+  assert.throws(
+    ()=>createSignedProofBundle(body({verification:[claim,{...claim}]}),{keyId:'proof-key-1',privateKeyPem}),
+    /verification claim ids must be unique/
+  );
 });

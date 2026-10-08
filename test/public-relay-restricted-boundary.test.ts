@@ -135,6 +135,7 @@ test('missing crash-window result replays a read through the normal bounded exec
   const runner = new LocalAgentRelayRunner({
     stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
     sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
   const running = runner.run();
@@ -206,6 +207,7 @@ test('relay restart recovers a completed mutation with degraded audit evidence w
     identity,
     localAgentBaseUrl: localBase,
     agentToken: 'e'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true,
     socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
@@ -285,6 +287,7 @@ test('transient result submission failure retries in place without replay or tra
     identity,
     localAgentBaseUrl: localBase,
     agentToken: 'f'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
       socketCreations += 1;
@@ -382,6 +385,7 @@ test('result 401 escalates to credential reconnect and resubmits durable mutatio
     identity,
     localAgentBaseUrl: localBase,
     agentToken: '1'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
       socketCreations += 1;
@@ -410,6 +414,7 @@ test('local action deadline reconciles durable receipt without replaying mutatio
   const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
   await identity.loadOrCreate('Local Receipt Recovery PC');
   const agentToken = '9'.repeat(64);
+  const relayInternalToken = 'r'.repeat(64);
   let executions = 0;
   const runtime = {
     async execute(action: any) {
@@ -429,6 +434,7 @@ test('local action deadline reconciles durable receipt without replaying mutatio
   const agent = createLocalAgentServer({
     runtime,
     token: agentToken,
+    relayInternalToken,
     permissions: { allowedCapabilities: ['file.*'], allowedRoots: [stateDir] },
     actionExecutions: receipts
   });
@@ -470,6 +476,7 @@ test('local action deadline reconciles durable receipt without replaying mutatio
     identity,
     localAgentBaseUrl: localBase,
     agentToken,
+    relayInternalToken,
     localRequestTimeoutMs: 100,
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
@@ -538,6 +545,7 @@ test('durable task request timeout reconnects and retries through task state wit
     identity,
     localAgentBaseUrl: localBase,
     agentToken: '7'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     localRequestTimeoutMs: 100,
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
@@ -613,6 +621,7 @@ test('result submission timeout retries in place without replaying action or rep
     identity,
     localAgentBaseUrl: localBase,
     agentToken: '8'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     resultSubmitTimeoutMs: 100,
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
@@ -684,6 +693,7 @@ test('public relay blocks restricted local output and leaves no ACKed outbox pay
     identity: new DeviceIdentityStore(stateDir, { platform: 'linux' }),
     localAgentBaseUrl: localBase,
     agentToken: 'a'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true,
     socketFactory: (url) => {
       socket = new ScriptedRelaySocket(url, delivery, resolveAck);
@@ -743,7 +753,8 @@ test('public relay blocks restricted action input before local execution', async
     stateDir, relayUrl: 'ws://127.0.0.1:65432/device',
     resultUrl: `${resultBase}/v1/device-result`, sessionTokenFile,
     identity: new DeviceIdentityStore(stateDir, { platform: 'linux' }),
-    localAgentBaseUrl: localBase, agentToken: 'b'.repeat(64), allowLoopbackInsecure: true,
+    localAgentBaseUrl: localBase, agentToken: 'b'.repeat(64),
+    relayInternalToken: 'r'.repeat(64), allowLoopbackInsecure: true,
     socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
   const running = runner.run();
@@ -808,6 +819,7 @@ test('oversized local relay result is converted to a bounded non-retryable failu
     identity,
     localAgentBaseUrl: localBase,
     agentToken: 'd'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure: true,
     socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });

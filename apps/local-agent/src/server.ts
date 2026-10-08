@@ -100,6 +100,7 @@ export function createLocalAgentServer(options: {
   intentRegistry?: IntentRegistry;
   sagas?: DurableSagaKernel;
   token: string;
+  relayInternalToken?: string;
   permissions: PermissionProfile;
   emergencyStop?: EmergencyStopStore;
   approvals?: ApprovalStore;
@@ -441,11 +442,19 @@ export function createLocalAgentServer(options: {
     let requestPermissionDecision: { permissions: PermissionProfile; enterpriseApplied: boolean; roleIds: string[]; bindingIds: string[] };
     try {
       relayRequest = relayRequestMarker(req.headers['x-operator-relay-request']);
+      if (relayRequest) {
+        const suppliedRelayAuth = Array.isArray(req.headers['x-operator-relay-auth'])
+          ? (req.headers['x-operator-relay-auth'].length === 1 ? req.headers['x-operator-relay-auth'][0] : undefined)
+          : req.headers['x-operator-relay-auth'];
+        if (!options.relayInternalToken || !timingSafeSecretMatch(suppliedRelayAuth, options.relayInternalToken)) {
+          throw new OperatorError('RELAY_INTERNAL_AUTH_INVALID', 'Internal relay request authentication failed.');
+        }
+      }
       requestEnterpriseContext = decodeEnterpriseContextHeader(req.headers['x-operator-enterprise-context'], relayRequest);
       requestPermissionDecision = await permissionsForRequest(relayRequest, requestEnterpriseContext);
     } catch (error) {
       const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'ENTERPRISE_CONTEXT_INVALID';
-      send(res, code === 'ENTERPRISE_AUTHORITY_DENIED' || code === 'ENTERPRISE_CONTEXT_REQUIRED' ? 403 : 400, {
+      send(res, code === 'ENTERPRISE_AUTHORITY_DENIED' || code === 'ENTERPRISE_CONTEXT_REQUIRED' || code === 'RELAY_INTERNAL_AUTH_INVALID' ? 403 : 400, {
         ok: false,
         error: { code, message: error instanceof Error ? error.message : String(error) }
       });

@@ -162,6 +162,7 @@ test('relay result bearer endpoint stays bound to relay authority outside explic
     identity: new DeviceIdentityStore(stateDir, { platform: 'linux' }),
     localAgentBaseUrl: 'http://127.0.0.1:47100',
     agentToken: 'a'.repeat(32),
+    relayInternalToken: 'r'.repeat(64),
     allowLoopbackInsecure
   });
 

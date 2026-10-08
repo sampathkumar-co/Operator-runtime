@@ -14,7 +14,7 @@ export interface ProofBundleBody {
     expiresAt:string;
     artifactIds:string[];
   };
-  planLineage:{planId:string;decisionDigest:string};
+  planLineage:{planId:string;decisionDigest:string;twinId?:string;twinStateDigest?:string};
   preconditions:Array<{id:string;level:ProofLevel;artifactIds:string[]}>;
   actionJournal:Array<{
     actionId:string;
@@ -106,7 +106,12 @@ function normalizeBody(input:ProofBundleBody):ProofBundleBody{
     expiresAt:iso(input.authority?.expiresAt,'authority expiresAt'),
     artifactIds:digests(input.authority?.artifactIds,'authority artifactIds')
   };
-  const planLineage={planId:id(input.planLineage?.planId,'planId'),decisionDigest:digest(input.planLineage?.decisionDigest,'decisionDigest')};
+  const planLineage={
+    planId:id(input.planLineage?.planId,'planId'),
+    decisionDigest:digest(input.planLineage?.decisionDigest,'decisionDigest'),
+    ...(input.planLineage?.twinId!==undefined?{twinId:digest(input.planLineage.twinId,'twinId')}:{ }),
+    ...(input.planLineage?.twinStateDigest!==undefined?{twinStateDigest:digest(input.planLineage.twinStateDigest,'twinStateDigest')}:{ })
+  };
   const preconditions=normalizeClaims(input.preconditions,'precondition');
   const actionJournal=normalizeJournal(input.actionJournal);
   const verification=normalizeVerification(input.verification);
@@ -144,13 +149,19 @@ function normalizeJournal(input:ProofBundleBody['actionJournal']):ProofBundleBod
 
 function normalizeVerification(input:ProofBundleBody['verification']):ProofBundleBody['verification']{
   if(!Array.isArray(input)||input.length<1||input.length>1000)throw invalid('verification list is invalid.');
-  return input.map((row)=>({
-    claimId:id(row.claimId,'claimId'),
-    level:proofLevel(row.level),
-    artifactIds:digests(row.artifactIds,'verification artifactIds'),
-    verifier:id(row.verifier,'verifier'),
-    independent:row.independent===true
-  }));
+  const ids=new Set<string>();
+  return input.map((row)=>{
+    const claimId=id(row.claimId,'claimId');
+    if(ids.has(claimId))throw invalid('verification claim ids must be unique.');
+    ids.add(claimId);
+    return{
+      claimId,
+      level:proofLevel(row.level),
+      artifactIds:digests(row.artifactIds,'verification artifactIds'),
+      verifier:id(row.verifier,'verifier'),
+      independent:row.independent===true
+    };
+  });
 }
 
 function proofLevel(v:unknown):ProofLevel{
