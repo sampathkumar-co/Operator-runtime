@@ -75,8 +75,17 @@ export class RemoteAuthorityFenceStore {
     if (previous && previous.kind === 'active' && Date.parse(current!.expiresAt ?? '') > now) {
       throw blocked('REMOTE_AUTHORITY_HELD', 'Another worker still holds this device generation.');
     }
-    if (previous && previous.kind === 'active' && subject.authorityGeneration < previous.authorityGeneration) {
-      throw blocked('REMOTE_AUTHORITY_REVOKED', 'Device has a newer authority generation.');
+    if (previous && previous.kind === 'active') {
+      if (subject.authorityGeneration < previous.authorityGeneration) {
+        throw blocked('REMOTE_AUTHORITY_REVOKED', 'Device has a newer authority generation.');
+      }
+      // An expired lease can be reclaimed by its account, but a *different*
+      // account must advance the authority generation. TTL is not proof that
+      // a new tenant owns the cryptographic device registration.
+      if (previous.accountId !== subject.accountId &&
+          subject.authorityGeneration <= previous.authorityGeneration) {
+        throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Expired device lease cannot transfer accounts at a reused generation.');
+      }
     }
     const leaseId = crypto.randomUUID();
     const fenceToken = crypto.randomBytes(32).toString('base64url');
