@@ -329,3 +329,30 @@ test('cancellation uncertainty leaves persisted pause and blocks unsafe resume',
  await assert.rejects(restarted.resume(contract.id),(error:any)=>error?.code==='DESIRED_STATE_RECONCILIATION_REQUIRED');
  assert.equal(ops.submitted.length,1);
 });
+
+test('reserved remediation id never accepts an operation bound to another scope', async t => {
+ const world=new FakeWorld(),operations=new FakeOperations();
+ const controller=new DesiredStateController(await temp(t),{world:world as any,operations:operations as any});
+ const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+ const running=await controller.reconcile(contract.id);
+ const unrelated=operations.operations.get(running.activeOperationId!);
+ unrelated.scopeKey='project:another-customer';
+ const blocked=await controller.reconcile(contract.id);
+ assert.equal(blocked.status,'BLOCKED');
+ assert.equal(blocked.activeOperationId,running.activeOperationId);
+ assert.match(blocked.lastReason||'',/handoff is unresolved/i);
+ assert.equal(operations.submitted.length,1);
+});
+
+test('reserved remediation id never accepts divergent machine postconditions or success contract', async t => {
+ const world=new FakeWorld(),operations=new FakeOperations();
+ const controller=new DesiredStateController(await temp(t),{world:world as any,operations:operations as any});
+ const contract=await controller.create(createInput({policy:{autoRemediate:true,minRemediationIntervalMs:0}}));
+ const running=await controller.reconcile(contract.id);
+ const active=operations.operations.get(running.activeOperationId!);
+ active.postconditions=[{entityKey:'service:unrelated',factKey:'health',expectedValueDigest:worldValueDigest('healthy')}];
+ const blocked=await controller.reconcile(contract.id);
+ assert.equal(blocked.status,'BLOCKED');
+ assert.equal(blocked.activeOperationId,running.activeOperationId);
+ assert.equal(operations.submitted.length,1);
+});
