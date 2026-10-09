@@ -664,3 +664,60 @@ test('organization pause compensation retains intent on foreign inspected or pau
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered:1,pending:0 });
   assert.equal(pauses,2);
 });
+
+test('foreign provider receipts cannot turn organization refresh, pause or cancel into a false terminal state', async t => {
+  const state = await tempDir(t);
+  let missionId = '';
+  let wrongInspect = false;
+  const foreignId = crypto.randomUUID();
+  const teams = {
+    async submit(input: { missionId: string }) { missionId = input.missionId; return { id: missionId }; },
+    async start(id: string) { return { id, state: 'RUNNING' }; },
+    async inspect(id: string) {
+      assert.equal(id, missionId);
+      return { id:wrongInspect ? foreignId : missionId, state:'VERIFIED', workItems:[] };
+    },
+    async pause(id: string) { assert.equal(id,missionId); return { id:foreignId, state:'PAUSED' }; },
+    async cancel(id: string) { assert.equal(id,missionId); return { id:foreignId, state:'CANCELLED' }; }
+  };
+  const org = new OrganizationCoordinator(state, teams as any);
+  const program = await org.create({
+    objective:'Keep exact mission authority',policy:{allowedScopePrefixes:['org:direct-foreign']},
+    targets:[{key:'service',scopeKey:'org:direct-foreign:service',workItems:work('service')}]
+  });
+  const started = await org.start(program.id);
+  assert.equal(started.state,'RUNNING');
+  wrongInspect = true;
+  await assert.rejects(org.refresh(program.id),
+    (e:any) => e?.code==='ORGANIZATION_CHILD_ID_CONFLICT');
+  assert.equal((await org.inspect(program.id)).state,'RUNNING');
+  const paused = await org.pause(program.id);
+  assert.equal(paused.state,'BLOCKED');
+  assert.equal(paused.targets[0]?.state,'RUNNING');
+  assert.equal(paused.targets[0]?.controlFailure?.code,'ORGANIZATION_CHILD_PAUSE_UNCONFIRMED');
+  const cancelled = await org.cancel(program.id);
+  assert.equal(cancelled.state,'BLOCKED');
+  assert.equal(cancelled.targets[0]?.state,'RUNNING');
+  assert.equal(cancelled.targets[0]?.controlFailure?.code,'ORGANIZATION_CHILD_CANCEL_UNCONFIRMED');
+});
+
+test('organization start rejects foreign RUNNING child response and retains recovery safety',async t=>{
+  const state=await tempDir(t);
+  let missionId='';
+  const foreignId=crypto.randomUUID();
+  const teams={
+    async submit(input:{missionId:string}) {missionId=input.missionId;return{id:missionId}},
+    async start(id:string){assert.equal(id,missionId);return{id:foreignId,state:'RUNNING'}},
+    async cancel(id:string){assert.equal(id,missionId);return{id,state:'CANCELLED'}}
+  };
+  const journal=new DurableCompensationJournal(state);
+  const org=new OrganizationCoordinator(state,teams as any,{compensations:journal});
+  const program=await org.create({
+    objective:'Do not accept foreign started child',policy:{allowedScopePrefixes:['org:run-identity']},
+    targets:[{key:'service',scopeKey:'org:run-identity:service',workItems:work('service')}]
+  });
+  await assert.rejects(org.start(program.id),
+    (e:any)=>e?.code==='ORGANIZATION_CHILD_START_UNCONFIRMED');
+  assert.equal((await org.inspect(program.id)).state,'PENDING');
+  assert.deepEqual(await journal.pending('organization'),[]);
+});
