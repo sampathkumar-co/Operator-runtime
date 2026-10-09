@@ -682,25 +682,40 @@ export class RelayHub {
       throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'A superseded relay socket cannot acknowledge deliveries.');
     }
     const retained = await this.#deliveries.retained(connection.deviceId, seq);
-    if (!retained || retained.id !== id || !retained.authority ||
-        retained.requiredCapabilities === undefined) {
-      throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING',
-        'The exact retained delivery authority is not proven for this acknowledgment.');
+    if (!retained || retained.id !== id) {
+      throw new OperatorError('RELAY_ACK_MISMATCH',
+        'The acknowledgment does not match an exact retained delivery.');
     }
     const membership = await this.#accounts.activeMembershipForDevice(connection.deviceId);
-    if (!membership || !sameRelayAccountAuthority(retained.authority, {
+    if (!membership) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED',
+        'Account/device authority was revoked before acknowledgment.');
+    }
+    const currentlyOwned: RelayDeliveryAuthority = {
       accountId: membership.accountId, deviceId: membership.deviceId,
       generation: membership.authorityGeneration
-    })) {
+    };
+    // Terminal duplicates are idempotent and scrub their original sensitive
+    // authority. Do not synthesize a *new* ACK from their absent proof, but
+    // permit an exact already-terminal no-op under a currently valid session.
+    const pending = retained.status === 'pending';
+    if (pending && (!retained.authority || retained.requiredCapabilities === undefined)) {
+      throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING',
+        'A pending delivery has no durable account/capability binding.');
+    }
+    if (pending && !sameRelayAccountAuthority(retained.authority!, currentlyOwned)) {
       throw new OperatorError('RELAY_AUTHORITY_CHANGED',
-        'Account/device authority changed before acknowledgment could be committed.');
+        'Account/device generation changed before a pending delivery acknowledgment.');
     }
     if (connection.capabilityAuthority &&
-        !sameRelayAccountAuthority(connection.capabilityAuthority.binding.authority, retained.authority)) {
+        !sameRelayAccountAuthority(connection.capabilityAuthority.binding.authority, currentlyOwned)) {
       throw new OperatorError('RELAY_AUTHORITY_CHANGED',
         'The relay socket was negotiated under a different authority generation.');
     }
-    await this.#assertDispatchAuthority(retained.authority, connection.sessionId, retained.requiredCapabilities);
+    await this.#assertDispatchAuthority(
+      pending ? retained.authority! : currentlyOwned, connection.sessionId,
+      pending ? retained.requiredCapabilities! : []
+    );
     if (this.#connections.get(connection.deviceId) !== connection ||
         connection.socket.readyState !== WebSocket.OPEN) {
       throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Connection ownership changed during acknowledgment verification.');
