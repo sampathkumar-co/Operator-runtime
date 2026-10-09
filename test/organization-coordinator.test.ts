@@ -520,3 +520,25 @@ test('organization resume rollback retains its journal until PAUSED is actually 
   assert.equal(pending[0]?.operation, 'pause-team-mission');
   assert.equal((await org.inspect(program.id)).state, 'PAUSED');
 });
+
+test('preexisting reserved Organization child ID is never enough to cancel an unrelated mission',async t=>{
+ const state=await tempDir(t);
+ const teams=new TeamCoordinator(state);
+ const org=new OrganizationCoordinator(state,teams);
+ const program=await org.create({
+  objective:'One owner',policy:{allowedScopePrefixes:['org:preexisting']},
+  targets:[{key:'service',scopeKey:'org:preexisting:service',workItems:work('service')}]
+ });
+ const childId=reservedOrganizationChildId(program.id,'service');
+ const unrelated=await teams.submit({missionId:childId,objective:'Existing unrelated mission',workItems:work('service')});
+ await teams.start(unrelated.id);
+ await assert.rejects(org.start(program.id));
+ const journal=new DurableCompensationJournal(state);
+ const pending=await journal.pending('organization');
+ assert.equal(pending.length,1);
+ assert.equal(pending[0]?.targetId,childId);
+ assert.equal(pending[0]?.confirmedAt,undefined);
+ assert.deepEqual(await org.recoverPendingCompensations(),{recovered:0,pending:1});
+ assert.equal((await teams.inspect(childId)).state,'RUNNING');
+ await assert.rejects(org.start(program.id),(err:any)=>err?.code==='ORGANIZATION_RECOVERY_REQUIRED');
+});
