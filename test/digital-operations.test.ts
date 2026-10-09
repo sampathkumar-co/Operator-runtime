@@ -9,7 +9,7 @@ import { WorldModelStore, worldValueDigest } from '../src/core/world-model.ts';
 import { DeviceRegistryStore } from '../src/core/device-registry.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { DeviceRoutingStore } from '../src/core/device-routing.ts';
-import { DevicePoolScheduler } from '../src/core/device-pool.ts';
+import { DevicePoolScheduler, devicePoolAllocationRequestDigest } from '../src/core/device-pool.ts';
 import { ExecutionOptimizerStore } from '../src/core/execution-optimizer.ts';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
@@ -1158,4 +1158,68 @@ test('confirmed orphan child NOT_FOUND stays quarantined until exact cancellatio
   known = true;
   assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
   assert.equal(cancels, 2);
+});
+
+
+test('write-ahead allocation survives lost provider response: durable exact proof releases only its reservation', async (t) => {
+  const { state, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
+  const principal = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('provenance-test-device');
+  await registry.registerVerifiedPeer(principal);
+  const operationId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(operationId, 'release-device-reservation');
+  const request = { workloadKey: 'reservation-crash-evidence', slots: 1 };
+  const digest = devicePoolAllocationRequestDigest(request);
+  const journal = new DurableCompensationJournal(state);
+  const intentId = crypto.randomUUID();
+  const quarantineId = crypto.randomUUID();
+  await journal.prepare({ id: intentId, ownerKind: 'digital-operation', ownerId: operationId,
+    operation: 'release-device-reservation', targetId: reservationId, allocationRequestDigest: digest });
+  // This provider write commits, but the caller crashes before confirm(intent).
+  await devices.reserve(request, [{
+    deviceId: principal.deviceId, sessionId: crypto.randomUUID(), capabilities: [],
+    observedAt: new Date().toISOString(), cpuSlots: 8, memoryMb: 8192, gpu: false,
+    tags: [], activeJobs: 0, maxConcurrentJobs: 1
+  }], { reservationId });
+  await journal.prepare({ id: quarantineId, ownerKind: 'digital-operation', ownerId: operationId,
+    operation: 'reconcile-unacknowledged-device-reservation', targetId: reservationId });
+  const restarted = new DigitalOperationsLayer(state, {
+    procedures: new ProcedureMemoryStore(state), world: new WorldModelStore(state),
+    devices: new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry)),
+    optimizer: new ExecutionOptimizerStore(state), teams: new TeamCoordinator(state),
+    organizations: new OrganizationCoordinator(state, new TeamCoordinator(state)),
+    availableCapabilities: ['file.read']
+  });
+  const recovery = await restarted.recoverPendingCompensations();
+  assert.equal(recovery.pending, 0);
+  assert.ok(recovery.recovered >= 1);
+  assert.equal((await devices.inspectPrepared(reservationId, digest))?.state, 'RELEASED');
+  assert.deepEqual(await journal.pending('digital-operation'), []);
+});
+
+test('unbound request proofs and unavailable provider observations never grant reservation release', async (t) => {
+  const { state, ops, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
+  const principal = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('untrusted-reservation-device');
+  await registry.registerVerifiedPeer(principal);
+  const opId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(opId, 'release-device-reservation');
+  const req = { workloadKey: 'legitimate-reservation' };
+  const realDigest = devicePoolAllocationRequestDigest(req);
+  const journal = new DurableCompensationJournal(state);
+  await journal.prepare({ id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId: opId,
+    operation: 'release-device-reservation', targetId: reservationId,
+    allocationRequestDigest: devicePoolAllocationRequestDigest({workloadKey:'different-workload'}) });
+  await devices.reserve(req, [{
+    deviceId: principal.deviceId, sessionId: crypto.randomUUID(), capabilities: [],
+    observedAt: new Date().toISOString(), cpuSlots: 8, memoryMb: 8192, gpu: false,
+    tags: [], activeJobs: 0, maxConcurrentJobs: 1
+  }], { reservationId });
+  await assert.rejects(devices.inspectPrepared(reservationId, 'f'.repeat(64)),
+    (e: any) => e?.code === 'DEVICE_POOL_ALLOCATION_PROOF_MISMATCH');
+  const outcome = await ops.recoverPendingCompensations();
+  assert.equal(outcome.recovered, 0);
+  assert.equal(outcome.pending, 1);
+  assert.equal((await devices.inspectPrepared(reservationId, realDigest))?.state, 'ACTIVE');
+  assert.equal(await devices.inspectPrepared(crypto.randomUUID(), realDigest), null);
 });

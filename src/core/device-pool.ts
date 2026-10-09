@@ -36,6 +36,8 @@ export interface DeviceReservation {
   id: string;
   workloadKey: string;
   projectKey?: string;
+  /** Provider-persisted immutable write-ahead request binding; absent in legacy reservations. */
+  allocationRequestDigest?: string;
   deviceId: string;
   sessionId: string;
   requiredCapabilities: string[];
@@ -67,6 +69,11 @@ export interface DevicePoolRequest {
   livenessMs?: number;
 }
 
+/** Exact immutable request binding for read-only crash reconciliation. */
+export function devicePoolAllocationRequestDigest(input: DevicePoolRequest): string {
+  return crypto.createHash('sha256').update(JSON.stringify(normalizeRequest(input))).digest('hex');
+}
+
 export class DevicePoolScheduler {
   #file: string;
   #registry: DeviceRegistryStore;
@@ -83,6 +90,7 @@ export class DevicePoolScheduler {
 
   async reserve(requestInput: DevicePoolRequest, advertisementsInput: DeviceResourceAdvertisement[], options: { reservationId?: string } = {}): Promise<DeviceReservation> {
     const request = normalizeRequest(requestInput);
+    const allocationRequestDigest = devicePoolAllocationRequestDigest(requestInput);
     // Trusted durable callers may preassign an identity before external allocation.
     // The identity cannot replace, renew or replay any existing reservation.
     const reservationId = options.reservationId === undefined ? crypto.randomUUID() : validUuid(options.reservationId, 'reservationId');
@@ -140,6 +148,7 @@ export class DevicePoolScheduler {
       const reservation: DeviceReservation = {
         id: reservationId,
         workloadKey: request.workloadKey,
+        allocationRequestDigest,
         ...(request.projectKey ? { projectKey: request.projectKey } : {}),
         deviceId: selected.deviceId,
         sessionId: selected.sessionId,
@@ -196,6 +205,28 @@ export class DevicePoolScheduler {
     }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
+  }
+
+  /**
+   * Trusted provider proof of an exact preallocated reservation identity.
+   * The absence of a record is UNKNOWN, not proof that an allocation did not
+   * occur on a partitioned provider. Never mutate or allocate in this method.
+   * Legacy reservations lacking the immutable request digest fail closed.
+   */
+  async inspectPrepared(reservationIdInput: string, requestDigestInput: string): Promise<DeviceReservation | null> {
+    const reservationId = validUuid(reservationIdInput, 'reservationId');
+    const requestDigest = String(requestDigestInput ?? '');
+    if (!/^[0-9a-f]{64}$/.test(requestDigest)) {
+      throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
+    }
+    await this.#serial;
+    const state = await this.#read();
+    const found = state.reservations.find((item) => item.id === reservationId);
+    if (!found) return null;
+    if (!found.allocationRequestDigest || found.allocationRequestDigest !== requestDigest) {
+      throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_MISMATCH', 'Reservation exists but is not bound to this immutable allocation request.');
+    }
+    return structuredClone(found);
   }
 
   async list(input: { activeOnly?: boolean; deviceId?: string; limit?: number } = {}): Promise<DeviceReservation[]> {
@@ -292,6 +323,7 @@ function validateState(input: unknown): DevicePoolState {
     if (ids.has(item.id)) throw corrupt('Reservation IDs must be unique.');
     ids.add(item.id);
     if (item.projectKey !== undefined) boundedContext(item.projectKey, 'projectKey');
+    if (item.allocationRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(item.allocationRequestDigest)) throw corrupt('Reservation allocation request digest is invalid.');
     uniqueStrings(item.requiredCapabilities, MAX_CAPABILITIES, 256, 'requiredCapabilities');
     uniqueStrings(item.requiredTags, MAX_TAGS, 128, 'requiredTags');
     boundedInteger(item.minMemoryMb, 0, 1024 * 1024, 'minMemoryMb'); boundedInteger(item.slots, 1, 64, 'slots');
