@@ -183,3 +183,33 @@ test('expired unsigned/new decisions cannot bypass freshness using an unrelated 
   }), (e: any) => e?.code === 'QUARANTINE_EVIDENCE_INVALID');
   assert.ok((await f.journal.pending('organization')).some(i => i.id === f.quarantineId));
 });
+
+test('signed claim cannot replace the immutable planned child with a caller-chosen mission ID', async t => {
+  const f = await setup(t);
+  const foreignExpected = crypto.randomUUID();
+  const forged = { ...f.claim, expectedMissionId: foreignExpected };
+  await assert.rejects(f.adjudicator.review({
+    intentId: f.quarantineId, programId: f.program.id, targetKey: 'service',
+    expectedMissionId: foreignExpected, returnedMissionId: f.returnedMissionId,
+    operatorId: 'security-admin', providerClaim: f.signed(forged)
+  }), (error: any) => error?.code === 'QUARANTINE_EVIDENCE_INVALID');
+  const pending = await f.journal.pending('organization');
+  assert.ok(pending.some(i => i.id === f.originalId));
+  assert.ok(pending.some(i => i.id === f.quarantineId));
+  assert.deepEqual(await f.adjudicator.list(), []);
+});
+
+test('even valid provider signature and operator authority cannot retire quarantine if original creation prepare is missing', async t => {
+  const f = await setup(t);
+  await f.journal.complete(f.originalId);
+  const input = {
+    programId: f.program.id, targetKey: 'service', returnedMissionId: f.returnedMissionId,
+    operatorId: 'security-admin', providerClaim: f.signed(f.claim)
+  };
+  await assert.rejects(f.org.adjudicateQuarantinedIdentity(input),
+    (error: any) => error?.code === 'QUARANTINE_ORIGIN_UNVERIFIED');
+  const remaining = await f.journal.pending('organization');
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0]?.id, f.quarantineId);
+  assert.deepEqual(await f.adjudicator.list(), []);
+});
