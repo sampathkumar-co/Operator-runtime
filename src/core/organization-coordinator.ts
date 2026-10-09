@@ -192,11 +192,10 @@ export class OrganizationCoordinator {
           }
           await this.#compensations.complete(intent.id);
           recovered += 1;
-        } catch (error) {
-          if (error instanceof OperatorError && error.code === 'TEAM_NOT_FOUND') {
-            await this.#compensations.complete(intent.id);
-            recovered += 1;
-          }
+        } catch {
+          // Not-found is a snapshot of one provider's observation, not proof
+          // that the exact acknowledged mission was never created. Preserve
+          // the durable compensation for evidence-backed reconciliation.
         }
       }
       const remaining = (await this.#compensations.pending('organization')).length;
