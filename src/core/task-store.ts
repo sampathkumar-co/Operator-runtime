@@ -8,6 +8,7 @@ import type { PlannerEventDecision, PlannerEventKind, TaskPlannerEvent } from '.
 import { normalizeDurableTaskPlan } from './task-plan.ts';
 import { OperatorError } from './errors.ts';
 import { createDurableStateBytes, readDurableStateText, writeDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import { validateRecoveryShadowRecommendation } from './adaptive-recovery-shadow.ts';
 import { validateStrategyShadowAssessment } from './adaptive-strategy-shadow.ts';
 import {
@@ -160,6 +161,10 @@ export class TaskStore {
       acquiredAt: new Date().toISOString()
     };
     const serialized = Buffer.from(JSON.stringify(record), 'utf8');
+    // A stale-owner observation must not authorize renaming a new owner's
+    // lease after a concurrent contender has already reclaimed the old one.
+    // Serialize admission and reclamation across independent process instances.
+    return await withDurableStateLock(leasePath, async () => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         await createDurableStateBytes(leasePath, serialized, LEASE_OPTIONS);
@@ -188,6 +193,7 @@ export class TaskStore {
       }
     }
     throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} execution ownership changed concurrently.`);
+    });
   }
 
   #file(taskId: string): string {
@@ -221,10 +227,13 @@ function taskExecutionLease(leasePath: string, expected: TaskLeaseRecord): TaskE
     assertOwned,
     async release(): Promise<void> {
       if (released) return;
-      await assertOwned();
-      await fs.rm(leasePath);
-      await syncLeaseDirectory(path.dirname(leasePath));
-      released = true;
+      await withDurableStateLock(leasePath, async () => {
+        if (released) return;
+        await assertOwned();
+        await fs.rm(leasePath);
+        await syncLeaseDirectory(path.dirname(leasePath));
+        released = true;
+      });
     }
   };
 }
