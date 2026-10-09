@@ -64,3 +64,24 @@ test('conversation ledger refuses turns from another durable conversation identi
     (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT'
   );
 });
+
+test('conversation ledger rejects duplicate turn identities even when sequences remain contiguous', async (ctx) => {
+  const state = await temp(ctx);
+  const ledger = new ConversationLedger(state, 'duplicate-identity');
+  const first = await ledger.append({ role: 'user', content: 'Original evidence turn' });
+  const second = await ledger.append({ role: 'assistant', content: 'Distinct second turn' });
+  assert.notEqual(first.id, second.id);
+  const file = path.join(state, 'conversations', 'duplicate-identity.ndjson');
+  const stored = (await fs.readFile(file, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(stored.map(row => row.sequence), [1, 2]);
+  stored[1].id = first.id;
+  await fs.writeFile(file, stored.map(row => JSON.stringify(row)).join('\n') + '\n');
+  await assert.rejects(
+    () => new ConversationLedger(state, 'duplicate-identity').list(),
+    (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT' && /duplicate turn identities/.test(error.message)
+  );
+  await assert.rejects(
+    () => ledger.append({ role: 'user', content: 'Must not extend corrupt history' }),
+    (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT'
+  );
+});
