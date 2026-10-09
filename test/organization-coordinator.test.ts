@@ -270,6 +270,15 @@ test('stage8 child pause failure keeps program blocked instead of falsely paused
 });
 
 
+function reservedOrganizationChildId(programId: string, targetKey: string): string {
+  const digest = crypto.createHash('sha256').update(`organization-mission\0${programId}\0${targetKey}`, 'utf8').digest();
+  const bytes = Buffer.from(digest.subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
 test('stage8 restart recovery cancels a child mission created before parent rollout state was committed', async (t) => {
   const state = await tempDir(t);
   const teams = new TeamCoordinator(state);
@@ -280,7 +289,7 @@ test('stage8 restart recovery cancels a child mission created before parent roll
     targets: [{ key: 'canary', scopeKey: 'org:crash:canary', workItems: work('canary') }]
   });
 
-  const orphanMissionId = crypto.randomUUID();
+  const orphanMissionId = reservedOrganizationChildId(program.id, 'canary');
   const orphan = await teams.submit({
     missionId: orphanMissionId,
     objective: 'Crash-safe rollout [canary]',
@@ -390,7 +399,7 @@ test('organization recovery keeps unrollbackable verified child mission quaranti
   const state = await tempDir(t);
   let childState: 'VERIFIED' | 'RUNNING' = 'VERIFIED';
   let cancelled = 0;
-  const childId = crypto.randomUUID();
+  let childId = '';
   const teams = {
     async inspect(id: string) { assert.equal(id, childId); return { id, state: childState }; },
     async cancel(id: string) { assert.equal(id, childId); cancelled++; return { id, state: 'CANCELLED' }; }
@@ -401,9 +410,10 @@ test('organization recovery keeps unrollbackable verified child mission quaranti
     objective: 'Prove truthful compensation', policy: { allowedScopePrefixes: ['org:postcondition'] },
     targets: [{ key: 'service', scopeKey: 'org:postcondition:service', workItems: work('service') }]
   });
+  childId = reservedOrganizationChildId(program.id, 'service');
   await compensations.prepare({
     id: crypto.randomUUID(), ownerKind: 'organization', ownerId: program.id,
-    operation: 'cancel-team-mission', targetId: childId, subjectKey: 'service'
+    operation: 'cancel-team-mission', targetId: reservedOrganizationChildId(program.id, 'service'), subjectKey: 'service'
   });
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 0, pending: 1 });
   assert.equal(cancelled, 0);
