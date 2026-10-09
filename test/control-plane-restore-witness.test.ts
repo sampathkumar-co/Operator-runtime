@@ -146,3 +146,51 @@ test('offline external witness, denial and missing authority cannot restore any 
   }), (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_INVALID');
   assert.equal(await destination.get('n','k'), null);
 });
+
+test('strict embedded restore cannot bypass the pinned external witness using direct store or helper APIs', async t => {
+  const { source } = await stores(t);
+  await source.transact([{ namespace: 'authority', key: 'device', expectedGeneration: null,
+    value: { owner: 'original' } }]);
+  const snapshot = await source.snapshot('2026-10-09T11:58:00.000Z');
+  const approved = fixture(snapshot.digest);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-strict-control-plane-restore-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  assert.throws(() => new EmbeddedControlPlaneStore(dir, { requireWitnessForRestore: true }),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+  const strict = new EmbeddedControlPlaneStore(dir, {
+    restoreGuard: approved.guard, requireWitnessForRestore: true
+  });
+  await assert.rejects(strict.restore(snapshot),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+  await assert.rejects(restoreControlPlaneWithSignedWitness(strict, snapshot, approved.guard),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+  assert.equal(await strict.get('authority', 'device'), null);
+  await strict.restoreWithConfiguredWitness(snapshot);
+  assert.equal(approved.authorizations, 2, 'direct caller cannot bypass the witnessed guard');
+  assert.equal((await strict.get('authority','device'))?.value.owner, 'original');
+  await assert.rejects(strict.restoreWithConfiguredWitness(snapshot),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
+});
+
+test('a configured witness cannot be switched to another caller-supplied signer or authority', async t => {
+  const { source } = await stores(t);
+  await source.transact([{ namespace:'authority', key:'device', expectedGeneration:null,
+    value:{owner:'trusted'} }]);
+  const snapshot = await source.snapshot('2026-10-09T11:58:00.000Z');
+  const approved = fixture(snapshot.digest);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-witness-authority-'));
+  t.after(() => fs.rm(dir, { recursive:true, force:true }));
+  const strict = new EmbeddedControlPlaneStore(dir, { restoreGuard: approved.guard });
+  const untrusted = fixture(snapshot.digest);
+  await assert.rejects(restoreControlPlaneWithSignedWitness(strict, snapshot, untrusted.guard),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+  const denied = fixture(snapshot.digest);
+  denied.setLatest(denied.sign({ ...denied.manifest, epoch:2,
+    snapshotDigest: crypto.createHash('sha256').update('other snapshot').digest('hex') }));
+  const rejected = new EmbeddedControlPlaneStore(dir, { restoreGuard: denied.guard });
+  await assert.rejects(rejected.restoreWithConfiguredWitness(snapshot),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_STALE');
+  assert.equal(await rejected.get('authority','device'), null);
+  await strict.restoreWithConfiguredWitness(snapshot);
+  assert.equal((await strict.get('authority','device'))?.value.owner, 'trusted');
+});

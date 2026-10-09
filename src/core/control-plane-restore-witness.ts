@@ -58,7 +58,7 @@ const MAX_WITNESS_AGE_MS = 15 * 60_000;
  * deployment configurations requiring external rollback protection.
  */
 export async function restoreControlPlaneWithSignedWitness(
-  store: ControlPlaneStore,
+  store: Pick<ControlPlaneStore, 'restore'>,
   snapshot: ControlPlaneSnapshot,
   guard: ControlPlaneRestoreGuard
 ): Promise<void> {

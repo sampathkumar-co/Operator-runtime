@@ -4,6 +4,7 @@ import { canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
+import { restoreControlPlaneWithSignedWitness, type ControlPlaneRestoreGuard } from './control-plane-restore-witness.ts';
 
 export interface ControlPlaneRecord {
   schemaVersion: 1;
@@ -62,8 +63,14 @@ const ID = /^[A-Za-z0-9._:@/+=-]{1,256}$/;
 export class EmbeddedControlPlaneStore implements ControlPlaneStore {
   #file: string;
   #serial: Promise<void> = Promise.resolve();
+  #restoreGuard?: ControlPlaneRestoreGuard;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, options: { restoreGuard?: ControlPlaneRestoreGuard; requireWitnessForRestore?: boolean } = {}) {
+    if (options.requireWitnessForRestore && !options.restoreGuard) {
+      throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+        'Witness-required restore cannot start without a trusted external restore guard.');
+    }
+    this.#restoreGuard = options.restoreGuard;
     this.#file = path.join(path.resolve(stateDir), 'control-plane-store.json');
   }
 
@@ -175,6 +182,19 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
   }
 
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
+    if (this.#restoreGuard) throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+      'Direct restore is disabled for this witness-bound control-plane store.');
+    await this.#restoreUnchecked(snapshotInput);
+  }
+
+  async restoreWithConfiguredWitness(snapshot: ControlPlaneSnapshot): Promise<void> {
+    if (!this.#restoreGuard) throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+      'No trusted witness guard was pinned for this control-plane store.');
+    await restoreControlPlaneWithSignedWitness(
+      { restore: (approved) => this.#restoreUnchecked(approved) }, snapshot, this.#restoreGuard);
+  }
+
+  async #restoreUnchecked(snapshotInput: ControlPlaneSnapshot): Promise<void> {
     const snapshot = normalizeSnapshot(snapshotInput);
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
@@ -226,8 +246,14 @@ function directConnectionState(db: PostgresQueryHost): DirectConnectionState {
 export class PostgresControlPlaneStore implements ControlPlaneStore {
   #db: PostgresQueryHost;
   #directState?: DirectConnectionState;
+  #restoreGuard?: ControlPlaneRestoreGuard;
 
-  constructor(db: PostgresQueryHost) {
+  constructor(db: PostgresQueryHost, options: { restoreGuard?: ControlPlaneRestoreGuard; requireWitnessForRestore?: boolean } = {}) {
+    if (options.requireWitnessForRestore && !options.restoreGuard) {
+      throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+        'Witness-required PostgreSQL restore cannot start without a trusted external restore guard.');
+    }
+    this.#restoreGuard = options.restoreGuard;
     this.#db = db;
     if (typeof db.connect !== 'function') this.#directState = directConnectionState(db);
   }
@@ -435,6 +461,19 @@ $mecord_truncate_trigger$;
   }
 
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
+    if (this.#restoreGuard) throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+      'Direct restore is disabled for this witness-bound control-plane store.');
+    await this.#restoreUnchecked(snapshotInput);
+  }
+
+  async restoreWithConfiguredWitness(snapshot: ControlPlaneSnapshot): Promise<void> {
+    if (!this.#restoreGuard) throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_REQUIRED',
+      'No trusted witness guard was pinned for this control-plane store.');
+    await restoreControlPlaneWithSignedWitness(
+      { restore: (approved) => this.#restoreUnchecked(approved) }, snapshot, this.#restoreGuard);
+  }
+
+  async #restoreUnchecked(snapshotInput: ControlPlaneSnapshot): Promise<void> {
     const snapshot = normalizeSnapshot(snapshotInput);
     await this.#withTransaction(async (db) => {
       // Restore is a whole-store operation. Prevent concurrent writers from
