@@ -1306,3 +1306,84 @@ test('completed operation stays completed while release failure is marked for re
   assert.equal(body.reservationReconciliation.action, 'release');
   assert.equal((await reconciliations.pending()).length, 1);
 });
+
+test('restart renewal refuses a foreign provider receipt and retains exact pending recovery', async t => {
+  const state = await tempState(t, 'operator-relay-foreign-renew-receipt-');
+  const reconciliations = new RelayReservationReconciliationStore(state);
+  const operationId = '34343434-3434-4434-8434-343434343434';
+  const reservationId = '35353535-3535-4535-8535-353535353535';
+  const sessionId = '36363636-3636-4636-8636-363636363636';
+  const workloadKey = `operation:${operationId}`;
+  await reconciliations.record({
+    accountId: ACCOUNT_A, operationId, workloadKey,
+    reservationId, sessionId, action: 'renew', leaseMs: 60_000, errorCode: 'DEVICE_POOL_HEARTBEAT_FAILED'
+  });
+  for (const mismatch of [
+    { id: '37373737-3737-4737-8737-373737373737', sessionId, workloadKey, state: 'ACTIVE' },
+    { id: reservationId, sessionId: '38383838-3838-4838-8838-383838383838', workloadKey, state: 'ACTIVE' },
+    { id: reservationId, sessionId, workloadKey: 'operation:foreign', state: 'ACTIVE' },
+    { id: reservationId, sessionId, workloadKey, state: 'RELEASED' }
+  ]) {
+    let dispatchCalls = 0;
+    const service = new RelayControlService({
+      hub: {
+        heartbeatDeviceReservation: async () => mismatch,
+        dispatch: async () => { dispatchCalls++; throw new Error('must not dispatch'); }
+      } as any,
+      results: {} as any, accounts: {} as any, reservationReconciliations: reconciliations,
+      token: TOKEN, developerAccountIds: ACCOUNT_A
+    });
+    const { port } = await service.listen('127.0.0.1', 0);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+      });
+      assert.equal(response.status, 409);
+      assert.equal((await response.json() as any).error.code, 'RELAY_RESERVATION_RECONCILIATION_REQUIRED');
+      assert.equal(dispatchCalls, 0);
+      assert.equal((await reconciliations.pending()).length, 1);
+    } finally {
+      await service.close();
+    }
+  }
+});
+
+test('live reservation renewal with a foreign receipt never dispatches operation work', async t => {
+  const state = await tempState(t, 'operator-relay-live-foreign-renew-');
+  const reconciliations = new RelayReservationReconciliationStore(state);
+  const operationId = '39393939-3939-4939-8939-393939393939';
+  const reservation = {
+    id: '40404040-4040-4040-8040-404040404040',
+    workloadKey: `operation:${operationId}`, deviceId: DEVICE_ID,
+    sessionId: '41414141-4141-4141-8141-414141414141',
+    requiredCapabilities: [], requiredTags: [], minMemoryMb: 0,
+    requireGpu: false, slots: 1, acquiredAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    state: 'ACTIVE'
+  };
+  let dispatchCalls = 0;
+  const service = new RelayControlService({
+    hub: {
+      boundProjectDevice: async () => DEVICE_ID,
+      listDeviceReservations: async () => [reservation],
+      heartbeatDeviceReservation: async () => ({ ...reservation, id: '42424242-4242-4242-8242-424242424242' }),
+      dispatch: async () => { dispatchCalls++; throw new Error('must not dispatch'); }
+    } as any,
+    results: {} as any, accounts: {} as any, reservationReconciliations: reconciliations,
+    token: TOKEN, developerAccountIds: ACCOUNT_A
+  });
+  const { port } = await service.listen('127.0.0.1', 0);
+  t.after(() => service.close());
+  const response = await fetch(`http://127.0.0.1:${port}/v1/operation`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ accountId: ACCOUNT_A, operation: { operation: 'inspect', operationId }, waitMs: 1000 })
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as any).error.code, 'RELAY_RESERVATION_RECONCILIATION_REQUIRED');
+  assert.equal(dispatchCalls, 0);
+  const pending = await reconciliations.pending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.reservationId, reservation.id);
+  assert.equal(pending[0]?.sessionId, reservation.sessionId);
+});
