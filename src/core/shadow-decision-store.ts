@@ -3,6 +3,7 @@ import path from 'node:path';
 import { canonicalJson } from './action-identity.ts';
 import { appendDurableStateText, readDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 import type { RuntimeAdvisoryCommand } from './intelligence-adapters.ts';
 
 export type ShadowSource = 'ADAPTIVE_INTELLIGENCE' | 'VERIFIED_PLAN';
@@ -43,7 +44,7 @@ export class ShadowDecisionStore {
     });
     const line = JSON.stringify(event) + '\n';
     if (Buffer.byteLength(line, 'utf8') > 16 * 1024) throw invalid('Shadow event exceeds bounded size.');
-    const run = this.#serial.then(() => appendDurableStateText(this.#file, line, STORE_OPTIONS));
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, () => appendDurableStateText(this.#file, line, STORE_OPTIONS)));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
     return event;
@@ -51,13 +52,14 @@ export class ShadowDecisionStore {
 
   async list(input: { cohortId?: string; limit?: number } = {}): Promise<ShadowDecisionEvent[]> {
     await this.#serial;
-    let text: string;
-    try {
-      text = await readDurableStateText(this.#file, STORE_OPTIONS);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw error;
-    }
+    const text = await withDurableStateLock(this.#file, async () => {
+      try {
+        return await readDurableStateText(this.#file, STORE_OPTIONS);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+        throw error;
+      }
+    });
     const limit = Math.min(Math.max(Number.isSafeInteger(input.limit) ? input.limit! : 1000, 1), 10_000);
     const cohortId = input.cohortId === undefined ? undefined : boundedId(input.cohortId, 'cohortId');
     return text.split(/\r?\n/).filter(Boolean)
