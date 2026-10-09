@@ -28,16 +28,22 @@ const OPTIONS = {
 
 export class IntentKernel {
   #file: string;
+  #conversationId: string;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, conversationId: string) {
     const id = boundedId(conversationId, 'conversationId');
+    this.#conversationId = id;
     this.#file = path.join(path.resolve(stateDir), 'intent', `${id}.json`);
   }
 
   async current(): Promise<IntentEnvelope | undefined> {
     try {
-      return validateEnvelope(JSON.parse(await readDurableStateText(this.#file, OPTIONS)));
+      const stored = validateEnvelope(JSON.parse(await readDurableStateText(this.#file, OPTIONS)));
+      if (stored.conversationId !== this.#conversationId) {
+        throw new OperatorError('INTENT_STATE_CORRUPT', 'Intent state belongs to a different conversation.');
+      }
+      return stored;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
@@ -54,10 +60,13 @@ export class IntentKernel {
     let result!: IntentEnvelope;
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const previous = await this.current();
+      if (previous && previous.intentVersion >= Number.MAX_SAFE_INTEGER) {
+        throw new OperatorError('INTENT_VERSION_EXHAUSTED', 'Intent version capacity is exhausted; refusing unsafe version rollover.');
+      }
       const createdAt = new Date().toISOString();
       const base = {
         version: 1 as const,
-        conversationId: path.basename(this.#file, '.json'),
+        conversationId: this.#conversationId,
         intentVersion: (previous?.intentVersion ?? 0) + 1,
         objective: boundedText(input.objective, 256 * 1024, 'objective'),
         authorizedScope: uniqueText(input.authorizedScope ?? [], 1000, 4096, 'authorizedScope'),
