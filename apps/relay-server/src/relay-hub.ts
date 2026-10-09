@@ -528,6 +528,7 @@ export class RelayHub {
         if (frame.type === 'ack') {
           const seq = Number(frame.seq);
           const id = String(frame.id ?? '');
+          await this.#assertAckAuthority(connection, seq, id);
           await this.#deliveries.acknowledge(connection.deviceId, seq, id);
           connection.inFlight.delete(seq);
           await this.#pump(connection.deviceId);
@@ -668,6 +669,42 @@ export class RelayHub {
       } : {})
     });
     return connection;
+  }
+
+  /**
+   * ACK is a durable state transition and must be authority-fenced just like
+   * outbound dispatch. A prior hello/dispatch check does not survive revoke,
+   * tenant rebind, generation change, or replacement of a WebSocket.
+   */
+  async #assertAckAuthority(connection: Connection, seq: number, id: string): Promise<void> {
+    if (this.#connections.get(connection.deviceId) !== connection ||
+        connection.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'A superseded relay socket cannot acknowledge deliveries.');
+    }
+    const retained = await this.#deliveries.retained(connection.deviceId, seq);
+    if (!retained || retained.id !== id || !retained.authority ||
+        retained.requiredCapabilities === undefined) {
+      throw new OperatorError('RELAY_DELIVERY_AUTHORITY_MISSING',
+        'The exact retained delivery authority is not proven for this acknowledgment.');
+    }
+    const membership = await this.#accounts.activeMembershipForDevice(connection.deviceId);
+    if (!membership || !sameRelayAccountAuthority(retained.authority, {
+      accountId: membership.accountId, deviceId: membership.deviceId,
+      generation: membership.authorityGeneration
+    })) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED',
+        'Account/device authority changed before acknowledgment could be committed.');
+    }
+    if (connection.capabilityAuthority &&
+        !sameRelayAccountAuthority(connection.capabilityAuthority.binding.authority, retained.authority)) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED',
+        'The relay socket was negotiated under a different authority generation.');
+    }
+    await this.#assertDispatchAuthority(retained.authority, connection.sessionId, retained.requiredCapabilities);
+    if (this.#connections.get(connection.deviceId) !== connection ||
+        connection.socket.readyState !== WebSocket.OPEN) {
+      throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Connection ownership changed during acknowledgment verification.');
+    }
   }
 
   async #assertDispatchAuthority(authority: RelayDeliveryAuthority, expectedSessionId?: string, requiredCapabilities: string[] = []): Promise<Connection> {

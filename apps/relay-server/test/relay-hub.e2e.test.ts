@@ -1849,3 +1849,62 @@ test('session rotation preserves public read create and Git capabilities across 
   client.stop();
   await run;
 });
+
+test('revocation during in-flight delivery cannot be ACKed by a stale account-device connection', async t => {
+  const state = await tempDir(t, 'operator-relay-ack-revoked-');
+  const peerState = await tempDir(t, 'operator-relay-ack-revoked-peer-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  const peerIdentity = new DeviceIdentityStore(peerState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(state);
+  const peer = await pairDevice(identity, devices, peerIdentity);
+  const accounts = new AccountDeviceRegistry(state, devices);
+  const account = await accounts.resolveOrCreateAccount({
+    issuer: 'operator-test', subject: 'in-flight-ack-revocation'
+  });
+  await accounts.bindDevice(account.accountId, peer.deviceId);
+  const sessions = new DeviceSessionTokenStore(state, identity, devices);
+  const deliveries = new RelayDeliveryStore(state);
+  const hub = new RelayHub({ stateDir: state, identity, devices, accounts, sessions, deliveries });
+  t.after(() => hub.close());
+  t.after(() => cleanupTempDirs(t));
+  const { port } = await hub.listen('127.0.0.1', 0);
+  const seen: string[] = [];
+  const client = new RelayClient({
+    stateDir: peerState,
+    url: `ws://127.0.0.1:${port}/device`,
+    allowLoopbackInsecureWs: true,
+    identity: peerIdentity, socketFactory,
+    getSessionToken: async () => (await sessions.issue({
+      subjectDeviceId: peer.deviceId, audience: 'operator-relay',
+      scopes: ['relay:connect', 'cap:file.read'], ttlMs: 60_000
+    })).token,
+    supportedCapabilities: ['file.read'],
+    onDelivery: async delivery => {
+      seen.push(delivery.id);
+      // Revoke after the device receives work but before it sends ACK.
+      // The last successful hello and dispatch must not authorize this ACK.
+      await accounts.removeDevice(account.accountId, peer.deviceId, 'test authority revocation before ACK');
+    }
+  });
+  const run = client.run();
+  t.after(async () => { client.stop(); await run.catch(() => undefined); });
+  await waitFor(async () => (await hub.onlineDevices(account.accountId))
+    .some(x => x.deviceId === peer.deviceId));
+  const dispatched = await hub.dispatch({
+    accountId: account.accountId, explicitDeviceId: peer.deviceId,
+    requiredCapabilities: ['file.read'], kind: 'task.dispatch',
+    payload: { taskId: 'must-not-ack-after-revocation' }
+  }).catch(error => {
+    assert.ok(['RELAY_AUTHORITY_CHANGED','ACCOUNT_AUTHORITY_REVOKED',
+      'ACCOUNT_DEVICE_NOT_OWNED'].includes(error?.code),
+      'dispatch can race the revoke, but must never report unsafe success');
+    return null;
+  });
+  await waitFor(() => seen.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const cursor = await hub.deliveryCursor(peer.deviceId);
+  assert.equal(cursor.lastAckedSeq, 0,
+    'ACK received after account revocation must not retire the durable delivery');
+  assert.equal(cursor.highestEnqueuedSeq, 1);
+  if (dispatched) assert.equal(seen[0], dispatched.delivery.id);
+});
