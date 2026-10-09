@@ -251,7 +251,15 @@ function validateState(input: unknown): EventState {
   if (state.version !== 1 || !Array.isArray(state.events) || !Array.isArray(state.waits) || state.events.length > MAX_EVENTS || state.waits.length > MAX_WAITS) {
     throw new OperatorError('EVENT_STATE_CORRUPT', 'Event state shape is invalid.');
   }
-  state.events = state.events.map(validateEvent);
+  const eventIds = new Set<string>();
+  state.events = state.events.map((raw) => {
+    const event = validateEvent(raw);
+    // A durable event ID must identify at most one historical event. Otherwise
+    // replay and wait satisfaction can select inconsistent content for that ID.
+    if (eventIds.has(event.id)) throw new OperatorError('EVENT_STATE_CORRUPT', 'Duplicate durable event id.');
+    eventIds.add(event.id);
+    return event;
+  });
   const ids = new Set<string>();
   for (const wait of state.waits) {
     uuid(wait.id, 'wait.id');
