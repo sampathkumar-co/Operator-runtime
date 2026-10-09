@@ -611,7 +611,7 @@ test('write-ahead compensation journal failure prevents allocation entirely', as
   assert.deepEqual(await compensations.pending('digital-operation'), []);
 });
 
-test('lost reservation response is reconciled using the preassigned durable identity', async (t) => {
+test('lost reservation response remains quarantined without speculative release', async (t) => {
   const base = await setup(t);
   let reservationId = '';
   let allocations = 0;
@@ -638,18 +638,19 @@ test('lost reservation response is reconciled using the preassigned durable iden
     device: { request: { workloadKey: 'job:lost-response' }, advertisements: [] }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED' &&
     error?.details?.reservationId === reservationId &&
-    error?.details?.reserveCode === 'DEVICE_RESPONSE_LOST' &&
-    error?.details?.cleanupCode === 'DEVICE_RELEASE_UNAVAILABLE');
+    error?.details?.reserveCode === 'DEVICE_RESPONSE_LOST');
   assert.equal(allocations, 1);
-  assert.equal((await compensations.pending('digital-operation')).length, 1);
+  const pending = await compensations.pending('digital-operation');
+  assert.equal(pending.length, 2);
+  assert.ok(pending.every(intent => !intent.confirmedAt));
   failRelease = false;
   const restarted = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations: new DurableCompensationJournal(base.state) });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(allocations, 1);
-  assert.equal(releases, 2);
+  assert.equal(releases, 0);
 });
 
-test('restart after reservation commit and before operation commit releases exactly the orphaned resource', async (t) => {
+test('restart after confirmed reservation commit safely releases the orphaned resource', async (t) => {
   const base = await setup(t);
   const registry = new DeviceRegistryStore(base.state);
   const routing = new DeviceRoutingStore(base.state, registry);
@@ -671,6 +672,8 @@ test('restart after reservation commit and before operation commit releases exac
     gpu: false, tags: [], activeJobs: 0, maxConcurrentJobs: 1
   }], { reservationId });
   assert.equal(reservation.id, reservationId);
+  // Model a successful provider acknowledgement durably persisted before the crash.
+  await compensations.confirm(recoveryId);
   assert.equal((await devices.list({ activeOnly: true })).length, 1);
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, devices: new DevicePoolScheduler(base.state, registry, routing),
@@ -681,7 +684,7 @@ test('restart after reservation commit and before operation commit releases exac
   assert.deepEqual(await compensations.pending('digital-operation'), []);
 });
 
-test('team mission response loss keeps write-ahead cancel intent across restart without replaying creation', async (t) => {
+test('team mission lost acknowledgement remains quarantined without replay or cancellation', async (t) => {
   const base = await setup(t);
   let missionId = '';
   let creates = 0;
@@ -705,19 +708,20 @@ test('team mission response loss keeps write-ahead cancel intent across restart 
     successConditions: ['no duplicate work'], execution: { kind: 'team', workItems: work() }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
   const pending = await compensations.pending('digital-operation');
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0]?.operation, 'cancel-team-mission');
-  assert.equal(pending[0]?.targetId, missionId);
+  assert.equal(pending.length, 2);
+  assert.ok(pending.every(intent => !intent.confirmedAt));
+  assert.ok(pending.some(intent => intent.operation === 'cancel-team-mission'));
+  assert.ok(pending.some(intent => intent.targetId === missionId));
   allowCancel = true;
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, teams: teams as any, compensations: new DurableCompensationJournal(base.state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(creates, 1);
-  assert.equal(cancels, 2);
+  assert.equal(cancels, 0);
 });
 
-test('organization program response loss keeps the exact cancel identity for restart', async (t) => {
+test('organization program lost acknowledgement remains quarantined across restart', async (t) => {
   const base = await setup(t);
   let programId = '';
   let creates = 0;
@@ -743,16 +747,17 @@ test('organization program response loss keeps the exact cancel identity for res
     ] }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
   const pending = await compensations.pending('digital-operation');
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0]?.operation, 'cancel-organization-program');
-  assert.equal(pending[0]?.targetId, programId);
+  assert.equal(pending.length, 2);
+  assert.ok(pending.every(intent => !intent.confirmedAt));
+  assert.ok(pending.some(intent => intent.operation === 'cancel-organization-program'));
+  assert.ok(pending.some(intent => intent.targetId === programId));
   allowCancel = true;
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, organizations: organizations as any, compensations: new DurableCompensationJournal(base.state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(creates, 1);
-  assert.equal(cancels, 2);
+  assert.equal(cancels, 0);
 });
 
 test('digital operation reconciliation retains intents until cancellation and release postconditions are proved', async (t) => {
@@ -767,9 +772,10 @@ test('digital operation reconciliation retains intents until cancellation and re
     ['cancel-organization-program', programId],
     ['release-device-reservation', reservationId]
   ]) {
-    await compensations.prepare({
+    const prepared = await compensations.prepare({
       id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId
     });
+    await compensations.confirm(prepared.id);
   }
   let safe = false;
   const teams = { async cancel(id: string) { assert.equal(id, teamId); return { id, state: safe ? 'CANCELLED' : 'VERIFIED' }; } };
@@ -807,10 +813,11 @@ test('two independent recovery workers never execute one compensation twice',asy
  const base=await setup(t);
  const ownerId=crypto.randomUUID(),missionId=digitalOperationChildId(ownerId,'cancel-team-mission');
  const journal=new DurableCompensationJournal(base.state);
- await journal.prepare({
+ const prepared=await journal.prepare({
   id:crypto.randomUUID(),ownerKind:'digital-operation',ownerId,
   operation:'cancel-team-mission',targetId:missionId
  });
+ await journal.confirm(prepared.id);
  let cancels=0;
  const teams={
   async cancel(id:string){
@@ -851,7 +858,7 @@ test('two independent operation creators reuse one requestId without duplicated 
  assert.equal(creates,1);
 });
 
-test('external RESOURCE_BUSY error is not mistaken for acquisition contention and retried',async t=>{
+test('external RESOURCE_BUSY response is quarantined without retrying the attempted effect',async t=>{
  const base=await setup(t);
  let submits=0;
  const teams={
@@ -863,18 +870,21 @@ test('external RESOURCE_BUSY error is not mistaken for acquisition contention an
   requestId:crypto.randomUUID(),objective:'Do not replay unknown effects',
   scopeKey:'project:no-retry',successConditions:['no duplicate'],
   execution:{kind:'team',workItems:work()}
- }),/provider busy after effect attempt/);
+ }), (error:any) => error?.code === 'COMPENSATION_BLOCKED' && /acknowledgement is missing/.test(error.message));
  assert.equal(submits,1);
+ assert.ok((await new DurableCompensationJournal(base.state).pending('digital-operation')).length > 0);
 });
 
 test('independent OS processes execute one pending compensation only once',async t=>{
  const base=await setup(t);
  const id=crypto.randomUUID(), ownerId=crypto.randomUUID();
  const missionId=digitalOperationChildId(ownerId,'cancel-team-mission');
- await new DurableCompensationJournal(base.state).prepare({
+ const journal = new DurableCompensationJournal(base.state);
+ await journal.prepare({
   id,ownerKind:'digital-operation',ownerId,
   operation:'cancel-team-mission',targetId:missionId
  });
+ await journal.confirm(id);
  const {execFile}=await import('node:child_process');
  const {promisify}=await import('node:util');
  const {pathToFileURL}=await import('node:url');
