@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
-import type { ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
+import type { ControlPlaneMutation, ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
 import { currentProcessInstance, validProcessInstance, type ProcessInstanceIdentity } from './process-instance.ts';
 
 /**
@@ -117,6 +117,66 @@ export class RemoteAuthorityFenceStore {
       expiresAt
     }], new Date(now).toISOString());
     return { ...lease, generation: renewed!.generation, expiresAt };
+  }
+
+  /**
+   * Atomically verify the exact live owner and commit bounded provider data
+   * whose authoritative state lives in this SAME shared ControlPlaneStore.
+   * No state mutation can commit if revocation, takeover or heartbeat moved
+   * the ownership generation before the database transaction acquires CAS.
+   * External API effects are NOT covered by this method.
+   */
+  async commitAtomic(
+    leaseInput: RemoteAuthorityLease, mutationsInput: ControlPlaneMutation[]
+  ): Promise<{ lease: RemoteAuthorityLease; records: ControlPlaneRecord[] }> {
+    const lease = await this.assertCurrent(leaseInput);
+    if (!Array.isArray(mutationsInput) || mutationsInput.length < 1 || mutationsInput.length > 100) {
+      throw blocked('REMOTE_AUTHORITY_MUTATION_INVALID', 'Provider commit requires 1-100 bounded control-plane mutations.');
+    }
+    const mutations = mutationsInput.map((mutation) => ({ ...mutation }));
+    const keys = new Set<string>();
+    for (const mutation of mutations) {
+      if (mutation.namespace === NS || !OWNER.test(String(mutation.namespace ?? '')) ||
+          !OWNER.test(String(mutation.key ?? ''))) {
+        throw blocked('REMOTE_AUTHORITY_MUTATION_INVALID', 'Provider commit cannot modify authority fences or invalid keys.');
+      }
+      const k = JSON.stringify([mutation.namespace, mutation.key]);
+      if (keys.has(k)) throw blocked('REMOTE_AUTHORITY_MUTATION_INVALID', 'Duplicate provider commit target.');
+      keys.add(k);
+    }
+    await this.#authorize({
+      accountId: lease.accountId, deviceId: lease.deviceId, authorityGeneration: lease.authorityGeneration
+    }, 'acquire');
+    const now = this.#clock().toISOString();
+    if (Date.parse(now) >= Date.parse(lease.expiresAt)) {
+      throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Lease expired before the atomic provider commit.');
+    }
+    let committed: ControlPlaneRecord[];
+    try {
+      committed = await this.#store.transact([
+        ...mutations,
+        {
+          namespace: NS,
+          key: resourceKey(lease),
+          expectedGeneration: lease.generation,
+          value: {
+            kind: 'active', schemaVersion: 1, accountId: lease.accountId, deviceId: lease.deviceId,
+            authorityGeneration: lease.authorityGeneration, ownerId: lease.ownerId,
+            process: lease.process, leaseId: lease.leaseId, fenceToken: lease.fenceToken
+          },
+          expiresAt: lease.expiresAt
+        }
+      ], now);
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'CONTROL_PLANE_CAS_MISMATCH') {
+        throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Owner or provider generation changed before the atomic commit.');
+      }
+      throw error;
+    }
+    const owner = committed.find((record) => record.namespace === NS && record.key === resourceKey(lease));
+    if (!owner) throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Atomic commit did not return renewed ownership.');
+    return { lease: { ...lease, generation: owner.generation, expiresAt: owner.expiresAt! },
+      records: committed.filter((record) => !(record.namespace === NS && record.key === resourceKey(lease))) };
   }
 
   async revoke(subjectInput: RemoteAuthoritySubject): Promise<RemoteAuthorityBarrier> {
