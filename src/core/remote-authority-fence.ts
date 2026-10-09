@@ -75,7 +75,7 @@ export class RemoteAuthorityFenceStore {
     if (previous && previous.kind === 'active' && Date.parse(current!.expiresAt ?? '') > now) {
       throw blocked('REMOTE_AUTHORITY_HELD', 'Another worker still holds this device generation.');
     }
-    if (previous && previous.kind === 'active') {
+    if (previous && (previous.kind === 'active' || previous.kind === 'released')) {
       if (subject.authorityGeneration < previous.authorityGeneration) {
         throw blocked('REMOTE_AUTHORITY_REVOKED', 'Device has a newer authority generation.');
       }
@@ -194,7 +194,12 @@ export class RemoteAuthorityFenceStore {
     const lease = await this.assertCurrent(leaseInput);
     await this.#store.transact([{
       namespace: NS, key: resourceKey(lease),
-      expectedGeneration: lease.generation, value: null
+      expectedGeneration: lease.generation,
+      // Keep immutable tenant/generation lineage after voluntary release.
+      // A tombstone-only DELETE preserves CAS but forgets which account owned
+      // the device, allowing an unrelated account to reuse the generation.
+      value: { kind: 'released', schemaVersion: 1, accountId: lease.accountId,
+        deviceId: lease.deviceId, authorityGeneration: lease.authorityGeneration }
     }], this.#clock().toISOString());
   }
 
@@ -223,7 +228,7 @@ export class RemoteAuthorityFenceStore {
       const current = await this.#store.get(NS, key);
       const previous = parseValue(current);
       // A stale administrator must not revoke a newer live authority incarnation.
-      if (previous && previous.kind === 'active') {
+      if (previous && (previous.kind === 'active' || previous.kind === 'released')) {
         if (previous.authorityGeneration > subject.authorityGeneration) {
           throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'Revocation would fence a newer device owner.');
         }
@@ -246,7 +251,7 @@ export class RemoteAuthorityFenceStore {
       }
       const revokedGeneration = Math.max(subject.authorityGeneration,
         previous?.kind === 'revoked' ? previous.revokedGeneration : 0,
-        previous?.kind === 'active' ? previous.authorityGeneration : 0);
+        previous?.kind === 'active' || previous?.kind === 'released' ? previous.authorityGeneration : 0);
       const now = this.#clock().toISOString();
       try {
         const [written] = await this.#store.transact([{
@@ -295,7 +300,8 @@ function validateLease(input: RemoteAuthorityLease): RemoteAuthorityLease {
 }
 type LeaseState =
   | { kind: 'active'; accountId: string; deviceId: string; authorityGeneration: number; ownerId: string; process: ProcessInstanceIdentity; leaseId: string; fenceToken: string }
-  | { kind: 'revoked'; accountId: string; deviceId: string; revokedGeneration: number };
+  | { kind: 'revoked'; accountId: string; deviceId: string; revokedGeneration: number }
+  | { kind: 'released'; accountId: string; deviceId: string; authorityGeneration: number };
 function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
   if (!record) return null;
   const v = record.value;
@@ -308,6 +314,14 @@ function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
     }
     return { kind: 'revoked', accountId: subject.accountId, deviceId: subject.deviceId,
       revokedGeneration: subject.authorityGeneration };
+  }
+  if (v.kind === 'released') {
+    const subject = validateSubject({ accountId: String(v.accountId ?? ''),
+      deviceId: String(v.deviceId ?? ''), authorityGeneration: Number(v.authorityGeneration) });
+    if (subject.deviceId !== record.key) {
+      throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Released authority record does not match its device key.');
+    }
+    return { kind: 'released', ...subject };
   }
   if (v.kind === 'active') {
     const subject = validateSubject({ accountId: String(v.accountId), deviceId: String(v.deviceId), authorityGeneration: Number(v.authorityGeneration) });

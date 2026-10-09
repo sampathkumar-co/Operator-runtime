@@ -358,3 +358,66 @@ test('expiry never transfers account ownership at a recycled generation', async 
   }, 'new-account-generation', 5_000);
   assert.ok(legitimatelyRebound.generation > recovered.generation);
 });
+
+
+test('voluntary release retains tenant ownership so a foreign account cannot reuse its authority generation', async t => {
+  const { make, subject } = await fixture(t);
+  const first = await make().acquire(subject, 'legitimate-owner');
+  await make().release(first);
+  await assert.rejects(make().assertCurrent(first),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+
+  // A different store instance models restart after the owner released.
+  const foreign = { ...subject, accountId: crypto.randomUUID() };
+  await assert.rejects(make().acquire(foreign, 'same-generation-takeover'),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  await assert.rejects(make().revoke({ ...foreign, authorityGeneration: 20 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+
+  // Original tenant may reissue a lease at its current generation;
+  // the newer CAS fence must invalidate the released token.
+  const recovered = await make().acquire(subject, 'legitimate-successor');
+  assert.ok(recovered.generation > first.generation);
+  await assert.rejects(make().assertCurrent(first),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  await make().release(recovered);
+  // A legitimately rebound tenant must advance the generation *and* pass
+  // the independent external device registration policy.
+  const rebound = await make().acquire({
+    ...foreign, authorityGeneration: subject.authorityGeneration + 1
+  }, 'new-tenant');
+  assert.ok(rebound.generation > recovered.generation);
+  await assert.rejects(make().revoke({ ...subject, authorityGeneration: 99 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+});
+
+test('released authority can only be revoked by the exact previous tenant', async t => {
+  const { make, subject } = await fixture(t);
+  const first = await make().acquire(subject, 'owner');
+  await make().release(first);
+  const wrong = { ...subject, accountId: crypto.randomUUID() };
+  await assert.rejects(make().revoke(wrong),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  const revocation = await make().revoke(subject);
+  assert.equal(revocation.revokedGeneration, subject.authorityGeneration);
+  await assert.rejects(make().acquire(subject, 'replay'),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
+  const next = await make().acquire({ ...subject, authorityGeneration: 2 }, 'owner-next-generation');
+  assert.ok(next.generation > revocation.generation);
+});
+
+test('forged released record with mismatched device fails closed', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-released-tenant-integrity-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const deviceId = crypto.randomUUID();
+  const store = new EmbeddedControlPlaneStore(dir);
+  await store.transact([{ namespace: '__mecord_remote_authority', key: deviceId,
+    expectedGeneration: null, value: {
+      kind: 'released', schemaVersion: 1, accountId: crypto.randomUUID(),
+      deviceId: crypto.randomUUID(), authorityGeneration: 1
+    } }]);
+  const actor = new RemoteAuthorityFenceStore(store, { authorize: async () => {} });
+  await assert.rejects(actor.acquire({
+    accountId: crypto.randomUUID(), deviceId, authorityGeneration: 2
+  }, 'untrusted'), (e: any) => e?.code === 'REMOTE_AUTHORITY_CORRUPT');
+});
