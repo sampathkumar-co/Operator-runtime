@@ -187,14 +187,42 @@ export interface PostgresQueryHost extends PostgresQueryClient {
   connect?(): Promise<PostgresQueryClient>;
 }
 
+interface DirectConnectionState { tail: Promise<void>; unsafe: boolean; }
+const directConnectionStates = new WeakMap<PostgresQueryHost, DirectConnectionState>();
+function directConnectionState(db: PostgresQueryHost): DirectConnectionState {
+  let state = directConnectionStates.get(db);
+  if (!state) {
+    state = { tail: Promise.resolve(), unsafe: false };
+    directConnectionStates.set(db, state);
+  }
+  return state;
+}
+
 export class PostgresControlPlaneStore implements ControlPlaneStore {
   #db: PostgresQueryHost;
-  #directTransactionPoisoned = false;
+  #directState?: DirectConnectionState;
 
-  constructor(db: PostgresQueryHost) { this.#db = db; }
+  constructor(db: PostgresQueryHost) {
+    this.#db = db;
+    if (typeof db.connect !== 'function') this.#directState = directConnectionState(db);
+  }
+
+  // A direct pg.Client is one transaction/session, even when multiple store
+  // wrappers share it. Queue *all* operations on it to avoid read-during-
+  // transaction and nested BEGIN/COMMIT across unrelated requests.
+  async #onConnection<T>(work: () => Promise<T>): Promise<T> {
+    const state = this.#directState;
+    if (!state) return await work();
+    const run = state.tail.then(async () => {
+      if (state.unsafe) throw new OperatorError('CONTROL_PLANE_CONNECTION_UNSAFE', 'Control-plane connection is unsafe after a failed rollback.');
+      return await work();
+    });
+    state.tail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
 
   async initialize(): Promise<void> {
-    await this.#db.query(`
+    await this.#onConnection(async () => this.#db.query(`
 CREATE TABLE IF NOT EXISTS mecord_control_plane (
   namespace TEXT NOT NULL,
   record_key TEXT NOT NULL,
@@ -208,23 +236,30 @@ CREATE TABLE IF NOT EXISTS mecord_control_plane (
 );
 ALTER TABLE mecord_control_plane ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_plane(expires_at);
-`);
+`));
   }
 
   async get(namespace: string, key: string): Promise<ControlPlaneRecord | null> {
-    const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
-      [id(namespace,'namespace'), id(key,'key')]
-    );
-    return result.rows[0] && result.rows[0].is_deleted !== true ? rowToRecord(result.rows[0]) : null;
+    const ns = id(namespace, 'namespace');
+    const recordKeyValue = id(key, 'key');
+    return await this.#onConnection(async () => {
+      const result = await this.#db.query<any>(
+        'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+        [ns, recordKeyValue]
+      );
+      return result.rows[0] && result.rows[0].is_deleted !== true ? rowToRecord(result.rows[0]) : null;
+    });
   }
 
   async list(namespace: string): Promise<ControlPlaneRecord[]> {
-    const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND is_deleted=FALSE ORDER BY record_key',
-      [id(namespace,'namespace')]
-    );
-    return result.rows.map(rowToRecord);
+    const ns = id(namespace, 'namespace');
+    return await this.#onConnection(async () => {
+      const result = await this.#db.query<any>(
+        'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND is_deleted=FALSE ORDER BY record_key',
+        [ns]
+      );
+      return result.rows.map(rowToRecord);
+    });
   }
 
   async transact(mutations: ControlPlaneMutation[], nowInput = new Date().toISOString()): Promise<ControlPlaneRecord[]> {
@@ -286,13 +321,15 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
 
   async snapshot(nowInput = new Date().toISOString()): Promise<ControlPlaneSnapshot> {
     const now = iso(nowInput,'now');
-    const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE is_deleted=FALSE AND (expires_at IS NULL OR expires_at>$1) ORDER BY namespace,record_key',
-      [now]
-    );
-    const records = result.rows.map(rowToRecord);
-    const base = { schemaVersion: 1 as const, createdAt: now, records };
-    return { ...base, digest: digest(base) };
+    return await this.#onConnection(async () => {
+      const result = await this.#db.query<any>(
+        'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE is_deleted=FALSE AND (expires_at IS NULL OR expires_at>$1) ORDER BY namespace,record_key',
+        [now]
+      );
+      const records = result.rows.map(rowToRecord);
+      const base = { schemaVersion: 1 as const, createdAt: now, records };
+      return { ...base, digest: digest(base) };
+    });
   }
 
   async restore(snapshotInput: ControlPlaneSnapshot): Promise<void> {
@@ -314,10 +351,8 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
   }
 
   async #withTransaction<T>(work: (db: PostgresQueryClient) => Promise<T>): Promise<T> {
+    return await this.#onConnection(async () => {
     const pooled = typeof this.#db.connect === 'function';
-    if (!pooled && this.#directTransactionPoisoned) {
-      throw new OperatorError('CONTROL_PLANE_CONNECTION_UNSAFE','Control-plane connection is unsafe after a failed rollback.');
-    }
     const db = pooled ? await this.#db.connect!() : this.#db;
     let began = false;
     let releaseError: Error | undefined;
@@ -333,13 +368,14 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
         try { await db.query('ROLLBACK'); }
         catch (rollbackError) {
           releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
-          if (!pooled) this.#directTransactionPoisoned = true;
+          if (!pooled) this.#directState!.unsafe = true;
         }
       }
       throw error;
     } finally {
       if (pooled) db.release?.(releaseError);
     }
+    });
   }
 }
 

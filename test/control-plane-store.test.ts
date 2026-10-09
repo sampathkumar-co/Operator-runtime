@@ -411,3 +411,85 @@ test('explicit invalid expiry never becomes indefinite authority in mutations or
   await fs.writeFile(stateFile, original, 'utf8');
   assert.equal((await new EmbeddedControlPlaneStore(dir).get('leases', 'bounded'))?.expiresAt, live!.expiresAt);
 });
+
+test('independent PostgreSQL store wrappers serialize direct-client transactions and reads', async () => {
+  let beginCount = 0;
+  let opened = false;
+  let unblock!: () => void;
+  let reached!: () => void;
+  const entered = new Promise<void>(resolve => { reached = resolve; });
+  const gate = new Promise<void>(resolve => { unblock = resolve; });
+  const calls: string[] = [];
+  const db: PostgresQueryClient = {
+    async query(sql: string) {
+      calls.push(sql);
+      if (sql === 'BEGIN') {
+        assert.equal(opened, false, 'shared direct client cannot start nested transactions');
+        opened = true;
+        beginCount++;
+        return { rows: [] };
+      }
+      if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+        assert.equal(opened, true);
+        opened = false;
+        return { rows: [] };
+      }
+      if (sql.startsWith('SELECT pg_advisory_xact_lock')) {
+        if (beginCount === 1) { reached(); await gate; }
+        return { rows: [] };
+      }
+      if (sql.startsWith('SELECT generation, expires_at')) return { rows: [] };
+      if (sql.startsWith('INSERT INTO mecord_control_plane')) return { rows: [], rowCount: 1 };
+      if (sql.startsWith('SELECT namespace, record_key')) {
+        assert.equal(opened, false, 'direct-client reader must not see uncommitted state');
+        return { rows: [] };
+      }
+      throw new Error('unexpected SQL in direct-client serialization test: ' + sql);
+    }
+  };
+  const first = new PostgresControlPlaneStore(db);
+  const second = new PostgresControlPlaneStore(db);
+  const tx1 = first.transact([{ namespace: 'n', key: 'a', expectedGeneration: null, value: { v: 1 } }]);
+  await entered;
+  const read = second.get('n', 'a');
+  const tx2 = second.transact([{ namespace: 'n', key: 'b', expectedGeneration: null, value: { v: 2 } }]);
+  // An overlapping call would issue a second BEGIN before the first COMMIT.
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(beginCount, 1);
+  assert.equal(calls.filter(sql => sql.startsWith('SELECT namespace, record_key')).length, 0);
+  unblock();
+  await Promise.all([tx1, read, tx2]);
+  assert.equal(beginCount, 2);
+  const firstCommit = calls.indexOf('COMMIT');
+  const readAt = calls.findIndex(sql => sql.startsWith('SELECT namespace, record_key'));
+  const secondBegin = calls.indexOf('BEGIN', calls.indexOf('BEGIN') + 1);
+  assert.ok(firstCommit >= 0 && readAt > firstCommit && secondBegin > readAt);
+});
+
+test('direct PostgreSQL rollback poisoning applies across independent store wrappers', async () => {
+  let beginCount = 0;
+  const db: PostgresQueryClient = {
+    async query(sql: string) {
+      if (sql === 'BEGIN') { beginCount++; return { rows: [] }; }
+      if (sql === 'ROLLBACK') throw new Error('rollback transport lost');
+      if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] };
+      if (sql.startsWith('SELECT generation, expires_at')) return { rows: [{ generation: 9, expires_at: null }] };
+      throw new Error('unexpected SQL in direct-client poisoning test: ' + sql);
+    }
+  };
+  const first = new PostgresControlPlaneStore(db);
+  const second = new PostgresControlPlaneStore(db);
+  await assert.rejects(
+    first.transact([{ namespace: 'n', key: 'x', expectedGeneration: 8, value: { v: 1 } }]),
+    (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+  );
+  await assert.rejects(
+    second.get('n', 'x'),
+    (error: any) => error?.code === 'CONTROL_PLANE_CONNECTION_UNSAFE'
+  );
+  await assert.rejects(
+    second.transact([{ namespace: 'n', key: 'y', expectedGeneration: null, value: { v: 2 } }]),
+    (error: any) => error?.code === 'CONTROL_PLANE_CONNECTION_UNSAFE'
+  );
+  assert.equal(beginCount, 1);
+});
