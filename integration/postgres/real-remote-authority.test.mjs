@@ -33,7 +33,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 1
   });
   test.before(async () => { await firstStore.initialize(); });
-  test.beforeEach(async () => { await firstPool.query('TRUNCATE TABLE mecord_control_plane'); });
+  test.beforeEach(async () => { await firstPool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await firstStore.initialize(); });
   test.after(async () => { await Promise.all([firstPool.end(), secondPool.end()]); });
 
   test('independent PostgreSQL hosts cannot both commit the same live authority lease', async () => {
