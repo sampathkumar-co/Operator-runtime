@@ -306,6 +306,7 @@ test('stage8 restart recovery cancels a child mission created before parent roll
     targetId: orphan.id,
     subjectKey: 'canary'
   });
+  await journal.confirm(`test-orphan:${program.id}`);
 
   const restarted = new OrganizationCoordinator(state, teams);
   const recovery = await restarted.recoverPendingCompensations();
@@ -385,12 +386,12 @@ test('organization rollout does not trust a child mission that ignores its write
   const restarted = new OrganizationCoordinator(state, teams as any, {
     compensations: new DurableCompensationJournal(state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 1 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.deepEqual(cancelled, []);
   const quarantine = await journal.pending('organization');
-  assert.equal(quarantine.length, 1);
-  assert.equal(quarantine[0]?.operation, 'reconcile-untrusted-team-identity');
-  assert.equal(quarantine[0]?.targetId, unexpectedId);
+  assert.equal(quarantine.length, 2);
+  assert.ok(quarantine.some(item=>item.operation==='reconcile-untrusted-team-identity' && item.targetId===unexpectedId));
+  assert.ok(quarantine.some(item=>item.operation==='cancel-team-mission' && !item.confirmedAt));
   await assert.rejects(restarted.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
   assert.equal(attempted, 1);
 });
@@ -411,10 +412,12 @@ test('organization recovery keeps unrollbackable verified child mission quaranti
     targets: [{ key: 'service', scopeKey: 'org:postcondition:service', workItems: work('service') }]
   });
   childId = reservedOrganizationChildId(program.id, 'service');
+  const intentId = crypto.randomUUID();
   await compensations.prepare({
-    id: crypto.randomUUID(), ownerKind: 'organization', ownerId: program.id,
+    id: intentId, ownerKind: 'organization', ownerId: program.id,
     operation: 'cancel-team-mission', targetId: reservedOrganizationChildId(program.id, 'service'), subjectKey: 'service'
   });
+  await compensations.confirm(intentId);
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 0, pending: 1 });
   assert.equal(cancelled, 0);
   await assert.rejects(org.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
@@ -519,4 +522,26 @@ test('organization resume rollback retains its journal until PAUSED is actually 
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.operation, 'pause-team-mission');
   assert.equal((await org.inspect(program.id)).state, 'PAUSED');
+});
+
+test('preexisting reserved Organization child ID is never enough to cancel an unrelated mission',async t=>{
+ const state=await tempDir(t);
+ const teams=new TeamCoordinator(state);
+ const org=new OrganizationCoordinator(state,teams);
+ const program=await org.create({
+  objective:'One owner',policy:{allowedScopePrefixes:['org:preexisting']},
+  targets:[{key:'service',scopeKey:'org:preexisting:service',workItems:work('service')}]
+ });
+ const childId=reservedOrganizationChildId(program.id,'service');
+ const unrelated=await teams.submit({missionId:childId,objective:'Existing unrelated mission',workItems:work('service')});
+ await teams.start(unrelated.id);
+ await assert.rejects(org.start(program.id));
+ const journal=new DurableCompensationJournal(state);
+ const pending=await journal.pending('organization');
+ assert.equal(pending.length,1);
+ assert.equal(pending[0]?.targetId,childId);
+ assert.equal(pending[0]?.confirmedAt,undefined);
+ assert.deepEqual(await org.recoverPendingCompensations(),{recovered:0,pending:1});
+ assert.equal((await teams.inspect(childId)).state,'RUNNING');
+ await assert.rejects(org.start(program.id),(err:any)=>err?.code==='ORGANIZATION_RECOVERY_REQUIRED');
 });
