@@ -143,6 +143,7 @@ test('stage10 refuses to create execution when declared world precondition is co
 
 test('stage10 unknown child creation quarantines while confirmed device recovery remains possible', async (t) => {
   const base = await setup(t);
+  const expectedRequestDigest = devicePoolAllocationRequestDigest({ workloadKey: 'job:cleanup' });
   let reservationId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
   let failRelease = true;
@@ -160,6 +161,10 @@ test('stage10 unknown child creation quarantines while confirmed device recovery
       releases += 1;
       if (failRelease) throw Object.assign(new Error('release unavailable'), { code: 'DEVICE_RELEASE_UNAVAILABLE' });
       return { id, state: 'RELEASED' };
+    },
+    async releasePrepared(id: string, requestDigest: string) {
+      assert.equal(requestDigest, expectedRequestDigest);
+      return await this.release(id);
     }
   };
   const teams = {
