@@ -29,7 +29,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     await store.initialize();
   });
   test.beforeEach(async () => {
-    await pool.query('TRUNCATE TABLE mecord_control_plane');
+    await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize();
   });
   test.after(async () => {
     await pool.end();
@@ -109,7 +110,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     const snapshot = await store.snapshot('2026-10-08T00:00:02.000Z');
     await assert.rejects(store.restore(snapshot),
       (error) => error?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
-    await pool.query('TRUNCATE TABLE mecord_control_plane');
+    await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize();
     await store.restore(snapshot);
     assert.deepEqual((await store.get('proof', 'receipt'))?.value, { cohort: 2, verified: true });
     await assert.rejects(store.restore(snapshot),
@@ -214,6 +216,37 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     }], '2026-10-09T00:00:03.000Z');
     assert.equal(reincarnation.generation, 2);
     assert.equal((await store.get('authority','legacy-worker-key'))?.value.owner, 'new-owner');
+  });
+
+  test('PostgreSQL rejects legacy TRUNCATE and retains hidden authority generation history', async () => {
+    const [owner] = await store.transact([{
+      namespace:'authority', key:'must-not-truncate', expectedGeneration:null,
+      value:{owner:'first-account'}
+    }], '2026-10-09T09:00:01.000Z');
+    assert.equal(owner.generation,1);
+    await store.transact([{
+      namespace:'authority', key:'must-not-truncate', expectedGeneration:1, value:null
+    }], '2026-10-09T09:00:02.000Z');
+    const denied = (error) => error?.code === '23514' &&
+      String(error?.message).includes('CONTROL_PLANE_LEGACY_TRUNCATE_FENCED');
+    await assert.rejects(pool.query('TRUNCATE TABLE mecord_control_plane'), denied);
+    await assert.rejects(pool.query('TRUNCATE TABLE mecord_control_plane RESTART IDENTITY CASCADE'), denied);
+    const rows = await pool.query(
+      'SELECT generation, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+      ['authority','must-not-truncate']
+    );
+    assert.equal(rows.rows.length,1);
+    assert.equal(Number(rows.rows[0].generation),1);
+    assert.equal(rows.rows[0].is_deleted,true);
+    const [newOwner] = await store.transact([{
+      namespace:'authority', key:'must-not-truncate', expectedGeneration:null,
+      value:{owner:'second-account'}
+    }], '2026-10-09T09:00:03.000Z');
+    assert.equal(newOwner.generation,2);
+    await assert.rejects(store.transact([{
+      namespace:'authority', key:'must-not-truncate', expectedGeneration:1,
+      value:{owner:'stale-account'}
+    }], '2026-10-09T09:00:04.000Z'), (error) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
   });
 
 }

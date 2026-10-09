@@ -26,7 +26,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     ...(clock ? { clock } : {})
   });
   test.before(async () => { await store.initialize(); });
-  test.beforeEach(async () => { await pool.query('TRUNCATE TABLE mecord_control_plane'); });
+  test.beforeEach(async () => { await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize(); });
   test.after(async () => { await pool.end(); });
 
   const workerPath = new URL('./fixtures/remote-authority-worker.mjs', import.meta.url);
