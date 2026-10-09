@@ -135,3 +135,28 @@ test('artifact list limits by recency rather than lexicographic content address'
   assert.deepEqual(limited.map(record => record.id), expected);
   assert.deepEqual((await store.list(5)).map(record => record.id), [...inserted].reverse().map(record => record.id));
 });
+
+test('artifact metadata owns and digests prototype-named JSON data fields without aliasing', async (t) => {
+  const dir = await tempState();
+  t.after(async () => fs.rm(dir, { recursive: true, force: true }));
+  const store = new ArtifactStore(dir);
+  const base = {
+    bytes: 'same verified evidence',
+    kind: 'test-report' as const,
+    mediaType: 'application/json',
+    now: '2026-10-09T00:00:00.000Z'
+  };
+  const ordinary = await store.put({ ...base, metadata: { role: 'reader' } });
+  const specialMetadata = JSON.parse('{"__proto__":"principal-override","role":"reader"}');
+  assert.equal(Object.hasOwn(specialMetadata, '__proto__'), true);
+  const special = await store.put({ ...base, metadata: specialMetadata });
+  assert.notEqual(ordinary.id, special.id);
+  assert.equal(Object.hasOwn(special.metadata, '__proto__'), true);
+  assert.equal(Object.getPrototypeOf(special.metadata), Object.prototype);
+  assert.equal(special.metadata['__proto__'], 'principal-override');
+  assert.deepEqual(JSON.parse(JSON.stringify(special.metadata)), specialMetadata);
+  const persisted = await new ArtifactStore(dir).get(special.id);
+  assert.equal(Object.hasOwn(persisted.metadata, '__proto__'), true);
+  assert.equal(persisted.metadata['__proto__'], 'principal-override');
+  assert.equal((await store.read(special.id)).record.id, special.id);
+});
