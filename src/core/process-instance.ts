@@ -36,6 +36,11 @@ export function processInstanceDefinitelyStale(
 ): boolean {
   if (observation.status === 'dead') return true;
   if (observation.status !== 'live' || !storedIdentity || !observation.identity) return false;
+  // A pre-upgrade Linux PID/tick identity does not include a boot UUID.
+  // Its mismatch with a boot-bound v2 observation is *uncertain*, not proof
+  // of a different/dead process. Keep its lease fenced until confirmed death
+  // or an explicit, independently proven owner transition.
+  if (linuxIdentityUpgradeUncertain(storedIdentity.started, observation.identity.started)) return false;
   return !sameProcessInstance(storedIdentity, observation.identity);
 }
 
@@ -67,6 +72,13 @@ export function currentProcessInstance(): Promise<ProcessInstanceIdentity> {
     return observation.identity;
   });
   return currentIdentity;
+}
+
+function linuxIdentityUpgradeUncertain(left: string, right: string): boolean {
+  const oldPattern = /^linux-boot-ticks:\\d+$/;
+  const newPattern = /^linux-boot-id:[0-9a-f-]{36}:ticks:\\d+$/;
+  return (oldPattern.test(left) && newPattern.test(right)) ||
+    (newPattern.test(left) && oldPattern.test(right));
 }
 
 export function sameProcessInstance(left: ProcessInstanceIdentity, right: ProcessInstanceIdentity | null): boolean {
@@ -138,13 +150,19 @@ function windowsStartedMillisecond(value: string): bigint | null {
 
 async function observeLinuxProcess(pid: number): Promise<ProcessInstanceObservation> {
   try {
+    // Linux start ticks alone can be identical on two separate machines (or
+    // across reboots). Bind them to the kernel boot UUID. If the host will
+    // not disclose its boot identity, fail closed instead of claiming an
+    // authoritative process instance from the PID and ticks alone.
+    const bootId = (await fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim().toLowerCase();
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(bootId)) return { status: 'unknown' };
     const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
     const closingName = stat.lastIndexOf(')');
     if (closingName < 0) return { status: 'unknown' };
     const fields = stat.slice(closingName + 2).trim().split(/\s+/);
     const startTicks = fields[19]; // field 22 overall; fields begin at process-state field 3.
     return startTicks
-      ? { status: 'live', identity: { pid, started: `linux-boot-ticks:${startTicks}` } }
+      ? { status: 'live', identity: { pid, started: `linux-boot-id:${bootId}:ticks:${startTicks}` } }
       : { status: 'unknown' };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
