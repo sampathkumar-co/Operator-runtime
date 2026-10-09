@@ -303,6 +303,34 @@ BEGIN
   END IF;
 END;
 $mecord_trigger$;
+-- Row-level DELETE guards do not run for TRUNCATE; fence that independent
+-- DDL path as well. Full-cluster restore must use the verified explicit
+-- snapshot protocol, never wipe hidden generation history as a shortcut.
+CREATE OR REPLACE FUNCTION mecord_control_plane_truncate_guard()
+RETURNS trigger LANGUAGE plpgsql AS $mecord_truncate$
+BEGIN
+  RAISE EXCEPTION USING ERRCODE='23514',
+    MESSAGE='CONTROL_PLANE_LEGACY_TRUNCATE_FENCED: authority history cannot be truncated';
+END;
+$mecord_truncate$;
+DO $mecord_truncate_trigger$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'mecord_control_plane'::regclass
+      AND tgname = 'mecord_control_plane_truncate_guard_trigger'
+      AND NOT tgisinternal
+  ) THEN
+    BEGIN
+      CREATE TRIGGER mecord_control_plane_truncate_guard_trigger
+        BEFORE TRUNCATE ON mecord_control_plane
+        FOR EACH STATEMENT EXECUTE FUNCTION mecord_control_plane_truncate_guard();
+    EXCEPTION WHEN duplicate_object THEN
+      NULL;
+    END;
+  END IF;
+END;
+$mecord_truncate_trigger$;
 `));
   }
 
