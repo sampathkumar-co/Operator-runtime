@@ -65,6 +65,9 @@ interface AccountDeviceState {
   accounts: OperatorAccount[];
   memberships: AccountDeviceMembership[];
   erasures: AccountErasureRecord[];
+  // Survives account erasure without retaining personal owner/device history.
+  // Bounds future per-device generations above every physically erased member.
+  authorityGenerationFloor?: number;
 }
 type LegacyAccountDeviceState = { version: 1; accounts: OperatorAccount[]; memberships: AccountDeviceMembership[] };
 
@@ -184,7 +187,12 @@ export class AccountDeviceRegistry {
       if (!currentDevice) throw new OperatorError('DEVICE_NOT_FOUND', 'Cannot bind a device whose cryptographic registration was removed during authority transfer.');
       if (currentDevice.status !== 'active') throw new OperatorError('DEVICE_REVOKED', 'Cannot bind a revoked device to an account.');
       if (state.memberships.length >= MAX_MEMBERSHIPS) throw new OperatorError('ACCOUNT_DEVICE_LIMIT', `At most ${MAX_MEMBERSHIPS} account-device memberships may be stored.`);
-      const authorityGeneration = Math.max(0, ...state.memberships.filter((m) => m.deviceId === deviceId).map((m) => m.authorityGeneration ?? 1)) + 1;
+
+      const previous = state.memberships.reduce((highest, membership) =>
+        membership.deviceId === deviceId ? Math.max(highest, membership.authorityGeneration ?? 1) : highest,
+        state.authorityGenerationFloor ?? 0);
+      if (previous >= Number.MAX_SAFE_INTEGER) throw new OperatorError('ACCOUNT_AUTHORITY_GENERATION_EXHAUSTED', 'Account-device generation cannot advance without an authority epoch migration.');
+      const authorityGeneration = previous + 1;
       const membership: AccountDeviceMembership = { accountId, deviceId, status: 'active', addedAt: this.#clock().toISOString(), authorityGeneration };
       state.memberships.push(membership);
       return cloneMembership(membership);
@@ -363,6 +371,12 @@ export class AccountDeviceRegistry {
             const activeElsewhere = current.memberships.some((membership) => membership.deviceId === deviceId && membership.accountId !== accountId && membership.status === 'active');
             if (!activeElsewhere) await this.#devices.unregisterActiveDevice(deviceId);
           }
+          // Erasure must not erase fencing history. A future new owner of any
+          // erased device cannot receive the same generation as the old owner,
+          // even after process restarts and the completed erasure is pruned.
+          current.authorityGenerationFloor = current.memberships.reduce((highest, membership) =>
+            membership.accountId === accountId ? Math.max(highest, membership.authorityGeneration) : highest,
+            current.authorityGenerationFloor ?? 0);
           current.memberships = current.memberships.filter((membership) => membership.accountId !== accountId);
           current.accounts = current.accounts.filter((candidate) => candidate.accountId !== accountId);
           entry.phase = 'REGISTRY_REMOVED'; entry.updatedAt = this.#clock().toISOString();
@@ -522,6 +536,13 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
     return { accountId, principalHash, status, createdAt, disabledAt, disabledReason } satisfies OperatorAccount;
   });
 
+  // Old v2 stores have no persisted floor. Their surviving memberships remain
+  // authoritative, but an already erased pre-upgrade generation cannot be
+  // reconstructed without a separately audited restore/upgrade epoch.
+  const authorityGenerationFloor = input.authorityGenerationFloor === undefined ? 0 : Number(input.authorityGenerationFloor);
+  if (!Number.isSafeInteger(authorityGenerationFloor) || authorityGenerationFloor < 0) {
+    throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Account authority generation high-water mark is invalid.');
+  }
   const activeDevices = new Set<string>();
   const membershipKeys = new Set<string>();
   const memberships = input.memberships.map((raw) => {
@@ -577,7 +598,7 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
     const journal = erasures.find((entry) => entry.accountId === account.accountId && !['REGISTRY_REMOVED', 'COMPLETE'].includes(entry.phase));
     if (!journal) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Erasing account is missing its resumable erasure journal.');
   }
-  return { version: 2, accounts, memberships, erasures };
+  return { version: 2, accounts, memberships, erasures, authorityGenerationFloor };
 }
 
 function requireErasure(state: AccountDeviceState, erasureId: string, expected: AccountErasurePhase): AccountErasureRecord {
