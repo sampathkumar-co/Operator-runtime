@@ -242,6 +242,7 @@ function validStartedIdentity(value: string): boolean {
   if (value.length < 1 || value.length > 256 || value.includes('\0')) return false;
   if (/^windows-filetime:\d{15,20}$/.test(value)) return true;
   if (/^linux-boot-ticks:\d{1,32}$/.test(value)) return true;
+  if (/^linux-boot-id:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:ticks:\d{1,32}$/.test(value)) return true;
   if (/^ps-lstart:[^\r\n]{1,128}$/.test(value)) return true;
   return /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value));
 }
