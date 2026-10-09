@@ -11,6 +11,7 @@ export interface DurableCompensationIntent {
   targetId: string;
   subjectKey?: string;
   createdAt: string;
+  confirmedAt?: string;
 }
 
 interface CompensationState {
@@ -35,7 +36,7 @@ export class DurableCompensationJournal {
     this.#clock = options.clock ?? (() => new Date());
   }
 
-  async prepare(input: Omit<DurableCompensationIntent, 'createdAt'>): Promise<DurableCompensationIntent> {
+  async prepare(input: Omit<DurableCompensationIntent, 'createdAt' | 'confirmedAt'>): Promise<DurableCompensationIntent> {
     return await this.#mutate((state) => {
       const candidate = normalizeIntent({ ...input, createdAt: this.#clock().toISOString() });
       const existing = state.intents.find((item) => item.id === candidate.id);
@@ -47,6 +48,17 @@ export class DurableCompensationJournal {
       state.intents.push(candidate);
       state.intents.sort((a, b) => a.id.localeCompare(b.id));
       return candidate;
+    });
+  }
+
+  // Provider acknowledgement grants recovery authority only for the exact
+  // owner-bound resource identity recorded by the prepare phase.
+  async confirm(idInput: string): Promise<void> {
+    const id = bounded(idInput, 256, 'id');
+    await this.#mutate((state) => {
+      const intent = state.intents.find(item => item.id === id);
+      if (!intent) throw new OperatorError('COMPENSATION_INTENT_NOT_FOUND', 'Cannot confirm a missing compensation intent.');
+      if (!intent.confirmedAt) intent.confirmedAt = this.#clock().toISOString();
     });
   }
 
@@ -116,7 +128,8 @@ function normalizeIntent(input: DurableCompensationIntent): DurableCompensationI
     operation: bounded(input.operation, 128, 'operation'),
     targetId: bounded(input.targetId, 256, 'targetId'),
     ...(input.subjectKey === undefined ? {} : { subjectKey: bounded(input.subjectKey, 256, 'subjectKey') }),
-    createdAt: iso(input.createdAt)
+    createdAt: iso(input.createdAt),
+    ...(input.confirmedAt === undefined ? {} : { confirmedAt: iso(input.confirmedAt) })
   };
 }
 
