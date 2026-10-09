@@ -193,3 +193,17 @@ test('protected commits cannot mutate the fence namespace or bypass an effect CA
   }), (e: any) => e?.code === 'CONTROL_PLANE_CAS_MISMATCH');
   assert.equal((await make().assertCurrent(lease)).generation, lease.generation);
 });
+
+test('voluntary release preserves monotonic token generation and does not override revocation', async (t) => {
+  const { make, subject } = await fixture(t);
+  const previous = await make().acquire(subject, 'lease-owner');
+  await make().release(previous);
+  await assert.rejects(make().assertCurrent(previous), (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  const replacement = await make().acquire(subject, 'other-owner');
+  assert.ok(replacement.generation > previous.generation);
+  await assert.rejects(make().release(previous), (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  assert.equal((await make().assertCurrent(replacement)).ownerId, 'other-owner');
+  await make().revoke(subject);
+  await assert.rejects(make().release(replacement), (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  await assert.rejects(make().acquire(subject, 'revoked-worker'), (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
+});
