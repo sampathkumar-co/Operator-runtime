@@ -287,3 +287,74 @@ test('copied valid owner token is readable across processes but cannot mutate fr
   });
   assert.equal(committed.record?.value.permitted, true);
 });
+
+test('foreign account cannot revoke another owner at a reused generation', async (t) => {
+  const { make, subject } = await fixture(t);
+  const unrelated = { ...subject, accountId: crypto.randomUUID() };
+  const owner = await make().acquire(subject, 'owner-A');
+  await assert.rejects(make().revoke(unrelated),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  assert.equal((await make().assertCurrent(owner)).ownerId, 'owner-A');
+  const barrier = await make().revoke(subject);
+  const before = barrier.generation;
+  await assert.rejects(make().revoke(unrelated),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  const repeated = await make().revoke(subject);
+  assert.ok(repeated.generation > before);
+  assert.equal(repeated.revokedGeneration, subject.authorityGeneration);
+  // Merely claiming a higher generation must not let a foreign tenant
+  // rewrite the barrier; that tenant has not acquired authority yet.
+  await assert.rejects(make().revoke({ ...unrelated, authorityGeneration: 2 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  await assert.rejects(make().acquire(unrelated, 'foreign-account-at-same-generation'),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
+  const newer = await make().acquire({ ...unrelated, authorityGeneration: 2 }, 'new-authority');
+  assert.equal((await make().assertCurrent(newer)).ownerId, 'new-authority');
+  await assert.rejects(make().revoke({ ...subject, authorityGeneration: 3 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  await assert.rejects(make().revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
+  assert.equal((await make().assertCurrent(newer)).leaseId, newer.leaseId);
+  const newerBarrier = await make().revoke({ ...unrelated, authorityGeneration: 2 });
+  await assert.rejects(make().revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
+  const finalBarrier = await make().revoke({ ...unrelated, authorityGeneration: 2 });
+  assert.equal(finalBarrier.revokedGeneration, 2);
+  assert.ok(finalBarrier.generation > newerBarrier.generation);
+});
+
+test('revoked authority record with forged device identity fails closed', async (t) => {
+  const { make, subject } = await fixture(t);
+  await make().revoke(subject);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-authority-corrupt-barrier-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // A forged state with valid schema cannot be used to revoke someone
+  // else's record: read-side binding validates stored device versus CAS key.
+  const store = new EmbeddedControlPlaneStore(dir);
+  await store.transact([{ namespace: '__mecord_remote_authority', key: subject.deviceId,
+    expectedGeneration: null, value: { kind: 'revoked', schemaVersion: 1,
+      accountId: subject.accountId, deviceId: crypto.randomUUID(), revokedGeneration: 1 } }]);
+  const scoped = new RemoteAuthorityFenceStore(store, { authorize: async () => {} });
+  await assert.rejects(scoped.revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_CORRUPT');
+});
+
+test('expiry never transfers account ownership at a recycled generation', async (t) => {
+  const { make, subject, advance } = await fixture(t);
+  const first = await make().acquire(subject, 'old-owner', 5_000);
+  const other = { ...subject, accountId: crypto.randomUUID() };
+  advance(5_001);
+  await assert.rejects(make().acquire(other, 'foreign-owner', 5_000),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  // A crashed worker from the same account can reacquire after its exact TTL,
+  // with a new owner token and strictly higher control-plane CAS generation.
+  const recovered = await make().acquire(subject, 'replacement-same-account', 5_000);
+  assert.ok(recovered.generation > first.generation);
+  await assert.rejects(make().assertCurrent(first),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  advance(5_001);
+  const legitimatelyRebound = await make().acquire({
+    ...other, authorityGeneration: subject.authorityGeneration + 1
+  }, 'new-account-generation', 5_000);
+  assert.ok(legitimatelyRebound.generation > recovered.generation);
+});
