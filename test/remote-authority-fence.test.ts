@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -252,4 +254,35 @@ test('revoked authoritative account policy blocks old leases even before a globa
   await make().revoke(subject);
   await assert.rejects(make().assertCurrent(lease),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+});
+
+test('copied valid owner token is readable across processes but cannot mutate from a different OS process', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-remote-lease-borrowed-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const subject: RemoteAuthoritySubject = {
+    accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 1
+  };
+  const owningStore = new EmbeddedControlPlaneStore(root);
+  const owner = new RemoteAuthorityFenceStore(owningStore, {
+    authorize: async () => {}, authorizeMutation: async () => {}
+  });
+  const lease = await owner.acquire(subject, 'legitimate-owner');
+  const fixturePath = new URL('./fixtures/remote-lease-borrowed-process.mjs', import.meta.url);
+  const { stdout } = await promisify(execFile)(process.execPath,
+    ['--experimental-strip-types', fixturePath.pathname, root, JSON.stringify(lease)],
+    { timeout: 20_000, maxBuffer: 16_384 });
+  const result = JSON.parse(stdout.trim());
+  assert.deepEqual(result, {
+    verified: 'ACCEPTED',
+    heartbeat: 'REMOTE_AUTHORITY_PROCESS_MISMATCH',
+    release: 'REMOTE_AUTHORITY_PROCESS_MISMATCH',
+    commit: 'REMOTE_AUTHORITY_PROCESS_MISMATCH'
+  });
+  assert.equal((await owner.assertCurrent(lease)).leaseId, lease.leaseId);
+  assert.equal(await owningStore.get('provider-effects', 'stolen-token-effect'), null);
+  const committed = await owner.commitProtected(lease, {
+    namespace: 'provider-effects', key: 'real-owner-effect', expectedGeneration: null,
+    value: { permitted: true }
+  });
+  assert.equal(committed.record?.value.permitted, true);
 });
