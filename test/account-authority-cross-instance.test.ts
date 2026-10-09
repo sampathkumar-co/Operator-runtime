@@ -165,3 +165,55 @@ await new AccountDeviceRegistry(process.argv[1],{}).resolveOrCreateAccount({
  const state=JSON.parse(await fs.readFile(path.join(dir,'account-devices.json'),'utf8'));
  assert.equal(state.accounts.length,4);
 });
+
+
+test('erasure retains a high-water generation fence without preserving erased membership history', async (t) => {
+  const dir = await temp(t);
+  const deviceId = crypto.randomUUID();
+  const devices = {
+    listDevices: async () => [{ deviceId, status: 'active' }],
+    unregisterActiveDevice: async () => undefined
+  } as unknown as DeviceRegistryStore;
+  const store = () => new AccountDeviceRegistry(dir, devices);
+  const ownerA = await store().resolveOrCreateAccount({ issuer: 'issuer', subject: 'erased-owner' });
+  const first = await store().bindDevice(ownerA.accountId, deviceId);
+  assert.equal(first.authorityGeneration, 1);
+  await store().eraseAccount(ownerA.accountId);
+
+  const afterErase = JSON.parse(await fs.readFile(path.join(dir, 'account-devices.json'), 'utf8'));
+  assert.equal(afterErase.memberships.some((entry: any) => entry.accountId === ownerA.accountId), false);
+  assert.equal(afterErase.accounts.some((entry: any) => entry.accountId === ownerA.accountId), false);
+  assert.equal(afterErase.authorityGenerationFloor, 1);
+
+  const ownerB = await store().resolveOrCreateAccount({ issuer: 'issuer', subject: 'new-owner' });
+  const second = await store().bindDevice(ownerB.accountId, deviceId);
+  assert.equal(second.authorityGeneration, 2);
+  await assert.rejects(store().withActiveAuthorityLease({
+    accountId: ownerB.accountId, deviceId, generation: first.authorityGeneration
+  }, async () => 'stale'), (error: any) => error?.code === 'ACCOUNT_AUTHORITY_REVOKED');
+
+  await store().eraseAccount(ownerB.accountId);
+  const ownerC = await store().resolveOrCreateAccount({ issuer: 'issuer', subject: 'third-owner' });
+  const third = await store().bindDevice(ownerC.accountId, deviceId);
+  assert.equal(third.authorityGeneration, 3);
+});
+
+test('multiple device generations never fall below a completed erasure fence', async (t) => {
+  const dir = await temp(t);
+  const deviceA = crypto.randomUUID();
+  const deviceB = crypto.randomUUID();
+  const devices = {
+    listDevices: async () => [{ deviceId: deviceA, status: 'active' }, { deviceId: deviceB, status: 'active' }],
+    unregisterActiveDevice: async () => undefined
+  } as unknown as DeviceRegistryStore;
+  const registry = () => new AccountDeviceRegistry(dir, devices);
+  const firstOwner = await registry().resolveOrCreateAccount({ issuer: 'issuer', subject: 'first' });
+  const a = await registry().bindDevice(firstOwner.accountId, deviceA);
+  await registry().removeDevice(firstOwner.accountId, deviceA, 'rotate owner');
+  const again = await registry().bindDevice(firstOwner.accountId, deviceA);
+  assert.ok(again.authorityGeneration > a.authorityGeneration);
+  await registry().eraseAccount(firstOwner.accountId);
+  const nextOwner = await registry().resolveOrCreateAccount({ issuer: 'issuer', subject: 'new' });
+  const b = await registry().bindDevice(nextOwner.accountId, deviceB);
+  assert.ok(b.authorityGeneration > again.authorityGeneration);
+});
