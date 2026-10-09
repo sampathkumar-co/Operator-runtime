@@ -229,3 +229,27 @@ test('a valid lease cannot commit an effect without independently authorized res
     value: { data: 1 }
   }), (e: any) => e?.code === 'REMOTE_AUTHORITY_MUTATION_POLICY_REQUIRED');
 });
+
+test('revoked authoritative account policy blocks old leases even before a global barrier arrives', async (t) => {
+  const { make, subject, permit } = await fixture(t);
+  const lease = await make().acquire(subject, 'delayed-remote-provider');
+  assert.equal((await make().assertCurrent(lease)).generation, lease.generation);
+  // Simulate a policy-plane revoke followed by an asynchronously delayed
+  // cross-host control-plane revocation event. The policy check must deny
+  // execution without relying only on the still-live lease record.
+  permit(false);
+  await assert.rejects(make().assertCurrent(lease), /authoritative policy denied request/);
+  await assert.rejects(make().heartbeat(lease), /authoritative policy denied request/);
+  await assert.rejects(make().release(lease), /authoritative policy denied request/);
+  await assert.rejects(make().commitProtected(lease, {
+    namespace: 'provider-effects', key: 'forbidden-after-policy-revoke',
+    expectedGeneration: null, value: { effect: 'not-allowed' }
+  }), /authoritative policy denied request/);
+  // Prove this is a policy denial, not merely a CAS lease that happened to
+  // expire. The owner token is otherwise unchanged and still present.
+  permit(true);
+  assert.equal((await make().assertCurrent(lease)).generation, lease.generation);
+  await make().revoke(subject);
+  await assert.rejects(make().assertCurrent(lease),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+});
