@@ -79,6 +79,13 @@ export class CdpConnection {
         try { this.#socket.close(); } catch { /* connection error is already authoritative */ }
         reject(new OperatorError('CDP_CONNECT_FAILED', 'Failed to connect to browser target.', { retryable: true }));
       }), { once: true });
+      // A WebSocket may close without emitting an error or ever opening.
+      // Settle the handshake immediately rather than waiting for the entire
+      // connection timeout before the caller can recover/reconnect.
+      this.#socket.addEventListener('close', () => finish(() => {
+        this.#closed = true;
+        reject(new OperatorError('CDP_CONNECTION_CLOSED', 'Browser target connection closed during setup.', { retryable: true }));
+      }), { once: true });
     });
 
     this.#socket.addEventListener('message', (event) => {
@@ -165,7 +172,17 @@ export class CdpConnection {
       };
       signal?.addEventListener('abort', onAbort, { once: true });
       this.#pending.set(id, { resolve, reject, timer, ...(signal ? { detachAbort: () => signal.removeEventListener('abort', onAbort) } : {}) });
-      this.#socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      try {
+        this.#socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      } catch {
+        // Synchronous send failures never create an acknowledged CDP request.
+        // Do not retain a phantom pending command or an abort listener until
+        // timeout; allow the caller to surface the transport failure promptly.
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        this.#pending.delete(id);
+        reject(new OperatorError('CDP_COMMAND_SEND_FAILED', 'Unable to queue browser target command.', { retryable: true }));
+      }
     });
   }
 
