@@ -988,3 +988,26 @@ test('parent lifecycle refuses unconfirmed child start, pause and cancel results
  await assert.rejects(ops.cancel(op.id),(e:any)=>e?.code==='OPERATIONS_CHILD_CANCEL_UNCONFIRMED');
  assert.equal((await ops.inspect(op.id)).state,'PENDING');
 });
+
+test('terminal operation retains device reconciliation when release is unconfirmed', async t => {
+  const base = await setup(t);
+  let releases = 0;
+  const devices = {
+    async reserve(_request:unknown,_ads:unknown[],opts:{reservationId:string}){
+      return {id:opts.reservationId,sessionId:crypto.randomUUID(),state:'ACTIVE'};
+    },
+    async release(id:string){ releases++; return {id,state:'ACTIVE'}; }
+  };
+  const ops = new DigitalOperationsLayer(base.state,{...base,devices:devices as any});
+  const op = await ops.submit({
+    requestId:crypto.randomUUID(),objective:'Verify actual device release',
+    scopeKey:'project:device-release',successConditions:['confirmed scheduler release'],
+    execution:{kind:'team',workItems:work()},run:false,
+    device:{request:{workloadKey:'work:release-confirm'},advertisements:[]}
+  });
+  const result = await ops.cancel(op.id);
+  assert.equal(result.state,'CANCELLED');
+  assert.equal(releases,1);
+  assert.equal(result.deviceReservationStatus,'reconciliation_required');
+  assert.equal(result.deviceReservationErrorCode,'DEVICE_RESERVATION_RELEASE_UNCONFIRMED');
+});
