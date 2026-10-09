@@ -6,6 +6,10 @@ import { approvalAuthorityFingerprint } from './approval-store.ts';
 
 const MAX_SESSION_MS = 8 * 60 * 60_000;
 const IDLE_SESSION_MS = 60 * 60_000;
+// Session approval attenuates to the risk class explicitly approved by the
+// user; approving an external action never grants system/destructive authority.
+const RISK_RANK: Record<ActionRequest['risk'], number> = { read: 0, write: 1, external: 2, system: 3, destructive: 4 };
+const riskRank = (risk: ActionRequest['risk']): number => RISK_RANK[risk];
 
 export type SessionApprovalGrant = {
   id: string;
@@ -16,6 +20,7 @@ export type SessionApprovalGrant = {
   expiresAt: string;
   idleExpiresAt: string;
   sourceActionId: string;
+  maxApprovedRisk: 'external' | 'system' | 'destructive';
 };
 
 export type SessionApprovalSummary = {
@@ -49,7 +54,8 @@ export class SessionApprovalStore {
       lastUsedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + MAX_SESSION_MS).toISOString(),
       idleExpiresAt: new Date(now.getTime() + IDLE_SESSION_MS).toISOString(),
-      sourceActionId: record.actionId
+      sourceActionId: record.actionId,
+      maxApprovedRisk: record.risk as SessionApprovalGrant['maxApprovedRisk']
     };
     this.#grant = grant;
     return { ...grant };
@@ -72,7 +78,7 @@ export class SessionApprovalStore {
     if (!grant) return false;
     if (grant.authorityHash !== approvalAuthorityFingerprint(authority)) return false;
     if (grant.scopeHash !== permissionScopeFingerprint(permissions)) return false;
-    if (!['external', 'system', 'destructive'].includes(action.risk)) return true;
+    if (riskRank(action.risk) > riskRank(grant.maxApprovedRisk)) return false;
     const now = this.#clock();
     grant.lastUsedAt = now.toISOString();
     grant.idleExpiresAt = new Date(now.getTime() + IDLE_SESSION_MS).toISOString();
@@ -93,9 +99,9 @@ export class SessionApprovalStore {
     grant.idleExpiresAt = new Date(now.getTime() + IDLE_SESSION_MS).toISOString();
     return {
       ...permissions,
-      allowExternalWrites: true,
-      allowSystemChanges: true,
-      allowDestructive: true
+      allowExternalWrites: Boolean(permissions.allowExternalWrites) || riskRank(grant.maxApprovedRisk) >= riskRank('external'),
+      allowSystemChanges: Boolean(permissions.allowSystemChanges) || riskRank(grant.maxApprovedRisk) >= riskRank('system'),
+      allowDestructive: Boolean(permissions.allowDestructive) || riskRank(grant.maxApprovedRisk) >= riskRank('destructive')
     };
   }
 

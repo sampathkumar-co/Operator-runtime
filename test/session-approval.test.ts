@@ -94,3 +94,27 @@ test('session approval cannot cross an enterprise policy freshness boundary', ()
   const restoredContent = { ...permissions, enterprisePolicyDigest: 'a'.repeat(64), enterprisePolicyGeneration: 9 };
   assert.equal(store.permissionsFor(authorityA, restoredContent).allowDestructive, false);
 });
+
+test('a session grant cannot promote an external approval into system or destructive authority', () => {
+  const clock = () => new Date('2026-09-23T10:00:00.000Z');
+  const store = new SessionApprovalStore({ clock });
+  const source: ApprovalRecord = { ...record(), capability: 'app.operate', risk: 'external' };
+  const grant = store.grant(source, permissions);
+  assert.equal(grant.sourceActionId, source.actionId);
+  const after = store.permissionsFor(authorityA, permissions);
+  assert.equal(after.allowExternalWrites, true);
+  assert.equal(after.allowSystemChanges, false);
+  assert.equal(after.allowDestructive, false);
+  const external: ActionRequest = { ...action, capability: 'app.operate', risk: 'external' };
+  const system: ActionRequest = { ...action, capability: 'terminal.execute', risk: 'system' };
+  assert.equal(store.allows(external, authorityA, permissions), true);
+  assert.equal(store.allows(system, authorityA, permissions), false);
+  assert.equal(store.allows(action, authorityA, permissions), false);
+  const systemStore = new SessionApprovalStore({ clock });
+  systemStore.grant({ ...record(), capability: 'terminal.execute', risk: 'system' }, permissions);
+  const systemPermissions = systemStore.permissionsFor(authorityA, permissions);
+  assert.equal(systemPermissions.allowExternalWrites, true);
+  assert.equal(systemPermissions.allowSystemChanges, true);
+  assert.equal(systemPermissions.allowDestructive, false);
+  assert.equal(systemStore.allows(action, authorityA, permissions), false);
+});
