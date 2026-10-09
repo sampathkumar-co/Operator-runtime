@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
-import type { ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
+import type { ControlPlaneMutation, ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
 import { currentProcessInstance, validProcessInstance, type ProcessInstanceIdentity } from './process-instance.ts';
 
 /**
@@ -32,6 +32,8 @@ export interface RemoteAuthorityBarrier extends RemoteAuthoritySubject {
   generation: number;
 }
 export type RemoteAuthorityAuthorization = (subject: RemoteAuthoritySubject, mode: 'acquire' | 'revoke') => Promise<void>;
+/** Provider policy must bind each mutation's namespace/key to the authorized account/device. */
+export type RemoteAuthorityMutationAuthorization = (subject: RemoteAuthoritySubject, mutation: ControlPlaneMutation) => Promise<void>;
 
 const NS = '__mecord_remote_authority';
 const MIN_TTL_MS = 5_000;
@@ -42,14 +44,16 @@ const OWNER = /^[A-Za-z0-9._:@/+=-]{1,256}$/;
 export class RemoteAuthorityFenceStore {
   #store: ControlPlaneStore;
   #authorize: RemoteAuthorityAuthorization;
+  #authorizeMutation?: RemoteAuthorityMutationAuthorization;
   #clock: () => Date;
 
-  constructor(store: ControlPlaneStore, options: { authorize: RemoteAuthorityAuthorization; clock?: () => Date }) {
+  constructor(store: ControlPlaneStore, options: { authorize: RemoteAuthorityAuthorization; authorizeMutation?: RemoteAuthorityMutationAuthorization; clock?: () => Date }) {
     if (!options || typeof options.authorize !== 'function') {
       throw new OperatorError('REMOTE_AUTHORITY_POLICY_REQUIRED', 'A trusted external authorization hook is required.');
     }
     this.#store = store;
     this.#authorize = options.authorize;
+    this.#authorizeMutation = options.authorizeMutation;
     this.#clock = options.clock ?? (() => new Date());
   }
 
@@ -117,6 +121,62 @@ export class RemoteAuthorityFenceStore {
       expiresAt
     }], new Date(now).toISOString());
     return { ...lease, generation: renewed!.generation, expiresAt };
+  }
+
+  /**
+   * Atomic provider commit for effects stored in the SAME ControlPlaneStore.
+   * Compare the exact lease generation and commit the protected mutation in
+   * one transaction. If revocation/heartbeat wins first, the provider write
+   * is rolled back with CONTROL_PLANE_CAS_MISMATCH. This is not an external
+   * side-effect wrapper: out-of-band filesystem/network writes still require
+   * a provider-native prepare/commit and reconciliation protocol.
+   *
+   * The returned lease supersedes the input even for a protected deletion:
+   * advancing the owner generation is necessary to fence concurrent writers.
+   */
+  async commitProtected(leaseInput: RemoteAuthorityLease, mutation: ControlPlaneMutation):
+    Promise<{ lease: RemoteAuthorityLease; record: ControlPlaneRecord | null }> {
+    const lease = await this.assertCurrent(leaseInput);
+    if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS) {
+      throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must not address the authority namespace.');
+    }
+    if (!this.#authorizeMutation) {
+      throw blocked('REMOTE_AUTHORITY_MUTATION_POLICY_REQUIRED', 'Provider effect scope authorization is required before protected commit.');
+    }
+    // The mutation authorizer is trusted to verify exact account/device/resource
+    // ownership, not just a caller-supplied label. This check may deny the
+    // operation; the lease generation CAS still guards against revocation races.
+    await this.#authorizeMutation(lease, mutation);
+    const now = this.#clock().toISOString();
+    const [advanced, committed] = await this.#store.transact([
+      {
+        namespace: NS, key: resourceKey(lease), expectedGeneration: lease.generation,
+        value: { kind: 'active', schemaVersion: 1, accountId: lease.accountId,
+          deviceId: lease.deviceId, authorityGeneration: lease.authorityGeneration,
+          ownerId: lease.ownerId, process: lease.process, leaseId: lease.leaseId,
+          fenceToken: lease.fenceToken },
+        expiresAt: lease.expiresAt
+      },
+      mutation
+    ], now);
+    if (!advanced) {
+      throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Atomic authority checkpoint did not produce a new generation.');
+    }
+    return {
+      lease: { ...lease, generation: advanced.generation },
+      record: committed ?? null
+    };
+  }
+
+  /** Voluntary exact-owner release. Revocation remains a separate, irreversible
+   * generation barrier. A release keeps the key's CAS history as a tombstone.
+   */
+  async release(leaseInput: RemoteAuthorityLease): Promise<void> {
+    const lease = await this.assertCurrent(leaseInput);
+    await this.#store.transact([{
+      namespace: NS, key: resourceKey(lease),
+      expectedGeneration: lease.generation, value: null
+    }], this.#clock().toISOString());
   }
 
   async revoke(subjectInput: RemoteAuthoritySubject): Promise<RemoteAuthorityBarrier> {
