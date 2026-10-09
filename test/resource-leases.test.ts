@@ -507,7 +507,7 @@ test('same owner label never authorizes overlapping exclusive leases from indepe
   const state = await temp(t);
   const left = new ResourceLeaseStore(state);
   const right = new ResourceLeaseStore(state);
-  const key = 'repo:/tmp/same-owner-alias';
+  const key = 'fs-path:/tmp/same-owner-alias';
   const first = await left.acquire('identical-owner-label', [key], 'exclusive');
   await first.assertOwned();
   await assert.rejects(
