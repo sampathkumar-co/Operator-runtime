@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import pg from 'pg';
+// Registered under the existing real-PostgreSQL CI entry point.
+import './real-quarantine-anchor.test.mjs';
 import {
   PostgresControlPlaneStore,
   applyControlPlaneMigration,

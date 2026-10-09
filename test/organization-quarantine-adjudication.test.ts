@@ -213,3 +213,88 @@ test('even valid provider signature and operator authority cannot retire quarant
   assert.equal(remaining[0]?.id, f.quarantineId);
   assert.deepEqual(await f.adjudicator.list(), []);
 });
+
+test('external high-water anchor rejects valid MAC ledger truncation and complete deletion', async t => {
+  const f = await setup(t);
+  let highWater = { count: 0, headMac: '0'.repeat(64) };
+  const anchor = {
+    read: async () => ({ ...highWater }),
+    compareAndAdvance: async (expected: typeof highWater, next: typeof highWater) => {
+      assert.deepEqual(highWater, expected, 'independent anchor must provide exact CAS');
+      highWater = { ...next };
+    }
+  };
+  const anchored = new OrganizationQuarantineAdjudicator(f.dir, {
+    journal: f.journal, ledgerSecret: f.ledgerSecret,
+    providerPublicKeyPem: f.providerPublicKeyPem,
+    authorize: async id => { assert.equal(id, 'security-admin'); },
+    anchor, requireExternalAnchor: true
+  });
+  await anchored.review({
+    intentId: f.quarantineId, programId: f.program.id, targetKey: 'service',
+    expectedMissionId: f.claim.expectedMissionId,
+    returnedMissionId: f.returnedMissionId, operatorId: 'security-admin',
+    providerClaim: f.signed(f.claim)
+  });
+  assert.equal(highWater.count, 1);
+  const file = path.join(f.dir, 'quarantine-adjudications.json');
+  const intact = await fs.readFile(file, 'utf8');
+  const state = JSON.parse(intact);
+  await fs.writeFile(file, JSON.stringify({ ...state, records: [] }));
+  await assert.rejects(anchored.list(), (e: any) => e?.code === 'QUARANTINE_LEDGER_ROLLBACK');
+  await fs.rm(file);
+  await assert.rejects(anchored.list(), (e: any) => e?.code === 'QUARANTINE_LEDGER_ROLLBACK');
+  await fs.writeFile(file, intact);
+  assert.equal((await anchored.list()).length, 1);
+});
+
+test('external anchor handoff crash reconciles one exact MAC-linked commit and resumes original quarantine', async t => {
+  const f = await setup(t);
+  let highWater = { count: 0, headMac: '0'.repeat(64) };
+  let rejectFirstAdvance = true;
+  const anchor = {
+    read: async () => ({ ...highWater }),
+    compareAndAdvance: async (expected: typeof highWater, next: typeof highWater) => {
+      assert.deepEqual(expected, highWater);
+      if (rejectFirstAdvance) {
+        rejectFirstAdvance = false;
+        throw new Error('injected independent-anchor crash');
+      }
+      highWater = { ...next };
+    }
+  };
+  const options = {
+    journal: f.journal, ledgerSecret: f.ledgerSecret,
+    providerPublicKeyPem: f.providerPublicKeyPem,
+    authorize: async (id: string) => { assert.equal(id, 'security-admin'); },
+    anchor, requireExternalAnchor: true
+  };
+  const review = (adjudicator: OrganizationQuarantineAdjudicator) => adjudicator.review({
+    intentId: f.quarantineId, programId: f.program.id, targetKey: 'service',
+    expectedMissionId: f.claim.expectedMissionId,
+    returnedMissionId: f.returnedMissionId, operatorId: 'security-admin',
+    providerClaim: f.signed(f.claim)
+  });
+  await assert.rejects(review(new OrganizationQuarantineAdjudicator(f.dir, options)),
+    (e: any) => e?.code === 'QUARANTINE_ANCHOR_UNAVAILABLE');
+  assert.equal(highWater.count, 0);
+  assert.ok((await f.journal.pending('organization')).some(x => x.id === f.quarantineId),
+    'failed external anchor cannot retire quarantine');
+  const recovered = new OrganizationQuarantineAdjudicator(f.dir, options);
+  const committed = await recovered.list();
+  assert.equal(committed.length, 1);
+  assert.equal(highWater.count, 1, 'single fully MAC-linked local record advances anchor after crash');
+  await review(recovered);
+  assert.ok(!(await f.journal.pending('organization')).some(x => x.id === f.quarantineId));
+  assert.ok((await f.journal.pending('organization')).some(x => x.id === f.originalId),
+    'original child cancellation intent must never be erased by foreign-ID adjudication');
+});
+
+test('production strict mode requires independently configured quarantine ledger anchor', async t => {
+  const f = await setup(t);
+  assert.throws(() => new OrganizationQuarantineAdjudicator(f.dir, {
+    journal: f.journal, ledgerSecret: f.ledgerSecret,
+    providerPublicKeyPem: f.providerPublicKeyPem,
+    authorize: async () => {}, requireExternalAnchor: true
+  }), (e: any) => e?.code === 'QUARANTINE_ANCHOR_REQUIRED');
+});
