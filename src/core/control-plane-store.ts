@@ -46,7 +46,8 @@ export interface ControlPlaneMigration {
 
 const MIGRATION_NAMESPACE = '__mecord_migrations';
 
-interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; }
+interface EmbeddedTombstone { namespace: string; key: string; generation: number; }
+interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; tombstones?: EmbeddedTombstone[]; }
 
 const OPTIONS = {
   maxBytes: 256 * 1024 * 1024,
@@ -86,6 +87,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const index = new Map(state.records.map((item, i) => [recordKey(item.namespace, item.key), i]));
+      const tombstones = new Map((state.tombstones ?? []).map((item) => [recordKey(item.namespace, item.key), item]));
       const seen = new Set<string>();
       const normalized = mutations.map((item) => normalizeMutation(item));
       for (const mutation of normalized) {
@@ -109,6 +111,8 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
         const current = position === undefined ? undefined : state.records[position];
         if (mutation.value === null) {
           if (position !== undefined) {
+            // Preserve the last generation after physical removal, preventing ABA on key reuse.
+            tombstones.set(rk, { namespace: current!.namespace, key: current!.key, generation: current!.generation });
             state.records.splice(position, 1);
             // Rebuild after splice to retain correct positions for following distinct keys.
             index.clear();
@@ -116,7 +120,10 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
           }
           continue;
         }
-        const generation = (current?.generation ?? 0) + 1;
+        const priorGeneration = Math.max(current?.generation ?? 0, tombstones.get(rk)?.generation ?? 0);
+        if (priorGeneration >= Number.MAX_SAFE_INTEGER) throw invalid('Control-plane record generation exhausted.');
+        const generation = priorGeneration + 1;
+        tombstones.delete(rk);
         const record = makeRecord(mutation.namespace, mutation.key, generation, mutation.value, now, mutation.expiresAt);
         const updatedPosition = index.get(rk);
         if (updatedPosition === undefined) {
@@ -126,6 +133,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
         results.push(record);
       }
       state.records.sort((a, b) => recordKey(a.namespace, a.key).localeCompare(recordKey(b.namespace, b.key)));
+      state.tombstones = [...tombstones.values()].sort((a, b) => recordKey(a.namespace, a.key).localeCompare(recordKey(b.namespace, b.key)));
       await this.#write(state);
       output = results.map((item) => structuredClone(item));
     }));
@@ -146,7 +154,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     const snapshot = normalizeSnapshot(snapshotInput);
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
-      if (current.records.length > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite live control-plane state.');
+      if (current.records.length > 0 || (current.tombstones?.length ?? 0) > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite existing control-plane records or generation fences.');
       await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)) });
     }));
     this.#serial = run.then(() => undefined, () => undefined);
@@ -158,7 +166,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
       const parsed = JSON.parse(await readDurableStateText(this.#file, OPTIONS)) as EmbeddedState;
       return normalizeState(parsed);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, records: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, records: [], tombstones: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('CONTROL_PLANE_STORE_CORRUPT', 'Control-plane store could not be read.');
     }
@@ -410,7 +418,21 @@ function normalizeState(input: EmbeddedState): EmbeddedState {
     if(keys.has(rk)) throw corrupt('Duplicate control-plane record.');
     keys.add(rk);
   }
-  return { version: 1, records };
+  // Old version-1 files lack tombstones. Preserve new deletion fences durably
+  // without surfacing them to get/list or snapshot callers.
+  const rawTombstones = input.tombstones ?? [];
+  if (!Array.isArray(rawTombstones) || rawTombstones.length > 1_000_000) throw corrupt('Control-plane generation fence collection is invalid.');
+  const tombstones = rawTombstones.map((item) => ({
+    namespace: id(item.namespace, 'tombstone.namespace'),
+    key: id(item.key, 'tombstone.key'),
+    generation: integer(item.generation, 1, Number.MAX_SAFE_INTEGER, 'tombstone.generation')
+  }));
+  for (const item of tombstones) {
+    const rk = recordKey(item.namespace, item.key);
+    if (keys.has(rk)) throw corrupt('Generation fence duplicates a live record or another fence.');
+    keys.add(rk);
+  }
+  return { version: 1, records, tombstones };
 }
 function normalizeRecord(input: ControlPlaneRecord): ControlPlaneRecord {
   if (!input || input.schemaVersion !== 1) throw corrupt('Record schema is invalid.');
