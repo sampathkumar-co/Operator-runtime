@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -269,7 +270,7 @@ test('copied valid owner token is readable across processes but cannot mutate fr
   const lease = await owner.acquire(subject, 'legitimate-owner');
   const fixturePath = new URL('./fixtures/remote-lease-borrowed-process.mjs', import.meta.url);
   const { stdout } = await promisify(execFile)(process.execPath,
-    ['--experimental-strip-types', fixturePath.pathname, root, JSON.stringify(lease)],
+    ['--experimental-strip-types', fileURLToPath(fixturePath), root, JSON.stringify(lease)],
     { timeout: 20_000, maxBuffer: 16_384 });
   const result = JSON.parse(stdout.trim());
   assert.deepEqual(result, {
