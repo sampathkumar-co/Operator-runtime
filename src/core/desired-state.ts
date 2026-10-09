@@ -138,7 +138,27 @@ export class DesiredStateController {
   async reconcile(idInput: string): Promise<DesiredStateContract> {
     return await this.#mutate(async (state, now) => {
       const contract = requireContract(state, idInput);
-      if (contract.status === 'PAUSED') return contract;
+      if (contract.status === 'PAUSED') {
+        // Pause is a durable revocation of automatic remediation. An uncertain
+        // cancel response must not trap the contract forever when its exact
+        // operation subsequently becomes provably terminal. Inspect only:
+        // refreshing or submitting here could re-enable external effects.
+        if (!contract.activeOperationId) return contract;
+        let observed: DigitalOperation | undefined;
+        try { observed = await this.#operations.inspect(contract.activeOperationId); }
+        catch { /* Unknown is not proof of completion; retain the reservation. */ }
+        if (!observed || observed.id !== contract.activeOperationId ||
+            !remediationMatchesContract(observed, contract) || !isTerminal(observed)) {
+          contract.lastReason = 'Paused; the exact remediation outcome remains unresolved and cannot be resumed.';
+          contract.updatedAt = now.toISOString();
+          return contract;
+        }
+        this.#closeHistory(contract, observed, now);
+        delete contract.activeOperationId;
+        contract.lastReason = 'Paused; exact remediation terminal outcome reconciled. Explicit resume is required.';
+        contract.updatedAt = now.toISOString();
+        return contract;
+      }
 
       if (contract.activeOperationId) {
         let active: DigitalOperation | undefined;
@@ -285,7 +305,8 @@ export class DesiredStateController {
     const limit = integer(limitInput, 1, 500, 'limit');
     const state = await this.#read();
     return state.contracts
-      .filter((contract) => contract.status !== 'PAUSED')
+      // Paused contracts with uncertain cancellation need operator visibility.
+      .filter((contract) => contract.status !== 'PAUSED' || Boolean(contract.activeOperationId))
       .slice()
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id))
       .slice(0, limit)
