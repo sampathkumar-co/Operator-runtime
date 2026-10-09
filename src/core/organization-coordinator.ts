@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
+import { stableOrganizationMissionId, organizationCompensationIntentId as compensationIntentId } from './organization-identity.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
@@ -640,19 +641,6 @@ function boundedContext(input: unknown, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$/.test(value)) throw new OperatorError('ORGANIZATION_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
-function stableOrganizationMissionId(programId: string, targetKey: string): string {
-  const bytes = crypto.createHash('sha256').update(`organization-mission\0${programId}\0${targetKey}`, 'utf8').digest().subarray(0, 16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = bytes.toString('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function compensationIntentId(programId: string, operation: string, targetId: string): string {
-  const digest = crypto.createHash('sha256').update(`${programId}\0${operation}\0${targetId}`, 'utf8').digest('hex');
-  return `organization:${digest}`;
-}
-
 function boundedKey(input: unknown, label: string): string {
   const value = boundedText(input, 128, label);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)) throw new OperatorError('ORGANIZATION_INPUT_INVALID', `${label} is invalid.`);
