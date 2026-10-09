@@ -46,6 +46,18 @@ export interface QuarantineAdjudicationRecord {
 interface Ledger { version: 1; records: QuarantineAdjudicationRecord[]; }
 
 /**
+ * Persist this high-water mark OUTSIDE the quarantine ledger's restore/backup
+ * domain. The implementation must compare-and-swap atomically across hosts.
+ * A local copy (or an anchor restored together with the ledger) is not proof
+ * against rollback or truncation.
+ */
+export interface QuarantineLedgerPosition { count: number; headMac: string; }
+export interface QuarantineLedgerAnchor {
+  read(): Promise<QuarantineLedgerPosition>;
+  compareAndAdvance(expected: QuarantineLedgerPosition, next: QuarantineLedgerPosition): Promise<void>;
+}
+
+/**
  * Only pinned provider signatures AND an independently authenticated scoped
  * operator can classify a returned child identity. Classification never grants
  * permission to cancel it; verified-owned stays in quarantine until a separate
@@ -58,12 +70,16 @@ export class OrganizationQuarantineAdjudicator {
   #ledgerSecret: Buffer;
   #authorize: (operatorId: string, claim: ProviderQuarantineClaim) => Promise<void>;
   #clock: () => Date;
+  #anchor?: QuarantineLedgerAnchor;
 
   constructor(stateDir: string, options: {
     journal?: DurableCompensationJournal;
     providerPublicKeyPem: string;
     ledgerSecret: Buffer;
     authorize: (operatorId: string, claim: ProviderQuarantineClaim) => Promise<void>;
+    /** Required in deployments that promise rollback-protected adjudication. */
+    anchor?: QuarantineLedgerAnchor;
+    requireExternalAnchor?: boolean;
     clock?: () => Date;
   }) {
     if (!options || typeof options.authorize !== 'function' ||
@@ -78,6 +94,15 @@ export class OrganizationQuarantineAdjudicator {
     this.#ledgerSecret = Buffer.from(options.ledgerSecret);
     this.#authorize = options.authorize;
     this.#clock = options.clock ?? (() => new Date());
+    if (options.requireExternalAnchor && !options.anchor) {
+      throw new OperatorError('QUARANTINE_ANCHOR_REQUIRED',
+        'Production quarantine adjudication requires an independently hosted high-water anchor.');
+    }
+    if (options.anchor && (typeof options.anchor.read !== 'function' ||
+        typeof options.anchor.compareAndAdvance !== 'function')) {
+      throw invalid('External quarantine ledger anchor is invalid.');
+    }
+    this.#anchor = options.anchor;
     this.#file = path.join(path.resolve(stateDir), 'quarantine-adjudications.json');
     this.#journal = options.journal ?? new DurableCompensationJournal(stateDir, { clock: this.#clock });
   }
@@ -171,6 +196,11 @@ export class OrganizationQuarantineAdjudicator {
       const entry = { ...base, mac: this.#mac(base) };
       state.records.push(entry);
       await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), OPTIONS);
+      // On a crash between the local append and remote CAS, the next
+      // #read() repairs only the exact MAC-linked single-step advancement.
+      // Until the external anchor acknowledges this commit, never retire the
+      // original quarantine journal entry.
+      await this.#verifyAnchor(state);
       return entry;
     });
     // Preserve verified-owned cases: a proved origin isn't itself proof that
@@ -190,7 +220,11 @@ export class OrganizationQuarantineAdjudicator {
     let parsed: Ledger;
     try { parsed = JSON.parse(await readDurableStateText(this.#file, OPTIONS)) as Ledger; }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, records: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        const empty: Ledger = { version: 1, records: [] };
+        await this.#verifyAnchor(empty);
+        return empty;
+      }
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('QUARANTINE_LEDGER_CORRUPT', 'Quarantine decision ledger cannot be read.');
     }
@@ -209,7 +243,44 @@ export class OrganizationQuarantineAdjudicator {
       seen.add(record.intentId);
       previousMac = mac;
     }
+    await this.#verifyAnchor(parsed);
     return parsed;
+  }
+
+  async #verifyAnchor(ledger: Ledger): Promise<void> {
+    if (!this.#anchor) return;
+    const current = await this.#anchor.read();
+    if (!current || !Number.isSafeInteger(current.count) || current.count < 0 ||
+        !DIGEST.test(String(current.headMac))) {
+      throw new OperatorError('QUARANTINE_ANCHOR_INVALID', 'Independent quarantine anchor is invalid or unavailable.');
+    }
+    const local: QuarantineLedgerPosition = {
+      count: ledger.records.length,
+      headMac: ledger.records.at(-1)?.mac ?? '0'.repeat(64)
+    };
+    if (local.count === current.count && constantHexEqual(local.headMac, current.headMac)) return;
+    // A valid, durably MAC-linked last record may have been written immediately
+    // before process death prevented the independent high-water CAS. Only
+    // this exact one-step handoff can be repaired; never adopt arbitrary
+    // unanchored histories or roll an external anchor backward.
+    const last = ledger.records.at(-1);
+    if (local.count !== current.count + 1 || !last ||
+        !constantHexEqual(last.previousMac, current.headMac)) {
+      throw new OperatorError('QUARANTINE_LEDGER_ROLLBACK',
+        'Quarantine ledger and independent high-water anchor disagree; operator reconciliation required.');
+    }
+    try {
+      await this.#anchor.compareAndAdvance(current, local);
+    } catch {
+      throw new OperatorError('QUARANTINE_ANCHOR_UNAVAILABLE',
+        'External anchor could not confirm the exact durable ledger advancement.');
+    }
+    const committed = await this.#anchor.read();
+    if (!committed || committed.count !== local.count ||
+        !constantHexEqual(String(committed.headMac), local.headMac)) {
+      throw new OperatorError('QUARANTINE_ANCHOR_UNAVAILABLE',
+        'Independent high-water anchor did not attest the committed ledger head.');
+    }
   }
 
   #mac(base: Omit<QuarantineAdjudicationRecord, 'mac'>): string {
