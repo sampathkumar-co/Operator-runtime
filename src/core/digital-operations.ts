@@ -13,6 +13,27 @@ import type { ActionRisk } from './types.ts';
 import { DurableCompensationJournal, type DurableCompensationIntent } from './compensation-journal.ts';
 import { ResourceLeaseStore } from './resource-leases.ts';
 
+type DigitalEffectOperation = 'cancel-team-mission' | 'cancel-organization-program' | 'release-device-reservation';
+
+/**
+ * Stable, purpose-separated resource identity issued before any external effect.
+ * An uncommitted compensation intent without this binding has no authority to
+ * cancel or release a potentially unrelated resource.
+ */
+export function reservedDigitalEffectId(ownerIdInput: string, operation: DigitalEffectOperation): string {
+  const ownerId = validUuid(ownerIdInput, 'operation owner');
+  if (!['cancel-team-mission', 'cancel-organization-program', 'release-device-reservation'].includes(operation)) {
+    throw new OperatorError('COMPENSATION_OPERATION_INVALID', 'Unsupported recovery effect operation.');
+  }
+  const bytes = crypto.createHash('sha256')
+    .update('digital-operation-reservation-v2\0').update(ownerId).update('\0').update(operation)
+    .digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const MAX_OPERATIONS = 2000;
 const MAX_CONDITIONS = 200;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
@@ -221,7 +242,7 @@ export class DigitalOperationsLayer {
       let deviceReservationSessionId: string | undefined;
       const compensationIds: string[] = [];
       if (normalized.device) {
-        const reservationId = crypto.randomUUID();
+        const reservationId = reservedDigitalEffectId(operationId, 'release-device-reservation');
         // Journal *before* resource allocation: an abrupt restart can now name
         // the exact allocation without ever receiving the reserve response.
         const compensationId = await this.#prepareCompensation(operationId, 'release-device-reservation', reservationId);
@@ -293,7 +314,7 @@ export class DigitalOperationsLayer {
       };
       try {
         if (resolved.execution.kind === 'team') {
-          const missionId = crypto.randomUUID();
+          const missionId = reservedDigitalEffectId(operationId, 'cancel-team-mission');
           compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', missionId));
           teamMissionId = missionId;
           const mission = await this.#teams.submit({
@@ -305,7 +326,7 @@ export class DigitalOperationsLayer {
           if (mission.id !== missionId) throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
-          const programId = crypto.randomUUID();
+          const programId = reservedDigitalEffectId(operationId, 'cancel-organization-program');
           compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', programId));
           organizationProgramId = programId;
           const program = await this.#organizations.create({
@@ -386,6 +407,14 @@ export class DigitalOperationsLayer {
           recovered += 1;
           continue;
         }
+        // A journal record cannot grant side-effect authority over an arbitrary
+        // unrelated child. Legacy/unverifiable intents stay quarantined.
+        if (!['cancel-team-mission', 'cancel-organization-program', 'release-device-reservation'].includes(intent.operation)) continue;
+        let reservedId: string;
+        try {
+          reservedId = reservedDigitalEffectId(intent.ownerId, intent.operation as DigitalEffectOperation);
+        } catch { continue; }
+        if (reservedId !== intent.targetId) continue;
         try {
           if (intent.operation === 'cancel-team-mission') {
             if ((await this.#teams.cancel(intent.targetId)).state !== 'CANCELLED') continue;
@@ -433,6 +462,9 @@ export class DigitalOperationsLayer {
   }
 
   async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
+    if (targetId !== reservedDigitalEffectId(ownerId, operation as DigitalEffectOperation)) {
+      throw new OperatorError('COMPENSATION_IDENTITY_CONFLICT', 'Effect identity does not match its immutable operation recovery contract.');
+    }
     const id = crypto.createHash('sha256').update(`digital-operation\0${ownerId}\0${operation}\0${targetId}`).digest('hex');
     await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
     return id;
