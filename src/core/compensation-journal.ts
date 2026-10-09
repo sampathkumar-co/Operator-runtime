@@ -10,6 +10,8 @@ export interface DurableCompensationIntent {
   operation: string;
   targetId: string;
   subjectKey?: string;
+  /** Immutable provider request fingerprint, written before external allocation. */
+  allocationRequestDigest?: string;
   createdAt: string;
   confirmedAt?: string;
 }
@@ -128,6 +130,7 @@ function normalizeIntent(input: DurableCompensationIntent): DurableCompensationI
     operation: bounded(input.operation, 128, 'operation'),
     targetId: bounded(input.targetId, 256, 'targetId'),
     ...(input.subjectKey === undefined ? {} : { subjectKey: bounded(input.subjectKey, 256, 'subjectKey') }),
+    ...(input.allocationRequestDigest === undefined ? {} : { allocationRequestDigest: allocationDigest(input.allocationRequestDigest) }),
     createdAt: iso(input.createdAt),
     ...(input.confirmedAt === undefined ? {} : { confirmedAt: iso(input.confirmedAt) })
   };
@@ -135,7 +138,15 @@ function normalizeIntent(input: DurableCompensationIntent): DurableCompensationI
 
 function sameIntent(a: DurableCompensationIntent, b: DurableCompensationIntent): boolean {
   return a.id === b.id && a.ownerKind === b.ownerKind && a.ownerId === b.ownerId
-    && a.operation === b.operation && a.targetId === b.targetId && a.subjectKey === b.subjectKey;
+    && a.operation === b.operation && a.targetId === b.targetId && a.subjectKey === b.subjectKey
+    && a.allocationRequestDigest === b.allocationRequestDigest;
+}
+
+function allocationDigest(input: unknown): string {
+  if (typeof input !== 'string' || !/^[0-9a-f]{64}$/.test(input)) {
+    throw new OperatorError('COMPENSATION_JOURNAL_INPUT_INVALID', 'Allocation request digest is invalid.');
+  }
+  return input;
 }
 
 function bounded(input: unknown, max: number, label: string): string {
