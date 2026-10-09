@@ -246,6 +246,48 @@ CREATE TABLE IF NOT EXISTS mecord_control_plane (
 );
 ALTER TABLE mecord_control_plane ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_plane(expires_at);
+-- This table must remain safe while a pre-migration worker is still connected.
+-- Legacy DELETE would discard the key's lifetime generation history (ABA).
+-- Legacy UPDATE/UPSERT may also try to reuse or roll back a generation.
+-- Reject those writes inside PostgreSQL itself, not just in the new SDK.
+CREATE OR REPLACE FUNCTION mecord_control_plane_generation_guard()
+RETURNS trigger LANGUAGE plpgsql AS $mecord_guard$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION USING ERRCODE='23514',
+      MESSAGE='CONTROL_PLANE_LEGACY_DELETE_FENCED: physical deletion is prohibited';
+  END IF;
+  IF NEW.generation < OLD.generation OR (
+      NEW.generation = OLD.generation AND NOT (
+        OLD.is_deleted = FALSE AND NEW.is_deleted = TRUE AND
+        NEW.value_json = '{}'::jsonb AND NEW.expires_at IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE='23514',
+      MESSAGE='CONTROL_PLANE_LEGACY_GENERATION_FENCED: stale or nonadvancing mutation';
+  END IF;
+  RETURN NEW;
+END;
+$mecord_guard$;
+DO $mecord_trigger$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'mecord_control_plane'::regclass
+      AND tgname = 'mecord_control_plane_generation_guard_trigger'
+      AND NOT tgisinternal
+  ) THEN
+    BEGIN
+      CREATE TRIGGER mecord_control_plane_generation_guard_trigger
+        BEFORE UPDATE OR DELETE ON mecord_control_plane
+        FOR EACH ROW EXECUTE FUNCTION mecord_control_plane_generation_guard();
+    EXCEPTION WHEN duplicate_object THEN
+      -- Concurrent initialize() on another host installed the same guard.
+      NULL;
+    END;
+  END IF;
+END;
+$mecord_trigger$;
 `));
   }
 
