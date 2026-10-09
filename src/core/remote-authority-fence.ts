@@ -104,6 +104,13 @@ export class RemoteAuthorityFenceStore {
       current.process.pid !== lease.process.pid || current.process.started !== lease.process.started) {
       throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Remote authority ownership is stale, expired or revoked.');
     }
+    // A durable lease is not permission by itself. Re-check the independently
+    // authoritative account/device policy on every execution-boundary check,
+    // including heartbeat and atomic provider commit paths using this method.
+    // The generation CAS remains necessary for a revocation racing *after*
+    // this policy check.
+    await this.#authorize({ accountId: lease.accountId, deviceId: lease.deviceId,
+      authorityGeneration: lease.authorityGeneration }, 'acquire');
     return { ...lease, expiresAt: record.expiresAt };
   }
 
