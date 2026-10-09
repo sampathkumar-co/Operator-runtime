@@ -574,3 +574,47 @@ test('PostgreSQL snapshot includes hidden generations and restore writes durable
   await writer.restore(snapshot);
   assert.deepEqual(restoredFences, [{ key: 'deleted', generation: 7 }, { key: 'expired', generation: 5 }]);
 });
+
+
+test('explicit embedded control-plane v2 upgrade fences legacy writer and retains delete generations', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-upgrade-v1-v2-'));
+  t.after(() => fs.rm(dir, { recursive:true, force:true }));
+  const file=path.join(dir,'control-plane-store.json');
+  const old=new EmbeddedControlPlaneStore(dir);
+  const [initial]=await old.transact([{ namespace:'authority', key:'device', expectedGeneration:null,
+    value:{ owner:'original' } }], '2026-10-09T00:00:01.000Z');
+  // Simulate a historically legitimate v1 file lacking the later tombstone field.
+  const raw=JSON.parse(await fs.readFile(file,'utf8'));
+  raw.version=1;
+  delete raw.tombstones;
+  await fs.writeFile(file,JSON.stringify(raw));
+  await new EmbeddedControlPlaneStore(dir).activateGenerationFenceSchema();
+  const promoted=JSON.parse(await fs.readFile(file,'utf8'));
+  assert.equal(promoted.version,2);
+  assert.deepEqual(promoted.tombstones,[]);
+  // Pre-upgrade clients with strict version-1 readers fail on v2. A delayed
+  // old binary cannot successfully write its v1 shape after activation.
+  assert.notEqual(promoted.version,1);
+
+  await new EmbeddedControlPlaneStore(dir).transact([{
+    namespace:'authority',key:'device',expectedGeneration:initial!.generation,value:null
+  }], '2026-10-09T00:00:02.000Z');
+  const afterDelete=JSON.parse(await fs.readFile(file,'utf8'));
+  assert.equal(afterDelete.version,2);
+  assert.equal(afterDelete.tombstones[0].generation,1);
+  const [next]=await new EmbeddedControlPlaneStore(dir).transact([{
+    namespace:'authority',key:'device',expectedGeneration:null,value:{owner:'new'}
+  }], '2026-10-09T00:00:03.000Z');
+  assert.equal(next!.generation,2);
+  await assert.rejects(new EmbeddedControlPlaneStore(dir).transact([{
+    namespace:'authority',key:'device',expectedGeneration:initial!.generation,value:{owner:'stale'}
+  }], '2026-10-09T00:00:04.000Z'),(e:any)=>e?.code==='CONTROL_PLANE_CAS_MISMATCH');
+});
+
+test('embedded v2 missing tombstone history fails closed instead of rebuilding authority from live records',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-cp-corrupt-v2-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  await fs.writeFile(path.join(dir,'control-plane-store.json'),JSON.stringify({version:2,records:[]}));
+  await assert.rejects(new EmbeddedControlPlaneStore(dir).get('authority','device'),
+    (e:any)=>e?.code==='CONTROL_PLANE_STORE_CORRUPT');
+});
