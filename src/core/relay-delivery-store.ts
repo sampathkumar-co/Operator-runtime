@@ -127,6 +127,9 @@ export class RelayDeliveryStore {
             if (existing.idempotencyContractDigest && existing.idempotencyContractDigest !== contractDigest) {
               throw new OperatorError('RELAY_IDEMPOTENCY_CONTRACT_CHANGED', 'Retained pending invocation contract digest differs.');
             }
+            // A legitimate retry is an authenticated chance to upgrade
+            // pre-digest pending records before the payload is erased.
+            if (!existing.idempotencyContractDigest) existing.idempotencyContractDigest = contractDigest;
           }
           return cloneDelivery(existing);
         }
@@ -653,6 +656,27 @@ function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {
     authority: delivery.authority ? { ...delivery.authority } : undefined,
     replayAuthority: delivery.replayAuthority ? { ...delivery.replayAuthority } : undefined
   };
+}
+
+/**
+ * Only the bounded digest survives terminal ACK/expiry. Do not retain the
+ * original payload, capability list, or private account authority in tombstones.
+ */
+function relayIdempotencyContractDigest(
+  kind: string, payload: JsonObject, authority: RelayDeliveryAuthority | undefined,
+  requiredCapabilities: readonly string[]
+): string {
+  return crypto.createHash('sha256')
+    .update('mecord-relay-idempotency-v1\0')
+    .update(canonicalJson({ kind, payload, authority: authority ?? null, requiredCapabilities }))
+    .digest('hex');
+}
+
+function validIdempotencyContractDigest(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Retained idempotency contract digest is invalid.');
+  }
+  return value;
 }
 
 function safeRequiredCapabilities(input: unknown): string[] {
