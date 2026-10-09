@@ -627,7 +627,8 @@ function validateState(input: unknown): RelayDeliveryState {
       const ackedAt = entry.ackedAt === undefined ? undefined : validIso(entry.ackedAt, 'ackedAt');
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
       if (status === 'pending' && idempotencyContractDigest &&
-        idempotencyContractDigest !== relayIdempotencyContractDigest(kind, payload, authority, requiredCapabilities)) {
+        (requiredCapabilities === undefined ||
+          idempotencyContractDigest !== relayIdempotencyContractDigest(kind, payload, authority, requiredCapabilities))) {
         throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending invocation contract digest does not match its live payload and authority.');
       }
       if (status === 'pending' && (ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps or replay authority.');
