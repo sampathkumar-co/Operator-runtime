@@ -208,6 +208,38 @@ export class DevicePoolScheduler {
   }
 
   /**
+   * Release a prepared allocation only if the exact immutable request proof
+   * is still attached to the reservation at the mutation commit boundary.
+   * Both proof validation and release run within the same provider file lock;
+   * a separate inspect() followed by release(id) is a TOCTOU vulnerability.
+   * Missing is UNKNOWN (never proof of non-creation). Foreign/legacy records
+   * are immutable from this API and fail closed.
+   */
+  async releasePrepared(reservationIdInput: string, requestDigestInput: string): Promise<DeviceReservation | null> {
+    const reservationId = validUuid(reservationIdInput, 'reservationId');
+    const requestDigest = String(requestDigestInput ?? '');
+    if (!/^[0-9a-f]{64}$/.test(requestDigest)) {
+      throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
+    }
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
+      const state = await this.#read();
+      const record = state.reservations.find((item) => item.id === reservationId);
+      if (!record) return null;
+      if (!record.allocationRequestDigest || record.allocationRequestDigest !== requestDigest) {
+        throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_MISMATCH',
+          'Cannot release a reservation without its exact persisted immutable request proof.');
+      }
+      if (record.state === 'ACTIVE') {
+        record.state = Date.parse(record.expiresAt) <= this.#clock().getTime() ? 'EXPIRED' : 'RELEASED';
+        await this.#write(state);
+      }
+      return structuredClone(record);
+    }));
+    this.#serial = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  /**
    * Trusted provider proof of an exact preallocated reservation identity.
    * The absence of a record is UNKNOWN, not proof that an allocation did not
    * occur on a partitioned provider. Never mutate or allocate in this method.

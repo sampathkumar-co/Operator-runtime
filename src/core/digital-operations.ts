@@ -425,12 +425,9 @@ export class DigitalOperationsLayer {
           if (intent.operation === 'release-device-reservation' && intent.allocationRequestDigest &&
               intent.targetId === digitalOperationChildId(intent.ownerId, intent.operation)) {
             try {
-              const proof = await this.#devices.inspectPrepared(intent.targetId, intent.allocationRequestDigest);
-              if (!proof) continue;
-              if (proof.state === 'ACTIVE') {
-                const released = await this.#devices.release(proof.id);
-                if (released.id !== proof.id || !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
-              } else if (!['RELEASED', 'EXPIRED'].includes(proof.state)) continue;
+              const released = await this.#devices.releasePrepared(intent.targetId, intent.allocationRequestDigest);
+              if (!released || released.id !== intent.targetId ||
+                  !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
               // A confirmed exact allocation has now reached a terminal state.
               // Retire only the matching prepared intent and its exact lost-ACK
               // quarantine. Never retire an unknown child on NOT_FOUND.
@@ -463,7 +460,10 @@ export class DigitalOperationsLayer {
           } else if (intent.operation === 'cancel-organization-program') {
             if ((await this.#organizations.cancel(intent.targetId)).state !== 'CANCELLED') continue;
           } else if (intent.operation === 'release-device-reservation') {
-            if (!['RELEASED', 'EXPIRED'].includes((await this.#devices.release(intent.targetId)).state)) continue;
+            const released = intent.allocationRequestDigest
+              ? await this.#devices.releasePrepared(intent.targetId, intent.allocationRequestDigest)
+              : await this.#devices.release(intent.targetId);
+            if (!released || !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
           } else continue;
           await this.#compensations.complete(intent.id);
           recovered += 1;
