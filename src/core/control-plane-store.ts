@@ -455,7 +455,7 @@ function normalizeRecord(input: ControlPlaneRecord): ControlPlaneRecord {
     valueDigest: sha(input.valueDigest,'valueDigest'),
     value,
     updatedAt: iso(input.updatedAt,'updatedAt'),
-    ...(input.expiresAt ? { expiresAt: iso(input.expiresAt,'expiresAt') } : {})
+    ...(input.expiresAt !== undefined ? { expiresAt: iso(input.expiresAt,'expiresAt') } : {})
   };
   if (record.valueDigest !== digest(value)) throw corrupt('Record value digest mismatch.');
   return record;
@@ -466,7 +466,7 @@ function normalizeMutation(input: ControlPlaneMutation): ControlPlaneMutation {
   return {
     namespace:id(input.namespace,'namespace'),key:id(input.key,'key'),expectedGeneration:expected,
     value: input.value === null ? null : objectValue(input.value),
-    ...(input.expiresAt ? { expiresAt: iso(input.expiresAt,'expiresAt') } : {})
+    ...(input.expiresAt !== undefined ? { expiresAt: iso(input.expiresAt,'expiresAt') } : {})
   };
 }
 function normalizeSnapshot(input: ControlPlaneSnapshot): ControlPlaneSnapshot {
