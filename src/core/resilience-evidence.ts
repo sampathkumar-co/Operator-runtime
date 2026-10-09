@@ -86,9 +86,9 @@ export const CRITICAL_RESILIENCE_EVIDENCE: readonly ExecutableResilienceEvidence
     invariant: 'LONG_TASKS_SURVIVE_FAILURE',
     mechanism: 'Durable compensation intent recovery',
     implementationFile: 'src/core/digital-operations.ts', implementationSymbol: 'recoverPendingCompensations',
-    executableTestFile: 'test/digital-operations.test.ts', executableTestName: 'creation cleanup persists compensation failure and restart recovery completes it',
-    injectedFault: 'Cleanup compensation fails and the coordinating process is reconstructed.',
-    expectedEvidence: 'The durable compensation remains pending and restart recovery completes it.', status: 'EXECUTABLE'
+    executableTestFile: 'test/digital-operations.test.ts', executableTestName: 'unknown child creation quarantines while confirmed device recovery remains possible',
+    injectedFault: 'Child creation acknowledgement is lost while a separately confirmed device allocation requires cleanup after restart.',
+    expectedEvidence: 'Unacknowledged child remains quarantined without cancellation while the confirmed device reservation is safely recovered.', status: 'EXECUTABLE'
   },
   {
     id: 'relay-partition',

@@ -242,36 +242,30 @@ export class DigitalOperationsLayer {
         try {
           const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements, { reservationId });
           if (reservation.id !== reservationId) {
-            // Contract mismatch with a provider is not a safe success.
-            try { await this.#devices.release(reservation.id); } catch { /* unknown effect: retained journal blocks further submissions */ }
+            // The returned identity has *not* been proven to be ours.
+            // Preserve it for explicit review; never release an unrelated
+            // reservation simply because a provider returned its ID.
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-device-reservation', String(reservation.id));
             throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Resource scheduler returned a different reservation identity.');
           }
+          await this.#compensations.confirm(compensationId);
           deviceReservationId = reservation.id;
           deviceReservationSessionId = reservation.sessionId;
         } catch (reserveError) {
-          let cleanupError: unknown;
-          try { await this.#devices.release(reservationId); }
-          catch (error) {
-            if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') cleanupError = error;
-          }
-          if (!cleanupError) {
-            try { await this.#compensations.complete(compensationId); }
-            catch (error) { cleanupError = error; }
-          }
-          if (cleanupError) {
-            const code = (error: unknown): string => typeof (error as { code?: unknown } | null)?.code === 'string'
-              ? String((error as { code: string }).code) : 'UNKNOWN';
-            throw new OperatorError('COMPENSATION_BLOCKED', 'Reservation outcome or recovery journal remains unresolved; new work is blocked.', {
-              retryable: true,
-              details: { reservationId, reserveCode: code(reserveError), cleanupCode: code(cleanupError) }
-            });
-          }
-          throw reserveError;
+          // A thrown response is not proof of what happened remotely. Never
+          // release a possibly foreign preexisting reservation by ID.
+          await this.#quarantineUntrustedEffect(operationId, 'reconcile-unacknowledged-device-reservation', reservationId);
+          const code = typeof (reserveError as { code?: unknown } | null)?.code === 'string'
+            ? String((reserveError as { code: string }).code) : 'UNKNOWN';
+          throw new OperatorError('COMPENSATION_BLOCKED', 'Reservation result is unacknowledged; recovery must verify provenance before any release.', {
+            retryable: true, details: { reservationId, reserveCode: code }
+          });
         }
       }
 
       let teamMissionId: string | undefined;
       let organizationProgramId: string | undefined;
+      let unacknowledgedChild: { operation: string; targetId: string } | undefined;
       const compensateCreatedExecution = async (): Promise<string[]> => {
         const failed: string[] = [];
         if (teamMissionId) {
@@ -307,30 +301,50 @@ export class DigitalOperationsLayer {
       try {
         if (resolved.execution.kind === 'team') {
           const missionId = digitalOperationChildId(operationId, 'cancel-team-mission');
-          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', missionId));
-          teamMissionId = missionId;
+          const compensationId = await this.#prepareCompensation(operationId, 'cancel-team-mission', missionId);
+          compensationIds.push(compensationId);
+          unacknowledgedChild = { operation: 'reconcile-unacknowledged-team-mission', targetId: missionId };
           const mission = await this.#teams.submit({
             missionId,
             objective: normalized.objective,
             workItems: resolved.execution.workItems,
             ...(resolved.execution.budget ? { budget: resolved.execution.budget } : {})
           });
-          if (mission.id !== missionId) throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
+          if (mission.id !== missionId) {
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-team-mission', String(mission.id));
+            throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
+          }
+          await this.#compensations.confirm(compensationId);
+          teamMissionId = missionId;
+          unacknowledgedChild = undefined;
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
           const programId = digitalOperationChildId(operationId, 'cancel-organization-program');
-          compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', programId));
-          organizationProgramId = programId;
+          const compensationId = await this.#prepareCompensation(operationId, 'cancel-organization-program', programId);
+          compensationIds.push(compensationId);
+          unacknowledgedChild = { operation: 'reconcile-unacknowledged-organization-program', targetId: programId };
           const program = await this.#organizations.create({
             programId,
             objective: normalized.objective,
             targets: resolved.execution.targets,
             ...(resolved.execution.policy ? { policy: resolved.execution.policy } : {})
           });
-          if (program.id !== programId) throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Program creator did not honor the journal-bound program identity.');
+          if (program.id !== programId) {
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-organization-program', String(program.id));
+            throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Program creator did not honor the journal-bound program identity.');
+          }
+          await this.#compensations.confirm(compensationId);
+          organizationProgramId = programId;
+          unacknowledgedChild = undefined;
           if (normalized.run) await this.#organizations.start(program.id);
         }
       } catch (error) {
+        if (unacknowledgedChild) {
+          await this.#quarantineUntrustedEffect(operationId, unacknowledgedChild.operation, unacknowledgedChild.targetId);
+          throw new OperatorError('COMPENSATION_BLOCKED', 'Child creation acknowledgement is missing; refusing speculative cancellation.', {
+            retryable: true, details: { operationId, operation: unacknowledgedChild.operation }
+          });
+        }
         const failed = await compensateCreatedExecution();
         if (failed.length > 0) throw new OperatorError('COMPENSATION_BLOCKED', 'Operation creation failed and durable compensation could not be completed safely.', { retryable: true, details: { failed, cause: error instanceof Error ? error.message : String(error) } });
         throw error;
@@ -399,6 +413,10 @@ export class DigitalOperationsLayer {
           recovered += 1;
           continue;
         }
+        // A write-ahead identity without a positively acknowledged,
+        // exact-ID provider response cannot grant cancellation authority.
+        // A lost response may have created unrelated or partial work.
+        if (!intent.confirmedAt) continue;
         // Orphaned write-ahead identities may be compensated only when the
         // target is deterministically bound to this exact operation/purpose.
         // Pre-upgrade random identities remain quarantined for review.
@@ -452,7 +470,15 @@ export class DigitalOperationsLayer {
     throw new OperatorError('OPERATIONS_RECOVERY_BUSY', 'Digital operation ownership unavailable.', { retryable: true });
   }
 
+  async #quarantineUntrustedEffect(ownerId: string, operation: string, targetId: string): Promise<void> {
+    const id = crypto.createHash('sha256').update(['digital-operation-untrusted', ownerId, operation, targetId].join('\0')).digest('hex');
+    await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
+  }
+
   async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
+    if (targetId !== digitalOperationChildId(ownerId, operation)) {
+      throw new OperatorError('COMPENSATION_IDENTITY_CONFLICT', 'Effect identity does not match its immutable operation recovery contract.');
+    }
     const id = crypto.createHash('sha256').update(`digital-operation\0${ownerId}\0${operation}\0${targetId}`).digest('hex');
     await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
     return id;

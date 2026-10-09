@@ -162,6 +162,9 @@ export class OrganizationCoordinator {
         // Unknown child identities are not cancellation authority. Preserve the
         // quarantine intent for explicit operator reconciliation on every restart.
         if (intent.operation === 'reconcile-untrusted-team-identity') continue;
+        // Deterministic IDs alone cannot prove the child was created here.
+        // Require the provider's successful, exact-identity acknowledgement.
+        if (!intent.confirmedAt) continue;
         // A journal entry is not proof of authority over a child mission.
         // Only the deterministic preallocated ID of the exact program target
         // can be used for any cleanup side effect.
@@ -460,6 +463,7 @@ export class OrganizationCoordinator {
         });
         throw new OperatorError('ORGANIZATION_MISSION_ID_CONFLICT', 'Child mission identity differs from its write-ahead recovery contract.');
       }
+      await this.#compensations.confirm(compensationId);
       const durableCompensationId = compensationId;
       transaction.onCommit(async () => { await this.#compensations.complete(durableCompensationId); });
       transaction.onRollback(async () => {
