@@ -112,7 +112,12 @@ export function registerExtensionCapabilityRisk(input: {
 }
 
 export function capabilityRiskRule(capability: string): CapabilityRiskRule {
-  const rule = CAPABILITY_RISK_RULES[capability] ?? EXTENSION_CAPABILITY_RISK_RULES.get(capability)?.rule;
+  // Inherited Object.prototype members such as "__proto__", "constructor"
+  // and "toString" are not registered capability risk rules.
+  const builtIn = Object.prototype.hasOwnProperty.call(CAPABILITY_RISK_RULES, capability)
+    ? CAPABILITY_RISK_RULES[capability]
+    : undefined;
+  const rule = builtIn ?? EXTENSION_CAPABILITY_RISK_RULES.get(capability)?.rule;
   if (!rule) {
     throw new PolicyError(
       'CAPABILITY_RISK_UNREGISTERED',

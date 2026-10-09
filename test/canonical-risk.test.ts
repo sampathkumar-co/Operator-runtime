@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { FilesystemProvider } from '../src/capabilities/filesystem.ts';
-import { CAPABILITY_RISK_RULES } from '../src/core/capability-policy.ts';
+import { CAPABILITY_RISK_RULES, capabilityRiskRule, isBuiltInCapability } from '../src/core/capability-policy.ts';
 import { OperatorRuntime } from '../src/core/runtime.ts';
 import type { ActionRequest, ActionResult, CapabilityProvider, CapabilityScore } from '../src/core/types.ts';
 
@@ -106,4 +106,17 @@ test('file.replace with canonical destructive risk still requires approval', asy
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('prototype-chain names are not implicitly registered capability risk rules', () => {
+  for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    assert.equal(isBuiltInCapability(key), false, key);
+    assert.throws(
+      () => capabilityRiskRule(key),
+      (error: any) => error?.code === 'CAPABILITY_RISK_UNREGISTERED',
+      key
+    );
+  }
+  assert.equal(capabilityRiskRule('file.read'), 'read');
+  assert.equal(capabilityRiskRule('browser.interact'), 'external');
 });
