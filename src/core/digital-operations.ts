@@ -4,7 +4,7 @@ import { OperatorError } from './errors.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { ProcedureMemoryStore, type ProcedureAssumption, type ProcedureStep } from './procedure-memory.ts';
 import { WorldModelStore, worldValueDigest } from './world-model.ts';
-import { DevicePoolScheduler, type DevicePoolRequest, type DeviceResourceAdvertisement } from './device-pool.ts';
+import { DevicePoolScheduler, devicePoolAllocationRequestDigest, type DevicePoolRequest, type DeviceResourceAdvertisement } from './device-pool.ts';
 import { ExecutionOptimizerStore } from './execution-optimizer.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
 import { OrganizationCoordinator, type OrganizationPolicy } from './organization-coordinator.ts';
@@ -237,7 +237,8 @@ export class DigitalOperationsLayer {
         const reservationId = digitalOperationChildId(operationId, 'release-device-reservation');
         // Journal *before* resource allocation: an abrupt restart can now name
         // the exact allocation without ever receiving the reserve response.
-        const compensationId = await this.#prepareCompensation(operationId, 'release-device-reservation', reservationId);
+        const compensationId = await this.#prepareCompensation(operationId, 'release-device-reservation', reservationId,
+          devicePoolAllocationRequestDigest(normalized.device.request));
         compensationIds.push(compensationId);
         try {
           const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements, { reservationId });
@@ -416,7 +417,39 @@ export class DigitalOperationsLayer {
         // A write-ahead identity without a positively acknowledged,
         // exact-ID provider response cannot grant cancellation authority.
         // A lost response may have created unrelated or partial work.
-        if (!intent.confirmedAt) continue;
+        if (!intent.confirmedAt) {
+          // The allocation happened after a durable write-ahead request but
+          // before its acknowledgement. The trusted scheduler must provide a
+          // persisted exact-ID + exact-request proof; absence or an unbound
+          // legacy record is UNKNOWN and leaves the intent quarantined.
+          if (intent.operation === 'release-device-reservation' && intent.allocationRequestDigest &&
+              intent.targetId === digitalOperationChildId(intent.ownerId, intent.operation)) {
+            try {
+              const proof = await this.#devices.inspectPrepared(intent.targetId, intent.allocationRequestDigest);
+              if (!proof) continue;
+              if (proof.state === 'ACTIVE') {
+                const released = await this.#devices.release(proof.id);
+                if (released.id !== proof.id || !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
+              } else if (!['RELEASED', 'EXPIRED'].includes(proof.state)) continue;
+              // A confirmed exact allocation has now reached a terminal state.
+              // Retire only the matching prepared intent and its exact lost-ACK
+              // quarantine. Never retire an unknown child on NOT_FOUND.
+              await this.#compensations.complete(intent.id);
+              const quarantines = await this.#compensations.pending('digital-operation');
+              for (const quarantine of quarantines) {
+                if (quarantine.ownerId === intent.ownerId &&
+                    quarantine.operation === 'reconcile-unacknowledged-device-reservation' &&
+                    quarantine.targetId === intent.targetId) {
+                  await this.#compensations.complete(quarantine.id);
+                }
+              }
+              recovered += 1;
+            } catch {
+              // Unknown/partitioned provider proof cannot grant cleanup authority.
+            }
+          }
+          continue;
+        }
         // Orphaned write-ahead identities may be compensated only when the
         // target is deterministically bound to this exact operation/purpose.
         // Pre-upgrade random identities remain quarantined for review.
@@ -474,12 +507,13 @@ export class DigitalOperationsLayer {
     await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
   }
 
-  async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
+  async #prepareCompensation(ownerId: string, operation: string, targetId: string, allocationRequestDigest?: string): Promise<string> {
     if (targetId !== digitalOperationChildId(ownerId, operation)) {
       throw new OperatorError('COMPENSATION_IDENTITY_CONFLICT', 'Effect identity does not match its immutable operation recovery contract.');
     }
     const id = crypto.createHash('sha256').update(`digital-operation\0${ownerId}\0${operation}\0${targetId}`).digest('hex');
-    await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
+    await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId,
+      ...(allocationRequestDigest ? { allocationRequestDigest } : {}) });
     return id;
   }
 
