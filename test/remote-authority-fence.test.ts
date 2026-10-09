@@ -122,3 +122,74 @@ test('revocation remains durable after restart and cannot be undone by a fabrica
   await assert.rejects(current.acquire(subject, 'other'), (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
   assert.ok((await current.revoke(subject)).generation > revoke.generation);
 });
+
+test('a protected provider write advances the lease and commits in the same CAS transaction', async (t) => {
+  const { make, subject } = await fixture(t);
+  const first = await make().acquire(subject, 'provider-A');
+  const mutation = { namespace: 'provider-effects', key: 'effect-one', expectedGeneration: null,
+    value: { state: 'committed', requestId: 'effect-one' } };
+  const committed = await make().commitProtected(first, mutation);
+  assert.equal(committed.record?.value.state, 'committed');
+  assert.equal(committed.lease.leaseId, first.leaseId);
+  assert.ok(committed.lease.generation > first.generation);
+  await assert.rejects(make().commitProtected(first, {
+    namespace: 'provider-effects', key: 'stale', expectedGeneration: null, value: { state: 'should-not-write' }
+  }), (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  assert.equal((await make().assertCurrent(committed.lease)).generation, committed.lease.generation);
+  await make().revoke(subject);
+  await assert.rejects(make().commitProtected(committed.lease, {
+    namespace: 'provider-effects', key: 'post-revoke', expectedGeneration: null, value: { state: 'should-not-write' }
+  }), (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+});
+
+test('revocation between provider authority check and atomic write rejects the entire effect', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-authority-provider-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = new EmbeddedControlPlaneStore(dir);
+  const subject: RemoteAuthoritySubject = {
+    accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 1
+  };
+  const authorize = async () => {};
+  const authority = () => new RemoteAuthorityFenceStore(new EmbeddedControlPlaneStore(dir), { authorize });
+  const old = await authority().acquire(subject, 'old-provider');
+  let signal!: () => void;
+  const entered = new Promise<void>((resolve) => { signal = resolve; });
+  let unblock!: () => void;
+  const gate = new Promise<void>((resolve) => { unblock = resolve; });
+  const delayed = {
+    get: store.get.bind(store),
+    list: store.list.bind(store),
+    snapshot: store.snapshot.bind(store),
+    restore: store.restore.bind(store),
+    transact: async (...args: Parameters<typeof store.transact>) => {
+      if (args[0].length === 2) {
+        signal();
+        await gate;
+      }
+      return store.transact(...args);
+    }
+  };
+  const mutating = new RemoteAuthorityFenceStore(delayed, { authorize }).commitProtected(old, {
+    namespace: 'protected-effects', key: 'mutated-after-revocation',
+    expectedGeneration: null, value: { sensitive: true }
+  });
+  await entered;
+  await authority().revoke(subject);
+  unblock();
+  await assert.rejects(mutating, (e: any) => e?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+  assert.equal(await store.get('protected-effects', 'mutated-after-revocation'), null);
+});
+
+test('protected commits cannot mutate the fence namespace or bypass an effect CAS mismatch', async (t) => {
+  const { make, subject } = await fixture(t);
+  const lease = await make().acquire(subject, 'provider');
+  await assert.rejects(make().commitProtected(lease, {
+    namespace: '__mecord_remote_authority', key: subject.deviceId,
+    expectedGeneration: null, value: { kind: 'revoked' }
+  }), (e: any) => e?.code === 'REMOTE_AUTHORITY_INVALID');
+  await assert.rejects(make().commitProtected(lease, {
+    namespace: 'provider-effects', key: 'missing-effect',
+    expectedGeneration: 1, value: { data: 'not-authorized-to-overwrite' }
+  }), (e: any) => e?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+  assert.equal((await make().assertCurrent(lease)).generation, lease.generation);
+});
