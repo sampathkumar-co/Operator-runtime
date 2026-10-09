@@ -376,3 +376,38 @@ test('PostgreSQL control-plane retains deleted CAS history as invisible durable 
   assert.equal(row?.generation, 2);
   assert.equal(row?.is_deleted, false);
 });
+
+test('explicit invalid expiry never becomes indefinite authority in mutations or restored records', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-expiry-presence-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = new EmbeddedControlPlaneStore(dir);
+
+  for (const malformed of ['', null]) {
+    await assert.rejects(
+      () => store.transact([{
+        namespace: 'leases', key: 'bounded', expectedGeneration: null,
+        value: { scope: 'session' }, expiresAt: malformed as string
+      }], '2026-10-09T00:00:00.000Z'),
+      (error: any) => error?.code === 'CONTROL_PLANE_STORE_INVALID'
+    );
+  }
+  assert.equal(await store.get('leases', 'bounded'), null);
+
+  const [live] = await store.transact([{
+    namespace: 'leases', key: 'bounded', expectedGeneration: null,
+    value: { scope: 'session' }, expiresAt: '2026-10-09T00:01:00.000Z'
+  }], '2026-10-09T00:00:00.000Z');
+  assert.equal(live?.expiresAt, '2026-10-09T00:01:00.000Z');
+
+  const stateFile = path.join(dir, 'control-plane-store.json');
+  const original = await fs.readFile(stateFile, 'utf8');
+  const poisoned = JSON.parse(original);
+  poisoned.records[0].expiresAt = '';
+  await fs.writeFile(stateFile, JSON.stringify(poisoned), 'utf8');
+  await assert.rejects(
+    () => new EmbeddedControlPlaneStore(dir).get('leases', 'bounded'),
+    (error: any) => error?.code === 'CONTROL_PLANE_STORE_INVALID'
+  );
+  await fs.writeFile(stateFile, original, 'utf8');
+  assert.equal((await new EmbeddedControlPlaneStore(dir).get('leases', 'bounded'))?.expiresAt, live!.expiresAt);
+});
