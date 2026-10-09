@@ -502,3 +502,41 @@ test('resource lease v1 state migrates without inventing quarantines', async (t)
   assert.equal(snapshot.version, 2);
   assert.equal(snapshot.quarantines[0]?.actionId, 'migration-action');
 });
+
+test('same owner label never authorizes overlapping exclusive leases from independent instances', async (t) => {
+  const state = await temp(t);
+  const left = new ResourceLeaseStore(state);
+  const right = new ResourceLeaseStore(state);
+  const key = 'repo:/tmp/same-owner-alias';
+  const first = await left.acquire('identical-owner-label', [key], 'exclusive');
+  await first.assertOwned();
+  await assert.rejects(
+    () => right.acquire('identical-owner-label', [key], 'exclusive'),
+    (error: any) => error?.code === 'RESOURCE_BUSY'
+  );
+  await assert.rejects(
+    () => right.acquire('identical-owner-label', [key + '/child'], 'shared'),
+    (error: any) => error?.code === 'RESOURCE_BUSY'
+  );
+  await first.assertOwned();
+  await first.release();
+  const second = await right.acquire('identical-owner-label', [key], 'exclusive');
+  assert.notEqual(second.id, first.id);
+  await second.assertOwned();
+  await second.release();
+});
+
+test('same owner label may share read leases but cannot escalate to exclusive', async (t) => {
+  const state = await temp(t);
+  const firstStore = new ResourceLeaseStore(state);
+  const secondStore = new ResourceLeaseStore(state);
+  const key = 'fs-path:/tmp/same-owner-shared';
+  const one = await firstStore.acquire('owner', [key], 'shared');
+  const two = await secondStore.acquire('owner', [key], 'shared');
+  await assert.rejects(
+    () => new ResourceLeaseStore(state).acquire('owner', [key], 'exclusive'),
+    (error: any) => error?.code === 'RESOURCE_BUSY'
+  );
+  await two.release();
+  await one.release();
+});
