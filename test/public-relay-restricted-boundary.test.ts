@@ -13,7 +13,36 @@ import { RelayResultStore } from '../src/core/relay-result-store.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
 
 async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
-  const server = http.createServer(handler);
+  // Transport/fault-injection suites below use a scripted relay socket and an
+  // in-memory HTTP result server, not the real RelayResultService. Supply the
+  // newly required fresh-authority RPC contract here without consuming the
+  // fault-injection handler's result counters. Real authorization/revocation
+  // decisions are tested using actual session+store state in result-service.test.
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/v1/device-authority/check') {
+      try {
+        const body = JSON.parse(await readBody(req));
+        if (!Number.isSafeInteger(body.seq) || body.seq < 1 ||
+            typeof body.deliveryId !== 'string' ||
+            typeof body.authority?.accountId !== 'string' ||
+            typeof body.authority?.deviceId !== 'string' ||
+            !Number.isSafeInteger(body.authority?.generation)) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: { code: 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED' } }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, authorization: {
+          seq: body.seq, deliveryId: body.deliveryId, ...body.authority
+        } }));
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false }));
+      }
+      return;
+    }
+    await handler(req, res);
+  });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
