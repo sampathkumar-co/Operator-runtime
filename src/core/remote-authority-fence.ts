@@ -75,8 +75,17 @@ export class RemoteAuthorityFenceStore {
     if (previous && previous.kind === 'active' && Date.parse(current!.expiresAt ?? '') > now) {
       throw blocked('REMOTE_AUTHORITY_HELD', 'Another worker still holds this device generation.');
     }
-    if (previous && previous.kind === 'active' && subject.authorityGeneration < previous.authorityGeneration) {
-      throw blocked('REMOTE_AUTHORITY_REVOKED', 'Device has a newer authority generation.');
+    if (previous && previous.kind === 'active') {
+      if (subject.authorityGeneration < previous.authorityGeneration) {
+        throw blocked('REMOTE_AUTHORITY_REVOKED', 'Device has a newer authority generation.');
+      }
+      // An expired lease can be reclaimed by its account, but a *different*
+      // account must advance the authority generation. TTL is not proof that
+      // a new tenant owns the cryptographic device registration.
+      if (previous.accountId !== subject.accountId &&
+          subject.authorityGeneration <= previous.authorityGeneration) {
+        throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Expired device lease cannot transfer accounts at a reused generation.');
+      }
     }
     const leaseId = crypto.randomUUID();
     const fenceToken = crypto.randomBytes(32).toString('base64url');
@@ -214,8 +223,26 @@ export class RemoteAuthorityFenceStore {
       const current = await this.#store.get(NS, key);
       const previous = parseValue(current);
       // A stale administrator must not revoke a newer live authority incarnation.
-      if (previous && previous.kind === 'active' && previous.authorityGeneration > subject.authorityGeneration) {
-        throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'Revocation would fence a newer device owner.');
+      if (previous && previous.kind === 'active') {
+        if (previous.authorityGeneration > subject.authorityGeneration) {
+          throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'Revocation would fence a newer device owner.');
+        }
+        if (previous.accountId !== subject.accountId) {
+          throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Device authority belongs to a different account.');
+        }
+      }
+      if (previous && previous.kind === 'revoked') {
+        if (previous.revokedGeneration > subject.authorityGeneration) {
+          throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'A newer authority has already been revoked.');
+        }
+        // A generation claim is not proof of a completed tenant transfer.
+        // A different account must first acquire a new, strictly advanced
+        // active lease through the trusted registration authority. Otherwise
+        // its revoke call could erase another tenant's durable revocation
+        // barrier without ever owning this device.
+        if (previous.accountId !== subject.accountId) {
+          throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Revocation cannot rewrite a different account\'s generation barrier.');
+        }
       }
       const revokedGeneration = Math.max(subject.authorityGeneration,
         previous?.kind === 'revoked' ? previous.revokedGeneration : 0,
@@ -268,13 +295,19 @@ function validateLease(input: RemoteAuthorityLease): RemoteAuthorityLease {
 }
 type LeaseState =
   | { kind: 'active'; accountId: string; deviceId: string; authorityGeneration: number; ownerId: string; process: ProcessInstanceIdentity; leaseId: string; fenceToken: string }
-  | { kind: 'revoked'; revokedGeneration: number };
+  | { kind: 'revoked'; accountId: string; deviceId: string; revokedGeneration: number };
 function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
   if (!record) return null;
   const v = record.value;
   if (v.schemaVersion !== 1) throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Authority record has an unknown schema.');
   if (v.kind === 'revoked' && Number.isSafeInteger(Number(v.revokedGeneration)) && Number(v.revokedGeneration) >= 1) {
-    return { kind: 'revoked', revokedGeneration: Number(v.revokedGeneration) };
+    const subject = validateSubject({ accountId: String(v.accountId ?? ''), deviceId: String(v.deviceId ?? ''),
+      authorityGeneration: Number(v.revokedGeneration) });
+    if (subject.deviceId !== record.key) {
+      throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Revocation barrier does not match its device key.');
+    }
+    return { kind: 'revoked', accountId: subject.accountId, deviceId: subject.deviceId,
+      revokedGeneration: subject.authorityGeneration };
   }
   if (v.kind === 'active') {
     const subject = validateSubject({ accountId: String(v.accountId), deviceId: String(v.deviceId), authorityGeneration: Number(v.authorityGeneration) });
