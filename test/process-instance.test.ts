@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   inspectProcessInstance,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity
 } from '../src/core/process-instance.ts';
@@ -18,6 +19,8 @@ test('current process identity is inspectable without PID-only authority', async
   assert.ok(identity);
   assert.equal(identity.pid, process.pid);
   if (process.platform === 'win32') assert.match(identity.started, /^windows-filetime:\d{15,20}$/);
+  if (process.platform === 'linux') assert.match(identity.started,
+    /^linux-boot-id:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:ticks:\d+$/);
 });
 
 test('Windows FILETIME identity remains compatible with legacy ISO lock records', () => {
@@ -27,4 +30,32 @@ test('Windows FILETIME identity remains compatible with legacy ISO lock records'
   assert.equal(sameProcessInstance(legacy, compatible), true);
   assert.equal(sameProcessInstance(legacy, different), false);
   assert.equal(sameProcessInstance(legacy, { ...compatible, pid: 43 }), false);
+});
+
+test('Linux process identity separates boot UUID even with the same PID and start ticks', () => {
+  const first: ProcessInstanceIdentity = {
+    pid: 455, started: 'linux-boot-id:12345678-1234-1234-1234-123456789abc:ticks:8000'
+  };
+  const otherBoot: ProcessInstanceIdentity = {
+    pid: 455, started: 'linux-boot-id:abcdef01-1234-1234-1234-123456789abc:ticks:8000'
+  };
+  assert.equal(sameProcessInstance(first, first), true);
+  assert.equal(sameProcessInstance(first, otherBoot), false);
+  assert.equal(processInstanceDefinitelyStale(first, { status: 'live', identity: otherBoot }), true);
+});
+
+test('Linux mixed-version lease migration is not proof of process death', () => {
+  const legacy: ProcessInstanceIdentity = { pid: 455, started: 'linux-boot-ticks:8000' };
+  const bootBound: ProcessInstanceIdentity = {
+    pid: 455, started: 'linux-boot-id:12345678-1234-1234-1234-123456789abc:ticks:8000'
+  };
+  // Fail closed even if a v2 observer sees a process with the old PID, since
+  // legacy tick-only IDs cannot establish which machine owns the old lease.
+  assert.equal(sameProcessInstance(legacy, bootBound), false);
+  assert.equal(processInstanceDefinitelyStale(legacy, { status: 'live', identity: bootBound }), false);
+  assert.equal(processInstanceDefinitelyStale(bootBound, { status: 'live', identity: legacy }), false);
+  assert.equal(processInstanceDefinitelyStale(legacy, { status: 'dead' }), true);
+  assert.equal(processInstanceDefinitelyStale(bootBound, { status: 'live', identity: {
+    pid: bootBound.pid + 1, started: bootBound.started
+  } }), true);
 });
