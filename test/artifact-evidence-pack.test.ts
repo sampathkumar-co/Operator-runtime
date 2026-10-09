@@ -95,3 +95,43 @@ test('Evidence Pack can be published as a content-addressed artifact', async (t)
   const stored = await store.read(result.artifact.id);
   assert.match(stored.bytes.toString('utf8'), /EMPIRICALLY_VERIFIED/);
 });
+
+test('artifact list limits by recency rather than lexicographic content address', async (t) => {
+  const scratchDir = await tempState();
+  const stateDir = await tempState();
+  t.after(async () => {
+    await fs.rm(scratchDir, { recursive: true, force: true });
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+
+  const scratch = new ArtifactStore(scratchDir);
+  const candidates = await Promise.all(Array.from({ length: 5 }, (_, i) =>
+    scratch.put({
+      bytes: 'candidate-' + i,
+      kind: 'test-report',
+      mediaType: 'text/plain',
+      now: '2026-10-06T00:00:00.000Z'
+    })
+  ));
+
+  // Arrange timestamps in increasing *hash* order, so the newest records
+  // necessarily fall beyond any naive ID-sorted prefix.
+  const orderedById = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+  const store = new ArtifactStore(stateDir);
+  const inserted = [];
+  for (const [index, item] of orderedById.entries()) {
+    const candidateIndex = candidates.findIndex(row => row.id === item.id);
+    const record = await store.put({
+      bytes: 'candidate-' + candidateIndex,
+      kind: 'test-report',
+      mediaType: 'text/plain',
+      now: new Date(Date.UTC(2026, 9, 6, 0, index)).toISOString()
+    });
+    assert.equal(record.id, item.id);
+    inserted.push(record);
+  }
+  const expected = [...inserted].reverse().slice(0, 2).map(record => record.id);
+  const limited = await new ArtifactStore(stateDir).list(2);
+  assert.deepEqual(limited.map(record => record.id), expected);
+  assert.deepEqual((await store.list(5)).map(record => record.id), [...inserted].reverse().map(record => record.id));
+});
