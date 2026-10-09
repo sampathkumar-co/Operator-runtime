@@ -662,8 +662,14 @@ export class DigitalOperationsLayer {
       }
     } finally {
       if (operation.deviceReservationId) {
-        try { await this.#devices.release(operation.deviceReservationId); }
-        catch (error) { releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED'; }
+        try {
+          const released = await this.#devices.release(operation.deviceReservationId);
+          if (released.id !== operation.deviceReservationId || !['RELEASED', 'EXPIRED'].includes(released.state)) {
+            releaseErrorCode = 'DEVICE_RESERVATION_RELEASE_UNCONFIRMED';
+          }
+        } catch (error) {
+          releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED';
+        }
       }
     }
     return await this.#update(operation.id, (current) => {
