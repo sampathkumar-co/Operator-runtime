@@ -475,6 +475,16 @@ function applyTransition(
     if (entry.state === next) return;
     throw new OperatorError('ACTION_JOURNAL_TRANSITION_INVALID', `Cannot transition action journal from ${entry.state} to ${next}.`);
   }
+  // A retry of exactly the last transition is not new evidence. Keeping a
+  // second copy would eventually exhaust the bounded journal on safe retries.
+  // Distinct metadata remains an explicit new observation and is preserved.
+  const last = entry.transitions.at(-1)!;
+  if (entry.state === next && canonicalJson({
+    provider: last.provider,
+    resultDigest: last.resultDigest,
+    verificationDigest: last.verificationDigest,
+    reconciliationStatus: last.reconciliationStatus
+  }) === canonicalJson(metadata)) return;
   if (entry.transitions.length >= MAX_TRANSITIONS) {
     throw new OperatorError('ACTION_JOURNAL_TRANSITION_LIMIT', 'Action journal transition history is unexpectedly large.');
   }
