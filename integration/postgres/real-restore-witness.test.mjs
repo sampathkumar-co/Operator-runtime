@@ -81,4 +81,38 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
       { namespace: 'account', key: 'rebound', expectedGeneration: 1, value: { owner: 'replayed' } }
     ], '2026-10-09T12:02:00.000Z'), e => e?.code === 'CONTROL_PLANE_CAS_MISMATCH');
   });
+
+  test('PostgreSQL witness-bound store forbids direct restore and permits only pinned-current approval', async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-witness-guarded-postgres-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const source = new EmbeddedControlPlaneStore(root);
+    await source.transact([{ namespace:'safety', key:'replay', expectedGeneration:null,
+      value:{owner:'initial'} }], '2026-10-09T11:01:00.000Z');
+    const snapshot = await source.snapshot('2026-10-09T11:03:00.000Z');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const manifest = { schemaVersion:1, anchorId:'independent-approval',
+      epoch:5, snapshotDigest:snapshot.digest,
+      issuedAt:'2026-10-09T11:59:00.000Z', expiresAt:'2026-10-09T12:09:00.000Z' };
+    const guard = {
+      anchorId:manifest.anchorId,
+      publicKeyPem: publicKey.export({ format:'pem', type:'spki' }).toString(),
+      clock: () => new Date('2026-10-09T12:00:00.000Z'),
+      authorizeRestore: async () => {},
+      anchor: { withLatestExclusive: async (fn) => await fn({
+        manifest, signature: crypto.sign(null,Buffer.from(canonicalJson(manifest)),privateKey).toString('base64url')
+      }) }
+    };
+    assert.throws(() => new PostgresControlPlaneStore(pool,{requireWitnessForRestore:true}),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+    const guarded = new PostgresControlPlaneStore(pool,{
+      restoreGuard:guard, requireWitnessForRestore:true
+    });
+    await assert.rejects(guarded.restore(snapshot),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+    assert.equal((await pool.query('SELECT COUNT(*)::int AS count FROM mecord_control_plane')).rows[0].count,0);
+    await guarded.restoreWithConfiguredWitness(snapshot);
+    assert.equal((await guarded.get('safety','replay'))?.value.owner,'initial');
+    await assert.rejects(guarded.restoreWithConfiguredWitness(snapshot),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
+  });
 }
