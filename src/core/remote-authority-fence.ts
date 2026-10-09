@@ -157,6 +157,17 @@ export class RemoteAuthorityFenceStore {
     };
   }
 
+  /** Voluntary exact-owner release. Revocation remains a separate, irreversible
+   * generation barrier. A release keeps the key's CAS history as a tombstone.
+   */
+  async release(leaseInput: RemoteAuthorityLease): Promise<void> {
+    const lease = await this.assertCurrent(leaseInput);
+    await this.#store.transact([{
+      namespace: NS, key: resourceKey(lease),
+      expectedGeneration: lease.generation, value: null
+    }], this.#clock().toISOString());
+  }
+
   async revoke(subjectInput: RemoteAuthoritySubject): Promise<RemoteAuthorityBarrier> {
     const subject = validateSubject(subjectInput);
     await this.#authorize(subject, 'revoke');
