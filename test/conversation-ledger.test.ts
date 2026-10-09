@@ -85,3 +85,33 @@ test('conversation ledger rejects duplicate turn identities even when sequences 
     (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT'
   );
 });
+
+test('conversation supersession binds only to earlier turns in the same conversation', async (t) => {
+  const dir = await temp(t);
+  const source = new ConversationLedger(dir, 'source-chat');
+  const unrelated = new ConversationLedger(dir, 'different-chat');
+  const original = await source.append({ role: 'user', content: 'Original request' });
+  const external = await unrelated.append({ role: 'user', content: 'Other conversation' });
+  const valid = await source.append({
+    role: 'user', content: 'Revised request', supersedes: [original.id]
+  });
+  assert.deepEqual(valid.supersedes, [original.id]);
+  await assert.rejects(
+    source.append({ role: 'user', content: 'Foreign supersession', supersedes: [external.id] }),
+    (error: any) => error?.code === 'CONVERSATION_INPUT_INVALID'
+  );
+  await assert.rejects(
+    source.append({ role: 'user', content: 'Nonexistent supersession', supersedes: ['unknown-turn-id'] }),
+    (error: any) => error?.code === 'CONVERSATION_INPUT_INVALID'
+  );
+  assert.equal((await new ConversationLedger(dir, 'source-chat').list()).length, 2);
+
+  const file = path.join(dir, 'conversations', 'source-chat.ndjson');
+  const parsed = (await fs.readFile(file, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  parsed[0].supersedes = [valid.id]; // Future reference cannot be valid durable history.
+  await fs.writeFile(file, parsed.map(item => JSON.stringify(item)).join('\n') + '\n');
+  await assert.rejects(
+    new ConversationLedger(dir, 'source-chat').list(),
+    (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT'
+  );
+});

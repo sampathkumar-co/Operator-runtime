@@ -43,6 +43,10 @@ export class ConversationLedger {
       const content = boundedText(input.content, MAX_TURN_BYTES, 'content');
       const role = validRole(input.role);
       const supersedes = uniqueIds(input.supersedes ?? []);
+      const knownTurnIds = new Set(existing.map(turn => turn.id));
+      if (supersedes.some(turnId => !knownTurnIds.has(turnId))) {
+        throw new OperatorError('CONVERSATION_INPUT_INVALID', 'Superseded turn must already exist in this conversation.');
+      }
       const createdAt = new Date().toISOString();
       const conversationId = this.#conversationId;
       const turn: ConversationTurn = {
@@ -91,6 +95,9 @@ export class ConversationLedger {
       if (turn.conversationId !== this.#conversationId) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains a turn belonging to a different conversation.');
       if (turn.sequence !== i + 1) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger sequence is not contiguous.');
       if (turnIds.has(turn.id)) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains duplicate turn identities.');
+      if (turn.supersedes?.some(turnId => !turnIds.has(turnId))) {
+        throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger references a superseded turn that is not earlier in this conversation.');
+      }
       turnIds.add(turn.id);
     }
     return turns;
