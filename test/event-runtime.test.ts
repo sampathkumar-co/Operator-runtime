@@ -109,3 +109,44 @@ test('stage13 terminal waits stay inspectable during retention and are reclaimed
     (error: any) => error?.code === 'EVENT_WAIT_NOT_FOUND'
   );
 });
+
+test('stage13 explicit empty event bindings fail closed rather than widening matching scope', async (t) => {
+  const state = await temp(t);
+  const runtime = new DurableEventRuntime(state);
+
+  for (const invalid of [
+    { eventType: 'release.approved', correlationKey: '' },
+    { eventType: 'release.approved', notBefore: '' },
+    { eventType: 'release.approved', deadlineAt: '' },
+    { eventType: 'release.approved', wakeAt: '' }
+  ]) {
+    await assert.rejects(() => runtime.wait(invalid), (error: any) => error?.code === 'EVENT_INPUT_INVALID');
+  }
+
+  const event = {
+    id: crypto.randomUUID(),
+    type: 'release.approved',
+    payloadDigest: 'f'.repeat(64),
+    occurredAt: new Date().toISOString()
+  };
+  await assert.rejects(
+    () => runtime.publish({ ...event, correlationKey: '' }),
+    (error: any) => error?.code === 'EVENT_INPUT_INVALID'
+  );
+
+  const scoped = await runtime.wait({ eventType: 'release.approved', correlationKey: 'release:one' });
+  const unrelated = await runtime.publish({ ...event, correlationKey: 'release:other' });
+  assert.deepEqual(unrelated.satisfiedWaitIds, []);
+  assert.equal((await runtime.inspect(scoped.id)).state, 'WAITING');
+
+  // Persisted state is validated too: a malformed empty correlation cannot silently
+  // turn a previously scoped wait into a wildcard on restart.
+  const file = path.join(state, 'events.json');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  persisted.waits[0].correlationKey = '';
+  await fs.writeFile(file, JSON.stringify(persisted));
+  await assert.rejects(
+    () => new DurableEventRuntime(state).inspect(scoped.id),
+    (error: any) => error?.code === 'EVENT_INPUT_INVALID'
+  );
+});

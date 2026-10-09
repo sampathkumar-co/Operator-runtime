@@ -81,12 +81,12 @@ export class DurableEventRuntime {
       const candidate: EventWait = {
         id,
         eventType: boundedType(input.eventType),
-        ...(input.correlationKey ? { correlationKey: bounded(input.correlationKey, 512, 'correlationKey') } : {}),
+        ...(input.correlationKey !== undefined ? { correlationKey: bounded(input.correlationKey, 512, 'correlationKey') } : {}),
         state: 'WAITING',
         createdAt: now.toISOString(),
-        ...(input.notBefore ? { notBefore: iso(input.notBefore, 'notBefore') } : {}),
-        ...(input.deadlineAt ? { deadlineAt: iso(input.deadlineAt, 'deadlineAt') } : {}),
-        ...(input.wakeAt ? { wakeAt: iso(input.wakeAt, 'wakeAt') } : {})
+        ...(input.notBefore !== undefined ? { notBefore: iso(input.notBefore, 'notBefore') } : {}),
+        ...(input.deadlineAt !== undefined ? { deadlineAt: iso(input.deadlineAt, 'deadlineAt') } : {}),
+        ...(input.wakeAt !== undefined ? { wakeAt: iso(input.wakeAt, 'wakeAt') } : {})
       };
       if (candidate.deadlineAt && candidate.wakeAt && Date.parse(candidate.wakeAt) > Date.parse(candidate.deadlineAt)) {
         throw new OperatorError('EVENT_WAIT_INVALID', 'wakeAt cannot be after deadlineAt.');
@@ -239,7 +239,7 @@ function validateEvent(input: RuntimeEvent): RuntimeEvent {
   return {
     id,
     type,
-    ...(input.correlationKey ? { correlationKey: bounded(input.correlationKey, 512, 'correlationKey') } : {}),
+    ...(input.correlationKey !== undefined ? { correlationKey: bounded(input.correlationKey, 512, 'correlationKey') } : {}),
     payloadDigest: input.payloadDigest.toLowerCase(),
     occurredAt
   };
@@ -260,11 +260,12 @@ function validateState(input: unknown): EventState {
     boundedType(wait.eventType);
     if (!['WAITING', 'SATISFIED', 'TIMED_OUT', 'CANCELLED'].includes(wait.state)) throw new OperatorError('EVENT_STATE_CORRUPT', 'Event wait state is invalid.');
     iso(wait.createdAt, 'wait.createdAt');
-    if (wait.notBefore) iso(wait.notBefore, 'wait.notBefore');
-    if (wait.deadlineAt) iso(wait.deadlineAt, 'wait.deadlineAt');
-    if (wait.wakeAt) iso(wait.wakeAt, 'wait.wakeAt');
-    if (wait.satisfiedAt) iso(wait.satisfiedAt, 'wait.satisfiedAt');
-    if (wait.terminalAt) iso(wait.terminalAt, 'wait.terminalAt');
+    if (wait.correlationKey !== undefined) bounded(wait.correlationKey, 512, 'wait.correlationKey');
+    if (wait.notBefore !== undefined) iso(wait.notBefore, 'wait.notBefore');
+    if (wait.deadlineAt !== undefined) iso(wait.deadlineAt, 'wait.deadlineAt');
+    if (wait.wakeAt !== undefined) iso(wait.wakeAt, 'wait.wakeAt');
+    if (wait.satisfiedAt !== undefined) iso(wait.satisfiedAt, 'wait.satisfiedAt');
+    if (wait.terminalAt !== undefined) iso(wait.terminalAt, 'wait.terminalAt');
     if (wait.state === 'WAITING') {
       if (wait.terminalAt) throw new OperatorError('EVENT_STATE_CORRUPT', 'Waiting event wait cannot have terminalAt.');
     } else if (!wait.terminalAt) {
