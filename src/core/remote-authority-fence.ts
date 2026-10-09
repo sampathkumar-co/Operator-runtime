@@ -194,8 +194,21 @@ export class RemoteAuthorityFenceStore {
       const current = await this.#store.get(NS, key);
       const previous = parseValue(current);
       // A stale administrator must not revoke a newer live authority incarnation.
-      if (previous && previous.kind === 'active' && previous.authorityGeneration > subject.authorityGeneration) {
-        throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'Revocation would fence a newer device owner.');
+      if (previous && previous.kind === 'active') {
+        if (previous.authorityGeneration > subject.authorityGeneration) {
+          throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'Revocation would fence a newer device owner.');
+        }
+        if (previous.accountId !== subject.accountId) {
+          throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Device authority belongs to a different account.');
+        }
+      }
+      if (previous && previous.kind === 'revoked') {
+        if (previous.revokedGeneration > subject.authorityGeneration) {
+          throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'A newer authority has already been revoked.');
+        }
+        if (previous.revokedGeneration === subject.authorityGeneration && previous.accountId !== subject.accountId) {
+          throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Revocation cannot rewrite a different account\'s generation barrier.');
+        }
       }
       const revokedGeneration = Math.max(subject.authorityGeneration,
         previous?.kind === 'revoked' ? previous.revokedGeneration : 0,
@@ -248,13 +261,19 @@ function validateLease(input: RemoteAuthorityLease): RemoteAuthorityLease {
 }
 type LeaseState =
   | { kind: 'active'; accountId: string; deviceId: string; authorityGeneration: number; ownerId: string; process: ProcessInstanceIdentity; leaseId: string; fenceToken: string }
-  | { kind: 'revoked'; revokedGeneration: number };
+  | { kind: 'revoked'; accountId: string; deviceId: string; revokedGeneration: number };
 function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
   if (!record) return null;
   const v = record.value;
   if (v.schemaVersion !== 1) throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Authority record has an unknown schema.');
   if (v.kind === 'revoked' && Number.isSafeInteger(Number(v.revokedGeneration)) && Number(v.revokedGeneration) >= 1) {
-    return { kind: 'revoked', revokedGeneration: Number(v.revokedGeneration) };
+    const subject = validateSubject({ accountId: String(v.accountId ?? ''), deviceId: String(v.deviceId ?? ''),
+      authorityGeneration: Number(v.revokedGeneration) });
+    if (subject.deviceId !== record.key) {
+      throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Revocation barrier does not match its device key.');
+    }
+    return { kind: 'revoked', accountId: subject.accountId, deviceId: subject.deviceId,
+      revokedGeneration: subject.authorityGeneration };
   }
   if (v.kind === 'active') {
     const subject = validateSubject({ accountId: String(v.accountId), deviceId: String(v.deviceId), authorityGeneration: Number(v.authorityGeneration) });
