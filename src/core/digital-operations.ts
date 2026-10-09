@@ -467,107 +467,144 @@ export class DigitalOperationsLayer {
   }
 
   async start(idInput: string): Promise<DigitalOperation> {
-    const id = validUuid(idInput, 'operationId');
-    const operation = await this.inspect(id);
-    if (operation.state !== 'PENDING' && operation.state !== 'PAUSED') throw new OperatorError('OPERATIONS_STATE_INVALID', 'Operation is not startable.');
-    await this.#assertWorldConditions(operation.preconditions, 'precondition');
-    if (operation.mode === 'team') {
-      if (!operation.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
-      const mission = await this.#teams.inspect(operation.teamMissionId);
-      if (mission.state === 'PENDING') await this.#teams.start(mission.id);
-      else if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') await this.#teams.resume(mission.id);
-    } else {
-      if (!operation.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Organization operation has no program.');
-      await this.#organizations.start(operation.organizationProgramId);
-    }
-    return await this.#update(id, (current) => {
-      current.state = 'RUNNING';
-      delete current.lastBlockReason;
+    return await this.#withOperationOwnership(async () => {
+      const id = validUuid(idInput, 'operationId');
+      const operation = await this.inspect(id);
+      if (operation.state !== 'PENDING' && operation.state !== 'PAUSED') throw new OperatorError('OPERATIONS_STATE_INVALID', 'Operation is not startable.');
+      await this.#assertWorldConditions(operation.preconditions, 'precondition');
+      if (operation.mode === 'team') {
+        if (!operation.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
+        const mission = await this.#teams.inspect(operation.teamMissionId);
+        const started = mission.state === 'PENDING' ? await this.#teams.start(mission.id)
+          : mission.state === 'PAUSED' || mission.state === 'BLOCKED' ? await this.#teams.resume(mission.id)
+          : mission;
+        if (started.id !== mission.id || started.state !== 'RUNNING') {
+          throw new OperatorError('OPERATIONS_CHILD_START_UNCONFIRMED', 'Team mission did not confirm its exact running identity.');
+        }
+      } else {
+        if (!operation.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Organization operation has no program.');
+        const started = await this.#organizations.start(operation.organizationProgramId);
+        if (started.id !== operation.organizationProgramId || started.state !== 'RUNNING') {
+          throw new OperatorError('OPERATIONS_CHILD_START_UNCONFIRMED', 'Organization program did not confirm its exact running identity.');
+        }
+      }
+      return await this.#update(id, (current) => {
+        current.state = 'RUNNING';
+        delete current.lastBlockReason;
+      });
     });
   }
 
   async refresh(idInput: string): Promise<DigitalOperation> {
-    const id = validUuid(idInput, 'operationId');
-    const current = await this.inspect(id);
-    if (current.deviceReservationId && current.state === 'RUNNING') {
-      if (!current.deviceReservationSessionId) {
-        return await this.#update(id, (operation) => {
-          operation.state = 'BLOCKED';
-          operation.lastBlockReason = 'Device reservation session identity is missing; reconciliation is required.';
-        });
-      }
-      try {
-        await this.#devices.heartbeat(current.deviceReservationId, current.deviceReservationSessionId);
-      } catch (error) {
-        const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_HEARTBEAT_FAILED';
-        return await this.#update(id, (operation) => {
-          operation.state = 'BLOCKED';
-          operation.lastBlockReason = `Device reservation renewal failed (${code}); capacity ownership is no longer trusted and requires reconciliation.`;
-        });
-      }
-    }
-    let underlyingState: string;
-    if (current.mode === 'team') {
-      if (!current.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
-      underlyingState = (await this.#teams.inspect(current.teamMissionId)).state;
-    } else {
-      if (!current.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Organization operation has no program.');
-      underlyingState = (await this.#organizations.refresh(current.organizationProgramId)).state;
-    }
-
-    let nextState: DigitalOperationState = mapUnderlyingState(underlyingState);
-    let blockReason: string | undefined;
-    let verificationEvidenceDigest: string | undefined;
-    if (nextState === 'VERIFIED') {
-      const worldCheck = await this.#checkWorldConditions(current.postconditions);
-      if (!worldCheck.ok) {
-        nextState = 'BLOCKED';
-        blockReason = worldCheck.reason;
-      } else {
-        verificationEvidenceDigest = await this.#underlyingVerificationDigest(current);
-      }
-    }
-
-    const updated = await this.#update(id, (operation) => {
-      operation.state = nextState;
-      if (blockReason) operation.lastBlockReason = blockReason;
-      else delete operation.lastBlockReason;
-      if (nextState === 'VERIFIED') {
-        if (!verificationEvidenceDigest) throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Verified operation is missing its underlying machine verification proof.');
-        if (operation.verificationEvidenceDigest && operation.verificationEvidenceDigest !== verificationEvidenceDigest) {
-          throw new OperatorError('OPERATIONS_VERIFICATION_DRIFT', 'Underlying verification evidence changed after the operation was verified.');
+    return await this.#withOperationOwnership(async () => {
+      const id = validUuid(idInput, 'operationId');
+      const current = await this.inspect(id);
+      if (current.deviceReservationId && current.state === 'RUNNING') {
+        if (!current.deviceReservationSessionId) {
+          return await this.#update(id, (operation) => {
+            operation.state = 'BLOCKED';
+            operation.lastBlockReason = 'Device reservation session identity is missing; reconciliation is required.';
+          });
         }
-        operation.verificationEvidenceDigest = verificationEvidenceDigest;
-        if (!operation.receiptDigest) operation.receiptDigest = operationReceipt(operation);
+        try {
+          await this.#devices.heartbeat(current.deviceReservationId, current.deviceReservationSessionId);
+        } catch (error) {
+          const code = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_HEARTBEAT_FAILED';
+          return await this.#update(id, (operation) => {
+            operation.state = 'BLOCKED';
+            operation.lastBlockReason = `Device reservation renewal failed (${code}); capacity ownership is no longer trusted and requires reconciliation.`;
+          });
+        }
       }
+      let underlyingState: string;
+      if (current.mode === 'team') {
+        if (!current.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
+        underlyingState = (await this.#teams.inspect(current.teamMissionId)).state;
+      } else {
+        if (!current.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Organization operation has no program.');
+        underlyingState = (await this.#organizations.refresh(current.organizationProgramId)).state;
+      }
+
+      let nextState: DigitalOperationState = mapUnderlyingState(underlyingState);
+      let blockReason: string | undefined;
+      let verificationEvidenceDigest: string | undefined;
+      if (nextState === 'VERIFIED') {
+        const worldCheck = await this.#checkWorldConditions(current.postconditions);
+        if (!worldCheck.ok) {
+          nextState = 'BLOCKED';
+          blockReason = worldCheck.reason;
+        } else {
+          verificationEvidenceDigest = await this.#underlyingVerificationDigest(current);
+        }
+      }
+
+      const updated = await this.#update(id, (operation) => {
+        operation.state = nextState;
+        if (blockReason) operation.lastBlockReason = blockReason;
+        else delete operation.lastBlockReason;
+        if (nextState === 'VERIFIED') {
+          if (!verificationEvidenceDigest) throw new OperatorError('OPERATIONS_VERIFIER_MISSING', 'Verified operation is missing its underlying machine verification proof.');
+          if (operation.verificationEvidenceDigest && operation.verificationEvidenceDigest !== verificationEvidenceDigest) {
+            throw new OperatorError('OPERATIONS_VERIFICATION_DRIFT', 'Underlying verification evidence changed after the operation was verified.');
+          }
+          operation.verificationEvidenceDigest = verificationEvidenceDigest;
+          if (!operation.receiptDigest) operation.receiptDigest = operationReceipt(operation);
+        }
+      });
+      if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(updated.state) && !updated.outcomeRecorded) return await this.#recordFinalOutcome(updated);
+      return updated;
     });
-    if (['VERIFIED', 'FAILED', 'CANCELLED'].includes(updated.state) && !updated.outcomeRecorded) return await this.#recordFinalOutcome(updated);
-    return updated;
   }
 
   async pause(idInput: string): Promise<DigitalOperation> {
-    const id = validUuid(idInput, 'operationId');
-    const current = await this.inspect(id);
-    if (current.mode === 'team' && current.teamMissionId) await this.#teams.pause(current.teamMissionId);
-    else if (current.organizationProgramId) await this.#organizations.pause(current.organizationProgramId);
-    return await this.#update(id, (operation) => { operation.state = 'PAUSED'; });
+    return await this.#withOperationOwnership(async () => {
+      const id = validUuid(idInput, 'operationId');
+      const current = await this.inspect(id);
+      let paused: { id: string; state: string };
+      let expectedId: string;
+      if (current.mode === 'team' && current.teamMissionId) {
+        expectedId = current.teamMissionId;
+        paused = await this.#teams.pause(expectedId);
+      } else if (current.mode === 'organization' && current.organizationProgramId) {
+        expectedId = current.organizationProgramId;
+        paused = await this.#organizations.pause(expectedId);
+      } else throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Operation has no owned child to pause.');
+      if (paused.id !== expectedId || paused.state !== 'PAUSED') {
+        throw new OperatorError('OPERATIONS_CHILD_PAUSE_UNCONFIRMED', 'Child operation did not confirm the exact paused state.');
+      }
+      return await this.#update(id, (operation) => { operation.state = 'PAUSED'; });
+    });
   }
 
   async cancel(idInput: string): Promise<DigitalOperation> {
-    const id = validUuid(idInput, 'operationId');
-    const current = await this.inspect(id);
-    if (current.mode === 'team' && current.teamMissionId) await this.#teams.cancel(current.teamMissionId);
-    else if (current.organizationProgramId) await this.#organizations.cancel(current.organizationProgramId);
-    const updated = await this.#update(id, (operation) => { operation.state = 'CANCELLED'; });
-    return updated.outcomeRecorded ? updated : await this.#recordFinalOutcome(updated);
+    return await this.#withOperationOwnership(async () => {
+      const id = validUuid(idInput, 'operationId');
+      const current = await this.inspect(id);
+      let cancelled: { id: string; state: string };
+      let expectedId: string;
+      if (current.mode === 'team' && current.teamMissionId) {
+        expectedId = current.teamMissionId;
+        cancelled = await this.#teams.cancel(expectedId);
+      } else if (current.mode === 'organization' && current.organizationProgramId) {
+        expectedId = current.organizationProgramId;
+        cancelled = await this.#organizations.cancel(expectedId);
+      } else throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Operation has no owned child to cancel.');
+      if (cancelled.id !== expectedId || cancelled.state !== 'CANCELLED') {
+        throw new OperatorError('OPERATIONS_CHILD_CANCEL_UNCONFIRMED', 'Child operation did not confirm the exact cancelled state.');
+      }
+      const updated = await this.#update(id, (operation) => { operation.state = 'CANCELLED'; });
+      return updated.outcomeRecorded ? updated : await this.#recordFinalOutcome(updated);
+    });
   }
 
   async promoteOrganization(idInput: string, verificationDigestInput: string): Promise<DigitalOperation> {
-    const id = validUuid(idInput, 'operationId');
-    const current = await this.inspect(id);
-    if (current.mode !== 'organization' || !current.organizationProgramId) throw new OperatorError('OPERATIONS_MODE_INVALID', 'Operation is not organization-scale.');
-    await this.#organizations.promote(current.organizationProgramId, shaDigest(verificationDigestInput, 'verificationDigest'));
-    return await this.#update(id, (operation) => { operation.state = 'RUNNING'; });
+    return await this.#withOperationOwnership(async () => {
+      const id = validUuid(idInput, 'operationId');
+      const current = await this.inspect(id);
+      if (current.mode !== 'organization' || !current.organizationProgramId) throw new OperatorError('OPERATIONS_MODE_INVALID', 'Operation is not organization-scale.');
+      await this.#organizations.promote(current.organizationProgramId, shaDigest(verificationDigestInput, 'verificationDigest'));
+      return await this.#update(id, (operation) => { operation.state = 'RUNNING'; });
+    });
   }
 
   async inspect(idInput: string): Promise<DigitalOperation> {
@@ -625,8 +662,14 @@ export class DigitalOperationsLayer {
       }
     } finally {
       if (operation.deviceReservationId) {
-        try { await this.#devices.release(operation.deviceReservationId); }
-        catch (error) { releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED'; }
+        try {
+          const released = await this.#devices.release(operation.deviceReservationId);
+          if (released.id !== operation.deviceReservationId || !['RELEASED', 'EXPIRED'].includes(released.state)) {
+            releaseErrorCode = 'DEVICE_RESERVATION_RELEASE_UNCONFIRMED';
+          }
+        } catch (error) {
+          releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED';
+        }
       }
     }
     return await this.#update(operation.id, (current) => {

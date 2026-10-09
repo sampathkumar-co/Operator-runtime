@@ -939,3 +939,75 @@ test('orphan recovery rejects foreign team, organization and reservation identit
   assert.notEqual(digitalOperationChildId(ownerId,'cancel-team-mission'),
                   digitalOperationChildId(ownerId,'cancel-organization-program'));
 });
+
+test('cross-instance cancellation cannot be resurrected by an older delayed start',async t=>{
+ const base=await setup(t);
+ let started!:()=>void,finish!:()=>void;
+ const entered=new Promise<void>(resolve=>{started=resolve});
+ const gate=new Promise<void>(resolve=>{finish=resolve});
+ let underlying='PENDING';
+ const teams={
+   submit:async (input:{missionId:string})=>({id:input.missionId,state:'PENDING'}),
+   inspect:async(id:string)=>({id,state:underlying}),
+   start:async(id:string)=>{started();await gate;underlying='RUNNING';return {id,state:'RUNNING'}},
+   cancel:async(id:string)=>{underlying='CANCELLED';return {id,state:'CANCELLED'}}
+ };
+ const first=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const second=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const op=await first.submit({
+   requestId:crypto.randomUUID(),objective:'Race-safe operation lifecycle',
+   scopeKey:'project:lifecycle-race',successConditions:['cancel dominates start'],
+   execution:{kind:'team',workItems:work()},run:false
+ });
+ const start=first.start(op.id);
+ await entered;
+ const cancel=second.cancel(op.id);
+ await new Promise(resolve=>setTimeout(resolve,100));
+ finish();
+ await Promise.all([start,cancel]);
+ assert.equal((await first.inspect(op.id)).state,'CANCELLED');
+});
+
+test('parent lifecycle refuses unconfirmed child start, pause and cancel results',async t=>{
+ const base=await setup(t);
+ const teams={
+   submit:async(input:{missionId:string})=>({id:input.missionId,state:'PENDING'}),
+   inspect:async(id:string)=>({id,state:'PENDING'}),
+   start:async(id:string)=>({id,state:'BLOCKED'}),
+   pause:async(id:string)=>({id,state:'RUNNING'}),
+   cancel:async(id:string)=>({id,state:'VERIFIED'})
+ };
+ const ops=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const op=await ops.submit({requestId:crypto.randomUUID(),
+   objective:'Confirm external child outcome',scopeKey:'project:confirm-child',
+   successConditions:['never claim false child state'],
+   execution:{kind:'team',workItems:work()},run:false
+ });
+ await assert.rejects(ops.start(op.id),(e:any)=>e?.code==='OPERATIONS_CHILD_START_UNCONFIRMED');
+ await assert.rejects(ops.pause(op.id),(e:any)=>e?.code==='OPERATIONS_CHILD_PAUSE_UNCONFIRMED');
+ await assert.rejects(ops.cancel(op.id),(e:any)=>e?.code==='OPERATIONS_CHILD_CANCEL_UNCONFIRMED');
+ assert.equal((await ops.inspect(op.id)).state,'PENDING');
+});
+
+test('terminal operation retains device reconciliation when release is unconfirmed', async t => {
+  const base = await setup(t);
+  let releases = 0;
+  const devices = {
+    async reserve(_request:unknown,_ads:unknown[],opts:{reservationId:string}){
+      return {id:opts.reservationId,sessionId:crypto.randomUUID(),state:'ACTIVE'};
+    },
+    async release(id:string){ releases++; return {id,state:'ACTIVE'}; }
+  };
+  const ops = new DigitalOperationsLayer(base.state,{...base,devices:devices as any});
+  const op = await ops.submit({
+    requestId:crypto.randomUUID(),objective:'Verify actual device release',
+    scopeKey:'project:device-release',successConditions:['confirmed scheduler release'],
+    execution:{kind:'team',workItems:work()},run:false,
+    device:{request:{workloadKey:'work:release-confirm'},advertisements:[]}
+  });
+  const result = await ops.cancel(op.id);
+  assert.equal(result.state,'CANCELLED');
+  assert.equal(releases,1);
+  assert.equal(result.deviceReservationStatus,'reconciliation_required');
+  assert.equal(result.deviceReservationErrorCode,'DEVICE_RESERVATION_RELEASE_UNCONFIRMED');
+});
