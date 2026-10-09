@@ -47,6 +47,9 @@ class FakeOperations {
     this.operations.set(id, operation);
     return structuredClone(operation);
   }
+  async inspect(id: string) {
+    return structuredClone(this.operations.get(id));
+  }
   async refresh(id: string) {
     return structuredClone(this.operations.get(id));
   }
@@ -355,4 +358,54 @@ test('reserved remediation id never accepts divergent machine postconditions or 
  assert.equal(blocked.status,'BLOCKED');
  assert.equal(blocked.activeOperationId,running.activeOperationId);
  assert.equal(operations.submitted.length,1);
+});
+
+test('paused desired-state cancellation uncertainty reconciles only exact verified terminal evidence', async (t) => {
+  const state = await temp(t), world = new FakeWorld(), operations = new FakeOperations();
+  const controller = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  const contract = await controller.create(createInput({
+    policy: { autoRemediate: true, minRemediationIntervalMs: 0, maxConsecutiveFailures: 3, maxRemediationsPerDay: 10 }
+  }));
+  const running = await controller.reconcile(contract.id);
+  const expectedId = running.activeOperationId!;
+  const cancel = operations.cancel.bind(operations);
+  operations.cancel = async (id: string) => {
+    await cancel(id); // The remote effect completed; acknowledgement was lost.
+    throw new Error('synthetic lost cancel acknowledgement');
+  };
+  await assert.rejects(controller.pause(contract.id, { cancelActive: true }), /lost cancel acknowledgement/);
+  const restarted = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  const pending = await restarted.inspect(contract.id);
+  assert.equal(pending.status, 'PAUSED');
+  assert.equal(pending.activeOperationId, expectedId);
+  assert.ok((await restarted.listForReconciliation()).some((record) => record.id === contract.id));
+
+  const settled = await restarted.reconcile(contract.id);
+  assert.equal(settled.status, 'PAUSED');
+  assert.equal(settled.activeOperationId, undefined);
+  assert.equal(settled.remediationHistory[0]?.outcome, 'cancelled');
+  assert.equal(operations.submitted.length, 1);
+  assert.equal((await restarted.resume(contract.id)).status, 'DRIFTED');
+});
+
+test('paused desired-state never clears an uncertain or mismatched remediation', async (t) => {
+  const state = await temp(t), world = new FakeWorld(), operations = new FakeOperations();
+  const controller = new DesiredStateController(state, { world: world as any, operations: operations as any });
+  const contract = await controller.create(createInput({
+    policy: { autoRemediate: true, minRemediationIntervalMs: 0, maxConsecutiveFailures: 3, maxRemediationsPerDay: 10 }
+  }));
+  const running = await controller.reconcile(contract.id);
+  await controller.pause(contract.id);
+  const unresolved = await controller.reconcile(contract.id);
+  assert.equal(unresolved.status, 'PAUSED');
+  assert.equal(unresolved.activeOperationId, running.activeOperationId);
+  await assert.rejects(controller.resume(contract.id), (error: any) => error?.code === 'DESIRED_STATE_RECONCILIATION_REQUIRED');
+
+  const operation = operations.operations.get(running.activeOperationId!);
+  operation.state = 'CANCELLED';
+  operation.objective = 'unrelated intervention';
+  const foreign = await controller.reconcile(contract.id);
+  assert.equal(foreign.activeOperationId, running.activeOperationId);
+  assert.equal(foreign.remediationHistory[0]?.finishedAt, undefined);
+  assert.equal(operations.submitted.length, 1);
 });
