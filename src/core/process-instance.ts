@@ -75,8 +75,8 @@ export function currentProcessInstance(): Promise<ProcessInstanceIdentity> {
 }
 
 function linuxIdentityUpgradeUncertain(left: string, right: string): boolean {
-  const oldPattern = /^linux-boot-ticks:\\d+$/;
-  const newPattern = /^linux-boot-id:[0-9a-f-]{36}:ticks:\\d+$/;
+  const oldPattern = /^linux-boot-ticks:\d+$/;
+  const newPattern = /^linux-boot-id:[0-9a-f-]{36}:ticks:\d+$/;
   return (oldPattern.test(left) && newPattern.test(right)) ||
     (newPattern.test(left) && oldPattern.test(right));
 }
