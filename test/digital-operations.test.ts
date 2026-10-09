@@ -141,7 +141,7 @@ test('stage10 refuses to create execution when declared world precondition is co
   );
 });
 
-test('stage10 creation cleanup persists compensation failure and restart recovery completes it', async (t) => {
+test('stage10 unknown child creation quarantines while confirmed device recovery remains possible', async (t) => {
   const base = await setup(t);
   let reservationId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
@@ -173,13 +173,17 @@ test('stage10 creation cleanup persists compensation failure and restart recover
     execution: { kind: 'team', workItems: work() },
     device: { request: { workloadKey: 'job:cleanup' }, advertisements: [] }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
-  assert.equal((await compensations.pending('digital-operation')).length, 1);
-  assert.equal(releases, 1);
+  const pending = await compensations.pending('digital-operation');
+  assert.equal(pending.length, 3);
+  assert.ok(pending.some(item=>item.operation==='cancel-team-mission' && !item.confirmedAt));
+  assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-team-mission'));
+  assert.ok(pending.some(item=>item.operation==='release-device-reservation' && item.confirmedAt));
+  assert.equal(releases, 0);
 
   failRelease = false;
   const recovered = await ops.recoverPendingCompensations();
-  assert.deepEqual(recovered, { recovered: 1, pending: 0 });
-  assert.equal(releases, 2);
+  assert.deepEqual(recovered, { recovered: 1, pending: 2 });
+  assert.equal(releases, 1);
 });
 
 test('stage10 cancellation records failed strategy outcome exactly once', async (t) => {
@@ -863,7 +867,7 @@ test('external RESOURCE_BUSY error is not mistaken for acquisition contention an
   requestId:crypto.randomUUID(),objective:'Do not replay unknown effects',
   scopeKey:'project:no-retry',successConditions:['no duplicate'],
   execution:{kind:'team',workItems:work()}
- }),/provider busy after effect attempt/);
+ }),(error:any)=>error?.code==='COMPENSATION_BLOCKED');
  assert.equal(submits,1);
 });
 
