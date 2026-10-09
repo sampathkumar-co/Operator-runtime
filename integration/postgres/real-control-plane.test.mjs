@@ -167,4 +167,53 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     assert.equal((await store.get('leases', 'expiring-key'))?.value.owner, 'new');
   });
 
+  test('database trigger fences old workers that physically delete or recycle control-plane generations', async () => {
+    const [first] = await store.transact([{
+      namespace: 'authority', key: 'legacy-worker-key', expectedGeneration: null,
+      value: { owner: 'new-runtime' }
+    }], '2026-10-09T00:00:01.000Z');
+    assert.equal(first.generation, 1);
+
+    // This is the old binary's DELETE path. It must fail at the shared DB
+    // even if that worker is unaware of v2 tombstones and no other process
+    // is concurrently holding the key advisory lock.
+    await assert.rejects(
+      pool.query('DELETE FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+        ['authority', 'legacy-worker-key']),
+      error => error?.code === '23514' && /LEGACY_DELETE_FENCED/.test(error.message)
+    );
+    assert.equal((await store.get('authority','legacy-worker-key'))?.generation, 1);
+
+    await assert.rejects(
+      pool.query(`UPDATE mecord_control_plane SET generation=0,
+        value_json='{"owner":"old"}'::jsonb
+        WHERE namespace=$1 AND record_key=$2`, ['authority', 'legacy-worker-key']),
+      error => error?.code === '23514' && /LEGACY_GENERATION_FENCED/.test(error.message)
+    );
+    await assert.rejects(
+      pool.query(`UPDATE mecord_control_plane SET generation=1,
+        value_json='{"owner":"old"}'::jsonb
+        WHERE namespace=$1 AND record_key=$2`, ['authority', 'legacy-worker-key']),
+      error => error?.code === '23514' && /LEGACY_GENERATION_FENCED/.test(error.message)
+    );
+
+    await store.transact([{
+      namespace: 'authority', key: 'legacy-worker-key', expectedGeneration: first.generation, value: null
+    }], '2026-10-09T00:00:02.000Z');
+    await assert.rejects(
+      pool.query(`INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at)
+        VALUES('authority','legacy-worker-key',1,$1::text,'{"owner":"old"}'::jsonb,NOW(),NULL)
+        ON CONFLICT(namespace,record_key) DO UPDATE SET
+        generation=EXCLUDED.generation,value_json=EXCLUDED.value_json`,
+      ['0'.repeat(64)]),
+      error => error?.code === '23514' && /LEGACY_GENERATION_FENCED/.test(error.message)
+    );
+    const [reincarnation] = await store.transact([{
+      namespace: 'authority', key: 'legacy-worker-key', expectedGeneration: null,
+      value: { owner: 'new-owner' }
+    }], '2026-10-09T00:00:03.000Z');
+    assert.equal(reincarnation.generation, 2);
+    assert.equal((await store.get('authority','legacy-worker-key'))?.value.owner, 'new-owner');
+  });
+
 }

@@ -50,7 +50,7 @@ export interface ControlPlaneMigration {
 const MIGRATION_NAMESPACE = '__mecord_migrations';
 
 export interface ControlPlaneGenerationFence { namespace: string; key: string; generation: number; }
-interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; tombstones?: ControlPlaneGenerationFence[]; }
+interface EmbeddedState { version: 1 | 2; records: ControlPlaneRecord[]; tombstones?: ControlPlaneGenerationFence[]; }
 
 const OPTIONS = {
   maxBytes: 256 * 1024 * 1024,
@@ -65,6 +65,21 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
 
   constructor(stateDir: string) {
     this.#file = path.join(path.resolve(stateDir), 'control-plane-store.json');
+  }
+
+  /**
+   * Explicitly activate the fencing-aware embedded schema under the cross-
+   * process file lock. Pre-upgrade binaries that understand only schema v1
+   * then fail closed rather than silently removing tombstones on write.
+   * Activation does not reconstruct pre-upgrade physical deletion history.
+   */
+  async activateGenerationFenceSchema(): Promise<void> {
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
+      const state = await this.#read();
+      await this.#write(state);
+    }));
+    this.#serial = run.then(() => undefined, () => undefined);
+    await run;
   }
 
   async get(namespace: string, key: string): Promise<ControlPlaneRecord | null> {
@@ -164,7 +179,7 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
       if (current.records.length > 0 || (current.tombstones?.length ?? 0) > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite existing control-plane records or generation fences.');
-      await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)),
+      await this.#write({ version: 2, records: snapshot.records.map((item) => structuredClone(item)),
         tombstones: snapshot.tombstones!.map((item) => structuredClone(item)) });
     }));
     this.#serial = run.then(() => undefined, () => undefined);
@@ -176,15 +191,15 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
       const parsed = JSON.parse(await readDurableStateText(this.#file, OPTIONS)) as EmbeddedState;
       return normalizeState(parsed);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, records: [], tombstones: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, records: [], tombstones: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('CONTROL_PLANE_STORE_CORRUPT', 'Control-plane store could not be read.');
     }
   }
 
   async #write(state: EmbeddedState): Promise<void> {
-    normalizeState(state);
-    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), OPTIONS);
+    const normalized = normalizeState(state);
+    await writeDurableStateText(this.#file, JSON.stringify(normalized, null, 2), OPTIONS);
   }
 }
 
@@ -246,6 +261,48 @@ CREATE TABLE IF NOT EXISTS mecord_control_plane (
 );
 ALTER TABLE mecord_control_plane ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_plane(expires_at);
+-- This table must remain safe while a pre-migration worker is still connected.
+-- Legacy DELETE would discard the key's lifetime generation history (ABA).
+-- Legacy UPDATE/UPSERT may also try to reuse or roll back a generation.
+-- Reject those writes inside PostgreSQL itself, not just in the new SDK.
+CREATE OR REPLACE FUNCTION mecord_control_plane_generation_guard()
+RETURNS trigger LANGUAGE plpgsql AS $mecord_guard$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION USING ERRCODE='23514',
+      MESSAGE='CONTROL_PLANE_LEGACY_DELETE_FENCED: physical deletion is prohibited';
+  END IF;
+  IF NEW.generation < OLD.generation OR (
+      NEW.generation = OLD.generation AND NOT (
+        OLD.is_deleted = FALSE AND NEW.is_deleted = TRUE AND
+        NEW.value_json = '{}'::jsonb AND NEW.expires_at IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE='23514',
+      MESSAGE='CONTROL_PLANE_LEGACY_GENERATION_FENCED: stale or nonadvancing mutation';
+  END IF;
+  RETURN NEW;
+END;
+$mecord_guard$;
+DO $mecord_trigger$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'mecord_control_plane'::regclass
+      AND tgname = 'mecord_control_plane_generation_guard_trigger'
+      AND NOT tgisinternal
+  ) THEN
+    BEGIN
+      CREATE TRIGGER mecord_control_plane_generation_guard_trigger
+        BEFORE UPDATE OR DELETE ON mecord_control_plane
+        FOR EACH ROW EXECUTE FUNCTION mecord_control_plane_generation_guard();
+    EXCEPTION WHEN duplicate_object THEN
+      -- Concurrent initialize() on another host installed the same guard.
+      NULL;
+    END;
+  END IF;
+END;
+$mecord_trigger$;
 `));
   }
 
@@ -479,7 +536,8 @@ function rowToRecord(row: any): ControlPlaneRecord {
   });
 }
 function normalizeState(input: EmbeddedState): EmbeddedState {
-  if (!input || input.version !== 1 || !Array.isArray(input.records) || input.records.length > 1_000_000) throw corrupt('State shape is invalid.');
+  if (!input || (input.version !== 1 && input.version !== 2) || !Array.isArray(input.records) || input.records.length > 1_000_000) throw corrupt('State shape is invalid.');
+  if (input.version === 2 && !Array.isArray(input.tombstones)) throw corrupt('Fencing-aware embedded control-plane state is missing tombstones.');
   const records = input.records.map(normalizeRecord);
   const keys = new Set<string>();
   for (const item of records) {
@@ -501,7 +559,7 @@ function normalizeState(input: EmbeddedState): EmbeddedState {
     if (keys.has(rk)) throw corrupt('Generation fence duplicates a live record or another fence.');
     keys.add(rk);
   }
-  return { version: 1, records, tombstones };
+  return { version: 2, records, tombstones };
 }
 function normalizeRecord(input: ControlPlaneRecord): ControlPlaneRecord {
   if (!input || input.schemaVersion !== 1) throw corrupt('Record schema is invalid.');
