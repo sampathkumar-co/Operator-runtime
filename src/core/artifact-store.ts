@@ -264,7 +264,15 @@ function normalizeMetadata(input: unknown): Record<string, string | number | boo
     if (typeof value === 'number' && !Number.isFinite(value)) {
       throw new OperatorError('ARTIFACT_METADATA_INVALID', `Artifact metadata value for ${key} is not finite.`);
     }
-    output[key] = value as string | number | boolean | null;
+    // Assignment to "__proto__" on {} invokes its legacy setter and drops
+    // a valid own JSON metadata key. Define an explicit enumerable property
+    // so content-addressed metadata retains every validated input field.
+    Object.defineProperty(output, key, {
+      value: value as string | number | boolean | null,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
   }
   return output;
 }
