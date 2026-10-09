@@ -253,3 +253,27 @@ test('terminal ownership rejects duplicate IDs, backward transitions and hard-li
   t.after(() => fs.rm(alias, { force: true }));
   await assert.rejects(store.list(), (error: any) => error?.code === 'TERMINAL_SESSION_OWNERSHIP_CORRUPT');
 });
+
+
+test('boot-bound Linux process identities survive durable terminal ownership validation', async (t) => {
+  const { root, state } = await fixture(t);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new TerminalSessionStore(state);
+  const sessionId = crypto.randomUUID();
+  await store.prepare({ sessionId, executable: process.execPath });
+  const identity = {
+    pid: 12345,
+    started: 'linux-boot-id:12345678-1234-1234-1234-123456789abc:ticks:987654'
+  };
+  const active = await store.activate(sessionId, identity);
+  assert.deepEqual(active.processInstance, identity);
+  const persisted = await new TerminalSessionStore(state).get(sessionId);
+  assert.deepEqual(persisted?.processInstance, identity);
+
+  const invalidSession = crypto.randomUUID();
+  await store.prepare({ sessionId: invalidSession, executable: process.execPath });
+  await assert.rejects(
+    store.activate(invalidSession, { ...identity, started: 'linux-boot-id:garbage:ticks:987654' }),
+    (error: any) => error?.code === 'TERMINAL_SESSION_OWNERSHIP_CORRUPT'
+  );
+});
