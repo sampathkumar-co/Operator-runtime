@@ -122,3 +122,62 @@ test('revocation remains durable after restart and cannot be undone by a fabrica
   await assert.rejects(current.acquire(subject, 'other'), (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
   assert.ok((await current.revoke(subject)).generation > revoke.generation);
 });
+
+
+test('atomically committed provider mutation cannot race behind a revoked cross-host lease',async t=>{
+  const {make,subject}=await fixture(t);
+  const first=await make().acquire(subject,'worker');
+  await make().revoke(subject);
+  await assert.rejects(make().commitAtomic(first,[{
+    namespace:'provider',key:'irreversible',expectedGeneration:null,value:{mutation:'should-not-exist'}
+  }]),(e:any)=>e?.code==='REMOTE_AUTHORITY_FENCE_LOST');
+});
+test('provider-bound transactions advance exact generation and reject replay, duplicate targets and authority namespace',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-remote-cas-commit-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const accountId=crypto.randomUUID(),deviceId=crypto.randomUUID();
+  const subject={accountId,deviceId,authorityGeneration:1};
+  const store=()=>new EmbeddedControlPlaneStore(dir);
+  const make=()=>new RemoteAuthorityFenceStore(store(),{authorize:async()=>{}});
+  const lease=await make().acquire(subject,'worker');
+  const result=await make().commitAtomic(lease,[{
+    namespace:'provider',key:'order-1',expectedGeneration:null,
+    value:{status:'written', owner:accountId}
+  }]);
+  assert.equal(result.records.length,1);
+  assert.equal(result.records[0].value.status,'written');
+  assert.ok(result.lease.generation>lease.generation);
+  assert.equal((await store().get('provider','order-1'))?.value.owner,accountId);
+  await assert.rejects(make().commitAtomic(lease,[{
+    namespace:'provider',key:'order-2',expectedGeneration:null,value:{status:'unauthorized-replay'}
+  }]),(e:any)=>e?.code==='REMOTE_AUTHORITY_FENCE_LOST');
+  assert.equal(await store().get('provider','order-2'),null);
+  const unchanged=await make().assertCurrent(result.lease);
+  assert.equal(unchanged.generation,result.lease.generation);
+  await assert.rejects(make().commitAtomic(result.lease,[{
+    namespace:'__mecord_remote_authority',key:'malicious',expectedGeneration:null,value:{kind:'revoked'}
+  }]),(e:any)=>e?.code==='REMOTE_AUTHORITY_MUTATION_INVALID');
+  await assert.rejects(make().commitAtomic(result.lease,[{
+    namespace:'provider',key:'duplicate',expectedGeneration:null,value:{first:true}
+  },{
+    namespace:'provider',key:'duplicate',expectedGeneration:null,value:{second:true}
+  }]),(e:any)=>e?.code==='REMOTE_AUTHORITY_MUTATION_INVALID');
+});
+
+test('atomic effect and ownership CAS are all-or-nothing on provider conflict',async t=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'mecord-remote-cas-conflict-'));
+  t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const cp=()=>new EmbeddedControlPlaneStore(dir);
+  const make=()=>new RemoteAuthorityFenceStore(cp(),{authorize:async()=>{}});
+  const subject={accountId:crypto.randomUUID(),deviceId:crypto.randomUUID(),authorityGeneration:1};
+  const lease=await make().acquire(subject,'owner');
+  const [prior]=await cp().transact([{
+    namespace:'provider',key:'target',expectedGeneration:null,value:{state:'protected'}
+  }]);
+  await assert.rejects(make().commitAtomic(lease,[{
+    namespace:'provider',key:'target',expectedGeneration:null,value:{state:'overwritten'}
+  }]),(e:any)=>e?.code==='REMOTE_AUTHORITY_FENCE_LOST');
+  assert.equal((await cp().get('provider','target'))?.value.state,'protected');
+  assert.equal((await make().assertCurrent(lease)).generation,lease.generation);
+  assert.equal(prior.generation,1);
+});
