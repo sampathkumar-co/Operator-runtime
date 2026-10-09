@@ -93,14 +93,23 @@ export class OrganizationQuarantineAdjudicator {
     }
     const now = this.#clock().getTime();
     const issued = Date.parse(claim.issuedAt), expires = Date.parse(claim.expiresAt);
-    if (!(issued <= now && now < expires && expires - issued <= 5 * 60_000)) {
-      throw invalid('Provider attestation is stale, premature or unbounded.');
-    }
     const signature = String(input.providerClaim.signature ?? '');
     if (!/^[A-Za-z0-9_-]{86}$/.test(signature) ||
         !crypto.verify(null, Buffer.from(JSON.stringify(claim), 'utf8'),
           this.#providerPublicKeyPem, Buffer.from(signature, 'base64url'))) {
       throw invalid('Independent provider origin signature failed verification.');
+    }
+    // A crash can occur AFTER the signed decision is durably recorded but
+    // BEFORE the matching quarantine journal entry is retired. A retry using
+    // the exact previously committed signed evidence is a recovery operation:
+    // it may be older than the ordinary five-minute initial-evidence window,
+    // but it still needs a fresh operator authorization below. A new decision
+    // with stale evidence is NEVER allowed.
+    const signatureDigest = crypto.createHash('sha256').update(signature).digest('hex');
+    const existingDecision = (await this.#read()).records.find((entry) => entry.intentId === claim.intentId);
+    const sameCommittedDecision = existingDecision && matchesCommittedDecision(existingDecision, claim, operatorId, signatureDigest);
+    if (!(issued <= now && now < expires && expires - issued <= 5 * 60_000) && !sameCommittedDecision) {
+      throw invalid('Provider attestation is stale, premature or unbounded.');
     }
     await this.#authorize(operatorId, claim);
     if (claim.classification === 'unresolved') {
@@ -113,19 +122,22 @@ export class OrganizationQuarantineAdjudicator {
     if (!quarantine) {
       const ledger = await this.#read();
       const already = ledger.records.find((entry) => entry.intentId === claim.intentId);
-      if (already) return already;
+      if (already) {
+        if (!matchesCommittedDecision(already, claim, operatorId, signatureDigest)) {
+          throw new OperatorError('QUARANTINE_ADJUDICATION_CONFLICT', 'Existing decision has a different authority or evidence contract.');
+        }
+        return already;
+      }
       throw new OperatorError('QUARANTINE_NOT_FOUND', 'Matching unresolved recovery quarantine is absent.');
     }
     // A verified foreign identity may be retired as a *quarantine label*, but
     // the separate original write-ahead child intent remains intact. A claim
     // about the returned ID does not prove the expected ID was never created.
-    const signatureDigest = crypto.createHash('sha256').update(signature).digest('hex');
     const record = await withDurableStateLock(this.#file, async () => {
       const state = await this.#read();
       const existing = state.records.find((item) => item.intentId === claim.intentId);
       if (existing) {
-        if (existing.operatorId !== operatorId || existing.evidenceDigest !== claim.evidenceDigest ||
-            existing.classification !== claim.classification || existing.providerSignatureDigest !== signatureDigest) {
+        if (!matchesCommittedDecision(existing, claim, operatorId, signatureDigest)) {
           throw new OperatorError('QUARANTINE_ADJUDICATION_CONFLICT', 'This intent has an immutable different disposition.');
         }
         return existing;
@@ -184,6 +196,15 @@ export class OrganizationQuarantineAdjudicator {
   #mac(base: Omit<QuarantineAdjudicationRecord, 'mac'>): string {
     return crypto.createHmac('sha256', this.#ledgerSecret).update(JSON.stringify(base)).digest('hex');
   }
+}
+function matchesCommittedDecision(
+  record: QuarantineAdjudicationRecord, claim: ProviderQuarantineClaim,
+  operatorId: string, signatureDigest: string
+): boolean {
+  return record.intentId === claim.intentId && record.programId === claim.programId &&
+    record.targetKey === claim.targetKey && record.returnedMissionId === claim.returnedMissionId &&
+    record.operatorId === operatorId && record.classification === claim.classification &&
+    record.evidenceDigest === claim.evidenceDigest && record.providerSignatureDigest === signatureDigest;
 }
 function constantHexEqual(a: string, b: string): boolean {
   if (!DIGEST.test(a) || !DIGEST.test(b)) return false;
