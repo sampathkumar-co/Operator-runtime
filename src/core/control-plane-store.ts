@@ -20,6 +20,9 @@ export interface ControlPlaneSnapshot {
   schemaVersion: 1;
   createdAt: string;
   records: ControlPlaneRecord[];
+  // Generation history belongs to the snapshot digest, even for deleted or expired keys.
+  // Legacy snapshots without this field are not safe to restore after key deletion.
+  tombstones?: ControlPlaneGenerationFence[];
   digest: string;
 }
 
@@ -46,8 +49,8 @@ export interface ControlPlaneMigration {
 
 const MIGRATION_NAMESPACE = '__mecord_migrations';
 
-interface EmbeddedTombstone { namespace: string; key: string; generation: number; }
-interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; tombstones?: EmbeddedTombstone[]; }
+export interface ControlPlaneGenerationFence { namespace: string; key: string; generation: number; }
+interface EmbeddedState { version: 1; records: ControlPlaneRecord[]; tombstones?: ControlPlaneGenerationFence[]; }
 
 const OPTIONS = {
   maxBytes: 256 * 1024 * 1024,
@@ -145,8 +148,14 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
   async snapshot(nowInput = new Date().toISOString()): Promise<ControlPlaneSnapshot> {
     await this.#serial;
     const now = iso(nowInput, 'now');
-    const records = (await this.#read()).records.filter((item) => !expired(item, Date.parse(now))).map((item) => structuredClone(item));
-    const base = { schemaVersion: 1 as const, createdAt: now, records };
+    const state = await this.#read();
+    const records = state.records.filter((item) => !expired(item, Date.parse(now))).map((item) => structuredClone(item));
+    // Expiry hides a key from reads, not from generation fencing. Preserve the
+    // highest generation even if a purge has not yet converted it to a tombstone.
+    const tombstones = [...(state.tombstones ?? []), ...state.records.filter((item) => expired(item, Date.parse(now)))
+      .map(({ namespace, key, generation }) => ({ namespace, key, generation }))]
+      .sort((a, b) => recordKey(a.namespace, a.key).localeCompare(recordKey(b.namespace, b.key)));
+    const base = { schemaVersion: 1 as const, createdAt: now, records, tombstones };
     return { ...base, digest: digest(base) };
   }
 
@@ -155,7 +164,8 @@ export class EmbeddedControlPlaneStore implements ControlPlaneStore {
     const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
       const current = await this.#read();
       if (current.records.length > 0 || (current.tombstones?.length ?? 0) > 0) throw new OperatorError('CONTROL_PLANE_RESTORE_CONFLICT', 'Restore refuses to overwrite existing control-plane records or generation fences.');
-      await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)) });
+      await this.#write({ version: 1, records: snapshot.records.map((item) => structuredClone(item)),
+        tombstones: snapshot.tombstones!.map((item) => structuredClone(item)) });
     }));
     this.#serial = run.then(() => undefined, () => undefined);
     await run;
@@ -322,12 +332,19 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
   async snapshot(nowInput = new Date().toISOString()): Promise<ControlPlaneSnapshot> {
     const now = iso(nowInput,'now');
     return await this.#onConnection(async () => {
+      // One database statement observes a consistent set of live rows and
+      // deletion/expiry generation fences, including keys hidden from get/list.
       const result = await this.#db.query<any>(
-        'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE is_deleted=FALSE AND (expires_at IS NULL OR expires_at>$1) ORDER BY namespace,record_key',
-        [now]
+        'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane ORDER BY namespace,record_key'
       );
-      const records = result.rows.map(rowToRecord);
-      const base = { schemaVersion: 1 as const, createdAt: now, records };
+      const records: ControlPlaneRecord[] = [];
+      const tombstones: ControlPlaneGenerationFence[] = [];
+      for (const row of result.rows) {
+        if (row.is_deleted === true || (row.expires_at && Date.parse(String(row.expires_at)) <= Date.parse(now))) {
+          tombstones.push({ namespace: id(row.namespace, 'namespace'), key: id(row.record_key, 'key'), generation: storedGeneration(row.generation) });
+        } else records.push(rowToRecord(row));
+      }
+      const base = { schemaVersion: 1 as const, createdAt: now, records, tombstones };
       return { ...base, digest: digest(base) };
     });
   }
@@ -345,6 +362,12 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
         await db.query(
           'INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)',
           [record.namespace,record.key,record.generation,record.valueDigest,JSON.stringify(record.value),record.updatedAt,record.expiresAt ?? null]
+        );
+      }
+      for (const fence of snapshot.tombstones!) {
+        await db.query(
+          'INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at,is_deleted) VALUES($1,$2,$3,$4,$5::jsonb,$6,NULL,TRUE)',
+          [fence.namespace, fence.key, fence.generation, digest({}), JSON.stringify({}), snapshot.createdAt]
         );
       }
     });
@@ -507,8 +530,21 @@ function normalizeMutation(input: ControlPlaneMutation): ControlPlaneMutation {
 }
 function normalizeSnapshot(input: ControlPlaneSnapshot): ControlPlaneSnapshot {
   if(!input||input.schemaVersion!==1||!Array.isArray(input.records)) throw invalid('Snapshot is invalid.');
+  if (!Array.isArray(input.tombstones)) throw invalid('Legacy snapshot has no durable generation fences; restore requires an epoch-aware migration.');
+  if (input.tombstones.length > 1_000_000 || input.records.length > 1_000_000) throw invalid('Snapshot exceeds control-plane bounds.');
   const records=input.records.map(normalizeRecord).sort((a,b)=>recordKey(a.namespace,a.key).localeCompare(recordKey(b.namespace,b.key)));
-  const base={schemaVersion:1 as const,createdAt:iso(input.createdAt,'createdAt'),records};
+  const tombstones=input.tombstones.map((item) => ({
+    namespace: id(item.namespace, 'snapshot.tombstone.namespace'),
+    key: id(item.key, 'snapshot.tombstone.key'),
+    generation: integer(item.generation, 1, Number.MAX_SAFE_INTEGER, 'snapshot.tombstone.generation')
+  })).sort((a,b)=>recordKey(a.namespace,a.key).localeCompare(recordKey(b.namespace,b.key)));
+  const keys = new Set<string>();
+  for (const item of [...records, ...tombstones]) {
+    const key = recordKey(item.namespace, item.key);
+    if (keys.has(key)) throw invalid('Snapshot contains duplicate identities or overlapping generation fences.');
+    keys.add(key);
+  }
+  const base={schemaVersion:1 as const,createdAt:iso(input.createdAt,'createdAt'),records,tombstones};
   if(sha(input.digest,'snapshot.digest')!==digest(base)) throw invalid('Snapshot digest mismatch.');
   return {...base,digest:input.digest.toLowerCase()};
 }

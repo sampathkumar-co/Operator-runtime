@@ -493,3 +493,84 @@ test('direct PostgreSQL rollback poisoning applies across independent store wrap
   );
   assert.equal(beginCount, 1);
 });
+
+
+test('snapshots retain deleted and expired key generation fences across embedded restore', async (t) => {
+  const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-fence-source-'));
+  const destDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-fence-dest-'));
+  t.after(() => Promise.all([sourceDir, destDir].map((dir) => fs.rm(dir, { recursive: true, force: true }))));
+  const source = new EmbeddedControlPlaneStore(sourceDir);
+  const [deleted, expired] = await source.transact([
+    { namespace: 'authority', key: 'deleted', expectedGeneration: null, value: { owner: 'old' } },
+    { namespace: 'authority', key: 'expired', expectedGeneration: null, value: { owner: 'old' }, expiresAt: '2026-10-07T00:00:01.000Z' }
+  ], '2026-10-07T00:00:00.000Z');
+  await source.transact([
+    { namespace: 'authority', key: 'deleted', expectedGeneration: deleted!.generation, value: null }
+  ], '2026-10-07T00:00:01.000Z');
+
+  const snapshot = await source.snapshot('2026-10-07T00:00:02.000Z');
+  assert.deepEqual(snapshot.records, []);
+  assert.deepEqual(snapshot.tombstones, [
+    { namespace: 'authority', key: 'deleted', generation: 1 },
+    { namespace: 'authority', key: 'expired', generation: 1 }
+  ]);
+
+  const restored = new EmbeddedControlPlaneStore(destDir);
+  await restored.restore(snapshot);
+  const [recreatedDeleted, recreatedExpired] = await restored.transact([
+    { namespace: 'authority', key: 'deleted', expectedGeneration: null, value: { owner: 'new' } },
+    { namespace: 'authority', key: 'expired', expectedGeneration: null, value: { owner: 'new' } }
+  ], '2026-10-07T00:00:03.000Z');
+  assert.equal(recreatedDeleted!.generation, 2);
+  assert.equal(recreatedExpired!.generation, 2);
+  for (const key of ['deleted', 'expired']) {
+    await assert.rejects(
+      restored.transact([{ namespace: 'authority', key, expectedGeneration: 1, value: { owner: 'stale' } }], '2026-10-07T00:00:04.000Z'),
+      (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+    );
+    assert.equal((await restored.get('authority', key))?.value.owner, 'new');
+  }
+
+  const forged = structuredClone(snapshot);
+  forged.tombstones![0]!.generation = 0;
+  const thirdDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-fence-forged-'));
+  t.after(() => fs.rm(thirdDir, { recursive: true, force: true }));
+  await assert.rejects(new EmbeddedControlPlaneStore(thirdDir).restore(forged), (error: any) => error?.code === 'CONTROL_PLANE_STORE_INVALID');
+
+  const stripped = structuredClone(snapshot);
+  delete stripped.tombstones;
+  await assert.rejects(new EmbeddedControlPlaneStore(thirdDir).restore(stripped), (error: any) => error?.code === 'CONTROL_PLANE_STORE_INVALID');
+});
+
+test('PostgreSQL snapshot includes hidden generations and restore writes durable tombstone rows', async () => {
+  const deleted = { namespace: 'authority', record_key: 'deleted', generation: '7', value_digest: '0'.repeat(64), value_json: {}, updated_at: '2026-10-07T00:00:00.000Z', expires_at: null, is_deleted: true };
+  const expired = { ...deleted, record_key: 'expired', generation: '5', is_deleted: false, expires_at: '2026-10-07T00:00:01.000Z' };
+  const reader = new PostgresControlPlaneStore({
+    async query(sql: string) {
+      assert.match(sql, /^SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane/);
+      return { rows: [deleted, expired] };
+    }
+  });
+  const snapshot = await reader.snapshot('2026-10-07T00:00:02.000Z');
+  assert.deepEqual(snapshot.records, []);
+  assert.deepEqual(snapshot.tombstones, [
+    { namespace: 'authority', key: 'deleted', generation: 7 },
+    { namespace: 'authority', key: 'expired', generation: 5 }
+  ]);
+  const restoredFences: Array<{ key: string; generation: number }> = [];
+  const writer = new PostgresControlPlaneStore({
+    async query(sql: string, values?: unknown[]) {
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] };
+      if (sql.startsWith('LOCK TABLE')) return { rows: [] };
+      if (sql.startsWith('SELECT COUNT')) return { rows: [{ count: '0' }] };
+      if (sql.startsWith('INSERT INTO mecord_control_plane')) {
+        assert.match(sql, /is_deleted.*TRUE/);
+        restoredFences.push({ key: String(values?.[1]), generation: Number(values?.[2]) });
+        return { rows: [] };
+      }
+      throw new Error('Unexpected SQL: ' + sql);
+    }
+  });
+  await writer.restore(snapshot);
+  assert.deepEqual(restoredFences, [{ key: 'deleted', generation: 7 }, { key: 'expired', generation: 5 }]);
+});
