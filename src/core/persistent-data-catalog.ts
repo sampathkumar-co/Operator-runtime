@@ -62,7 +62,7 @@ const entry = (value: PersistentDataEntryInput): PersistentDataEntry => Object.f
 export const MONOTONIC_RESTORE_STORE_IDS = Object.freeze([
   'audit-active', 'audit-head', 'audit-segments',
   'tasks', 'team-missions', 'action-journal', 'action-results', 'sagas', 'compensation', 'intent-registry',
-  'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'quarantine-adjudications', 'semantic-migrations', 'quarantine-adjudications',
+  'studio-runs', 'events', 'desired-state', 'digital-operations', 'organization-programs', 'quarantine-adjudications', 'semantic-migrations',
   'relay-client', 'relay-session-credential', 'relay-deliveries', 'relay-results', 'relay-reservation-reconciliation', 'relay-outbox',
   'device-sessions', 'approvals', 'action-executions', 'emergency-stop',
   'terminal-sessions',
@@ -110,7 +110,6 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   // The ledger MAC secret is injected separately; no signing key is persisted here.
   entry({ id: 'quarantine-adjudications', owner: 'organization-quarantine', location: 'quarantine-adjudications.json', category: 'tasks', sensitivity: 'sensitive', retention: 'while-quarantine-and-replay-authority-exists', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'PROCESS_LOCKED' }),
   entry({ id: 'operation-traces', owner: 'operation-trace', location: 'operation-traces.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-operational-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
-  entry({ id: 'quarantine-adjudications', owner: 'organization-recovery', location: 'quarantine-adjudications.json', category: 'tasks', sensitivity: 'sensitive', retention: 'immutable-operator-decisions-while-original-recovery-authority-is-live', deletion: 'privacy-category', backup: 'include', restore: 'required', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
   entry({ id: 'control-plane-store', owner: 'production-trust', location: 'control-plane-store.json', category: 'session-state', sensitivity: 'sensitive', retention: 'policy-bounded-control-plane-state', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'REVISION_CAS' }),
   entry({ id: 'relay-cluster-fences', owner: 'production-trust', location: 'relay-cluster-fences.json', category: 'session-state', sensitivity: 'operational', retention: 'active-lease-until-expiry', deletion: 'privacy-category', backup: 'ephemeral', restore: 'never', scope: 'device', secretMaterial: 'derived', participatesInDeletion: false, concurrency: 'REVISION_CAS' }),
   entry({ id: 'shadow-decisions', owner: 'adaptive-shadow', location: 'shadow-decisions.ndjson', category: 'activity', sensitivity: 'sensitive', retention: 'bounded-shadow-history', deletion: 'privacy-category', backup: 'include', restore: 'optional', scope: 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: 'APPEND_ONLY_JOURNALED' }),
