@@ -138,6 +138,7 @@ export class EnterprisePolicyStore {
       RISK_ORDER[role.maxRisk] > RISK_ORDER[current] ? role.maxRisk : current, 'read');
     const baseMaxRisk = base.maxRisk ?? 'destructive';
     const maxRisk = RISK_ORDER[roleMaxRisk] <= RISK_ORDER[baseMaxRisk] ? roleMaxRisk : baseMaxRisk;
+    assertRoleProjectionSafe(roles, allowedCapabilities, allowedRoots, maxRisk);
     const permissions: PermissionProfile = {
       ...base,
       allowedCapabilities,
@@ -304,6 +305,36 @@ function intersectCapabilityPattern(left: string, right: string): string | undef
     if (rightPrefix.startsWith(leftPrefix)) return right;
   }
   return undefined;
+}
+
+function assertRoleProjectionSafe(
+  roles: EnterpriseRole[], capabilities: string[], roots: string[], risk: ActionRisk
+): void {
+  if (roles.length < 2) return;
+  const targetCount = Math.max(1, roots.length);
+  // Fail closed instead of permitting adversarially large O(C * R * roles)
+  // checks to exhaust memory or monopolize the authorization request.
+  if (capabilities.length * targetCount > 16_384) {
+    throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Combined role grant projection exceeds safe validation limits.');
+  }
+  const targets: Array<string | undefined> = roots.length === 0 ? [undefined] : roots;
+  for (const capability of capabilities) {
+    const eligible = roles.filter((role) =>
+      RISK_ORDER[role.maxRisk] >= RISK_ORDER[risk]
+      && role.capabilities.some((pattern) =>
+        pattern === capability || (pattern.endsWith('.*') && capability.startsWith(pattern.slice(0, -1)))
+      )
+    );
+    for (const target of targets) {
+      if (!eligible.some((role) =>
+        target === undefined
+          ? role.rootPrefixes.length === 0
+          : role.rootPrefixes.length === 0 || role.rootPrefixes.some((prefix) => isWithin(target, path.resolve(prefix)))
+      )) {
+        throw new OperatorError('ENTERPRISE_AUTHORITY_DENIED', 'Combined enterprise roles cannot be flattened without expanding capability, root or risk authority.');
+      }
+    }
+  }
 }
 
 function intersectRoots(baseRoots: string[], enterpriseRoots: string[]): string[] {
