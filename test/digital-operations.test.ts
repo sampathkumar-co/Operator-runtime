@@ -634,15 +634,14 @@ test('lost reservation response is reconciled using the preassigned durable iden
     device: { request: { workloadKey: 'job:lost-response' }, advertisements: [] }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED' &&
     error?.details?.reservationId === reservationId &&
-    error?.details?.reserveCode === 'DEVICE_RESPONSE_LOST' &&
-    error?.details?.cleanupCode === 'DEVICE_RELEASE_UNAVAILABLE');
+    error?.details?.reserveCode === 'DEVICE_RESPONSE_LOST');
   assert.equal(allocations, 1);
-  assert.equal((await compensations.pending('digital-operation')).length, 1);
+  assert.equal((await compensations.pending('digital-operation')).length, 2);
   failRelease = false;
   const restarted = new DigitalOperationsLayer(base.state, { ...base, devices: devices as any, compensations: new DurableCompensationJournal(base.state) });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(allocations, 1);
-  assert.equal(releases, 2);
+  assert.equal(releases, 0);
 });
 
 test('restart after reservation commit and before operation commit releases exactly the orphaned resource', async (t) => {
@@ -667,6 +666,7 @@ test('restart after reservation commit and before operation commit releases exac
     gpu: false, tags: [], activeJobs: 0, maxConcurrentJobs: 1
   }], { reservationId });
   assert.equal(reservation.id, reservationId);
+  await compensations.confirm(recoveryId);
   assert.equal((await devices.list({ activeOnly: true })).length, 1);
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, devices: new DevicePoolScheduler(base.state, registry, routing),
@@ -701,16 +701,16 @@ test('team mission response loss keeps write-ahead cancel intent across restart 
     successConditions: ['no duplicate work'], execution: { kind: 'team', workItems: work() }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
   const pending = await compensations.pending('digital-operation');
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0]?.operation, 'cancel-team-mission');
-  assert.equal(pending[0]?.targetId, missionId);
+  assert.equal(pending.length, 2);
+  assert.ok(pending.some(item=>item.operation==='cancel-team-mission' && item.targetId===missionId && !item.confirmedAt));
+  assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-team-mission'));
   allowCancel = true;
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, teams: teams as any, compensations: new DurableCompensationJournal(base.state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(creates, 1);
-  assert.equal(cancels, 2);
+  assert.equal(cancels, 0);
 });
 
 test('organization program response loss keeps the exact cancel identity for restart', async (t) => {
@@ -739,16 +739,16 @@ test('organization program response loss keeps the exact cancel identity for res
     ] }
   }), (error: any) => error?.code === 'COMPENSATION_BLOCKED');
   const pending = await compensations.pending('digital-operation');
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0]?.operation, 'cancel-organization-program');
-  assert.equal(pending[0]?.targetId, programId);
+  assert.equal(pending.length, 2);
+  assert.ok(pending.some(item=>item.operation==='cancel-organization-program' && item.targetId===programId && !item.confirmedAt));
+  assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-organization-program'));
   allowCancel = true;
   const restarted = new DigitalOperationsLayer(base.state, {
     ...base, organizations: organizations as any, compensations: new DurableCompensationJournal(base.state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.equal(creates, 1);
-  assert.equal(cancels, 2);
+  assert.equal(cancels, 0);
 });
 
 test('digital operation reconciliation retains intents until cancellation and release postconditions are proved', async (t) => {
@@ -763,9 +763,11 @@ test('digital operation reconciliation retains intents until cancellation and re
     ['cancel-organization-program', programId],
     ['release-device-reservation', reservationId]
   ]) {
+    const id = crypto.randomUUID();
     await compensations.prepare({
-      id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId
+      id, ownerKind: 'digital-operation', ownerId, operation, targetId
     });
+    await compensations.confirm(id);
   }
   let safe = false;
   const teams = { async cancel(id: string) { assert.equal(id, teamId); return { id, state: safe ? 'CANCELLED' : 'VERIFIED' }; } };
@@ -808,6 +810,7 @@ test('two independent recovery workers never execute one compensation twice',asy
   id:crypto.randomUUID(),ownerKind:'digital-operation',ownerId,
   operation:'cancel-team-mission',targetId:missionId
  });
+ for(const intent of await journal.pending('digital-operation')) await journal.confirm(intent.id);
  let cancels=0;
  const teams={
   async cancel(id:string){
@@ -872,6 +875,7 @@ test('independent OS processes execute one pending compensation only once',async
   id,ownerKind:'digital-operation',ownerId,
   operation:'cancel-team-mission',targetId:missionId
  });
+ await new DurableCompensationJournal(base.state).confirm(id);
  const {execFile}=await import('node:child_process');
  const {promisify}=await import('node:util');
  const {pathToFileURL}=await import('node:url');
@@ -946,14 +950,14 @@ test('provider-supplied foreign reservation ID is quarantined and never released
   scopeKey:'project:foreign-reservation',successConditions:['no foreign cleanup'],
   execution:{kind:'team',workItems:work()},
   device:{request:{workloadKey:'foreign-reservation'},advertisements:[]}
- }),(error:any)=>error?.code==='DEVICE_POOL_RESERVATION_ID_CONFLICT');
+ }),(error:any)=>error?.code==='COMPENSATION_BLOCKED' && error?.details?.reserveCode==='DEVICE_POOL_RESERVATION_ID_CONFLICT');
  assert.ok(released.every(id=>id===expected),'foreign provider ID must never be released');
  assert.ok(!released.includes(foreign));
  const pending=await journal.pending('digital-operation');
- assert.equal(pending.length,1);
- assert.equal(pending[0]?.operation,'reconcile-untrusted-device-reservation');
- assert.equal(pending[0]?.targetId,foreign);
- assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:1});
+ assert.equal(pending.length,3);
+ assert.ok(pending.some(item=>item.operation==='reconcile-untrusted-device-reservation' && item.targetId===foreign));
+ assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-device-reservation'));
+ assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:3});
 });
 
 test('provider-supplied foreign team mission ID is never cancelled by an operation',async t=>{
@@ -971,11 +975,31 @@ test('provider-supplied foreign team mission ID is never cancelled by an operati
   requestId,objective:'Reject forged mission acknowledgement',
   scopeKey:'project:foreign-team',successConditions:['no foreign cancellation'],
   execution:{kind:'team',workItems:work()}
- }),(error:any)=>error?.code==='TEAM_MISSION_ID_CONFLICT');
+ }),(error:any)=>error?.code==='COMPENSATION_BLOCKED');
  assert.ok(!cancelled.includes(foreign));
  assert.ok(cancelled.every(id=>id===reservedDigitalEffectId(requestId,'cancel-team-mission')));
  const pending=await journal.pending('digital-operation');
- assert.equal(pending.length,1);
- assert.equal(pending[0]?.operation,'reconcile-untrusted-team-mission');
- assert.equal(pending[0]?.targetId,foreign);
+ assert.equal(pending.length,3);
+ assert.ok(pending.some(item=>item.operation==='reconcile-untrusted-team-mission' && item.targetId===foreign));
+ assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-team-mission'));
+});
+
+test('preexisting reserved mission identity never authorizes cancellation of unrelated work',async t=>{
+ const base=await setup(t);
+ const requestId=crypto.randomUUID();
+ const collisionId=reservedDigitalEffectId(requestId,'cancel-team-mission');
+ const unrelated=await base.teams.submit({missionId:collisionId,objective:'Unrelated preexisting work',workItems:work()});
+ await base.teams.start(unrelated.id);
+ const journal=new DurableCompensationJournal(base.state);
+ const layer=new DigitalOperationsLayer(base.state,{...base,compensations:journal});
+ await assert.rejects(layer.submit({requestId,objective:'New colliding operation',
+  scopeKey:'project:collision',successConditions:['no unrelated cancellation'],
+  execution:{kind:'team',workItems:work()}
+ }),(error:any)=>error?.code==='COMPENSATION_BLOCKED');
+ assert.equal((await base.teams.inspect(collisionId)).state,'RUNNING');
+ const pending=await journal.pending('digital-operation');
+ assert.ok(pending.some(item=>item.operation==='cancel-team-mission' && !item.confirmedAt));
+ assert.ok(pending.some(item=>item.operation==='reconcile-unacknowledged-team-mission'));
+ assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:2});
+ assert.equal((await base.teams.inspect(collisionId)).state,'RUNNING');
 });
