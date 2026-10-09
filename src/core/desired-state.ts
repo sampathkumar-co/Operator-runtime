@@ -144,7 +144,8 @@ export class DesiredStateController {
         let active: DigitalOperation | undefined;
         try { active = await this.#operations.refresh(contract.activeOperationId); }
         catch { /* No proof of non-execution: keep the durable reservation quarantined. */ }
-        if (!active || active.id !== contract.activeOperationId) {
+        if (!active || active.id !== contract.activeOperationId ||
+            !remediationMatchesContract(active, contract)) {
           contract.status = 'BLOCKED';
           contract.lastReason = 'Remediation handoff is unresolved; operator reconciliation is required before another dispatch.';
           contract.updatedAt = now.toISOString();
@@ -425,6 +426,23 @@ function normalizeConditions(input: WorldCondition[]): WorldCondition[] {
     factKey: key(condition.factKey, `desired[${index}].factKey`),
     expectedValueDigest: sha(condition.expectedValueDigest, `desired[${index}].expectedValueDigest`)
   }));
+}
+
+function remediationMatchesContract(operation: DigitalOperation, contract: DesiredStateContract): boolean {
+  if (operation.scopeKey !== contract.scopeKey ||
+      operation.objective !== contract.remediation.objective ||
+      !Array.isArray(operation.successConditions) ||
+      !Array.isArray(operation.postconditions)) return false;
+  if (operation.successConditions.length !== contract.remediation.successConditions.length ||
+      operation.postconditions.length !== contract.desired.length) return false;
+  const conditions = (values: WorldCondition[]): string[] =>
+    values.map(value => [value.entityKey, value.factKey, value.expectedValueDigest].join('\0')).sort();
+  const left = conditions(operation.postconditions);
+  const right = conditions(contract.desired);
+  const actualConditions = [...operation.successConditions].sort();
+  const expectedConditions = [...contract.remediation.successConditions].sort();
+  return left.every((item, i) => item === right[i]) &&
+    actualConditions.every((item, i) => item === expectedConditions[i]);
 }
 
 function requireContract(state: DesiredStateFile, idInput: string): DesiredStateContract {
