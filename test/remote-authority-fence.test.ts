@@ -292,3 +292,23 @@ test('revoked authority record with forged device identity fails closed', async 
   await assert.rejects(scoped.revoke(subject),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_CORRUPT');
 });
+
+test('expiry never transfers account ownership at a recycled generation', async (t) => {
+  const { make, subject, advance } = await fixture(t);
+  const first = await make().acquire(subject, 'old-owner', 5_000);
+  const other = { ...subject, accountId: crypto.randomUUID() };
+  advance(5_001);
+  await assert.rejects(make().acquire(other, 'foreign-owner', 5_000),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  // A crashed worker from the same account can reacquire after its exact TTL,
+  // with a new owner token and strictly higher control-plane CAS generation.
+  const recovered = await make().acquire(subject, 'replacement-same-account', 5_000);
+  assert.ok(recovered.generation > first.generation);
+  await assert.rejects(make().assertCurrent(first),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  advance(5_001);
+  const legitimatelyRebound = await make().acquire({
+    ...other, authorityGeneration: subject.authorityGeneration + 1
+  }, 'new-account-generation', 5_000);
+  assert.ok(legitimatelyRebound.generation > recovered.generation);
+});
