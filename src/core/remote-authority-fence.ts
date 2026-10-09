@@ -32,6 +32,8 @@ export interface RemoteAuthorityBarrier extends RemoteAuthoritySubject {
   generation: number;
 }
 export type RemoteAuthorityAuthorization = (subject: RemoteAuthoritySubject, mode: 'acquire' | 'revoke') => Promise<void>;
+/** Provider policy must bind each mutation's namespace/key to the authorized account/device. */
+export type RemoteAuthorityMutationAuthorization = (subject: RemoteAuthoritySubject, mutation: ControlPlaneMutation) => Promise<void>;
 
 const NS = '__mecord_remote_authority';
 const MIN_TTL_MS = 5_000;
@@ -42,14 +44,16 @@ const OWNER = /^[A-Za-z0-9._:@/+=-]{1,256}$/;
 export class RemoteAuthorityFenceStore {
   #store: ControlPlaneStore;
   #authorize: RemoteAuthorityAuthorization;
+  #authorizeMutation?: RemoteAuthorityMutationAuthorization;
   #clock: () => Date;
 
-  constructor(store: ControlPlaneStore, options: { authorize: RemoteAuthorityAuthorization; clock?: () => Date }) {
+  constructor(store: ControlPlaneStore, options: { authorize: RemoteAuthorityAuthorization; authorizeMutation?: RemoteAuthorityMutationAuthorization; clock?: () => Date }) {
     if (!options || typeof options.authorize !== 'function') {
       throw new OperatorError('REMOTE_AUTHORITY_POLICY_REQUIRED', 'A trusted external authorization hook is required.');
     }
     this.#store = store;
     this.#authorize = options.authorize;
+    this.#authorizeMutation = options.authorizeMutation;
     this.#clock = options.clock ?? (() => new Date());
   }
 
@@ -136,6 +140,13 @@ export class RemoteAuthorityFenceStore {
     if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS) {
       throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must not address the authority namespace.');
     }
+    if (!this.#authorizeMutation) {
+      throw blocked('REMOTE_AUTHORITY_MUTATION_POLICY_REQUIRED', 'Provider effect scope authorization is required before protected commit.');
+    }
+    // The mutation authorizer is trusted to verify exact account/device/resource
+    // ownership, not just a caller-supplied label. This check may deny the
+    // operation; the lease generation CAS still guards against revocation races.
+    await this.#authorizeMutation(lease, mutation);
     const now = this.#clock().toISOString();
     const [advanced, committed] = await this.#store.transact([
       {
