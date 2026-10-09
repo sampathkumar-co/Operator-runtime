@@ -514,3 +514,50 @@ test('TaskStore never steals an execution lease when owner liveness is unknown',
   );
   assert.equal(JSON.parse(await fs.readFile(leasePath, 'utf8')).pid, 42101);
 });
+
+test('competing stale task lease reclaimers cannot observe and replace the same dead owner concurrently', async (t) => {
+  const state = await tempDir(t, 'operator-task-stale-reclaimer-race-');
+  const value = task();
+  const leaseDir = path.join(state, 'task-leases');
+  await fs.mkdir(leaseDir, { recursive: true, mode: 0o700 });
+  const leaseFile = path.join(leaseDir, `${value.id}.json`);
+  const staleOwner = { pid: 51001, started: 'stale-owner' };
+  const leftOwner = { pid: 51002, started: 'new-left-owner' };
+  const rightOwner = { pid: 51003, started: 'new-right-owner' };
+  await fs.writeFile(leaseFile, JSON.stringify({
+    version: 2, taskId: value.id, ownerId: crypto.randomUUID(),
+    pid: staleOwner.pid, processInstance: staleOwner, acquiredAt: new Date().toISOString()
+  }), { mode: 0o600 });
+  let activeObservers = 0;
+  let maximumObservers = 0;
+  const observe = async (pid: number) => {
+    activeObservers++;
+    maximumObservers = Math.max(maximumObservers, activeObservers);
+    try {
+      await delay(45);
+      if (pid === staleOwner.pid) return { status: 'dead' as const };
+      if (pid === leftOwner.pid) return { status: 'live' as const, identity: leftOwner };
+      if (pid === rightOwner.pid) return { status: 'live' as const, identity: rightOwner };
+      return { status: 'unknown' as const };
+    } finally {
+      activeObservers--;
+    }
+  };
+  const left = new TaskStore(state, { processInstance: leftOwner, observeProcessInstance: observe });
+  const right = new TaskStore(state, { processInstance: rightOwner, observeProcessInstance: observe });
+  const contenders = await Promise.allSettled([
+    left.acquireExecutionLease(value.id),
+    right.acquireExecutionLease(value.id)
+  ]);
+  assert.equal(contenders.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(contenders.filter(item => item.status === 'rejected').length, 1);
+  assert.equal(contenders.find(item => item.status === 'rejected')?.reason?.code, 'TASK_ALREADY_RUNNING');
+  assert.equal(maximumObservers, 1, 'stale owner liveness decisions must be serialized');
+  const owned = contenders.find((item): item is PromiseFulfilledResult<Awaited<ReturnType<TaskStore['acquireExecutionLease']>>> =>
+    item.status === 'fulfilled')!.value;
+  await owned.assertOwned();
+  await Promise.all([owned.release(), owned.release()]);
+  const next = await left.acquireExecutionLease(value.id);
+  await next.assertOwned();
+  await next.release();
+});
