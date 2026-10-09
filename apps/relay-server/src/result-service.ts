@@ -91,6 +91,7 @@ export class RelayResultService {
           return;
         }
         const isResultRequest = request.url === '/v1/device-result';
+        const isExecutionFenceCheck = request.url === '/v1/device-authority/check';
         const isRotateRequest = request.url === '/v1/device-session/rotate';
         const isRecoveryChallenge = request.url === '/v1/device-session/recover/challenge';
         const isRecoveryRequest = request.url === '/v1/device-session/recover';
@@ -98,7 +99,7 @@ export class RelayResultService {
         const isEnrollmentComplete = request.url === '/v1/device-enrollment/complete';
         const isEnrollmentPoll = request.url === '/v1/device-enrollment/poll';
         const isResetRequest = request.url === '/v1/device-self/reset';
-        const accepted = isResultRequest || isRotateRequest || isRecoveryChallenge || isRecoveryRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
+        const accepted = isResultRequest || isExecutionFenceCheck || isRotateRequest || isRecoveryChallenge || isRecoveryRequest || isEnrollmentChallenge || isEnrollmentComplete || isEnrollmentPoll || isResetRequest;
         if (request.method !== 'POST' || !accepted) {
           send(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: 'Route not found.' } });
           return;
@@ -235,9 +236,35 @@ export class RelayResultService {
           send(response, 200, { ok: true, session: { token: rotated.token, expiresAt: rotated.payload.expiresAt, scopes: [...rotated.payload.scopes] } });
           return;
         }
-        const body = await readJson(request) as { seq?: unknown; deliveryId?: unknown; result?: unknown };
+        const body = await readJson(request) as { seq?: unknown; deliveryId?: unknown; result?: unknown; authority?: unknown };
         const seq = positiveSeq(body.seq);
         const deliveryId = uuid(String(body.deliveryId ?? ''), 'deliveryId');
+        if (isExecutionFenceCheck) {
+          // A bearer-scoped device must prove the *exact* persisted delivery
+          // identity and generation at its remote execution boundary. A stale
+          // socket/session envelope, provider-returned ID or caller-supplied
+          // authority object is never sufficient by itself.
+          const retained = await this.#deliveries.retained(session.subjectDeviceId, seq);
+          if (!retained || retained.id !== deliveryId || retained.status !== 'pending' || !retained.authority) {
+            throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED', 'Pending delivery authority could not be proven before device execution.');
+          }
+          const storedAuthority = retained.authority;
+          const claimed = body.authority;
+          if (!claimed || typeof claimed !== 'object' || Array.isArray(claimed)) {
+            throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED', 'Device omitted its exact delivery authority.');
+          }
+          const claim = claimed as Record<string, unknown>;
+          if (claim.accountId !== storedAuthority.accountId || claim.deviceId !== storedAuthority.deviceId ||
+              claim.generation !== storedAuthority.generation || storedAuthority.deviceId !== session.subjectDeviceId) {
+            throw new OperatorError('RELAY_EXECUTION_AUTHORITY_REVOKED', 'Device execution request differs from persisted account and delivery generation.');
+          }
+          await this.#assertActiveReplayAuthority(storedAuthority);
+          send(response, 200, { ok: true, authorization: {
+            seq, deliveryId, accountId: storedAuthority.accountId,
+            deviceId: storedAuthority.deviceId, generation: storedAuthority.generation
+          } });
+          return;
+        }
         if (!body.result || typeof body.result !== 'object' || Array.isArray(body.result)) throw new OperatorError('RELAY_RESULT_INVALID', 'Result body must be a JSON object.');
         const pending = await this.#deliveries.pending(session.subjectDeviceId, MAX_CONCURRENT_READ_RESULT_WINDOW);
         let expected = pending[0];
