@@ -51,3 +51,4 @@ jobs:
         run: |
           node --experimental-strip-types --test integration/postgres/real-control-plane.test.mjs
           node --experimental-strip-types --test integration/postgres/real-remote-authority.test.mjs
+          node --experimental-strip-types --test integration/postgres/real-restore-witness.test.mjs
