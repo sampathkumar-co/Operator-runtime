@@ -668,7 +668,8 @@ test('restart after confirmed reservation commit safely releases the orphaned re
   const recoveryId = crypto.createHash('sha256').update(['digital-operation', ownerId, 'release-device-reservation', reservationId].join('\0')).digest('hex');
   await compensations.prepare({
     id: recoveryId, ownerKind: 'digital-operation', ownerId,
-    operation: 'release-device-reservation', targetId: reservationId
+    operation: 'release-device-reservation', targetId: reservationId,
+    allocationRequestDigest: devicePoolAllocationRequestDigest({ workloadKey: 'work:crash-window' })
   });
   const sessionId = crypto.randomUUID();
   const reservation = await devices.reserve({ workloadKey: 'work:crash-window' }, [{
@@ -778,14 +779,23 @@ test('digital operation reconciliation retains intents until cancellation and re
     ['release-device-reservation', reservationId]
   ]) {
     const prepared = await compensations.prepare({
-      id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId
+      id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId,
+      ...(operation === 'release-device-reservation'
+        ? { allocationRequestDigest: devicePoolAllocationRequestDigest({ workloadKey: 'verified-recovery' }) } : {})
     });
     await compensations.confirm(prepared.id);
   }
   let safe = false;
   const teams = { async cancel(id: string) { assert.equal(id, teamId); return { id, state: safe ? 'CANCELLED' : 'VERIFIED' }; } };
   const organizations = { async cancel(id: string) { assert.equal(id, programId); return { id, state: safe ? 'CANCELLED' : 'BLOCKED' }; } };
-  const devices = { async release(id: string) { assert.equal(id, reservationId); return { id, state: safe ? 'RELEASED' : 'ACTIVE' }; } };
+  const devices = {
+    async release() { throw new Error('unfenced legacy release must not run'); },
+    async releasePrepared(id: string, digest: string) {
+      assert.equal(id, reservationId);
+      assert.equal(digest, devicePoolAllocationRequestDigest({ workloadKey: 'verified-recovery' }));
+      return { id, state: safe ? 'RELEASED' : 'ACTIVE' };
+    }
+  };
   const ops = new DigitalOperationsLayer(base.state, {
     ...base, teams: teams as any, organizations: organizations as any,
     devices: devices as any, compensations
@@ -1366,4 +1376,72 @@ test('immediate rollback uses exact proof-bound reservation release and retains 
   assert.equal(pending[0]!.targetId, reservationId);
   assert.equal(pending[0]!.allocationRequestDigest, expectedDigest);
   assert.ok(pending[0]!.confirmedAt);
+});
+
+test('confirmed restart cleanup requires exact child identity and bound reservation terminal receipt', async t => {
+  const base = await setup(t);
+  const ownerId = crypto.randomUUID();
+  const journal = new DurableCompensationJournal(base.state);
+  const request = { workloadKey: 'external-confirmed:recovery' };
+  const digest = devicePoolAllocationRequestDigest(request);
+  const teamId = digitalOperationChildId(ownerId, 'cancel-team-mission');
+  const organizationId = digitalOperationChildId(ownerId, 'cancel-organization-program');
+  const reservationId = digitalOperationChildId(ownerId, 'release-device-reservation');
+  for (const [operation, targetId] of [
+    ['cancel-team-mission', teamId],
+    ['cancel-organization-program', organizationId],
+    ['release-device-reservation', reservationId]
+  ]) {
+    const intent = await journal.prepare({
+      id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId, operation, targetId,
+      ...(operation === 'release-device-reservation' ? { allocationRequestDigest: digest } : {})
+    });
+    await journal.confirm(intent.id);
+  }
+  let legacyCalls = 0;
+  const teams = { async cancel(id: string) {
+    assert.equal(id, teamId);
+    return { id: crypto.randomUUID(), state:'CANCELLED' };
+  }};
+  const organizations = { async cancel(id: string) {
+    assert.equal(id, organizationId);
+    return { id: crypto.randomUUID(), state:'CANCELLED' };
+  }};
+  const devices = {
+    async release() { legacyCalls++; throw new Error('unbound release forbidden'); },
+    async releasePrepared(id: string, observedDigest: string) {
+      assert.equal(id, reservationId);
+      assert.equal(observedDigest, digest);
+      return { id: crypto.randomUUID(), state:'RELEASED' };
+    }
+  };
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, teams: teams as any, organizations: organizations as any,
+    devices: devices as any, compensations: journal
+  });
+  assert.deepEqual(await ops.recoverPendingCompensations(), { recovered:0, pending:3 });
+  assert.equal(legacyCalls, 0);
+  assert.equal((await journal.pending('digital-operation')).length, 3);
+});
+
+test('pre-digest legacy confirmed reservation cannot use naked ID release during restart recovery', async t => {
+  const base = await setup(t);
+  const journal = new DurableCompensationJournal(base.state);
+  const ownerId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(ownerId, 'release-device-reservation');
+  const prepared = await journal.prepare({
+    id: crypto.randomUUID(), ownerKind:'digital-operation', ownerId,
+    operation:'release-device-reservation', targetId:reservationId
+  });
+  await journal.confirm(prepared.id);
+  let releaseCalls = 0;
+  const devices = {
+    async release() { releaseCalls++; return { id:reservationId, state:'RELEASED' }; },
+    async releasePrepared() { releaseCalls++; return { id:reservationId, state:'RELEASED' }; }
+  };
+  const ops = new DigitalOperationsLayer(base.state, { ...base,
+    devices: devices as any, compensations: journal });
+  assert.deepEqual(await ops.recoverPendingCompensations(), { recovered:0, pending:1 });
+  assert.equal(releaseCalls, 0, 'unproven pre-upgrade cleanup must remain quarantined');
+  assert.equal((await journal.pending('digital-operation'))[0]?.targetId, reservationId);
 });
