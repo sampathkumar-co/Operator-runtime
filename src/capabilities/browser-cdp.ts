@@ -771,7 +771,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
     endpoint.search = url;
     const response = await fetch(endpoint, { method: 'PUT', redirect: 'error', signal: combinedSignal(signal, 4_000) });
     if (!response.ok) throw new OperatorError('CDP_CREATE_TAB_FAILED', `CDP returned HTTP ${response.status} while creating a tab.`, { retryable: true });
-    const tab = await boundedDiscoveryJson(response);
+    const tab = await boundedDiscoveryJson(response) as Record<string, unknown>;
     if (!tab || typeof tab !== 'object' || Array.isArray(tab)) {
       throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser new-tab discovery must return an object.');
     }
