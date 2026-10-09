@@ -162,6 +162,11 @@ export class OrganizationCoordinator {
         // Unknown child identities are not cancellation authority. Preserve the
         // quarantine intent for explicit operator reconciliation on every restart.
         if (intent.operation === 'reconcile-untrusted-team-identity') continue;
+        // A journal entry is not proof of authority over a child mission.
+        // Only the deterministic preallocated ID of the exact program target
+        // can be used for any cleanup side effect.
+        if (!program || !target ||
+            intent.targetId !== stableOrganizationMissionId(program.id, target.key)) continue;
         try {
           const mission = await this.#teams.inspect(intent.targetId);
           if (intent.operation === 'cancel-team-mission') {
@@ -414,7 +419,8 @@ export class OrganizationCoordinator {
     program: OrganizationProgram | undefined,
     target: OrganizationTarget | undefined
   ): boolean {
-    if (!program || !target || target.missionId !== intent.targetId) return false;
+    if (!program || !target || target.missionId !== intent.targetId ||
+        intent.targetId !== stableOrganizationMissionId(program.id, target.key)) return false;
     return intent.operation === 'cancel-team-mission' || intent.operation === 'pause-team-mission';
   }
 
