@@ -5,6 +5,7 @@ import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { TeamCoordinator, type TeamBudget, type TeamWorkInput } from './team-coordinator.ts';
 import { DurableCompensationJournal, type DurableCompensationIntent } from './compensation-journal.ts';
+import { OrganizationQuarantineAdjudicator, type SignedProviderQuarantineClaim, type QuarantineAdjudicationRecord } from './organization-quarantine-adjudication.ts';
 
 const MAX_PROGRAMS = 500;
 const MAX_TARGETS = 5000;
@@ -76,16 +77,19 @@ export class OrganizationCoordinator {
   #teams: TeamCoordinator;
   #clock: () => Date;
   #compensations: DurableCompensationJournal;
+  #adjudicator?: OrganizationQuarantineAdjudicator;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, teams: TeamCoordinator, options: {
     clock?: () => Date;
     compensations?: DurableCompensationJournal;
+    adjudicator?: OrganizationQuarantineAdjudicator;
   } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'organization-programs.json');
     this.#teams = teams;
     this.#clock = options.clock ?? (() => new Date());
     this.#compensations = options.compensations ?? new DurableCompensationJournal(stateDir, { clock: this.#clock });
+    this.#adjudicator = options.adjudicator;
   }
 
   async create(input: {
@@ -404,6 +408,31 @@ export class OrganizationCoordinator {
     const state = await this.#read();
     const limit = boundedInteger(limitInput, 1, 500, 'limit');
     return state.programs.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit).map((item) => structuredClone(item));
+  }
+
+  /**
+   * Authenticated human review of an untrusted provider-returned mission ID.
+   * This API cannot cancel a returned child. Owned cases remain quarantined;
+   * unrelated/not-created cases retire only the returned-identity quarantine,
+   * never the original preallocated recovery intent.
+   */
+  async adjudicateQuarantinedIdentity(input: {
+    programId: string; targetKey: string; returnedMissionId: string;
+    operatorId: string; providerClaim: SignedProviderQuarantineClaim;
+  }): Promise<QuarantineAdjudicationRecord> {
+    if (!this.#adjudicator) throw new OperatorError('QUARANTINE_ADJUDICATION_UNAVAILABLE',
+      'Independent provider signing and scoped operator authorization must be configured.');
+    const program = await this.inspect(validUuid(input.programId, 'programId'));
+    const targetKey = boundedKey(input.targetKey, 'targetKey');
+    const target = program.targets.find((item) => item.key === targetKey);
+    if (!target) throw new OperatorError('ORGANIZATION_TARGET_NOT_FOUND', 'Recovery target is not in the owning program.');
+    const returnedMissionId = validUuid(input.returnedMissionId, 'returnedMissionId');
+    const intentId = compensationIntentId(program.id, 'reconcile-untrusted-team-identity', returnedMissionId);
+    return await this.#adjudicator.review({
+      intentId, programId: program.id, targetKey,
+      expectedMissionId: stableOrganizationMissionId(program.id, targetKey),
+      returnedMissionId, operatorId: input.operatorId, providerClaim: input.providerClaim
+    });
   }
 
   async #assertNoPendingCompensation(programId: string): Promise<void> {
