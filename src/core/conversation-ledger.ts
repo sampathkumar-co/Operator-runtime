@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { appendDurableStateText, readDurableStateText } from './durable-state.ts';
+import { withDurableStateLock } from './durable-state-lock.ts';
 
 export type ConversationTurnRole = 'user' | 'assistant' | 'system';
 
@@ -22,10 +23,12 @@ const MAX_LEDGER_BYTES = 256 * 1024 * 1024;
 
 export class ConversationLedger {
   #file: string;
+  #conversationId: string;
   #serial: Promise<void> = Promise.resolve();
 
   constructor(stateDir: string, conversationId: string) {
     const id = boundedId(conversationId, 'conversationId');
+    this.#conversationId = id;
     this.#file = path.join(path.resolve(stateDir), 'conversations', `${id}.ndjson`);
   }
 
@@ -35,13 +38,13 @@ export class ConversationLedger {
     retainContent?: boolean;
     supersedes?: string[];
   }): Promise<ConversationTurn> {
-    const run = this.#serial.then(async () => {
-      const existing = await this.list();
+    const run = this.#serial.then(() => withDurableStateLock(this.#file, async () => {
+      const existing = await this.#listUnlocked();
       const content = boundedText(input.content, MAX_TURN_BYTES, 'content');
       const role = validRole(input.role);
       const supersedes = uniqueIds(input.supersedes ?? []);
       const createdAt = new Date().toISOString();
-      const conversationId = path.basename(this.#file, '.ndjson');
+      const conversationId = this.#conversationId;
       const turn: ConversationTurn = {
         version: 1,
         id: crypto.randomUUID(),
@@ -59,12 +62,16 @@ export class ConversationLedger {
         invalidMessage: 'Conversation ledger is invalid.'
       });
       return turn;
-    });
+    }));
     this.#serial = run.then(() => undefined, () => undefined);
     return await run;
   }
 
   async list(): Promise<ConversationTurn[]> {
+    return await withDurableStateLock(this.#file, () => this.#listUnlocked());
+  }
+
+  async #listUnlocked(): Promise<ConversationTurn[]> {
     let text: string;
     try {
       text = await readDurableStateText(this.#file, {
@@ -79,6 +86,7 @@ export class ConversationLedger {
     if (!text.trim()) return [];
     const turns = text.trimEnd().split('\n').map((line, index) => parseTurn(line, index + 1));
     for (let i = 0; i < turns.length; i += 1) {
+      if (turns[i]!.conversationId !== this.#conversationId) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains a turn belonging to a different conversation.');
       if (turns[i]!.sequence !== i + 1) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger sequence is not contiguous.');
     }
     return turns;

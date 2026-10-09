@@ -31,3 +31,36 @@ test('conversation ledger can retain only a digest when content retention is dis
   assert.equal(stored?.content, undefined);
   assert.match(stored!.contentDigest, /^[0-9a-f]{64}$/);
 });
+
+test('independent conversation ledger writers append contiguous durable turns without sequence races', async (t) => {
+  const state = await temp(t);
+  const writers = Array.from({ length: 8 }, () => new ConversationLedger(state, 'parallel-chat'));
+  const appended = await Promise.all(
+    Array.from({ length: 24 }, (_, index) =>
+      writers[index % writers.length]!.append({ role: 'user', content: 'turn-' + index })
+    )
+  );
+  const readBack = await new ConversationLedger(state, 'parallel-chat').list();
+  assert.equal(readBack.length, 24);
+  assert.deepEqual(readBack.map(item => item.sequence), Array.from({ length: 24 }, (_, i) => i + 1));
+  assert.equal(new Set(readBack.map(item => item.id)).size, 24);
+  assert.deepEqual(
+    new Set(readBack.map(item => item.content)),
+    new Set(Array.from({ length: 24 }, (_, i) => 'turn-' + i))
+  );
+  assert.equal(new Set(appended.map(item => item.sequence)).size, 24);
+});
+
+test('conversation ledger refuses turns from another durable conversation identity', async (t) => {
+  const state = await temp(t);
+  const ledger = new ConversationLedger(state, 'scoped-chat');
+  await ledger.append({ role: 'user', content: 'bound to this conversation' });
+  const file = path.join(state, 'conversations', 'scoped-chat.ndjson');
+  const turns = (await fs.readFile(file, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+  turns[0].conversationId = 'different-chat';
+  await fs.writeFile(file, turns.map(item => JSON.stringify(item)).join('\n') + '\n');
+  await assert.rejects(
+    () => new ConversationLedger(state, 'scoped-chat').list(),
+    (error: any) => error?.code === 'CONVERSATION_LEDGER_CORRUPT'
+  );
+});
