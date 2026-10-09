@@ -285,3 +285,94 @@ test('independent embedded control-plane stores enforce cross-instance CAS and p
   assert.equal(restoreResult.find((item): item is PromiseRejectedResult => item.status === 'rejected')?.reason?.code, 'CONTROL_PLANE_RESTORE_CONFLICT');
   assert.equal((await restore[0]!.list('tasks')).length, 20);
 });
+
+test('embedded control-plane CAS never recycles deleted keys or allows old owners to overwrite reincarnated records', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-cp-aba-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const firstStore = new EmbeddedControlPlaneStore(dir);
+  const [first] = await firstStore.transact([
+    { namespace: 'authority', key: 'session:one', expectedGeneration: null, value: { owner: 'first' } }
+  ], '2026-10-07T00:00:00.000Z');
+  assert.equal(first?.generation, 1);
+  const oldSnapshot = await firstStore.snapshot('2026-10-07T00:00:01.000Z');
+  await firstStore.transact([
+    { namespace: 'authority', key: 'session:one', expectedGeneration: first!.generation, value: null }
+  ], '2026-10-07T00:00:02.000Z');
+  assert.equal(await firstStore.get('authority', 'session:one'), null);
+  await assert.rejects(
+    () => firstStore.restore(oldSnapshot),
+    (error: any) => error?.code === 'CONTROL_PLANE_RESTORE_CONFLICT'
+  );
+
+  const independent = new EmbeddedControlPlaneStore(dir);
+  const [second] = await independent.transact([
+    { namespace: 'authority', key: 'session:one', expectedGeneration: null, value: { owner: 'second' } }
+  ], '2026-10-07T00:00:03.000Z');
+  assert.equal(second?.generation, 2);
+  await assert.rejects(
+    () => firstStore.transact([
+      { namespace: 'authority', key: 'session:one', expectedGeneration: first!.generation, value: { owner: 'stale' } }
+    ], '2026-10-07T00:00:04.000Z'),
+    (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+  );
+  assert.equal((await new EmbeddedControlPlaneStore(dir).get('authority', 'session:one'))?.value.owner, 'second');
+
+  const [expiring] = await firstStore.transact([
+    { namespace: 'authority', key: 'lease:expired', expectedGeneration: null, value: { owner: 'old' }, expiresAt: '2026-10-07T00:00:06.000Z' }
+  ], '2026-10-07T00:00:05.000Z');
+  assert.equal(await purgeExpiredControlPlaneRecords(independent, 'authority', '2026-10-07T00:00:07.000Z'), 1);
+  const [renewed] = await independent.transact([
+    { namespace: 'authority', key: 'lease:expired', expectedGeneration: null, value: { owner: 'new' } }
+  ], '2026-10-07T00:00:08.000Z');
+  assert.ok(renewed!.generation > expiring!.generation);
+  await assert.rejects(
+    () => firstStore.transact([
+      { namespace: 'authority', key: 'lease:expired', expectedGeneration: expiring!.generation, value: { owner: 'stale' } }
+    ], '2026-10-07T00:00:09.000Z'),
+    (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+  );
+});
+
+test('PostgreSQL control-plane retains deleted CAS history as invisible durable tombstones', async () => {
+  let row: { generation: number; expires_at: string | null; is_deleted: boolean } | undefined;
+  const client: PostgresQueryClient = {
+    async query(sql: string, values?: unknown[]) {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+      if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] };
+      if (sql.startsWith('SELECT generation, expires_at')) return { rows: row ? [{ ...row }] : [] };
+      if (sql.startsWith('UPDATE mecord_control_plane SET is_deleted=TRUE')) {
+        assert.ok(row);
+        row!.is_deleted = true;
+        row!.expires_at = null;
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.startsWith('INSERT INTO mecord_control_plane')) {
+        row = { generation: Number(values?.[2]), expires_at: (values?.[6] as string | null) ?? null, is_deleted: false };
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error('Unexpected SQL in PostgreSQL ABA test: ' + sql);
+    }
+  };
+  const store = new PostgresControlPlaneStore(client);
+  const [first] = await store.transact([
+    { namespace: 'authority', key: 'one', expectedGeneration: null, value: { owner: 'first' } }
+  ], '2026-10-07T00:00:00.000Z');
+  assert.equal(first?.generation, 1);
+  await store.transact([
+    { namespace: 'authority', key: 'one', expectedGeneration: first!.generation, value: null }
+  ], '2026-10-07T00:00:01.000Z');
+  assert.equal(row?.is_deleted, true);
+  assert.equal(row?.generation, 1);
+  const [recreated] = await store.transact([
+    { namespace: 'authority', key: 'one', expectedGeneration: null, value: { owner: 'second' } }
+  ], '2026-10-07T00:00:02.000Z');
+  assert.equal(recreated?.generation, 2);
+  await assert.rejects(
+    () => store.transact([
+      { namespace: 'authority', key: 'one', expectedGeneration: first!.generation, value: { owner: 'stale' } }
+    ], '2026-10-07T00:00:03.000Z'),
+    (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+  );
+  assert.equal(row?.generation, 2);
+  assert.equal(row?.is_deleted, false);
+});

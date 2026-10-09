@@ -3,7 +3,8 @@ import test from 'node:test';
 import pg from 'pg';
 import {
   PostgresControlPlaneStore,
-  applyControlPlaneMigration
+  applyControlPlaneMigration,
+  purgeExpiredControlPlaneRecords
 } from '../../src/core/control-plane-store.ts';
 
 const { Pool } = pg;
@@ -114,4 +115,56 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     await assert.rejects(store.restore(snapshot),
       (error) => error?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
   });
+  test('real PostgreSQL delete and expiry purge never recycle a CAS generation', async () => {
+    const [first] = await store.transact([{
+      namespace: 'leases', key: 'aba-key', expectedGeneration: null, value: { owner: 'first' }
+    }], '2026-10-08T00:00:01.000Z');
+    assert.equal(first?.generation, 1);
+
+    await store.transact([{
+      namespace: 'leases', key: 'aba-key', expectedGeneration: first.generation, value: null
+    }], '2026-10-08T00:00:02.000Z');
+    assert.equal(await store.get('leases', 'aba-key'), null);
+    assert.equal((await store.list('leases')).length, 0);
+    const hidden = await pool.query(
+      'SELECT generation, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+      ['leases', 'aba-key']
+    );
+    assert.equal(Number(hidden.rows[0]?.generation), 1);
+    assert.equal(hidden.rows[0]?.is_deleted, true);
+    assert.equal((await store.snapshot('2026-10-08T00:00:03.000Z')).records.length, 0);
+
+    const [second] = await store.transact([{
+      namespace: 'leases', key: 'aba-key', expectedGeneration: null, value: { owner: 'second' }
+    }], '2026-10-08T00:00:04.000Z');
+    assert.equal(second?.generation, 2);
+    await assert.rejects(
+      store.transact([{
+        namespace: 'leases', key: 'aba-key', expectedGeneration: first.generation,
+        value: { owner: 'stale' }
+      }], '2026-10-08T00:00:05.000Z'),
+      error => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+    );
+    assert.equal((await store.get('leases', 'aba-key'))?.value.owner, 'second');
+
+    const [expiring] = await store.transact([{
+      namespace: 'leases', key: 'expiring-key', expectedGeneration: null,
+      value: { owner: 'old' }, expiresAt: '2026-10-08T00:00:10.000Z'
+    }], '2026-10-08T00:00:06.000Z');
+    assert.equal(await purgeExpiredControlPlaneRecords(store, 'leases', '2026-10-08T00:00:11.000Z'), 1);
+    assert.equal(await store.get('leases', 'expiring-key'), null);
+    const [renewed] = await store.transact([{
+      namespace: 'leases', key: 'expiring-key', expectedGeneration: null, value: { owner: 'new' }
+    }], '2026-10-08T00:00:12.000Z');
+    assert.ok(renewed.generation > expiring.generation);
+    await assert.rejects(
+      store.transact([{
+        namespace: 'leases', key: 'expiring-key', expectedGeneration: expiring.generation,
+        value: { owner: 'stale' }
+      }], '2026-10-08T00:00:13.000Z'),
+      error => error?.code === 'CONTROL_PLANE_CAS_MISMATCH'
+    );
+    assert.equal((await store.get('leases', 'expiring-key'))?.value.owner, 'new');
+  });
+
 }
