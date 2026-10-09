@@ -501,6 +501,10 @@ export class DigitalOperationsLayer {
   }
 
   async start(idInput: string): Promise<DigitalOperation> {
+    return await this.#withOperationOwnership(() => this.#startOwned(idInput));
+  }
+
+  async #startOwned(idInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const operation = await this.inspect(id);
     if (operation.state !== 'PENDING' && operation.state !== 'PAUSED') throw new OperatorError('OPERATIONS_STATE_INVALID', 'Operation is not startable.');
@@ -508,11 +512,24 @@ export class DigitalOperationsLayer {
     if (operation.mode === 'team') {
       if (!operation.teamMissionId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Team operation has no mission.');
       const mission = await this.#teams.inspect(operation.teamMissionId);
-      if (mission.state === 'PENDING') await this.#teams.start(mission.id);
-      else if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') await this.#teams.resume(mission.id);
+      let result = mission.state;
+      if (mission.state === 'PENDING') result = (await this.#teams.start(mission.id)).state;
+      else if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') result = (await this.#teams.resume(mission.id)).state;
+      if (result !== 'RUNNING') {
+        return await this.#update(id, current => {
+          current.state = 'BLOCKED';
+          current.lastBlockReason = 'Underlying mission did not confirm RUNNING state.';
+        });
+      }
     } else {
       if (!operation.organizationProgramId) throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Organization operation has no program.');
-      await this.#organizations.start(operation.organizationProgramId);
+      const started = await this.#organizations.start(operation.organizationProgramId);
+      if (started.state !== 'RUNNING') {
+        return await this.#update(id, current => {
+          current.state = 'BLOCKED';
+          current.lastBlockReason = 'Organization program did not confirm RUNNING state.';
+        });
+      }
     }
     return await this.#update(id, (current) => {
       current.state = 'RUNNING';
@@ -521,6 +538,10 @@ export class DigitalOperationsLayer {
   }
 
   async refresh(idInput: string): Promise<DigitalOperation> {
+    return await this.#withOperationOwnership(() => this.#refreshOwned(idInput));
+  }
+
+  async #refreshOwned(idInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const current = await this.inspect(id);
     if (current.deviceReservationId && current.state === 'RUNNING') {
@@ -580,28 +601,55 @@ export class DigitalOperationsLayer {
   }
 
   async pause(idInput: string): Promise<DigitalOperation> {
+    return await this.#withOperationOwnership(() => this.#pauseOwned(idInput));
+  }
+
+  async #pauseOwned(idInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const current = await this.inspect(id);
-    if (current.mode === 'team' && current.teamMissionId) await this.#teams.pause(current.teamMissionId);
-    else if (current.organizationProgramId) await this.#organizations.pause(current.organizationProgramId);
-    return await this.#update(id, (operation) => { operation.state = 'PAUSED'; });
+    let confirmed: string | undefined;
+    if (current.mode === 'team' && current.teamMissionId) confirmed = (await this.#teams.pause(current.teamMissionId)).state;
+    else if (current.organizationProgramId) confirmed = (await this.#organizations.pause(current.organizationProgramId)).state;
+    return await this.#update(id, (operation) => {
+      operation.state = confirmed === 'PAUSED' ? 'PAUSED' : 'BLOCKED';
+      if (confirmed !== 'PAUSED') operation.lastBlockReason = 'Underlying operation did not confirm PAUSED state.';
+      else delete operation.lastBlockReason;
+    });
   }
 
   async cancel(idInput: string): Promise<DigitalOperation> {
+    return await this.#withOperationOwnership(() => this.#cancelOwned(idInput));
+  }
+
+  async #cancelOwned(idInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const current = await this.inspect(id);
-    if (current.mode === 'team' && current.teamMissionId) await this.#teams.cancel(current.teamMissionId);
-    else if (current.organizationProgramId) await this.#organizations.cancel(current.organizationProgramId);
-    const updated = await this.#update(id, (operation) => { operation.state = 'CANCELLED'; });
+    let confirmed: string | undefined;
+    if (current.mode === 'team' && current.teamMissionId) confirmed = (await this.#teams.cancel(current.teamMissionId)).state;
+    else if (current.organizationProgramId) confirmed = (await this.#organizations.cancel(current.organizationProgramId)).state;
+    const updated = await this.#update(id, (operation) => {
+      operation.state = confirmed === 'CANCELLED' ? 'CANCELLED' : 'BLOCKED';
+      if (confirmed !== 'CANCELLED') operation.lastBlockReason = 'Underlying operation did not confirm CANCELLED state.';
+      else delete operation.lastBlockReason;
+    });
+    if (updated.state !== 'CANCELLED') return updated;
     return updated.outcomeRecorded ? updated : await this.#recordFinalOutcome(updated);
   }
 
   async promoteOrganization(idInput: string, verificationDigestInput: string): Promise<DigitalOperation> {
+    return await this.#withOperationOwnership(() => this.#promoteOrganizationOwned(idInput, verificationDigestInput));
+  }
+
+  async #promoteOrganizationOwned(idInput: string, verificationDigestInput: string): Promise<DigitalOperation> {
     const id = validUuid(idInput, 'operationId');
     const current = await this.inspect(id);
     if (current.mode !== 'organization' || !current.organizationProgramId) throw new OperatorError('OPERATIONS_MODE_INVALID', 'Operation is not organization-scale.');
-    await this.#organizations.promote(current.organizationProgramId, shaDigest(verificationDigestInput, 'verificationDigest'));
-    return await this.#update(id, (operation) => { operation.state = 'RUNNING'; });
+    const promoted = await this.#organizations.promote(current.organizationProgramId, shaDigest(verificationDigestInput, 'verificationDigest'));
+    return await this.#update(id, (operation) => {
+      operation.state = promoted.state === 'RUNNING' ? 'RUNNING' : 'BLOCKED';
+      if (promoted.state !== 'RUNNING') operation.lastBlockReason = 'Organization promotion did not confirm RUNNING state.';
+      else delete operation.lastBlockReason;
+    });
   }
 
   async inspect(idInput: string): Promise<DigitalOperation> {

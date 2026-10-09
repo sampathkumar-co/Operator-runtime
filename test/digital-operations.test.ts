@@ -1007,3 +1007,66 @@ test('preexisting reserved mission identity never authorizes cancellation of unr
  assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:2});
  assert.equal((await base.teams.inspect(collisionId)).state,'RUNNING');
 });
+
+test('independent lifecycle owners cannot resurrect an operation after cancellation',async t=>{
+ const base=await setup(t);
+ let entered!:()=>void,release!:()=>void;
+ const started=new Promise<void>(resolve=>entered=resolve);
+ const gate=new Promise<void>(resolve=>release=resolve);
+ const teams={
+  async submit(input:{missionId:string}){return {id:input.missionId,state:'PENDING'};},
+  async inspect(id:string){return {id,state:'PENDING'};},
+  async start(id:string){entered();await gate;return {id,state:'RUNNING'};},
+  async cancel(id:string){return {id,state:'CANCELLED'};}
+ };
+ const left=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const right=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const operation=await left.submit({
+  requestId:crypto.randomUUID(),objective:'Bound lifecycle state',
+  scopeKey:'project:lifecycle',successConditions:['safe cancellation'],
+  execution:{kind:'team',workItems:work()},run:false
+ });
+ const start=left.start(operation.id);
+ await started;
+ const cancellation=right.cancel(operation.id);
+ await Promise.race([cancellation.then(()=>true),new Promise<boolean>(resolve=>setTimeout(()=>resolve(false),140))]);
+ release();
+ const outcomes=await Promise.all([start,cancellation]);
+ assert.equal(outcomes[1].state,'CANCELLED');
+ const durable=await new DigitalOperationsLayer(base.state,{...base,teams:teams as any}).inspect(operation.id);
+ assert.equal(durable.state,'CANCELLED');
+ assert.equal(durable.outcomeRecorded,true);
+});
+
+test('unconfirmed underlying cancellation cannot be reported as cancelled',async t=>{
+ const base=await setup(t);
+ const teams={
+  async submit(input:{missionId:string}){return {id:input.missionId,state:'PENDING'};},
+  async cancel(id:string){return {id,state:'BLOCKED'};}
+ };
+ const ops=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const operation=await ops.submit({
+  objective:'Truthful cancellation outcome',scopeKey:'project:cancel-truth',
+  successConditions:['no false cancellation'],execution:{kind:'team',workItems:work()}
+ });
+ const blocked=await ops.cancel(operation.id);
+ assert.equal(blocked.state,'BLOCKED');
+ assert.equal(blocked.outcomeRecorded,false);
+ assert.match(blocked.lastBlockReason||'',/did not confirm CANCELLED/);
+});
+
+test('unconfirmed underlying pause cannot be reported as paused',async t=>{
+ const base=await setup(t);
+ const teams={
+  async submit(input:{missionId:string}){return {id:input.missionId,state:'PENDING'};},
+  async pause(id:string){return {id,state:'RUNNING'};}
+ };
+ const ops=new DigitalOperationsLayer(base.state,{...base,teams:teams as any});
+ const operation=await ops.submit({
+  objective:'Truthful pause outcome',scopeKey:'project:pause-truth',
+  successConditions:['no false pause'],execution:{kind:'team',workItems:work()}
+ });
+ const blocked=await ops.pause(operation.id);
+ assert.equal(blocked.state,'BLOCKED');
+ assert.match(blocked.lastBlockReason||'',/did not confirm PAUSED/);
+});
