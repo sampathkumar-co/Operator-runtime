@@ -146,11 +146,14 @@ export class ArtifactStore {
     const names = (await fs.readdir(this.#recordRoot)).filter((name) => /^[0-9a-f]{64}\.json$/.test(name)).sort();
     const records: ArtifactRecord[] = [];
     for (const name of names) {
-      if (records.length >= limit) break;
       const id = name.slice(0, -5);
       records.push(await this.get(id));
     }
-    return records.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+    // Artifact ids are content-addresses, not chronological keys. Applying
+    // limit before this sort hides newer evidence whose digest sorts later.
+    return records
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))
+      .slice(0, limit);
   }
 
   async #putBlob(digest: string, bytes: Buffer): Promise<void> {
