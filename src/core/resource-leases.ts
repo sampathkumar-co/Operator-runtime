@@ -121,8 +121,12 @@ export class ResourceLeaseStore {
       for (const key of keys) {
         const conflictingEntries = state.resources.filter((item) => resourceKeysConflict(item.key, key));
         for (const entry of conflictingEntries) {
+          // The caller-supplied ownerId is an audit label, not an exact
+          // lease capability. Two separate leases sharing that label must not
+          // bypass mutual exclusion; only their UUID lease handles can
+          // establish exact ownership.
           const conflicts = entry.holders.filter((holder) =>
-            holder.ownerId !== ownerId && (mode === 'exclusive' || holder.mode === 'exclusive')
+            mode === 'exclusive' || holder.mode === 'exclusive'
           );
           if (conflicts.length > 0) {
             throw new OperatorError('RESOURCE_BUSY', `Resource ${key} conflicts with another active execution.`, {
