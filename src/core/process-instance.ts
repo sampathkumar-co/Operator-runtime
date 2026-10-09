@@ -149,13 +149,17 @@ function windowsStartedMillisecond(value: string): bigint | null {
 }
 
 async function observeLinuxProcess(pid: number): Promise<ProcessInstanceObservation> {
+  // A missing/blocked boot UUID is uncertainty about the *host*, not proof
+  // that the target PID is dead. Never pass a boot-id read error into the
+  // process-stat ENOENT handler below; it could wrongly reclaim live leases.
+  let bootId: string;
   try {
-    // Linux start ticks alone can be identical on two separate machines (or
-    // across reboots). Bind them to the kernel boot UUID. If the host will
-    // not disclose its boot identity, fail closed instead of claiming an
-    // authoritative process instance from the PID and ticks alone.
-    const bootId = (await fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim().toLowerCase();
-    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(bootId)) return { status: 'unknown' };
+    bootId = (await fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim().toLowerCase();
+  } catch {
+    return { status: 'unknown' };
+  }
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(bootId)) return { status: 'unknown' };
+  try {
     const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
     const closingName = stat.lastIndexOf(')');
     if (closingName < 0) return { status: 'unknown' };
