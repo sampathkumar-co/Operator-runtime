@@ -1129,3 +1129,33 @@ test('preexisting reserved mission identity never authorizes cancellation of unr
  assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:2});
  assert.equal((await base.teams.inspect(collisionId)).state,'RUNNING');
 });
+
+
+test('confirmed orphan child NOT_FOUND stays quarantined until exact cancellation is proved', async (t) => {
+  const base = await setup(t);
+  const ownerId = crypto.randomUUID();
+  const missionId = digitalOperationChildId(ownerId, 'cancel-team-mission');
+  const journal = new DurableCompensationJournal(base.state);
+  const intent = await journal.prepare({
+    id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId,
+    operation: 'cancel-team-mission', targetId: missionId
+  });
+  await journal.confirm(intent.id);
+  let known = false, cancels = 0;
+  const teams = {
+    async cancel(id: string) {
+      assert.equal(id, missionId);
+      cancels++;
+      if (!known) throw Object.assign(new Error('temporarily unseen child'), { code: 'TEAM_NOT_FOUND' });
+      return { id, state: 'CANCELLED' };
+    }
+  };
+  const restarted = new DigitalOperationsLayer(base.state, {
+    ...base, teams: teams as any, compensations: new DurableCompensationJournal(base.state)
+  });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 1 });
+  assert.equal((await journal.pending('digital-operation'))[0]?.id, intent.id);
+  known = true;
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(cancels, 2);
+});

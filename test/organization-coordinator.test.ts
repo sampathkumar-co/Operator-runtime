@@ -545,3 +545,40 @@ test('preexisting reserved Organization child ID is never enough to cancel an un
  assert.equal((await teams.inspect(childId)).state,'RUNNING');
  await assert.rejects(org.start(program.id),(err:any)=>err?.code==='ORGANIZATION_RECOVERY_REQUIRED');
 });
+
+
+test('acknowledged organization child NOT_FOUND is unresolved, not proof that cleanup completed', async (t) => {
+  const state = await tempDir(t);
+  let missionId = '', known = false, cancelled = 0;
+  const teams = {
+    async inspect(id: string) {
+      assert.equal(id, missionId);
+      if (!known) throw new OperatorError('TEAM_NOT_FOUND', 'Remote child currently absent.');
+      return { id, state: 'RUNNING' };
+    },
+    async cancel(id: string) {
+      assert.equal(id, missionId);
+      cancelled++;
+      return { id, state: 'CANCELLED' };
+    }
+  };
+  const journal = new DurableCompensationJournal(state);
+  const org = new OrganizationCoordinator(state, teams as any, { compensations: journal });
+  const program = await org.create({
+    objective: 'Keep uncertain child identity quarantined',
+    policy: { allowedScopePrefixes: ['org:proof'] },
+    targets: [{ key: 'service', scopeKey: 'org:proof:service', workItems: work('service') }]
+  });
+  missionId = reservedOrganizationChildId(program.id, 'service');
+  const intent = await journal.prepare({
+    id: crypto.randomUUID(), ownerKind: 'organization', ownerId: program.id,
+    operation: 'cancel-team-mission', subjectKey: 'service', targetId: missionId
+  });
+  await journal.confirm(intent.id);
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 0, pending: 1 });
+  assert.equal(cancelled, 0);
+  assert.equal((await journal.pending('organization'))[0]?.id, intent.id);
+  known = true;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 1, pending: 0 });
+  assert.equal(cancelled, 1);
+});
