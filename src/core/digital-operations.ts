@@ -434,12 +434,11 @@ export class DigitalOperationsLayer {
           } else continue;
           await this.#compensations.complete(intent.id);
           recovered += 1;
-        } catch (error) {
-          const code = error instanceof OperatorError ? error.code : '';
-          if (['TEAM_NOT_FOUND', 'ORGANIZATION_PROGRAM_NOT_FOUND', 'DEVICE_POOL_RESERVATION_NOT_FOUND'].includes(code)) {
-            await this.#compensations.complete(intent.id);
-            recovered += 1;
-          }
+        } catch {
+          // A negative lookup from one worker/provider is not a verified
+          // never-created receipt. A delayed child or partitioned authority
+          // might later reappear. Retain exact intent for explicit provenance
+          // reconciliation instead of silently erasing recovery ownership.
         }
       }
       return { recovered, pending: (await this.#compensations.pending('digital-operation')).length };
