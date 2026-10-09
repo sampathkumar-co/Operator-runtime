@@ -85,9 +85,13 @@ export class ConversationLedger {
     }
     if (!text.trim()) return [];
     const turns = text.trimEnd().split('\n').map((line, index) => parseTurn(line, index + 1));
+    const turnIds = new Set<string>();
     for (let i = 0; i < turns.length; i += 1) {
-      if (turns[i]!.conversationId !== this.#conversationId) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains a turn belonging to a different conversation.');
-      if (turns[i]!.sequence !== i + 1) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger sequence is not contiguous.');
+      const turn = turns[i]!;
+      if (turn.conversationId !== this.#conversationId) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains a turn belonging to a different conversation.');
+      if (turn.sequence !== i + 1) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger sequence is not contiguous.');
+      if (turnIds.has(turn.id)) throw new OperatorError('CONVERSATION_LEDGER_CORRUPT', 'Conversation ledger contains duplicate turn identities.');
+      turnIds.add(turn.id);
     }
     return turns;
   }
