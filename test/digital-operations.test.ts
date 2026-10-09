@@ -893,3 +893,21 @@ await ops.recoverPendingCompensations();`;
  assert.deepEqual(calls,[missionId]);
  assert.equal((await new DurableCompensationJournal(base.state).pending('digital-operation')).length,0);
 });
+
+test('unbound digital compensation must not cancel an unrelated team mission', async t => {
+  const {state,teams,ops}=await setup(t);
+  const unrelated=await teams.submit({
+    missionId:crypto.randomUUID(),objective:'Unrelated independent mission',workItems:work()
+  });
+  await teams.start(unrelated.id);
+  const journal=new DurableCompensationJournal(state);
+  await journal.prepare({
+    id:crypto.randomUUID(),ownerKind:'digital-operation',
+    ownerId:crypto.randomUUID(),operation:'cancel-team-mission',
+    targetId:unrelated.id
+  });
+  const result=await ops.recoverPendingCompensations();
+  assert.equal(result.recovered,0);
+  assert.equal(result.pending,1);
+  assert.equal((await teams.inspect(unrelated.id)).state,'RUNNING');
+});
