@@ -309,6 +309,10 @@ function intersectCapabilityPattern(left: string, right: string): string | undef
 function intersectRoots(baseRoots: string[], enterpriseRoots: string[]): string[] {
   const base = baseRoots.map((root) => path.resolve(root));
   if (enterpriseRoots.length === 0) return union(base);
+  // In PermissionProfile an empty root list means unrestricted, not denied.
+  // Preserve a narrower enterprise boundary instead of returning [] (which
+  // would accidentally turn the final policy back into unrestricted access).
+  if (base.length === 0) return union(enterpriseRoots.map((root) => path.resolve(root)));
   const result = new Set<string>();
   for (const baseRoot of base) {
     for (const enterpriseRoot of enterpriseRoots) {

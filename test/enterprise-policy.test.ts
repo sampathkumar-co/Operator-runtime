@@ -404,3 +404,42 @@ test('independent enterprise policy instances preserve every generation and dedu
   assert.equal(persisted.roles[0]?.id, finalPolicy.roles[0]!.id);
   assert.equal(persisted.bindings[0]?.roleId, finalPolicy.roles[0]!.id);
 });
+
+test('enterprise root restriction applies even when the base permission profile has unrestricted roots', async (t) => {
+  const root = path.resolve(os.tmpdir(), 'enterprise-restricted', 'allowed');
+  const outside = path.resolve(os.tmpdir(), 'enterprise-restricted', 'outside');
+  const store = new EnterprisePolicyStore(await temp(t));
+  await store.configure({
+    roles: [{
+      id: 'scoped-reader',
+      capabilities: ['file.read'],
+      rootPrefixes: [root],
+      maxRisk: 'read',
+      environments: [],
+      projectPrefixes: [],
+      deviceGroups: []
+    }],
+    bindings: [{ id: 'scoped-binding', principalId: 'analyst', roleId: 'scoped-reader', enabled: true }]
+  });
+  const decision = await store.narrow({
+    allowedCapabilities: ['file.read'],
+    allowedRoots: [] // Base policy's empty roots means no filesystem restriction.
+  }, { principalId: 'analyst' });
+  assert.deepEqual(decision.permissions.allowedRoots, [root]);
+
+  const policy = new PolicyEngine();
+  assert.doesNotThrow(() => policy.authorize({
+    id: 'inside-enterprise-root',
+    capability: 'file.read',
+    risk: 'read',
+    input: { path: path.join(root, 'report.txt') },
+    provenance: { kind: 'user' }
+  }, decision.permissions));
+  assert.throws(() => policy.authorize({
+    id: 'outside-enterprise-root',
+    capability: 'file.read',
+    risk: 'read',
+    input: { path: path.join(outside, 'report.txt') },
+    provenance: { kind: 'user' }
+  }, decision.permissions), (error: any) => error?.code === 'PATH_OUTSIDE_SCOPE');
+});
