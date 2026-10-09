@@ -150,3 +150,38 @@ test('stage13 explicit empty event bindings fail closed rather than widening mat
     (error: any) => error?.code === 'EVENT_INPUT_INVALID'
   );
 });
+
+test('durable event replay refuses persisted duplicate IDs, even with distinct payloads', async (ctx) => {
+  const stateDir = await temp(ctx);
+  const runtime = new DurableEventRuntime(stateDir);
+  const id = crypto.randomUUID();
+  const event = {
+    id,
+    type: 'process.finished',
+    correlationKey: 'run:one',
+    payloadDigest: 'a'.repeat(64),
+    occurredAt: '2026-10-09T00:00:00.000Z'
+  };
+  await runtime.publish(event);
+  const stateFile = path.join(stateDir, 'events.json');
+  const persisted = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  assert.equal(persisted.events.length, 1);
+  const original = JSON.stringify(persisted);
+
+  for (const payloadDigest of ['a'.repeat(64), 'b'.repeat(64)]) {
+    const corruptState = JSON.parse(original);
+    corruptState.events.push({ ...event, payloadDigest });
+    await fs.writeFile(stateFile, JSON.stringify(corruptState), 'utf8');
+    await assert.rejects(
+      () => new DurableEventRuntime(stateDir).wait({ eventType: 'process.finished', correlationKey: 'run:one' }),
+      (error: any) => error?.code === 'EVENT_STATE_CORRUPT'
+    );
+  }
+
+  // Preserve ordinary duplicate publication idempotency: no second row is created.
+  await fs.writeFile(stateFile, original, 'utf8');
+  const retry = await new DurableEventRuntime(stateDir).publish(event);
+  assert.equal(retry.event.id, id);
+  const clean = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  assert.equal(clean.events.length, 1);
+});
