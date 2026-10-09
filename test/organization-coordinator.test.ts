@@ -279,7 +279,7 @@ function reservedOrganizationChildId(programId: string, targetKey: string): stri
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
-test('stage8 restart recovery cancels a child mission created before parent rollout state was committed', async (t) => {
+test('stage8 restart safely compensates an acknowledged child before parent commit', async (t) => {
   const state = await tempDir(t);
   const teams = new TeamCoordinator(state);
   const org = new OrganizationCoordinator(state, teams);
@@ -306,6 +306,8 @@ test('stage8 restart recovery cancels a child mission created before parent roll
     targetId: orphan.id,
     subjectKey: 'canary'
   });
+  // The matching provider response was acknowledged before the parent crash.
+  await journal.confirm(`test-orphan:${program.id}`);
 
   const restarted = new OrganizationCoordinator(state, teams);
   const recovery = await restarted.recoverPendingCompensations();
@@ -385,12 +387,12 @@ test('organization rollout does not trust a child mission that ignores its write
   const restarted = new OrganizationCoordinator(state, teams as any, {
     compensations: new DurableCompensationJournal(state)
   });
-  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 1, pending: 1 });
+  assert.deepEqual(await restarted.recoverPendingCompensations(), { recovered: 0, pending: 2 });
   assert.deepEqual(cancelled, []);
   const quarantine = await journal.pending('organization');
-  assert.equal(quarantine.length, 1);
-  assert.equal(quarantine[0]?.operation, 'reconcile-untrusted-team-identity');
-  assert.equal(quarantine[0]?.targetId, unexpectedId);
+  assert.equal(quarantine.length, 2);
+  assert.ok(quarantine.every(intent => !intent.confirmedAt));
+  assert.ok(quarantine.some(intent => intent.operation === 'reconcile-untrusted-team-identity' && intent.targetId === unexpectedId));
   await assert.rejects(restarted.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
   assert.equal(attempted, 1);
 });
@@ -411,10 +413,11 @@ test('organization recovery keeps unrollbackable verified child mission quaranti
     targets: [{ key: 'service', scopeKey: 'org:postcondition:service', workItems: work('service') }]
   });
   childId = reservedOrganizationChildId(program.id, 'service');
-  await compensations.prepare({
+  const prepared = await compensations.prepare({
     id: crypto.randomUUID(), ownerKind: 'organization', ownerId: program.id,
     operation: 'cancel-team-mission', targetId: reservedOrganizationChildId(program.id, 'service'), subjectKey: 'service'
   });
+  await compensations.confirm(prepared.id);
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 0, pending: 1 });
   assert.equal(cancelled, 0);
   await assert.rejects(org.start(program.id), (error: any) => error?.code === 'ORGANIZATION_RECOVERY_REQUIRED');
