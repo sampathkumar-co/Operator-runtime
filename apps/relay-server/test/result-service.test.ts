@@ -460,3 +460,58 @@ test('authority lease prevents release purge from overtaking an in-flight result
   assert.equal(await results.get(device.deviceId, delivery.seq), null);
   assert.equal(await results.findByIdempotencyKey(key), null);
 });
+
+
+test('device execution authority fence rejects stale, foreign, removed and previously acknowledged deliveries', async (t) => {
+  const authorityState = await tempDir(t, 'operator-device-execution-fence-authority-');
+  const deviceState = await tempDir(t, 'operator-device-execution-fence-device-');
+  const authorityIdentity = new DeviceIdentityStore(authorityState, { platform: 'linux' });
+  const deviceIdentity = new DeviceIdentityStore(deviceState, { platform: 'linux' });
+  const devices = new DeviceRegistryStore(authorityState);
+  const device = await pairDevice(authorityIdentity, devices, deviceIdentity);
+  const sessions = new DeviceSessionTokenStore(authorityState, authorityIdentity, devices);
+  const accounts = new AccountDeviceRegistry(authorityState, devices);
+  const account = await accounts.resolveOrCreateAccount({ issuer: 'test', subject: 'execution-fence' });
+  const membership = await accounts.bindDevice(account.accountId, device.deviceId);
+  const authority = { accountId: account.accountId, deviceId: device.deviceId, generation: membership.authorityGeneration };
+  const deliveries = new RelayDeliveryStore(authorityState);
+  const delivery = await deliveries.enqueue(device.deviceId, 'action', {
+    action: { id: 'execution-fence-test' }, approvalAuthority: authority
+  }, authority, undefined, ['file.read']);
+
+  const service = new RelayResultService({ stateDir: authorityState, identity: authorityIdentity, devices, sessions, accounts, deliveries });
+  cleanupAfter(t, service);
+  const { port } = await service.listen('127.0.0.1', 0);
+  const url = `http://127.0.0.1:${port}/v1/device-authority/check`;
+  const token = (await sessions.issue({
+    subjectDeviceId: device.deviceId, audience: 'operator-relay',
+    scopes: ['relay:connect', 'relay:result'], ttlMs: 60_000
+  })).token;
+  const request = async (input: object, credential = token) => {
+    const response = await fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
+      body: JSON.stringify(input)
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const exact = { seq: delivery.seq, deliveryId: delivery.id, authority };
+  const allowed = await request(exact);
+  assert.equal(allowed.status, 200);
+  assert.deepEqual(allowed.body.authorization, { seq: delivery.seq, deliveryId: delivery.id, ...authority });
+
+  assert.equal((await request({ ...exact, deliveryId: '3e4f3ba3-fced-4f35-9856-61be3b5613fa' })).body.error.code,
+    'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+  assert.equal((await request({ ...exact, authority: { ...authority, generation: authority.generation + 1 } })).body.error.code,
+    'RELAY_EXECUTION_AUTHORITY_REVOKED');
+  assert.equal((await request({ ...exact, authority: { ...authority, accountId: 'bf739fb6-6694-411a-963a-2975a246e653' } })).body.error.code,
+    'RELAY_EXECUTION_AUTHORITY_REVOKED');
+  const noResultScope = (await sessions.issue({
+    subjectDeviceId: device.deviceId, audience: 'operator-relay', scopes: ['relay:connect'], ttlMs: 60_000
+  })).token;
+  assert.equal((await request(exact, noResultScope)).status, 401);
+
+  await accounts.removeDevice(account.accountId, device.deviceId, 'synthetic authority revocation');
+  const revoked = await request(exact);
+  assert.notEqual(revoked.status, 200);
+  assert.ok(['RELAY_RESULT_AUTHORITY_REVOKED', 'SESSION_REVOKED', 'SESSION_AUTHORITY_REVOKED'].includes(revoked.body.error.code));
+});
