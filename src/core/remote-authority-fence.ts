@@ -215,7 +215,12 @@ export class RemoteAuthorityFenceStore {
         if (previous.revokedGeneration > subject.authorityGeneration) {
           throw blocked('REMOTE_AUTHORITY_NEWER_GENERATION', 'A newer authority has already been revoked.');
         }
-        if (previous.revokedGeneration === subject.authorityGeneration && previous.accountId !== subject.accountId) {
+        // A generation claim is not proof of a completed tenant transfer.
+        // A different account must first acquire a new, strictly advanced
+        // active lease through the trusted registration authority. Otherwise
+        // its revoke call could erase another tenant's durable revocation
+        // barrier without ever owning this device.
+        if (previous.accountId !== subject.accountId) {
           throw blocked('REMOTE_AUTHORITY_FOREIGN_OWNER', 'Revocation cannot rewrite a different account\'s generation barrier.');
         }
       }
