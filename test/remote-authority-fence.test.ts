@@ -268,10 +268,16 @@ test('foreign account cannot revoke another owner at a reused generation', async
   const repeated = await make().revoke(subject);
   assert.ok(repeated.generation > before);
   assert.equal(repeated.revokedGeneration, subject.authorityGeneration);
+  // Merely claiming a higher generation must not let a foreign tenant
+  // rewrite the barrier; that tenant has not acquired authority yet.
+  await assert.rejects(make().revoke({ ...unrelated, authorityGeneration: 2 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
   await assert.rejects(make().acquire(unrelated, 'foreign-account-at-same-generation'),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
   const newer = await make().acquire({ ...unrelated, authorityGeneration: 2 }, 'new-authority');
   assert.equal((await make().assertCurrent(newer)).ownerId, 'new-authority');
+  await assert.rejects(make().revoke({ ...subject, authorityGeneration: 3 }),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
   await assert.rejects(make().revoke(subject),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
   assert.equal((await make().assertCurrent(newer)).leaseId, newer.leaseId);
