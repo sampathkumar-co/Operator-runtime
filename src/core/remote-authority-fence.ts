@@ -186,7 +186,7 @@ function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
   if (!record) return null;
   const v = record.value;
   if (v.schemaVersion !== 1) throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Authority record has an unknown schema.');
-  if (v.kind === 'revoked' && Number.isSafeInteger(v.revokedGeneration) && Number(v.revokedGeneration) >= 1) {
+  if (v.kind === 'revoked' && Number.isSafeInteger(Number(v.revokedGeneration)) && Number(v.revokedGeneration) >= 1) {
     return { kind: 'revoked', revokedGeneration: Number(v.revokedGeneration) };
   }
   if (v.kind === 'active') {
