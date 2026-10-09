@@ -473,14 +473,20 @@ export class DigitalOperationsLayer {
         }
         try {
           if (intent.operation === 'cancel-team-mission') {
-            if ((await this.#teams.cancel(intent.targetId)).state !== 'CANCELLED') continue;
+            const cancelled = await this.#teams.cancel(intent.targetId);
+            if (cancelled?.id !== intent.targetId || cancelled.state !== 'CANCELLED') continue;
           } else if (intent.operation === 'cancel-organization-program') {
-            if ((await this.#organizations.cancel(intent.targetId)).state !== 'CANCELLED') continue;
+            const cancelled = await this.#organizations.cancel(intent.targetId);
+            if (cancelled?.id !== intent.targetId || cancelled.state !== 'CANCELLED') continue;
           } else if (intent.operation === 'release-device-reservation') {
-            const released = intent.allocationRequestDigest
-              ? await this.#devices.releasePrepared(intent.targetId, intent.allocationRequestDigest)
-              : await this.#devices.release(intent.targetId);
-            if (!released || !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
+            // Legacy/pre-upgrade compensation with no allocation fingerprint
+            // is unproven, even if the expected reservation ID was prepared.
+            // Never fall back to an unbound release during crash recovery.
+            if (!intent.allocationRequestDigest) continue;
+            const released = await this.#devices.releasePrepared(
+              intent.targetId, intent.allocationRequestDigest);
+            if (!released || released.id !== intent.targetId ||
+                !['RELEASED', 'EXPIRED'].includes(released.state)) continue;
           } else continue;
           await this.#compensations.complete(intent.id);
           recovered += 1;
