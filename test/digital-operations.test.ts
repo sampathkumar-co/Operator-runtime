@@ -1162,7 +1162,8 @@ test('confirmed orphan child NOT_FOUND stays quarantined until exact cancellatio
 
 
 test('write-ahead allocation survives lost provider response: durable exact proof releases only its reservation', async (t) => {
-  const { state, ops, registry, devices } = await setup(t);
+  const { state, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
   const principal = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('provenance-test-device');
   await registry.registerVerifiedPeer(principal);
   const operationId = crypto.randomUUID();
@@ -1197,7 +1198,8 @@ test('write-ahead allocation survives lost provider response: durable exact proo
 });
 
 test('unbound request proofs and unavailable provider observations never grant reservation release', async (t) => {
-  const { state, ops, registry, devices } = await setup(t);
+  const { state, ops, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
   const principal = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('untrusted-reservation-device');
   await registry.registerVerifiedPeer(principal);
   const opId = crypto.randomUUID();
