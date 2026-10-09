@@ -443,3 +443,38 @@ test('enterprise root restriction applies even when the base permission profile 
     provenance: { kind: 'user' }
   }, decision.permissions), (error: any) => error?.code === 'PATH_OUTSIDE_SCOPE');
 });
+
+test('enterprise roles cannot cross-compose a capability with a different roles filesystem root', async (t) => {
+  const rootA = path.resolve(os.tmpdir(), 'role-a-only');
+  const rootB = path.resolve(os.tmpdir(), 'role-b-only');
+  const store = new EnterprisePolicyStore(await temp(t));
+  const role = (id: string, capabilities: string[], rootPrefixes: string[]) => ({
+    id, capabilities, rootPrefixes, maxRisk: 'write' as const,
+    environments: [], projectPrefixes: [], deviceGroups: []
+  });
+  const bindings = ['reader-a', 'writer-b'].map((id) => ({
+    id: 'binding-' + id, principalId: 'alice', roleId: id, enabled: true
+  }));
+
+  await store.configure({
+    roles: [role('reader-a', ['file.read'], [rootA]), role('writer-b', ['file.write'], [rootB])],
+    bindings
+  });
+  await assert.rejects(() => store.narrow({
+    allowedCapabilities: ['file.read', 'file.write'],
+    allowedRoots: [rootA, rootB], maxRisk: 'write'
+  }, { principalId: 'alice' }), (error: any) => error?.code === 'ENTERPRISE_AUTHORITY_DENIED');
+
+  // Additive roots for the SAME capability and risk are safe to project:
+  // each capability/root/risk tuple remains backed by one of the roles.
+  await store.configure({
+    roles: [role('reader-a', ['file.read'], [rootA]), role('writer-b', ['file.read'], [rootB])],
+    bindings
+  });
+  const safe = await store.narrow({
+    allowedCapabilities: ['file.read'],
+    allowedRoots: [rootA, rootB], maxRisk: 'write'
+  }, { principalId: 'alice' });
+  assert.deepEqual(safe.permissions.allowedCapabilities, ['file.read']);
+  assert.deepEqual(safe.permissions.allowedRoots, [rootA, rootB].sort());
+});
