@@ -6,6 +6,7 @@ import { canonicalJson } from './action-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { DeveloperWorktreeManager } from './developer-worktree.ts';
 import { OperatorError } from './errors.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 import { resolveTrustedExecutable } from './trusted-executable.ts';
 
 export type DeveloperContainerPhase =
@@ -66,6 +67,7 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export class DeveloperContainerManager {
   #stateDir: string;
+  #ownership: ResourceLeaseStore;
   #worktrees: DeveloperWorktreeManager;
   #runner: DeveloperDockerRunner;
   #clock: () => Date;
@@ -80,6 +82,7 @@ export class DeveloperContainerManager {
     clock?: () => Date;
   }) {
     this.#stateDir = path.join(path.resolve(options.stateDir), 'developer-containers');
+    this.#ownership = new ResourceLeaseStore(options.stateDir);
     this.#worktrees = new DeveloperWorktreeManager({
       allowedRepositoryRoots: options.allowedRepositoryRoots,
       worktreeRoot: options.worktreeRoot,
@@ -100,7 +103,7 @@ export class DeveloperContainerManager {
     pidsLimit?: number;
     signal?: AbortSignal;
   }): Promise<DeveloperContainerInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(input.sessionId, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(input.sessionId);
       const expectedWorktreeFingerprint = digest(input.expectedWorktreeFingerprint, 'expectedWorktreeFingerprint');
@@ -254,7 +257,7 @@ export class DeveloperContainerManager {
     sessionIdInput: string,
     signal?: AbortSignal
   ): Promise<DeveloperContainerInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(sessionIdInput, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(sessionIdInput);
       const record = await this.#requireRecord(sessionId);
@@ -267,7 +270,7 @@ export class DeveloperContainerManager {
     expectedContainerFingerprint: string;
     signal?: AbortSignal;
   }): Promise<DeveloperContainerInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(input.sessionId, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(input.sessionId);
       const expected = digest(input.expectedContainerFingerprint, 'expectedContainerFingerprint');
@@ -586,12 +589,33 @@ export class DeveloperContainerManager {
     return this.#clock().toISOString();
   }
 
-  async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  async #enqueue<T>(sessionIdInput: string, operation: () => Promise<T>): Promise<T> {
+    const sessionId = normalizeSessionId(sessionIdInput);
     const previous = this.#serial;
     let release!: () => void;
     this.#serial = new Promise<void>((resolve) => { release = resolve; });
     await previous;
-    try { return await operation(); } finally { release(); }
+    try {
+      // Docker effects and journal reconciliation require process-instance
+      // ownership that spans the entire effect, not a short JSON write lock.
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        let owner;
+        try {
+          owner = await this.#ownership.acquire(
+            `developer-container-owner:${crypto.randomUUID()}`,
+            [`developer-container:session:${sessionId}`], 'exclusive'
+          );
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+          if (attempt === 299) throw new OperatorError('DEVELOPER_CONTAINER_BUSY', 'Another process owns this container session.', { retryable: true });
+          await new Promise<void>((resolve) => setTimeout(resolve, 25));
+          continue;
+        }
+        try { return await operation(); }
+        finally { await owner.release(); }
+      }
+      throw new OperatorError('DEVELOPER_CONTAINER_BUSY', 'Container session owner unavailable.', { retryable: true });
+    } finally { release(); }
   }
 }
 

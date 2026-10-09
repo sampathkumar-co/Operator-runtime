@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import { OperatorError } from './errors.ts';
+import { ResourceLeaseStore } from './resource-leases.ts';
 import { resolveSupportedGitExecutable } from './trusted-executable.ts';
 
 const NULL_GIT_CONFIG = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -78,7 +79,7 @@ export class DeveloperWorktreeManager {
     repositoryRoot: string;
     baseCommit: string;
   }): Promise<DeveloperWorktreeInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(input.sessionId, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(input.sessionId);
       const baseCommit = normalizeCommit(input.baseCommit);
@@ -142,7 +143,7 @@ export class DeveloperWorktreeManager {
   }
 
   async inspect(sessionIdInput: string): Promise<DeveloperWorktreeInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(sessionIdInput, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(sessionIdInput);
       const record = await this.#requireRecord(sessionId);
@@ -154,7 +155,7 @@ export class DeveloperWorktreeManager {
     sessionId: string;
     expectedFingerprint: string;
   }): Promise<DeveloperWorktreeInspection> {
-    return await this.#enqueue(async () => {
+    return await this.#enqueue(input.sessionId, async () => {
       await this.#init();
       const sessionId = normalizeSessionId(input.sessionId);
       const expectedFingerprint = normalizeDigest(input.expectedFingerprint, 'expectedFingerprint');
@@ -516,13 +517,35 @@ export class DeveloperWorktreeManager {
     return value;
   }
 
-  async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+  async #enqueue<T>(sessionIdInput: string, operation: () => Promise<T>): Promise<T> {
+    const sessionId = normalizeSessionId(sessionIdInput);
     const previous = this.#serial;
     let release!: () => void;
     this.#serial = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await operation();
+      // Perform protected-root and symlink preflight BEFORE the lease store
+      // has permission to create any control state on disk.
+      await this.#init();
+      const ownership = new ResourceLeaseStore(this.#stateDir);
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        let owner;
+        try {
+          owner = await ownership.acquire(
+            `developer-worktree-owner:${crypto.randomUUID()}`,
+            [`developer-worktree:session:${sessionId}`], 'exclusive'
+          );
+        } catch (error) {
+          if (!(error instanceof OperatorError) || error.code !== 'RESOURCE_BUSY') throw error;
+          if (attempt === 299) throw new OperatorError('DEVELOPER_WORKTREE_BUSY', 'Another process owns this worktree session.', { retryable: true });
+          await new Promise<void>(resolve => setTimeout(resolve, 25));
+          continue;
+        }
+        // Do not retry worktree Git operations after an uncertain external effect.
+        try { return await operation(); }
+        finally { await owner.release(); }
+      }
+      throw new OperatorError('DEVELOPER_WORKTREE_BUSY', 'Worktree session owner unavailable.', { retryable: true });
     } finally {
       release();
     }
