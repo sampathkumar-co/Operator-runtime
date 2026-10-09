@@ -329,9 +329,12 @@ test('expired idempotent delivery keeps a payload-free replay tombstone and bloc
   assert.deepEqual(retained?.delivery.payload, {});
   assert.equal(retained?.delivery.authority, undefined);
   assert.deepEqual(retained?.delivery.replayAuthority, authority);
-  const retry = await store.enqueue(DEVICE, 'action', { secret: 'must-not-replace' }, undefined, key);
+  await assert.rejects(store.enqueue(DEVICE, 'action', { secret: 'must-not-replace' }, undefined, key),
+    (error: any) => error?.code === 'RELAY_IDEMPOTENCY_CONTRACT_CHANGED');
+  const retry = await store.enqueue(DEVICE, 'action', { secret: 'erase-me' }, authority, key);
   assert.equal(retry.id, first.id);
   assert.equal(retry.status, 'expired');
+  assert.deepEqual(retry.payload, {});
 });
 
 
@@ -407,4 +410,55 @@ test('v1 relay state migrates to compactable v2 without resetting sequence water
   assert.equal(persisted.streams[0].lastAckedSeq, 1);
   assert.equal(persisted.streams[0].baseSeq, 1);
   assert.equal(persisted.streams[0].highestCompactedAckedSeq, 0);
+});
+
+
+test('terminal relay retries retain immutable contract digest without retaining sensitive contents', async t => {
+  const state = await temp(t);
+  const key = 'f'.repeat(64);
+  const authority = { accountId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', deviceId: DEVICE, generation: 8 };
+  const first = await new RelayDeliveryStore(state).enqueue(
+    DEVICE, 'action', { profile: { z: 4, a: 2 }, secret: 'sensitive' }, authority, key,
+    ['file.read']
+  );
+  assert.match(first.idempotencyContractDigest ?? '', /^[0-9a-f]{64}$/);
+  await new RelayDeliveryStore(state).acknowledge(DEVICE, first.seq, first.id);
+  const recovered = new RelayDeliveryStore(state);
+  const retained = await recovered.findIdempotent(key);
+  assert.equal(retained?.delivery.status, 'acked');
+  assert.deepEqual(retained?.delivery.payload, {});
+  assert.equal(retained?.delivery.authority, undefined);
+  assert.equal(retained?.delivery.requiredCapabilities, undefined);
+  const replay = await recovered.enqueue(
+    DEVICE, 'action', { secret: 'sensitive', profile: { a: 2, z: 4 } },
+    { ...authority }, key, ['file.read']
+  );
+  assert.equal(replay.id, first.id);
+  for (const [kind, payload, auth, requirements] of [
+    ['task', { secret: 'sensitive', profile: { a: 2, z: 4 } }, authority, ['file.read']],
+    ['action', { secret: 'tampered', profile: { a: 2, z: 4 } }, authority, ['file.read']],
+    ['action', { secret: 'sensitive', profile: { a: 2, z: 4 } }, { ...authority, generation: 9 }, ['file.read']],
+    ['action', { secret: 'sensitive', profile: { a: 2, z: 4 } }, authority, ['file.write']]
+  ] as const) {
+    await assert.rejects(recovered.enqueue(DEVICE, kind, payload, auth, key, requirements),
+      (error: any) => error?.code === 'RELAY_IDEMPOTENCY_CONTRACT_CHANGED');
+  }
+  assert.equal((await recovered.cursor(DEVICE)).highestEnqueuedSeq, 1);
+});
+
+test('legacy terminal idempotency without original contract digest fails closed', async t => {
+  const state = await temp(t);
+  const key = 'd'.repeat(64);
+  const store = new RelayDeliveryStore(state);
+  const original = await store.enqueue(DEVICE, 'action', { sensitive: 'forget-on-ACK' }, undefined, key);
+  await store.acknowledge(DEVICE, original.seq, original.id);
+  const file = path.join(state, 'relay-deliveries.json');
+  const raw = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete raw.streams[0].deliveries[0].idempotencyContractDigest;
+  await fs.writeFile(file, JSON.stringify(raw, null, 2));
+  const reloaded = new RelayDeliveryStore(state);
+  await assert.rejects(reloaded.enqueue(DEVICE, 'action', { sensitive: 'forget-on-ACK' }, undefined, key),
+    (error: any) => error?.code === 'RELAY_IDEMPOTENCY_CONTRACT_UNVERIFIABLE');
+  assert.equal((await reloaded.findIdempotent(key))?.delivery.id, original.id);
+  assert.equal((await reloaded.cursor(DEVICE)).highestEnqueuedSeq, 1);
 });

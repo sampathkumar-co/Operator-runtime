@@ -34,6 +34,8 @@ export interface StoredRelayDelivery {
   authority?: RelayDeliveryAuthority;
   replayAuthority?: RelayDeliveryAuthority;
   idempotencyKey?: string;
+  /** Privacy-bounded binding retained after terminal payload scrubbing. */
+  idempotencyContractDigest?: string;
   idempotencyReleasedAt?: string;
   createdAt: string;
   status: 'pending' | 'acked' | 'expired';
@@ -91,6 +93,9 @@ export class RelayDeliveryStore {
     const authority = authorityInput === undefined ? undefined : safeAuthority(authorityInput, deviceId);
     const idempotencyKey = idempotencyKeyInput === undefined ? undefined : validIdempotencyKey(idempotencyKeyInput);
     const requiredCapabilities = safeRequiredCapabilities(requiredCapabilitiesInput);
+    const contractDigest = idempotencyKey
+      ? relayIdempotencyContractDigest(kind, payload, authority, requiredCapabilities)
+      : undefined;
     return await this.#mutate((state) => {
       this.#maintain(state);
       if (idempotencyKey) {
@@ -98,6 +103,17 @@ export class RelayDeliveryStore {
           const existing = existingStream.deliveries.find((delivery) => delivery.idempotencyKey === idempotencyKey && !delivery.idempotencyReleasedAt);
           if (!existing) continue;
           if (existingStream.deviceId !== deviceId) throw new OperatorError('RELAY_IDEMPOTENCY_ROUTE_CHANGED', 'An unacknowledged action retry resolved to a different device.');
+          if (existing.status !== 'pending') {
+            // ACK/expiry erase the input and its authority. A retained
+            // contract digest is the only safe way to identify the original
+            // invocation without rehydrating sensitive terminal payload.
+            if (!existing.idempotencyContractDigest) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_CONTRACT_UNVERIFIABLE', 'Legacy terminal replay cannot prove the original request contract.');
+            }
+            if (existing.idempotencyContractDigest !== contractDigest) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_CONTRACT_CHANGED', 'Terminal idempotency replay changed the original payload, authority or capabilities.');
+            }
+          }
           if (existing.status === 'pending') {
             if (existing.requiredCapabilities === undefined || !sameCapabilities(existing.requiredCapabilities, requiredCapabilities)) {
               throw new OperatorError('RELAY_IDEMPOTENCY_CAPABILITY_CHANGED', 'An unacknowledged action retry changed its durable capability requirements.');
@@ -108,6 +124,12 @@ export class RelayDeliveryStore {
             if (!sameAuthority(existing.authority, authority)) {
               throw new OperatorError('RELAY_IDEMPOTENCY_AUTHORITY_CHANGED', 'An unacknowledged action retry changed its account-device authority.');
             }
+            if (existing.idempotencyContractDigest && existing.idempotencyContractDigest !== contractDigest) {
+              throw new OperatorError('RELAY_IDEMPOTENCY_CONTRACT_CHANGED', 'Retained pending invocation contract digest differs.');
+            }
+            // A legitimate retry is an authenticated chance to upgrade
+            // pre-digest pending records before the payload is erased.
+            if (!existing.idempotencyContractDigest) existing.idempotencyContractDigest = contractDigest;
           }
           return cloneDelivery(existing);
         }
@@ -124,6 +146,7 @@ export class RelayDeliveryStore {
         requiredCapabilities,
         authority,
         idempotencyKey,
+        idempotencyContractDigest: contractDigest,
         createdAt: this.#clock().toISOString(),
         status: 'pending'
       };
@@ -309,6 +332,7 @@ export class RelayDeliveryStore {
         delivery.authority = undefined;
         delivery.replayAuthority = undefined;
         delivery.idempotencyKey = undefined;
+        delivery.idempotencyContractDigest = undefined;
         delivery.idempotencyReleasedAt = undefined;
       }
       stream.lastAckedSeq = stream.nextSeq - 1;
@@ -494,6 +518,7 @@ function expirePending(state: RelayDeliveryState, now: number, retentionMs: numb
       const terminalAt = delivery.status === 'acked' ? delivery.ackedAt : delivery.status === 'expired' ? delivery.expiredAt : undefined;
       if (!terminalAt || Date.parse(terminalAt) > now - retentionMs) continue;
       delivery.idempotencyKey = undefined;
+      delivery.idempotencyContractDigest = undefined;
       delivery.idempotencyReleasedAt = undefined;
       delivery.replayAuthority = undefined;
     }
@@ -589,6 +614,8 @@ function validateState(input: unknown): RelayDeliveryState {
       const authority = entry.authority === undefined ? undefined : safeAuthority(entry.authority, deviceId);
       const replayAuthority = entry.replayAuthority === undefined ? undefined : safeAuthority(entry.replayAuthority, deviceId);
       const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(entry.idempotencyKey);
+      const idempotencyContractDigest = entry.idempotencyContractDigest === undefined ? undefined : validIdempotencyContractDigest(entry.idempotencyContractDigest);
+      if (idempotencyContractDigest && !idempotencyKey) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Invocation contract digest must have a retained key.');
       const idempotencyReleasedAt = entry.idempotencyReleasedAt === undefined ? undefined : validIso(entry.idempotencyReleasedAt, 'idempotencyReleasedAt');
       if (idempotencyReleasedAt && !idempotencyKey) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Released idempotency authority is missing its key.');
       const createdAt = validIso(entry.createdAt, 'createdAt');
@@ -599,12 +626,17 @@ function validateState(input: unknown): RelayDeliveryState {
         : safeRequiredCapabilities(entry.requiredCapabilities);
       const ackedAt = entry.ackedAt === undefined ? undefined : validIso(entry.ackedAt, 'ackedAt');
       const expiredAt = entry.expiredAt === undefined ? undefined : validIso(entry.expiredAt, 'expiredAt');
+      if (status === 'pending' && idempotencyContractDigest &&
+        (requiredCapabilities === undefined ||
+          idempotencyContractDigest !== relayIdempotencyContractDigest(kind, payload, authority, requiredCapabilities))) {
+        throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending invocation contract digest does not match its live payload and authority.');
+      }
       if (status === 'pending' && (ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Pending delivery cannot contain terminal timestamps or replay authority.');
       if (status === 'acked' && (!ackedAt || expiredAt || replayAuthority)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Acknowledged delivery must contain only an acknowledgement timestamp.');
       if (status === 'expired' && (!expiredAt || ackedAt || Object.keys(payload).length !== 0 || authority || idempotencyReleasedAt || (replayAuthority && !idempotencyKey))) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Expired delivery must be a payload-free live-authority-free tombstone.');
       if (seq <= lastAckedSeq && !['acked', 'expired'].includes(status)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery at/below the terminal cursor must be terminal.');
       if (seq > lastAckedSeq && status !== 'pending') throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Delivery above the acknowledgement cursor must remain pending.');
-      return { seq, id, kind, payload, requiredCapabilities, authority, replayAuthority, idempotencyKey, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
+      return { seq, id, kind, payload, requiredCapabilities, authority, replayAuthority, idempotencyKey, idempotencyContractDigest, idempotencyReleasedAt, createdAt, status, ackedAt, expiredAt } satisfies StoredRelayDelivery;
     }).sort((a, b) => a.seq - b.seq);
     for (let seq = baseSeq; seq < nextSeq; seq += 1) {
       if (!seenSeq.has(seq)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay retained stream contains a sequence gap.');
@@ -625,6 +657,27 @@ function cloneDelivery(delivery: StoredRelayDelivery): StoredRelayDelivery {
     authority: delivery.authority ? { ...delivery.authority } : undefined,
     replayAuthority: delivery.replayAuthority ? { ...delivery.replayAuthority } : undefined
   };
+}
+
+/**
+ * Only the bounded digest survives terminal ACK/expiry. Do not retain the
+ * original payload, capability list, or private account authority in tombstones.
+ */
+function relayIdempotencyContractDigest(
+  kind: string, payload: JsonObject, authority: RelayDeliveryAuthority | undefined,
+  requiredCapabilities: readonly string[]
+): string {
+  return crypto.createHash('sha256')
+    .update('mecord-relay-idempotency-v1\0')
+    .update(canonicalJson({ kind, payload, authority: authority ?? null, requiredCapabilities }))
+    .digest('hex');
+}
+
+function validIdempotencyContractDigest(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Retained idempotency contract digest is invalid.');
+  }
+  return value;
 }
 
 function safeRequiredCapabilities(input: unknown): string[] {
