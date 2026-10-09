@@ -66,7 +66,9 @@ async function setup(t: test.TestContext) {
     signature:crypto.sign(null,Buffer.from(JSON.stringify(value),'utf8'),keypair.privateKey).toString('base64url')
   });
   return { dir, teams, org, journal, adjudicator, program, returnedMissionId,
-    originalId, quarantineId, claim, signed, workItems, deny:()=>{authorized=false;} };
+    originalId, quarantineId, claim, signed, workItems,
+    ledgerSecret, providerPublicKeyPem: keypair.publicKey.export({ format:'pem', type:'spki' }).toString(),
+    deny:()=>{authorized=false;} };
 }
 
 test('signed independent provider proof and operator approval retire only foreign-ID quarantine', async t => {
@@ -130,4 +132,54 @@ test('MAC chain rejects in-place ledger edits after restart',async t=>{
   state.records[0].operatorId='attacker';
   await fs.writeFile(file,JSON.stringify(state));
   await assert.rejects(f.adjudicator.list(),(e:any)=>e?.code==='QUARANTINE_LEDGER_CORRUPT');
+});
+
+test('previously MAC-committed signed decision survives journal-ack crash and attestation expiry', async t => {
+  const f = await setup(t);
+  const providerClaim = f.signed(f.claim);
+  const request = {
+    programId: f.program.id, targetKey: 'service', returnedMissionId: f.returnedMissionId,
+    operatorId: 'security-admin', providerClaim
+  };
+  const realComplete = f.journal.complete.bind(f.journal);
+  (f.journal as any).complete = async () => { throw new Error('injected crash before quarantine journal retire'); };
+  await assert.rejects(f.org.adjudicateQuarantinedIdentity(request), /injected crash/);
+  (f.journal as any).complete = realComplete;
+  assert.ok((await f.journal.pending('organization')).some(i => i.id === f.quarantineId));
+  const preRecovery = await f.adjudicator.list();
+  assert.equal(preRecovery.length, 1, 'record must persist before journal acknowledgement');
+  const later = new OrganizationQuarantineAdjudicator(f.dir, {
+    journal: f.journal, providerPublicKeyPem: f.providerPublicKeyPem,
+    ledgerSecret: f.ledgerSecret,
+    authorize: async operatorId => {
+      if (operatorId !== 'security-admin') throw new Error('operator not authorized');
+    },
+    clock: () => new Date(Date.parse(f.claim.expiresAt) + 60_000)
+  });
+  const restartedOrg = new OrganizationCoordinator(f.dir, f.teams, {
+    compensations: f.journal, adjudicator: later
+  });
+  const resumed = await restartedOrg.adjudicateQuarantinedIdentity(request);
+  assert.deepEqual(resumed, preRecovery[0]);
+  const remaining = await f.journal.pending('organization');
+  assert.ok(!remaining.some(i => i.id === f.quarantineId));
+  assert.ok(remaining.some(i => i.id === f.originalId),
+    'a resumed foreign-ID review must never remove the original orphan child authority');
+});
+
+test('expired unsigned/new decisions cannot bypass freshness using an unrelated signed ledger entry', async t => {
+  const f = await setup(t);
+  const later = new OrganizationQuarantineAdjudicator(f.dir, {
+    journal: f.journal, providerPublicKeyPem: f.providerPublicKeyPem,
+    ledgerSecret: f.ledgerSecret, authorize: async () => {},
+    clock: () => new Date(Date.parse(f.claim.expiresAt) + 60_000)
+  });
+  const newOrg = new OrganizationCoordinator(f.dir, f.teams, {
+    compensations: f.journal, adjudicator: later
+  });
+  await assert.rejects(newOrg.adjudicateQuarantinedIdentity({
+    programId: f.program.id, targetKey: 'service', returnedMissionId: f.returnedMissionId,
+    operatorId: 'security-admin', providerClaim: f.signed(f.claim)
+  }), (e: any) => e?.code === 'QUARANTINE_EVIDENCE_INVALID');
+  assert.ok((await f.journal.pending('organization')).some(i => i.id === f.quarantineId));
 });
