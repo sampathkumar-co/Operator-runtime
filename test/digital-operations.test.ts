@@ -928,3 +928,54 @@ test('purpose separation prevents recycling a reserved mission ID as device rele
  assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:1});
  assert.equal(releases,0);
 });
+
+test('provider-supplied foreign reservation ID is quarantined and never released', async t=>{
+ const base=await setup(t);
+ const requestId=crypto.randomUUID();
+ const expected=reservedDigitalEffectId(requestId,'release-device-reservation');
+ const foreign=crypto.randomUUID();
+ const released:string[]=[];
+ const devices={
+  async reserve(){return {id:foreign,sessionId:crypto.randomUUID(),state:'ACTIVE'};},
+  async release(id:string){released.push(id);return {id,state:'RELEASED'};}
+ };
+ const journal=new DurableCompensationJournal(base.state);
+ const layer=new DigitalOperationsLayer(base.state,{...base,devices:devices as any,compensations:journal});
+ await assert.rejects(layer.submit({
+  requestId,objective:'Reject forged reservation acknowledgement',
+  scopeKey:'project:foreign-reservation',successConditions:['no foreign cleanup'],
+  execution:{kind:'team',workItems:work()},
+  device:{request:{workloadKey:'foreign-reservation'},advertisements:[]}
+ }),(error:any)=>error?.code==='DEVICE_POOL_RESERVATION_ID_CONFLICT');
+ assert.ok(released.every(id=>id===expected),'foreign provider ID must never be released');
+ assert.ok(!released.includes(foreign));
+ const pending=await journal.pending('digital-operation');
+ assert.equal(pending.length,1);
+ assert.equal(pending[0]?.operation,'reconcile-untrusted-device-reservation');
+ assert.equal(pending[0]?.targetId,foreign);
+ assert.deepEqual(await layer.recoverPendingCompensations(),{recovered:0,pending:1});
+});
+
+test('provider-supplied foreign team mission ID is never cancelled by an operation',async t=>{
+ const base=await setup(t);
+ const foreign=crypto.randomUUID();
+ const cancelled:string[]=[];
+ const team={
+  async submit(){return {id:foreign};},
+  async cancel(id:string){cancelled.push(id);return {id,state:'CANCELLED'};}
+ };
+ const journal=new DurableCompensationJournal(base.state);
+ const layer=new DigitalOperationsLayer(base.state,{...base,teams:team as any,compensations:journal});
+ const requestId=crypto.randomUUID();
+ await assert.rejects(layer.submit({
+  requestId,objective:'Reject forged mission acknowledgement',
+  scopeKey:'project:foreign-team',successConditions:['no foreign cancellation'],
+  execution:{kind:'team',workItems:work()}
+ }),(error:any)=>error?.code==='TEAM_MISSION_ID_CONFLICT');
+ assert.ok(!cancelled.includes(foreign));
+ assert.ok(cancelled.every(id=>id===reservedDigitalEffectId(requestId,'cancel-team-mission')));
+ const pending=await journal.pending('digital-operation');
+ assert.equal(pending.length,1);
+ assert.equal(pending[0]?.operation,'reconcile-untrusted-team-mission');
+ assert.equal(pending[0]?.targetId,foreign);
+});

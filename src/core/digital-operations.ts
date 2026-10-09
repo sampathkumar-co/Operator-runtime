@@ -250,8 +250,10 @@ export class DigitalOperationsLayer {
         try {
           const reservation = await this.#devices.reserve(normalized.device.request, normalized.device.advertisements, { reservationId });
           if (reservation.id !== reservationId) {
-            // Contract mismatch with a provider is not a safe success.
-            try { await this.#devices.release(reservation.id); } catch { /* unknown effect: retained journal blocks further submissions */ }
+            // The returned identity has *not* been proven to be ours.
+            // Preserve it for explicit review; never release an unrelated
+            // reservation simply because a provider returned its ID.
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-device-reservation', String(reservation.id));
             throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Resource scheduler returned a different reservation identity.');
           }
           deviceReservationId = reservation.id;
@@ -323,7 +325,10 @@ export class DigitalOperationsLayer {
             workItems: resolved.execution.workItems,
             ...(resolved.execution.budget ? { budget: resolved.execution.budget } : {})
           });
-          if (mission.id !== missionId) throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
+          if (mission.id !== missionId) {
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-team-mission', String(mission.id));
+            throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
+          }
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
           const programId = reservedDigitalEffectId(operationId, 'cancel-organization-program');
@@ -335,7 +340,10 @@ export class DigitalOperationsLayer {
             targets: resolved.execution.targets,
             ...(resolved.execution.policy ? { policy: resolved.execution.policy } : {})
           });
-          if (program.id !== programId) throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Program creator did not honor the journal-bound program identity.');
+          if (program.id !== programId) {
+            await this.#quarantineUntrustedEffect(operationId, 'reconcile-untrusted-organization-program', String(program.id));
+            throw new OperatorError('ORGANIZATION_PROGRAM_ID_CONFLICT', 'Program creator did not honor the journal-bound program identity.');
+          }
           if (normalized.run) await this.#organizations.start(program.id);
         }
       } catch (error) {
@@ -459,6 +467,11 @@ export class DigitalOperationsLayer {
       finally { await lease.release(); }
     }
     throw new OperatorError('OPERATIONS_RECOVERY_BUSY', 'Digital operation ownership unavailable.', { retryable: true });
+  }
+
+  async #quarantineUntrustedEffect(ownerId: string, operation: string, targetId: string): Promise<void> {
+    const id = crypto.createHash('sha256').update(['digital-operation-untrusted', ownerId, operation, targetId].join('\0')).digest('hex');
+    await this.#compensations.prepare({ id, ownerKind: 'digital-operation', ownerId, operation, targetId });
   }
 
   async #prepareCompensation(ownerId: string, operation: string, targetId: string): Promise<string> {
