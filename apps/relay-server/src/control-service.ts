@@ -426,7 +426,9 @@ export class RelayControlService {
     };
     const renewReservation = async (current: DeviceReservation, renewMs: number): Promise<DeviceReservation> => {
       try {
-        return await this.#hub.heartbeatDeviceReservation(accountId, current.id, current.sessionId, renewMs);
+        const renewed = await this.#hub.heartbeatDeviceReservation(accountId, current.id, current.sessionId, renewMs);
+        assertExactRenewalReceipt(current, renewed);
+        return renewed;
       } catch (error) {
         if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_SESSION_CHANGED') {
           await this.#recordReservationFailure({ accountId, operationId: operation.operationId, workloadKey: bindingKey, reservation: current, action: 'renew', leaseMs: renewMs, error });
@@ -629,7 +631,10 @@ export class RelayControlService {
     for (const record of await this.#reservationReconciliations.pending()) {
       try {
         if (record.action === 'release') await this.#hub.releaseDeviceReservation(record.accountId, record.reservationId);
-        else await this.#hub.heartbeatDeviceReservation(record.accountId, record.reservationId, record.sessionId, record.leaseMs);
+        else {
+          const renewed = await this.#hub.heartbeatDeviceReservation(record.accountId, record.reservationId, record.sessionId, record.leaseMs);
+          assertExactRenewalReceipt(record, renewed);
+        }
         await this.#reservationReconciliations.resolve(record.id);
         this.#diagnostic({ service: 'operator-relay-control', status: 'reservation-reconciled', code: 'RELAY_RESERVATION_RECONCILED', action: record.action });
       } catch {
@@ -657,6 +662,21 @@ export class RelayControlService {
     this.#server = null;
     if (!server?.listening) return;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+/** A successful provider call is not proof of renewing the requested lease.
+ * Require exact reservation, session and workload provenance plus active state
+ * before retiring a recovery intent or using the renewed reservation for work.
+ */
+function assertExactRenewalReceipt(
+  expected: { id?: string; reservationId?: string; sessionId: string; workloadKey: string },
+  renewed: DeviceReservation
+): void {
+  if (!renewed || renewed.id !== (expected.reservationId ?? expected.id) ||
+      renewed.sessionId !== expected.sessionId || renewed.workloadKey !== expected.workloadKey ||
+      renewed.state !== 'ACTIVE') {
+    throw new OperatorError('RELAY_RESERVATION_RECEIPT_MISMATCH', 'Provider renewal receipt did not prove the exact active reservation contract.');
   }
 }
 
