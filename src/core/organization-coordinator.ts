@@ -177,18 +177,24 @@ export class OrganizationCoordinator {
             intent.targetId !== stableOrganizationMissionId(program.id, target.key)) continue;
         try {
           const mission = await this.#teams.inspect(intent.targetId);
+          // Provider lookup identity and returned terminal state are separate
+          // claims. A provider returning another mission's object must NEVER
+          // grant cancellation authority or complete this recovery journal.
+          if (!mission || mission.id !== intent.targetId) continue;
           if (intent.operation === 'cancel-team-mission') {
             // A terminal FAILED/VERIFIED mission may have irreversible effects.
             // It is not evidence that a requested cancellation succeeded.
             if (mission.state !== 'CANCELLED') {
               if (['FAILED', 'VERIFIED'].includes(mission.state)) continue;
-              const cancelled = await this.#teams.cancel(mission.id);
-              if (cancelled.state !== 'CANCELLED') continue;
+              const cancelled = await this.#teams.cancel(intent.targetId);
+              if (!cancelled || cancelled.id !== intent.targetId ||
+                  cancelled.state !== 'CANCELLED') continue;
             }
           } else if (intent.operation === 'pause-team-mission') {
             if (mission.state === 'RUNNING' || mission.state === 'BLOCKED') {
-              const paused = await this.#teams.pause(mission.id);
-              if (paused.state !== 'PAUSED') continue;
+              const paused = await this.#teams.pause(intent.targetId);
+              if (!paused || paused.id !== intent.targetId ||
+                  paused.state !== 'PAUSED') continue;
             } else if (mission.state !== 'PAUSED') {
               continue;
             }

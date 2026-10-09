@@ -582,3 +582,85 @@ test('acknowledged organization child NOT_FOUND is unresolved, not proof that cl
   assert.deepEqual(await org.recoverPendingCompensations(), { recovered: 1, pending: 0 });
   assert.equal(cancelled, 1);
 });
+
+test('organization recovery never cancels a foreign mission returned by inspect or trusts foreign terminal receipt', async t => {
+  const state = await tempDir(t);
+  let expectedId = '';
+  const foreignId = crypto.randomUUID();
+  let wrongInspect = true;
+  let wrongCancellation = true;
+  let cancels = 0;
+  const teams = {
+    async inspect(id: string) {
+      assert.equal(id, expectedId);
+      return { id: wrongInspect ? foreignId : expectedId, state:'RUNNING' };
+    },
+    async cancel(id: string) {
+      assert.equal(id, expectedId, 'provider foreign ID must never be cancelled');
+      cancels++;
+      return { id: wrongCancellation ? foreignId : expectedId, state:'CANCELLED' };
+    }
+  };
+  const journal = new DurableCompensationJournal(state);
+  const org = new OrganizationCoordinator(state, teams as any, { compensations: journal });
+  const program = await org.create({
+    objective: 'Protect foreign mission during recovery',
+    policy: { allowedScopePrefixes:['org:foreign-proof'] },
+    targets: [{ key:'service', scopeKey:'org:foreign-proof:service', workItems:work('service') }]
+  });
+  expectedId = reservedOrganizationChildId(program.id, 'service');
+  const intent = await journal.prepare({
+    id: crypto.randomUUID(), ownerKind:'organization', ownerId:program.id,
+    operation:'cancel-team-mission', targetId:expectedId, subjectKey:'service'
+  });
+  await journal.confirm(intent.id);
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:0, pending:1 });
+  assert.equal(cancels,0);
+  wrongInspect = false;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:0, pending:1 });
+  assert.equal(cancels,1, 'terminal response with another identity is not compensation proof');
+  wrongCancellation = false;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:1, pending:0 });
+  assert.equal(cancels,2);
+});
+
+test('organization pause compensation retains intent on foreign inspected or paused identity', async t => {
+  const state = await tempDir(t);
+  let expectedId = '';
+  const foreignId = crypto.randomUUID();
+  let wrongInspect = true;
+  let wrongPause = true;
+  let pauses = 0;
+  const teams = {
+    async inspect(id: string) {
+      assert.equal(id, expectedId);
+      return { id:wrongInspect ? foreignId : expectedId, state:'RUNNING' };
+    },
+    async pause(id: string) {
+      assert.equal(id,expectedId);
+      pauses++;
+      return { id:wrongPause ? foreignId : expectedId, state:'PAUSED' };
+    }
+  };
+  const journal = new DurableCompensationJournal(state);
+  const org = new OrganizationCoordinator(state, teams as any, { compensations: journal });
+  const program = await org.create({
+    objective:'Proof bound recovery pause',
+    policy:{allowedScopePrefixes:['org:pause-proof']},
+    targets:[{ key:'service',scopeKey:'org:pause-proof:service',workItems:work('service') }]
+  });
+  expectedId = reservedOrganizationChildId(program.id, 'service');
+  const intent = await journal.prepare({
+    id:crypto.randomUUID(), ownerKind:'organization',ownerId:program.id,
+    operation:'pause-team-mission',targetId:expectedId,subjectKey:'service'
+  });
+  await journal.confirm(intent.id);
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:0,pending:1 });
+  assert.equal(pauses,0);
+  wrongInspect=false;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:0,pending:1 });
+  assert.equal(pauses,1);
+  wrongPause=false;
+  assert.deepEqual(await org.recoverPendingCompensations(), { recovered:1,pending:0 });
+  assert.equal(pauses,2);
+});
