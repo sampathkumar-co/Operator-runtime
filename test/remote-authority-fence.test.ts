@@ -275,6 +275,12 @@ test('foreign account cannot revoke another owner at a reused generation', async
   await assert.rejects(make().revoke(subject),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
   assert.equal((await make().assertCurrent(newer)).leaseId, newer.leaseId);
+  const newerBarrier = await make().revoke({ ...unrelated, authorityGeneration: 2 });
+  await assert.rejects(make().revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
+  const finalBarrier = await make().revoke({ ...unrelated, authorityGeneration: 2 });
+  assert.equal(finalBarrier.revokedGeneration, 2);
+  assert.ok(finalBarrier.generation > newerBarrier.generation);
 });
 
 test('revoked authority record with forged device identity fails closed', async (t) => {
