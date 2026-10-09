@@ -165,3 +165,46 @@ test('stage5 verified procedure and outcome receipts are idempotent across retry
   assert.equal(duplicated.verifiedRuns, 2);
   assert.deepEqual(duplicated.outcomeReceipts, [receipt]);
 });
+
+test('stage5 procedure receipt saturation refuses new receipts while preserving old replay identity across restart', async (t) => {
+  const state = await tempDir(t);
+  const store = new ProcedureMemoryStore(state);
+  const procedure = await store.recordVerified({
+    key: 'bounded-receipts',
+    title: 'Durably bounded outcomes',
+    objectiveKind: 'maintenance',
+    scopeKey: 'project:bounded',
+    steps: [{ capability: 'file.read', risk: 'read', summary: 'Inspect.' }],
+    assumptions: [],
+    verificationDigest: 'a'.repeat(64),
+    verifierEvidenceDigest: 'b'.repeat(64)
+  });
+
+  // Simulate a fully utilized durable receipt ledger, as can occur after 256 distinct outcomes.
+  const file = path.join(state, 'verified-procedures.json');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  const receipts = Array.from({ length: 256 }, (_, index) => (index + 1).toString(16).padStart(64, '0'));
+  persisted.procedures[0].outcomeReceipts = receipts;
+  persisted.procedures[0].verifiedRuns = 257;
+  await fs.writeFile(file, JSON.stringify(persisted));
+
+  const reopened = new ProcedureMemoryStore(state);
+  const duplicate = await reopened.recordOutcome(procedure.id, 'verified', receipts[0]!);
+  assert.equal(duplicate.verifiedRuns, 257);
+
+  await assert.rejects(
+    () => reopened.recordOutcome(procedure.id, 'verified', 'f'.repeat(64)),
+    (error: unknown) => (error as { code?: string }).code === 'PROCEDURE_OUTCOME_RECEIPTS_FULL'
+  );
+  const after = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(after.procedures[0].verifiedRuns, 257);
+  assert.deepEqual(after.procedures[0].outcomeReceipts, receipts);
+
+  const independent = new ProcedureMemoryStore(state);
+  const replay = await independent.recordOutcome(procedure.id, 'verified', receipts[0]!);
+  assert.equal(replay.verifiedRuns, 257);
+  await assert.rejects(
+    () => independent.recordOutcome(procedure.id, 'failed', 'e'.repeat(64)),
+    (error: unknown) => (error as { code?: string }).code === 'PROCEDURE_OUTCOME_RECEIPTS_FULL'
+  );
+});

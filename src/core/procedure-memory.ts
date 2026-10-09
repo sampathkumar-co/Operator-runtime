@@ -9,6 +9,7 @@ const MAX_PROCEDURES = 2000;
 const MAX_STEPS = 200;
 const MAX_ASSUMPTIONS = 100;
 const MAX_RESOURCES = 200;
+const MAX_OUTCOME_RECEIPTS = 256;
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
 const MAX_TTL_MS = 365 * 24 * 60 * 60_000;
 const MIN_TTL_MS = 60_000;
@@ -196,11 +197,15 @@ export class ProcedureMemoryStore {
       if (procedure.status === 'INVALIDATED') throw new OperatorError('PROCEDURE_INVALIDATED', 'Invalidated procedure cannot record execution outcomes.');
       procedure.outcomeReceipts ??= [];
       if (receipt && procedure.outcomeReceipts.includes(receipt)) return structuredClone(procedure);
+      // Evicting old receipts permits their replay to inflate verified/failed counts.
+      // Exact replay protection has a bounded capacity: fail closed when exhausted.
+      if (receipt && procedure.outcomeReceipts.length >= MAX_OUTCOME_RECEIPTS) {
+        throw new OperatorError('PROCEDURE_OUTCOME_RECEIPTS_FULL', 'Procedure outcome receipt capacity is exhausted; a new outcome cannot be recorded safely.');
+      }
       if (outcome === 'verified') procedure.verifiedRuns += 1;
       else procedure.failedRuns += 1;
       if (receipt) {
         procedure.outcomeReceipts.push(receipt);
-        if (procedure.outcomeReceipts.length > 256) procedure.outcomeReceipts.splice(0, procedure.outcomeReceipts.length - 256);
       }
       procedure.updatedAt = this.#clock().toISOString();
       if (procedure.failedRuns >= 3 && procedure.failedRuns * 2 >= procedure.verifiedRuns) procedure.status = 'SUSPENDED';
@@ -327,7 +332,7 @@ function validateState(input: unknown): ProcedureMemoryState {
     if (item.invalidatedAt !== undefined) validIso(item.invalidatedAt, 'invalidatedAt');
     if (item.invalidationReason !== undefined) boundedText(item.invalidationReason, 2048, 'invalidationReason');
     if (item.outcomeReceipts !== undefined) {
-      if (!Array.isArray(item.outcomeReceipts) || item.outcomeReceipts.length > 256) throw corrupt('Procedure outcome receipts are invalid.');
+      if (!Array.isArray(item.outcomeReceipts) || item.outcomeReceipts.length > MAX_OUTCOME_RECEIPTS) throw corrupt('Procedure outcome receipts are invalid.');
       for (const receipt of item.outcomeReceipts) shaDigest(receipt, 'outcome receipt');
       if (new Set(item.outcomeReceipts).size !== item.outcomeReceipts.length) throw corrupt('Procedure outcome receipts must be unique.');
     }
