@@ -29,7 +29,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     await store.initialize();
   });
   test.beforeEach(async () => {
-    await pool.query('TRUNCATE TABLE mecord_control_plane');
+    await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize();
   });
   test.after(async () => {
     await pool.end();
@@ -109,7 +110,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     const snapshot = await store.snapshot('2026-10-08T00:00:02.000Z');
     await assert.rejects(store.restore(snapshot),
       (error) => error?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
-    await pool.query('TRUNCATE TABLE mecord_control_plane');
+    await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize();
     await store.restore(snapshot);
     assert.deepEqual((await store.get('proof', 'receipt'))?.value, { cohort: 2, verified: true });
     await assert.rejects(store.restore(snapshot),
