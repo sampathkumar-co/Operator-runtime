@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
 import type { ControlPlaneMutation, ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
-import { currentProcessInstance, validProcessInstance, type ProcessInstanceIdentity } from './process-instance.ts';
+import { currentProcessInstance, sameProcessInstance, validProcessInstance, type ProcessInstanceIdentity } from './process-instance.ts';
 
 /**
  * Shared-control-plane authority leases. All participating relay/provider hosts
@@ -115,6 +115,7 @@ export class RemoteAuthorityFenceStore {
   }
 
   async heartbeat(leaseInput: RemoteAuthorityLease, ttlMs = 30_000): Promise<RemoteAuthorityLease> {
+    await this.#assertExecutingOwner(leaseInput);
     const lease = await this.assertCurrent(leaseInput);
     const ms = ttl(ttlMs);
     const now = this.#clock().getTime();
@@ -143,6 +144,7 @@ export class RemoteAuthorityFenceStore {
    */
   async commitProtected(leaseInput: RemoteAuthorityLease, mutation: ControlPlaneMutation):
     Promise<{ lease: RemoteAuthorityLease; record: ControlPlaneRecord | null }> {
+    await this.#assertExecutingOwner(leaseInput);
     const lease = await this.assertCurrent(leaseInput);
     if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS) {
       throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must not address the authority namespace.');
@@ -179,11 +181,29 @@ export class RemoteAuthorityFenceStore {
    * generation barrier. A release keeps the key's CAS history as a tombstone.
    */
   async release(leaseInput: RemoteAuthorityLease): Promise<void> {
+    await this.#assertExecutingOwner(leaseInput);
     const lease = await this.assertCurrent(leaseInput);
     await this.#store.transact([{
       namespace: NS, key: resourceKey(lease),
       expectedGeneration: lease.generation, value: null
     }], this.#clock().toISOString());
+  }
+
+  /**
+   * Independent providers can read-check a received lease via assertCurrent,
+   * but only its exact originating OS process may renew, voluntarily release,
+   * or make owner-authorized writes. A copied lease is not delegated authority.
+   * Cross-host delegation must acquire a new generation-bound owner lease
+   * under a trusted principal, never reuse a bearer from a different process.
+   */
+  async #assertExecutingOwner(leaseInput: RemoteAuthorityLease): Promise<void> {
+    const lease = validateLease(leaseInput);
+    let actual: ProcessInstanceIdentity;
+    try { actual = await currentProcessInstance(); }
+    catch { throw blocked('REMOTE_AUTHORITY_PROCESS_UNKNOWN', 'Executing process identity cannot be verified.'); }
+    if (!sameProcessInstance(lease.process, actual)) {
+      throw blocked('REMOTE_AUTHORITY_PROCESS_MISMATCH', 'Authority lease belongs to a different process instance.');
+    }
   }
 
   async revoke(subjectInput: RemoteAuthoritySubject): Promise<RemoteAuthorityBarrier> {
