@@ -29,16 +29,38 @@ export class PostgresQuarantineLedgerAnchor implements QuarantineLedgerAnchor {
 
   /** Provision on a dedicated PostgreSQL service, before operator review. */
   async initialize(): Promise<void> {
-    await this.#db.query(`CREATE TABLE IF NOT EXISTS mecord_quarantine_high_water (
-      anchor_id varchar(128) PRIMARY KEY,
-      record_count bigint NOT NULL CHECK (record_count >= 0),
-      head_mac varchar(64) NOT NULL CHECK (head_mac ~ '^[0-9a-f]{64}$')
-    )`);
-    await this.#db.query(
-      `INSERT INTO mecord_quarantine_high_water (anchor_id, record_count, head_mac)
-       VALUES ($1, 0, $2) ON CONFLICT (anchor_id) DO NOTHING`,
-      [this.#anchorId, GENESIS]
-    );
+    // CREATE TABLE IF NOT EXISTS is NOT concurrency-safe for competing
+    // independent PostgreSQL backends: both may race to insert the same
+    // pg_type catalog key. Use one pinned connection and a transaction-scoped
+    // global DDL advisory lock before checking/creating the table.
+    if (typeof this.#db.connect !== 'function') {
+      throw invalid('Independent anchor schema bootstrap requires a dedicated pooled PostgreSQL connection.');
+    }
+    const client = await this.#db.connect();
+    let begun = false;
+    try {
+      await client.query('BEGIN');
+      begun = true;
+      await client.query('SELECT pg_advisory_xact_lock(7420520143874007911::bigint)');
+      await client.query(`CREATE TABLE IF NOT EXISTS mecord_quarantine_high_water (
+        anchor_id varchar(128) PRIMARY KEY,
+        record_count bigint NOT NULL CHECK (record_count >= 0),
+        head_mac varchar(64) NOT NULL CHECK (head_mac ~ '^[0-9a-f]{64}$')
+      )`);
+      await client.query(
+        `INSERT INTO mecord_quarantine_high_water (anchor_id, record_count, head_mac)
+         VALUES ($1, 0, $2) ON CONFLICT (anchor_id) DO NOTHING`,
+        [this.#anchorId, GENESIS]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      if (begun) {
+        try { await client.query('ROLLBACK'); } catch { /* preserve original database failure */ }
+      }
+      throw error;
+    } finally {
+      client.release?.();
+    }
   }
 
   async read(): Promise<QuarantineLedgerPosition> {

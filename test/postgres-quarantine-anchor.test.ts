@@ -5,9 +5,10 @@ import type { PostgresQueryHost, PostgresQueryResult } from '../src/core/control
 
 function fakeDatabase(): PostgresQueryHost {
   const stored = new Map<string, { count: number; headMac: string }>();
-  return {
+  const fake: PostgresQueryHost = {
     async query<Row=Record<string, unknown>>(sql: string, values: unknown[] = []): Promise<PostgresQueryResult<Row>> {
       let result: PostgresQueryResult<any> = { rows: [], rowCount: 0 };
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql.startsWith('SELECT pg_advisory_xact_lock')) return result as PostgresQueryResult<Row>;
       if (sql.startsWith('CREATE TABLE')) return result as PostgresQueryResult<Row>;
       if (sql.startsWith('INSERT INTO')) {
         const id = String(values[0]);
@@ -29,8 +30,13 @@ function fakeDatabase(): PostgresQueryHost {
         return result as PostgresQueryResult<Row>;
       }
       throw new Error('Unexpected query: ' + sql);
-    }
+    },
+    connect: async () => ({
+      query: async <Row=Record<string, unknown>>(sql: string, values?: unknown[]) => fake.query<Row>(sql, values),
+      release() {}
+    })
   };
+  return fake;
 }
 
 test('independent PostgreSQL high-water anchor rejects stale CAS, replay and skipped epochs', async () => {
