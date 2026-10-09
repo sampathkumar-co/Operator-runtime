@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { OperatorError } from './errors.ts';
-import type { ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
+import type { ControlPlaneMutation, ControlPlaneRecord, ControlPlaneStore } from './control-plane-store.ts';
 import { currentProcessInstance, validProcessInstance, type ProcessInstanceIdentity } from './process-instance.ts';
 
 /**
@@ -117,6 +117,44 @@ export class RemoteAuthorityFenceStore {
       expiresAt
     }], new Date(now).toISOString());
     return { ...lease, generation: renewed!.generation, expiresAt };
+  }
+
+  /**
+   * Atomic provider commit for effects stored in the SAME ControlPlaneStore.
+   * Compare the exact lease generation and commit the protected mutation in
+   * one transaction. If revocation/heartbeat wins first, the provider write
+   * is rolled back with CONTROL_PLANE_CAS_MISMATCH. This is not an external
+   * side-effect wrapper: out-of-band filesystem/network writes still require
+   * a provider-native prepare/commit and reconciliation protocol.
+   *
+   * The returned lease supersedes the input even for a protected deletion:
+   * advancing the owner generation is necessary to fence concurrent writers.
+   */
+  async commitProtected(leaseInput: RemoteAuthorityLease, mutation: ControlPlaneMutation):
+    Promise<{ lease: RemoteAuthorityLease; record: ControlPlaneRecord | null }> {
+    const lease = await this.assertCurrent(leaseInput);
+    if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS) {
+      throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must not address the authority namespace.');
+    }
+    const now = this.#clock().toISOString();
+    const [advanced, committed] = await this.#store.transact([
+      {
+        namespace: NS, key: resourceKey(lease), expectedGeneration: lease.generation,
+        value: { kind: 'active', schemaVersion: 1, accountId: lease.accountId,
+          deviceId: lease.deviceId, authorityGeneration: lease.authorityGeneration,
+          ownerId: lease.ownerId, process: lease.process, leaseId: lease.leaseId,
+          fenceToken: lease.fenceToken },
+        expiresAt: lease.expiresAt
+      },
+      mutation
+    ], now);
+    if (!advanced) {
+      throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Atomic authority checkpoint did not produce a new generation.');
+    }
+    return {
+      lease: { ...lease, generation: advanced.generation },
+      record: committed ?? null
+    };
   }
 
   async revoke(subjectInput: RemoteAuthoritySubject): Promise<RemoteAuthorityBarrier> {
