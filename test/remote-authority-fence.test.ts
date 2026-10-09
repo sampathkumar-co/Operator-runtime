@@ -253,3 +253,42 @@ test('revoked authoritative account policy blocks old leases even before a globa
   await assert.rejects(make().assertCurrent(lease),
     (e: any) => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
 });
+
+test('foreign account cannot revoke another owner at a reused generation', async (t) => {
+  const { make, subject } = await fixture(t);
+  const unrelated = { ...subject, accountId: crypto.randomUUID() };
+  const owner = await make().acquire(subject, 'owner-A');
+  await assert.rejects(make().revoke(unrelated),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  assert.equal((await make().assertCurrent(owner)).ownerId, 'owner-A');
+  const barrier = await make().revoke(subject);
+  const before = barrier.generation;
+  await assert.rejects(make().revoke(unrelated),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_FOREIGN_OWNER');
+  const repeated = await make().revoke(subject);
+  assert.ok(repeated.generation > before);
+  assert.equal(repeated.revokedGeneration, subject.authorityGeneration);
+  await assert.rejects(make().acquire(unrelated, 'foreign-account-at-same-generation'),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_REVOKED');
+  const newer = await make().acquire({ ...unrelated, authorityGeneration: 2 }, 'new-authority');
+  assert.equal((await make().assertCurrent(newer)).ownerId, 'new-authority');
+  await assert.rejects(make().revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_NEWER_GENERATION');
+  assert.equal((await make().assertCurrent(newer)).leaseId, newer.leaseId);
+});
+
+test('revoked authority record with forged device identity fails closed', async (t) => {
+  const { make, subject } = await fixture(t);
+  await make().revoke(subject);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-authority-corrupt-barrier-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // A forged state with valid schema cannot be used to revoke someone
+  // else's record: read-side binding validates stored device versus CAS key.
+  const store = new EmbeddedControlPlaneStore(dir);
+  await store.transact([{ namespace: '__mecord_remote_authority', key: subject.deviceId,
+    expectedGeneration: null, value: { kind: 'revoked', schemaVersion: 1,
+      accountId: subject.accountId, deviceId: crypto.randomUUID(), revokedGeneration: 1 } }]);
+  const scoped = new RemoteAuthorityFenceStore(store, { authorize: async () => {} });
+  await assert.rejects(scoped.revoke(subject),
+    (e: any) => e?.code === 'REMOTE_AUTHORITY_CORRUPT');
+});
