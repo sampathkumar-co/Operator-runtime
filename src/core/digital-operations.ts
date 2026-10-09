@@ -111,6 +111,19 @@ const STORE_OPTIONS = {
   invalidMessage: 'Digital operations state is invalid.'
 } as const;
 
+export function digitalOperationChildId(ownerId: string, operation: string): string {
+  const owner = validUuid(ownerId, 'operationId');
+  if (!['cancel-team-mission', 'cancel-organization-program', 'release-device-reservation'].includes(operation)) {
+    throw new OperatorError('OPERATIONS_RECOVERY_IDENTITY_INVALID', 'Recovery operation is invalid.');
+  }
+  const bytes = crypto.createHash('sha256').update('digital-operation-child\0').update(owner)
+    .update('\0').update(operation).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
 export class DigitalOperationsLayer {
   #file: string;
   #ownership: ResourceLeaseStore;
@@ -221,7 +234,7 @@ export class DigitalOperationsLayer {
       let deviceReservationSessionId: string | undefined;
       const compensationIds: string[] = [];
       if (normalized.device) {
-        const reservationId = crypto.randomUUID();
+        const reservationId = digitalOperationChildId(operationId, 'release-device-reservation');
         // Journal *before* resource allocation: an abrupt restart can now name
         // the exact allocation without ever receiving the reserve response.
         const compensationId = await this.#prepareCompensation(operationId, 'release-device-reservation', reservationId);
@@ -293,7 +306,7 @@ export class DigitalOperationsLayer {
       };
       try {
         if (resolved.execution.kind === 'team') {
-          const missionId = crypto.randomUUID();
+          const missionId = digitalOperationChildId(operationId, 'cancel-team-mission');
           compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-team-mission', missionId));
           teamMissionId = missionId;
           const mission = await this.#teams.submit({
@@ -305,7 +318,7 @@ export class DigitalOperationsLayer {
           if (mission.id !== missionId) throw new OperatorError('TEAM_MISSION_ID_CONFLICT', 'Mission creator did not honor the journal-bound mission identity.');
           if (normalized.run) await this.#teams.start(mission.id);
         } else {
-          const programId = crypto.randomUUID();
+          const programId = digitalOperationChildId(operationId, 'cancel-organization-program');
           compensationIds.push(await this.#prepareCompensation(operationId, 'cancel-organization-program', programId));
           organizationProgramId = programId;
           const program = await this.#organizations.create({
@@ -384,6 +397,13 @@ export class DigitalOperationsLayer {
         if (this.#compensationWasCommitted(intent, operation)) {
           await this.#compensations.complete(intent.id);
           recovered += 1;
+          continue;
+        }
+        // Orphaned write-ahead identities may be compensated only when the
+        // target is deterministically bound to this exact operation/purpose.
+        // Pre-upgrade random identities remain quarantined for review.
+        if (!['cancel-team-mission', 'cancel-organization-program', 'release-device-reservation'].includes(intent.operation) ||
+            intent.targetId !== digitalOperationChildId(intent.ownerId, intent.operation)) {
           continue;
         }
         try {
