@@ -32,6 +32,41 @@ const SCORE: CapabilityScore = {
 };
 
 const MAX_TABS = 100;
+const MAX_CDP_DISCOVERY_BYTES = 1024 * 1024;
+
+/** Never let an oversized or malformed loopback DevTools endpoint allocate an
+ * unbounded discovery response. This is independent of the inspect output cap.
+ */
+async function boundedDiscoveryJson(response: Response): Promise<unknown> {
+  const declared = response.headers.get('content-length');
+  if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_CDP_DISCOVERY_BYTES) {
+    throw new OperatorError('CDP_DISCOVERY_TOO_LARGE', 'Browser target discovery exceeds the permitted byte limit.');
+  }
+  if (!response.body) throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser target discovery response has no body.');
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      bytes += value.byteLength;
+      if (bytes > MAX_CDP_DISCOVERY_BYTES) {
+        await reader.cancel();
+        throw new OperatorError('CDP_DISCOVERY_TOO_LARGE', 'Browser target discovery exceeds the permitted byte limit.');
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')) as unknown;
+  } catch {
+    throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser target discovery returned malformed JSON.');
+  }
+}
 
 type DownloadTracker = {
   done: Promise<{ guid: string; state: string; url?: string; suggestedFilename?: string; receivedBytes?: number; totalBytes?: number; filePath?: string }>;
@@ -634,8 +669,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
     if (this.#browserSession && !this.#browserSession.closed) return this.#browserSession;
     const response = await fetch(new URL('/json/version', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status} while discovering browser endpoint.`, { retryable: true });
-    const version = await response.json() as Record<string, unknown>;
-    const ws = typeof version.webSocketDebuggerUrl === 'string' ? version.webSocketDebuggerUrl : '';
+    const version = await boundedDiscoveryJson(response);
+    if (!version || typeof version !== 'object' || Array.isArray(version)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser version discovery must return an object.');
+    }
+    const ws = typeof (version as JsonMap).webSocketDebuggerUrl === 'string' ? String((version as JsonMap).webSocketDebuggerUrl) : '';
     if (!ws) throw new OperatorError('CDP_BROWSER_TARGET_UNAVAILABLE', 'Browser does not expose a browser-level DevTools WebSocket endpoint.', { retryable: true });
     this.#browserSession = new CdpConnection('browser', ws);
     return this.#browserSession;
@@ -715,7 +753,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
   async #listTargets(signal?: AbortSignal): Promise<CdpTarget[]> {
     const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
-    const raw = await response.json() as Array<Record<string, unknown>>;
+    const raw = await boundedDiscoveryJson(response);
+    if (!Array.isArray(raw) || raw.some((tab) => !tab || typeof tab !== 'object' || Array.isArray(tab))) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser target discovery must return an array of objects.');
+    }
     return raw.slice(0, MAX_TABS).map((tab) => ({
       id: String(tab.id ?? ''),
       type: typeof tab.type === 'string' ? tab.type : undefined,
@@ -730,7 +771,10 @@ export class BrowserCdpProvider implements CapabilityProvider {
     endpoint.search = url;
     const response = await fetch(endpoint, { method: 'PUT', redirect: 'error', signal: combinedSignal(signal, 4_000) });
     if (!response.ok) throw new OperatorError('CDP_CREATE_TAB_FAILED', `CDP returned HTTP ${response.status} while creating a tab.`, { retryable: true });
-    const tab = await response.json() as Record<string, unknown>;
+    const tab = await boundedDiscoveryJson(response);
+    if (!tab || typeof tab !== 'object' || Array.isArray(tab)) {
+      throw new OperatorError('CDP_DISCOVERY_INVALID', 'Browser new-tab discovery must return an object.');
+    }
     const target: CdpTarget = {
       id: String(tab.id ?? ''),
       type: typeof tab.type === 'string' ? tab.type : undefined,

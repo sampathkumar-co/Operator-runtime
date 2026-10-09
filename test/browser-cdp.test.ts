@@ -70,3 +70,50 @@ test('browser inspect output is serialized-byte bounded before relay delivery', 
   assert.ok(bounded.returnedBytes <= 16 * 1024);
   assert.equal((bounded.output.page as any).semantic.pagination.controls.truncated, true);
 });
+
+test('CDP target discovery rejects oversized chunked responses before JSON parsing', async (t) => {
+  const oversized = '[' + ' '.repeat(1024 * 1024 + 256) + ']';
+  const server = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(oversized);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bad address');
+  const provider = new BrowserCdpInspectProvider(`http://127.0.0.1:${address.port}`);
+  t.after(() => provider.close());
+  const result = await provider.execute({
+    id: 'oversized-discovery', capability: 'browser.inspect', risk: 'read',
+    input: {}, provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'CDP_DISCOVERY_TOO_LARGE');
+});
+
+test('CDP discovery rejects invalid target-list JSON structure', async (t) => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'not-an-array' }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('bad address');
+  const provider = new BrowserCdpInspectProvider(`http://127.0.0.1:${address.port}`);
+  t.after(() => provider.close());
+  const result = await provider.execute({
+    id: 'malformed-discovery', capability: 'browser.inspect', risk: 'read',
+    input: {}, provenance: { kind: 'chatgpt' }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'CDP_DISCOVERY_INVALID');
+});
