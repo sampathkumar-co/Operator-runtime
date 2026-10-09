@@ -13,7 +13,7 @@ import { DevicePoolScheduler } from '../src/core/device-pool.ts';
 import { ExecutionOptimizerStore } from '../src/core/execution-optimizer.ts';
 import { TeamCoordinator, type TeamWorkInput } from '../src/core/team-coordinator.ts';
 import { OrganizationCoordinator } from '../src/core/organization-coordinator.ts';
-import { DigitalOperationsLayer } from '../src/core/digital-operations.ts';
+import { DigitalOperationsLayer, digitalOperationChildId } from '../src/core/digital-operations.ts';
 import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
 
 async function tempDir(t: test.TestContext): Promise<string> {
@@ -652,8 +652,8 @@ test('restart after reservation commit and before operation commit releases exac
   const devices = new DevicePoolScheduler(base.state, registry, routing);
   const peer = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('crash-peer');
   await registry.registerVerifiedPeer(peer);
-  const reservationId = crypto.randomUUID();
   const ownerId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(ownerId, 'release-device-reservation');
   const compensations = new DurableCompensationJournal(base.state);
   const recoveryId = crypto.createHash('sha256').update(['digital-operation', ownerId, 'release-device-reservation', reservationId].join('\0')).digest('hex');
   await compensations.prepare({
@@ -755,9 +755,9 @@ test('digital operation reconciliation retains intents until cancellation and re
   const base = await setup(t);
   const compensations = new DurableCompensationJournal(base.state);
   const ownerId = crypto.randomUUID();
-  const teamId = crypto.randomUUID();
-  const programId = crypto.randomUUID();
-  const reservationId = crypto.randomUUID();
+  const teamId = digitalOperationChildId(ownerId, 'cancel-team-mission');
+  const programId = digitalOperationChildId(ownerId, 'cancel-organization-program');
+  const reservationId = digitalOperationChildId(ownerId, 'release-device-reservation');
   for (const [operation, targetId] of [
     ['cancel-team-mission', teamId],
     ['cancel-organization-program', programId],
@@ -801,7 +801,7 @@ test('failed mission start cannot report compensated when its cancellation remai
 
 test('two independent recovery workers never execute one compensation twice',async t=>{
  const base=await setup(t);
- const missionId=crypto.randomUUID(),ownerId=crypto.randomUUID();
+ const ownerId=crypto.randomUUID(),missionId=digitalOperationChildId(ownerId,'cancel-team-mission');
  const journal=new DurableCompensationJournal(base.state);
  await journal.prepare({
   id:crypto.randomUUID(),ownerKind:'digital-operation',ownerId,
@@ -865,9 +865,10 @@ test('external RESOURCE_BUSY error is not mistaken for acquisition contention an
 
 test('independent OS processes execute one pending compensation only once',async t=>{
  const base=await setup(t);
- const id=crypto.randomUUID(),missionId=crypto.randomUUID();
+ const id=crypto.randomUUID(), ownerId=crypto.randomUUID();
+ const missionId=digitalOperationChildId(ownerId,'cancel-team-mission');
  await new DurableCompensationJournal(base.state).prepare({
-  id,ownerKind:'digital-operation',ownerId:crypto.randomUUID(),
+  id,ownerKind:'digital-operation',ownerId,
   operation:'cancel-team-mission',targetId:missionId
  });
  const {execFile}=await import('node:child_process');
@@ -910,4 +911,31 @@ test('unbound digital compensation must not cancel an unrelated team mission', a
   assert.equal(result.recovered,0);
   assert.equal(result.pending,1);
   assert.equal((await teams.inspect(unrelated.id)).state,'RUNNING');
+});
+
+test('orphan recovery rejects foreign team, organization and reservation identities', async t => {
+  const base = await setup(t);
+  const id = crypto.randomUUID(),ownerId=crypto.randomUUID();
+  const targets = {
+    'cancel-team-mission':crypto.randomUUID(),
+    'cancel-organization-program':crypto.randomUUID(),
+    'release-device-reservation':crypto.randomUUID()
+  };
+  const journal=new DurableCompensationJournal(base.state);
+  for(const [operation,targetId] of Object.entries(targets)){
+    await journal.prepare({ id:crypto.randomUUID(),ownerKind:'digital-operation',
+      ownerId,operation,targetId });
+  }
+  const invocations:string[]=[];
+  const teams={async cancel(id:string){ invocations.push('team:'+id);return {id,state:'CANCELLED'} }};
+  const organizations={async cancel(id:string){invocations.push('org:'+id);return {id,state:'CANCELLED'} }};
+  const devices={async release(id:string){invocations.push('device:'+id);return {id,state:'RELEASED'} }};
+  const ops = new DigitalOperationsLayer(base.state,{...base,teams:teams as any,
+    organizations:organizations as any,devices:devices as any});
+  assert.deepEqual(await ops.recoverPendingCompensations(),{recovered:0,pending:3});
+  assert.deepEqual(invocations,[]);
+  assert.equal(digitalOperationChildId(ownerId,'cancel-team-mission'),
+               digitalOperationChildId(ownerId,'cancel-team-mission'));
+  assert.notEqual(digitalOperationChildId(ownerId,'cancel-team-mission'),
+                  digitalOperationChildId(ownerId,'cancel-organization-program'));
 });
