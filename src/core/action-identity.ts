@@ -36,7 +36,13 @@ function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (!value || typeof value !== 'object') return value;
   const input = value as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
+  // A plain object silently treats assignment to "__proto__" as a
+  // prototype mutation rather than an own JSON property. Dropping that key
+  // creates content-address/signature collisions for distinct action inputs.
+  // A null-prototype record preserves every enumerable own data key,
+  // including "__proto__", at every nesting depth without changing the
+  // canonical encoding of ordinary JSON objects.
+  const output: Record<string, unknown> = Object.create(null);
   for (const key of Object.keys(input).sort()) {
     const item = input[key];
     if (item !== undefined) output[key] = canonicalize(item);
