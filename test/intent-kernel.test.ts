@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -46,4 +47,52 @@ test('intent chain binds each version to the previous digest', async (t) => {
   });
   assert.equal(second.previousIntentDigest, first.digest);
   assert.match(second.digest, /^[0-9a-f]{64}$/);
+});
+
+test('intent file refuses valid authority copied from another conversation', async (t) => {
+  const dir = await temp(t);
+  const source = new IntentKernel(dir, 'source-conversation');
+  const target = new IntentKernel(dir, 'target-conversation');
+  const original = await source.update({
+    objective: 'Inspect only within the source conversation.',
+    directive: 'continue',
+    sourceTurnId: 'source-turn'
+  });
+  await fs.mkdir(path.join(dir, 'intent'), { recursive: true });
+  await fs.copyFile(
+    path.join(dir, 'intent', 'source-conversation.json'),
+    path.join(dir, 'intent', 'target-conversation.json')
+  );
+  await assert.rejects(target.current(), (error: any) => error?.code === 'INTENT_STATE_CORRUPT');
+  await assert.rejects(
+    target.assertCurrent(original.intentVersion, original.digest),
+    (error: any) => error?.code === 'INTENT_STATE_CORRUPT'
+  );
+  await assert.rejects(
+    target.update({ objective: 'Must not inherit other conversation authority.', directive: 'continue', sourceTurnId: 'target-turn' }),
+    (error: any) => error?.code === 'INTENT_STATE_CORRUPT'
+  );
+  assert.equal((await source.current())?.conversationId, 'source-conversation');
+});
+
+test('intent version exhaustion fails closed without writing an invalid successor', async (t) => {
+  const dir = await temp(t);
+  const kernel = new IntentKernel(dir, 'version-limit');
+  await kernel.update({ objective: 'Pinned version', directive: 'continue', sourceTurnId: 'turn-1' });
+  const file = path.join(dir, 'intent', 'version-limit.json');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  const { digest: _old, ...base } = original;
+  base.intentVersion = Number.MAX_SAFE_INTEGER;
+  const exhausted = {
+    ...base,
+    digest: crypto.createHash('sha256').update(JSON.stringify(base)).digest('hex')
+  };
+  await fs.writeFile(file, JSON.stringify(exhausted, null, 2));
+  const before = await fs.readFile(file, 'utf8');
+  assert.equal((await kernel.current())?.intentVersion, Number.MAX_SAFE_INTEGER);
+  await assert.rejects(
+    kernel.update({ objective: 'Do not roll over.', directive: 'continue', sourceTurnId: 'turn-2' }),
+    (error: any) => error?.code === 'INTENT_VERSION_EXHAUSTED'
+  );
+  assert.equal(await fs.readFile(file, 'utf8'), before);
 });
