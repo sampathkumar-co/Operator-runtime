@@ -271,23 +271,40 @@ export class DigitalOperationsLayer {
         const failed: string[] = [];
         if (teamMissionId) {
           try {
-            if ((await this.#teams.cancel(teamMissionId)).state !== 'CANCELLED') failed.push('cancel-team-mission');
-          } catch (error) {
-            if ((error as { code?: unknown } | null)?.code !== 'TEAM_NOT_FOUND') failed.push('cancel-team-mission');
+            const cancelled = await this.#teams.cancel(teamMissionId);
+            if (cancelled.id !== teamMissionId || cancelled.state !== 'CANCELLED') {
+              failed.push('cancel-team-mission');
+            }
+          } catch {
+            // NOT_FOUND is not terminal proof after a confirmed create.
+            failed.push('cancel-team-mission');
           }
         }
         if (organizationProgramId) {
           try {
-            if ((await this.#organizations.cancel(organizationProgramId)).state !== 'CANCELLED') failed.push('cancel-organization-program');
-          } catch (error) {
-            if ((error as { code?: unknown } | null)?.code !== 'ORGANIZATION_PROGRAM_NOT_FOUND') failed.push('cancel-organization-program');
+            const cancelled = await this.#organizations.cancel(organizationProgramId);
+            if (cancelled.id !== organizationProgramId || cancelled.state !== 'CANCELLED') {
+              failed.push('cancel-organization-program');
+            }
+          } catch {
+            failed.push('cancel-organization-program');
           }
         }
         if (deviceReservationId) {
           try {
-            if (!['RELEASED', 'EXPIRED'].includes((await this.#devices.release(deviceReservationId)).state)) failed.push('release-device-reservation');
-          } catch (error) {
-            if (!(error instanceof OperatorError) || error.code !== 'DEVICE_POOL_RESERVATION_NOT_FOUND') failed.push('release-device-reservation');
+            // Even the immediate rollback path must carry exactly the
+            // immutable allocation fingerprint committed before reserve.
+            // No unverified provider identity or missing row grants release.
+            const digest = normalized.device
+              ? devicePoolAllocationRequestDigest(normalized.device.request) : undefined;
+            const released = digest
+              ? await this.#devices.releasePrepared(deviceReservationId, digest) : null;
+            if (!released || released.id !== deviceReservationId ||
+                !['RELEASED', 'EXPIRED'].includes(released.state)) {
+              failed.push('release-device-reservation');
+            }
+          } catch {
+            failed.push('release-device-reservation');
           }
         }
         for (const id of compensationIds) {

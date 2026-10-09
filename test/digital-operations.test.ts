@@ -1286,3 +1286,84 @@ test('confirmed recovery also retains ownership when stored allocation request d
   assert.equal((await devices.inspectPrepared(reservationId, devicePoolAllocationRequestDigest(actual)))?.state, 'ACTIVE');
   assert.ok((await journal.pending('digital-operation')).some(entry => entry.id === intent.id));
 });
+
+test('immediate failure never retires acknowledged child intent on NOT_FOUND response', async t => {
+  const base = await setup(t);
+  let missionId = '';
+  const teams = {
+    async submit(input: { missionId: string }) {
+      missionId = input.missionId;
+      return { id: missionId };
+    },
+    async start() { throw new Error('start transport failed'); },
+    async cancel(id: string) {
+      assert.equal(id, missionId);
+      throw Object.assign(new Error('child not observed on this host'), { code: 'TEAM_NOT_FOUND' });
+    }
+  };
+  const journal = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, teams: teams as any, compensations: journal
+  });
+  await assert.rejects(ops.submit({
+    objective: 'Crash-safe child compensation', scopeKey: 'project:child-proof',
+    successConditions: ['no lost owned mission'],
+    execution: { kind: 'team', workItems: work() }, run: true
+  }), (e: any) => e?.code === 'COMPENSATION_BLOCKED' &&
+    e?.details?.failed?.includes('cancel-team-mission'));
+  const pending = await journal.pending('digital-operation');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.operation, 'cancel-team-mission');
+  assert.equal(pending[0]!.targetId, missionId);
+  assert.ok(pending[0]!.confirmedAt, 'child creation was explicitly acknowledged');
+  assert.deepEqual(await ops.list(), []);
+});
+
+test('immediate rollback uses exact proof-bound reservation release and retains intent on foreign receipt', async t => {
+  const base = await setup(t);
+  let reservationId = '';
+  let ordinaryReleaseCalls = 0;
+  let preparedCalls = 0;
+  const request = { workloadKey: 'proof-bound:rollback' };
+  const expectedDigest = devicePoolAllocationRequestDigest(request);
+  const devices = {
+    async reserve(_request: unknown, _advertisements: unknown, options: { reservationId: string }) {
+      reservationId = options.reservationId;
+      return { id: reservationId, sessionId: crypto.randomUUID(), state: 'ACTIVE' };
+    },
+    async release() {
+      ordinaryReleaseCalls++;
+      throw new Error('unfenced release must never run');
+    },
+    async releasePrepared(id: string, digest: string) {
+      preparedCalls++;
+      assert.equal(id, reservationId);
+      assert.equal(digest, expectedDigest);
+      return { id: crypto.randomUUID(), state: 'RELEASED' };
+    }
+  };
+  const teams = {
+    async submit(input: { missionId: string }) { return { id: input.missionId }; },
+    async start() { throw new Error('start failed after reservation'); },
+    async cancel(id: string) { return { id, state: 'CANCELLED' }; }
+  };
+  const journal = new DurableCompensationJournal(base.state);
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, devices: devices as any, teams: teams as any, compensations: journal
+  });
+  await assert.rejects(ops.submit({
+    objective: 'Exact reservation release', scopeKey: 'project:reservation-proof',
+    successConditions: ['only owned reservation released'],
+    execution: { kind: 'team', workItems: work() }, run: true,
+    device: { request, advertisements: [] }
+  }), (e: any) => e?.code === 'COMPENSATION_BLOCKED' &&
+    e?.details?.failed?.includes('release-device-reservation'));
+  assert.equal(preparedCalls, 1);
+  assert.equal(ordinaryReleaseCalls, 0);
+  const pending = await journal.pending('digital-operation');
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]!.operation, 'release-device-reservation');
+  assert.equal(pending[0]!.targetId, reservationId);
+  assert.equal(pending[0]!.allocationRequestDigest, expectedDigest);
+  assert.ok(pending[0]!.confirmedAt);
+});
