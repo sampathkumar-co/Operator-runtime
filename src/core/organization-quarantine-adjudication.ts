@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import { DurableCompensationJournal } from './compensation-journal.ts';
+import { stableOrganizationMissionId, organizationCompensationIntentId } from './organization-identity.ts';
 import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
@@ -91,6 +92,9 @@ export class OrganizationQuarantineAdjudicator {
         claim.returnedMissionId !== uuid(input.returnedMissionId)) {
       throw invalid('Signed provider claim does not match the exact recovery identity.');
     }
+    if (claim.expectedMissionId !== stableOrganizationMissionId(claim.programId, claim.targetKey)) {
+      throw invalid('Provider origin claim does not identify the deterministic child for this program and target.');
+    }
     const now = this.#clock().getTime();
     const issued = Date.parse(claim.issuedAt), expires = Date.parse(claim.expiresAt);
     const signature = String(input.providerClaim.signature ?? '');
@@ -129,6 +133,21 @@ export class OrganizationQuarantineAdjudicator {
         return already;
       }
       throw new OperatorError('QUARANTINE_NOT_FOUND', 'Matching unresolved recovery quarantine is absent.');
+    }
+    // Require the original *preallocated* recovery contract as independent
+    // evidence that this quarantine is tied to a real creation attempt.
+    // A signed provider classification plus an arbitrary returned ID does
+    // not create recovery ownership when that prepare was never persisted.
+    const originalIntentId = organizationCompensationIntentId(claim.programId,
+      'cancel-team-mission', claim.expectedMissionId);
+    const original = intents.find((item) => item.id === originalIntentId &&
+      item.ownerKind === 'organization' && item.ownerId === claim.programId &&
+      item.subjectKey === claim.targetKey &&
+      item.operation === 'cancel-team-mission' &&
+      item.targetId === claim.expectedMissionId);
+    if (!original) {
+      throw new OperatorError('QUARANTINE_ORIGIN_UNVERIFIED',
+        'Original deterministic child creation intent is absent or misbound; quarantine must remain unresolved.');
     }
     // A verified foreign identity may be retired as a *quarantine label*, but
     // the separate original write-ahead child intent remains intact. A claim
