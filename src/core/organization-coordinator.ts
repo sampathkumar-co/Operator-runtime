@@ -177,18 +177,24 @@ export class OrganizationCoordinator {
             intent.targetId !== stableOrganizationMissionId(program.id, target.key)) continue;
         try {
           const mission = await this.#teams.inspect(intent.targetId);
+          // Provider lookup identity and returned terminal state are separate
+          // claims. A provider returning another mission's object must NEVER
+          // grant cancellation authority or complete this recovery journal.
+          if (!mission || mission.id !== intent.targetId) continue;
           if (intent.operation === 'cancel-team-mission') {
             // A terminal FAILED/VERIFIED mission may have irreversible effects.
             // It is not evidence that a requested cancellation succeeded.
             if (mission.state !== 'CANCELLED') {
               if (['FAILED', 'VERIFIED'].includes(mission.state)) continue;
-              const cancelled = await this.#teams.cancel(mission.id);
-              if (cancelled.state !== 'CANCELLED') continue;
+              const cancelled = await this.#teams.cancel(intent.targetId);
+              if (!cancelled || cancelled.id !== intent.targetId ||
+                  cancelled.state !== 'CANCELLED') continue;
             }
           } else if (intent.operation === 'pause-team-mission') {
             if (mission.state === 'RUNNING' || mission.state === 'BLOCKED') {
-              const paused = await this.#teams.pause(mission.id);
-              if (paused.state !== 'PAUSED') continue;
+              const paused = await this.#teams.pause(intent.targetId);
+              if (!paused || paused.id !== intent.targetId ||
+                  paused.state !== 'PAUSED') continue;
             } else if (mission.state !== 'PAUSED') {
               continue;
             }
@@ -221,6 +227,7 @@ export class OrganizationCoordinator {
       if (wasPaused) {
         for (const target of program.targets.filter((item) => item.wave === program.activeWave && item.missionId && item.state === 'BLOCKED')) {
           const mission = await this.#teams.inspect(target.missionId!);
+          if (mission.id !== target.missionId) throw new OperatorError('ORGANIZATION_CHILD_ID_CONFLICT', 'Provider inspection returned an unrelated mission identity.');
           if (mission.state === 'PAUSED' || mission.state === 'BLOCKED') {
             const compensationId = compensationIntentId(program.id, 'pause-team-mission', mission.id);
             await this.#compensations.prepare({
@@ -235,11 +242,11 @@ export class OrganizationCoordinator {
             transaction.onRollback(async () => {
               try {
                 const paused = await this.#teams.pause(mission.id);
-                if (paused.state === 'PAUSED') await this.#compensations.complete(compensationId);
+                if (paused.id === mission.id && paused.state === 'PAUSED') await this.#compensations.complete(compensationId);
               } catch {}
             });
             const resumed = await this.#teams.resume(mission.id);
-            if (resumed.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_RESUME_UNCONFIRMED', 'Child mission did not confirm resume before organization advancement.');
+            if (resumed.id !== mission.id || resumed.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_RESUME_UNCONFIRMED', 'Child mission did not confirm exact identity and running state before advancement.');
           }
           target.state = mission.state === 'VERIFIED' ? 'VERIFIED' : 'RUNNING';
           target.updatedAt = this.#clock().toISOString();
@@ -257,6 +264,7 @@ export class OrganizationCoordinator {
     return await this.#mutate(id, async (program) => {
       for (const target of program.targets.filter((item) => item.missionId && ['RUNNING', 'BLOCKED'].includes(item.state))) {
         const mission = await this.#teams.inspect(target.missionId!);
+        if (mission.id !== target.missionId) throw new OperatorError('ORGANIZATION_CHILD_ID_CONFLICT', 'Provider inspection returned an unrelated mission identity.');
         target.state = mission.state === 'VERIFIED' ? 'VERIFIED'
           : mission.state === 'FAILED' ? 'FAILED'
           : mission.state === 'CANCELLED' ? 'CANCELLED'
@@ -320,7 +328,7 @@ export class OrganizationCoordinator {
         throw new OperatorError('ORGANIZATION_VERIFICATION_MISSING', `Target ${targetKey} is missing a verified mission proof.`);
       }
       const mission = await this.#teams.inspect(target.missionId);
-      if (mission.state !== 'VERIFIED') {
+      if (mission.id !== target.missionId || mission.state !== 'VERIFIED') {
         throw new OperatorError('ORGANIZATION_VERIFICATION_MISSING', `Target ${targetKey} mission is not currently verified.`);
       }
       const verifiers = mission.workItems.filter((item) =>
@@ -357,7 +365,7 @@ export class OrganizationCoordinator {
       for (const target of program.targets.filter((item) => item.state === 'RUNNING' && item.missionId)) {
         try {
           const mission = await this.#teams.pause(target.missionId!);
-          if (mission.state !== 'PAUSED') throw new OperatorError('ORGANIZATION_CHILD_PAUSE_UNCONFIRMED', 'Child mission did not confirm a paused state.');
+          if (mission.id !== target.missionId || mission.state !== 'PAUSED') throw new OperatorError('ORGANIZATION_CHILD_PAUSE_UNCONFIRMED', 'Child mission did not confirm exact identity and paused state.');
           target.state = 'BLOCKED';
           delete target.controlFailure;
         } catch (error) {
@@ -381,7 +389,7 @@ export class OrganizationCoordinator {
       for (const target of program.targets.filter((item) => item.missionId && !['VERIFIED', 'FAILED', 'CANCELLED'].includes(item.state))) {
         try {
           const mission = await this.#teams.cancel(target.missionId!);
-          if (mission.state !== 'CANCELLED') throw new OperatorError('ORGANIZATION_CHILD_CANCEL_UNCONFIRMED', 'Child mission did not confirm terminal cancellation.');
+          if (mission.id !== target.missionId || mission.state !== 'CANCELLED') throw new OperatorError('ORGANIZATION_CHILD_CANCEL_UNCONFIRMED', 'Child mission did not confirm exact identity and cancellation.');
           target.state = 'CANCELLED';
           delete target.controlFailure;
         } catch (error) {
@@ -498,11 +506,11 @@ export class OrganizationCoordinator {
       transaction.onRollback(async () => {
         try {
           const cancelled = await this.#teams.cancel(mission.id);
-          if (cancelled.state === 'CANCELLED') await this.#compensations.complete(durableCompensationId);
+          if (cancelled.id === mission.id && cancelled.state === 'CANCELLED') await this.#compensations.complete(durableCompensationId);
         } catch {}
       });
       const started = await this.#teams.start(mission.id);
-      if (started.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_START_UNCONFIRMED', 'Child mission did not confirm running state.');
+      if (started.id !== mission.id || started.state !== 'RUNNING') throw new OperatorError('ORGANIZATION_CHILD_START_UNCONFIRMED', 'Child mission did not confirm exact identity and running state.');
       target.missionId = mission.id;
       target.state = 'RUNNING';
       target.updatedAt = this.#clock().toISOString();
