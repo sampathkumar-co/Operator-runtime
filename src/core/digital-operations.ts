@@ -646,8 +646,11 @@ export class DigitalOperationsLayer {
     if (current.mode !== 'organization' || !current.organizationProgramId) throw new OperatorError('OPERATIONS_MODE_INVALID', 'Operation is not organization-scale.');
     const promoted = await this.#organizations.promote(current.organizationProgramId, shaDigest(verificationDigestInput, 'verificationDigest'));
     return await this.#update(id, (operation) => {
-      operation.state = promoted.state === 'RUNNING' ? 'RUNNING' : 'BLOCKED';
-      if (promoted.state !== 'RUNNING') operation.lastBlockReason = 'Organization promotion did not confirm RUNNING state.';
+      // A final verified wave still requires Digital Operations' independent
+      // world-postcondition refresh before its own terminal VERIFICATION.
+      const accepted = promoted.state === 'RUNNING' || promoted.state === 'VERIFIED';
+      operation.state = accepted ? 'RUNNING' : 'BLOCKED';
+      if (!accepted) operation.lastBlockReason = 'Organization promotion did not confirm a successful state.';
       else delete operation.lastBlockReason;
     });
   }
