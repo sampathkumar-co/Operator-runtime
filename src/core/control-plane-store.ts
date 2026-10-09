@@ -203,23 +203,25 @@ CREATE TABLE IF NOT EXISTS mecord_control_plane (
   value_json JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   expires_at TIMESTAMPTZ NULL,
+  is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY(namespace, record_key)
 );
+ALTER TABLE mecord_control_plane ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_plane(expires_at);
 `);
   }
 
   async get(namespace: string, key: string): Promise<ControlPlaneRecord | null> {
     const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
       [id(namespace,'namespace'), id(key,'key')]
     );
-    return result.rows[0] ? rowToRecord(result.rows[0]) : null;
+    return result.rows[0] && result.rows[0].is_deleted !== true ? rowToRecord(result.rows[0]) : null;
   }
 
   async list(namespace: string): Promise<ControlPlaneRecord[]> {
     const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE namespace=$1 ORDER BY record_key',
+      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND is_deleted=FALSE ORDER BY record_key',
       [id(namespace,'namespace')]
     );
     return result.rows.map(rowToRecord);
@@ -245,27 +247,35 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
       }
       for (const item of normalized) {
         const locked = await db.query<any>(
-          'SELECT generation, expires_at FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2 FOR UPDATE',
+          'SELECT generation, expires_at, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2 FOR UPDATE',
           [item.namespace,item.key]
         );
         const row = locked.rows[0];
         const priorGeneration = row ? storedGeneration(row.generation) : 0;
-        const live = Boolean(row && (!row.expires_at || Date.parse(String(row.expires_at)) > Date.parse(now)));
+        const live = Boolean(row && row.is_deleted !== true && (!row.expires_at || Date.parse(String(row.expires_at)) > Date.parse(now)));
         if (item.expectedGeneration === null ? live : (!live || priorGeneration !== item.expectedGeneration)) {
           throw new OperatorError('CONTROL_PLANE_CAS_MISMATCH','Record generation changed.',{retryable:true});
         }
         if (item.value === null) {
-          await db.query('DELETE FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',[item.namespace,item.key]);
+          // A physical DELETE would recycle generation 1 on recreation (ABA).
+          // Retain an invisible durable tombstone under the same advisory key lock.
+          if (row && row.is_deleted !== true) {
+            await db.query(
+              'UPDATE mecord_control_plane SET is_deleted=TRUE, value_digest=$3, value_json=$4::jsonb, updated_at=$5, expires_at=NULL WHERE namespace=$1 AND record_key=$2',
+              [item.namespace, item.key, digest({}), JSON.stringify({}), now]
+            );
+          }
           continue;
         }
         // Expiry makes a row logically absent for CAS, but it does not erase
         // its fencing history. Re-creation must advance, never recycle, the
         // prior generation.
+        if (priorGeneration >= Number.MAX_SAFE_INTEGER) throw invalid('Control-plane record generation exhausted.');
         const record = makeRecord(item.namespace,item.key,priorGeneration+1,item.value,now,item.expiresAt);
         await db.query(
           `INSERT INTO mecord_control_plane(namespace,record_key,generation,value_digest,value_json,updated_at,expires_at)
            VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)
-           ON CONFLICT(namespace,record_key) DO UPDATE SET generation=EXCLUDED.generation,value_digest=EXCLUDED.value_digest,value_json=EXCLUDED.value_json,updated_at=EXCLUDED.updated_at,expires_at=EXCLUDED.expires_at`,
+           ON CONFLICT(namespace,record_key) DO UPDATE SET generation=EXCLUDED.generation,value_digest=EXCLUDED.value_digest,value_json=EXCLUDED.value_json,updated_at=EXCLUDED.updated_at,expires_at=EXCLUDED.expires_at,is_deleted=FALSE`,
           [record.namespace,record.key,record.generation,record.valueDigest,JSON.stringify(record.value),record.updatedAt,record.expiresAt ?? null]
         );
         out.push(record);
@@ -277,7 +287,7 @@ CREATE INDEX IF NOT EXISTS mecord_control_plane_expiry_idx ON mecord_control_pla
   async snapshot(nowInput = new Date().toISOString()): Promise<ControlPlaneSnapshot> {
     const now = iso(nowInput,'now');
     const result = await this.#db.query<any>(
-      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE expires_at IS NULL OR expires_at>$1 ORDER BY namespace,record_key',
+      'SELECT namespace, record_key, generation, value_digest, value_json, updated_at, expires_at FROM mecord_control_plane WHERE is_deleted=FALSE AND (expires_at IS NULL OR expires_at>$1) ORDER BY namespace,record_key',
       [now]
     );
     const records = result.rows.map(rowToRecord);
