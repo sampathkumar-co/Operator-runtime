@@ -1223,3 +1223,61 @@ test('unbound request proofs and unavailable provider observations never grant r
   assert.equal((await devices.inspectPrepared(reservationId, realDigest))?.state, 'ACTIVE');
   assert.equal(await devices.inspectPrepared(crypto.randomUUID(), realDigest), null);
 });
+
+test('atomic prepared reservation release rejects foreign proof without changing provider state', async (t) => {
+  const { state, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
+  const peer = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('atomic-reservation-device');
+  await registry.registerVerifiedPeer(peer);
+  const request = { workloadKey: 'authentic-reservation' };
+  const proof = devicePoolAllocationRequestDigest(request);
+  const id = crypto.randomUUID();
+  await devices.reserve(request, [{
+    deviceId: peer.deviceId, sessionId: crypto.randomUUID(), capabilities: [],
+    observedAt: new Date().toISOString(), cpuSlots: 8, memoryMb: 8192,
+    gpu: false, tags: [], activeJobs: 0, maxConcurrentJobs: 1
+  }], { reservationId: id });
+  const foreign = devicePoolAllocationRequestDigest({ workloadKey: 'foreign-identity' });
+  await assert.rejects(devices.releasePrepared(id, foreign),
+    (e: any) => e?.code === 'DEVICE_POOL_ALLOCATION_PROOF_MISMATCH');
+  assert.equal((await devices.inspectPrepared(id, proof))?.state, 'ACTIVE');
+  const separatelyConnected = new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry));
+  const competing = await Promise.allSettled([
+    separatelyConnected.releasePrepared(id, foreign),
+    devices.releasePrepared(id, proof)
+  ]);
+  assert.equal(competing.filter(x => x.status === 'fulfilled').length, 1);
+  assert.equal(competing.filter(x => x.status === 'rejected').length, 1);
+  assert.equal((competing.find((x): x is PromiseRejectedResult => x.status === 'rejected')?.reason as any)?.code,
+    'DEVICE_POOL_ALLOCATION_PROOF_MISMATCH');
+  assert.equal((await devices.inspectPrepared(id, proof))?.state, 'RELEASED');
+  assert.equal((await separatelyConnected.releasePrepared(id, proof))?.state, 'RELEASED');
+  assert.equal(await devices.releasePrepared(crypto.randomUUID(), proof), null);
+});
+
+test('confirmed recovery also retains ownership when stored allocation request differs', async (t) => {
+  const { state, ops, devices } = await setup(t);
+  const registry = new DeviceRegistryStore(state);
+  const peer = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('confirmed-foreign-reservation');
+  await registry.registerVerifiedPeer(peer);
+  const ownerId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(ownerId, 'release-device-reservation');
+  const actual = { workloadKey: 'owner-request' };
+  const journal = new DurableCompensationJournal(state);
+  const intent = await journal.prepare({
+    id: crypto.randomUUID(), ownerKind: 'digital-operation', ownerId,
+    operation: 'release-device-reservation', targetId: reservationId,
+    allocationRequestDigest: devicePoolAllocationRequestDigest({ workloadKey: 'not-this-owner' })
+  });
+  await journal.confirm(intent.id);
+  await devices.reserve(actual, [{
+    deviceId: peer.deviceId, sessionId: crypto.randomUUID(), capabilities: [],
+    observedAt: new Date().toISOString(), cpuSlots: 8, memoryMb: 8192,
+    gpu: false, tags: [], activeJobs: 0, maxConcurrentJobs: 1
+  }], { reservationId });
+  const recovered = await ops.recoverPendingCompensations();
+  assert.equal(recovered.recovered, 0);
+  assert.equal(recovered.pending, 1);
+  assert.equal((await devices.inspectPrepared(reservationId, devicePoolAllocationRequestDigest(actual)))?.state, 'ACTIVE');
+  assert.ok((await journal.pending('digital-operation')).some(entry => entry.id === intent.id));
+});
