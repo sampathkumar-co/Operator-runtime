@@ -111,6 +111,10 @@ export class LocalAgentRelayRunner {
     }
     let safe: JsonObject;
     try {
+      // Persisted relay sequence and account generation are rechecked over the
+      // authenticated result channel immediately before any local side effect.
+      // A disconnected device may not execute from an old session snapshot.
+      await this.#assertFreshDeliveryAuthority(delivery);
       const result = delivery.kind === 'action'
         ? await this.#executeActionPayload(delivery.payload)
         : delivery.kind === 'task'
@@ -341,6 +345,42 @@ export class LocalAgentRelayRunner {
       throw new OperatorError('RELAY_LOCAL_TASK_UNCERTAIN', `Local task API returned HTTP ${response.status}; durable task state must be reconciled before retry.`, { retryable: true });
     }
     return boundedResult(bodyValue);
+  }
+
+  async #assertFreshDeliveryAuthority(delivery: RelayDelivery): Promise<void> {
+    const authority = validateApprovalAuthority(delivery.payload.approvalAuthority);
+    const token = await this.#sessionCredentials.forRequest();
+    const url = new URL('/v1/device-authority/check', this.#resultUrl).toString();
+    let response: Response;
+    try {
+      response = await fetchWithDeadline(url, {
+        redirect: 'error',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ seq: delivery.seq, deliveryId: delivery.id, authority })
+      }, Math.min(this.#resultSubmitTimeoutMs, 10_000), 'relay execution authority');
+    } catch {
+      // Unknown network outcome is NOT equivalent to an active generation.
+      throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED',
+        'Fresh relay authority could not be confirmed; refusing remote execution.', { retryable: false });
+    }
+    if (response.status !== 200) {
+      throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED',
+        'Relay authority refused or could not verify remote execution.', {
+          retryable: false, details: { httpStatus: response.status }
+        });
+    }
+    let result: any;
+    try { result = await response.json(); } catch {
+      throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED', 'Relay authority response was invalid.');
+    }
+    const confirmed = result?.authorization;
+    if (result?.ok !== true || confirmed?.seq !== delivery.seq || confirmed?.deliveryId !== delivery.id ||
+        confirmed?.accountId !== authority.accountId || confirmed?.deviceId !== authority.deviceId ||
+        confirmed?.generation !== authority.generation) {
+      throw new OperatorError('RELAY_EXECUTION_AUTHORITY_UNCONFIRMED',
+        'Relay did not prove the exact delivery identity and authority generation.');
+    }
   }
 
   async #submitResultWithRetry(seq: number, deliveryId: string, result: JsonObject): Promise<void> {
