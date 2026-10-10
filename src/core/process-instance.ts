@@ -45,26 +45,25 @@ export function processInstanceDefinitelyStale(
 }
 
 /**
- * A local PID observer can only reclaim an owner if the stored identity is
- * plausibly from this host. Linux v2 identifies a single boot; Linux v1
- * contains no host provenance and must be reconciled conservatively.
- *
- * Other platform identities predate host provenance. Their existing local
- * process checks are NOT a cross-host proof and still require distributed
- * provider-side fencing before multi-host execution can be certified.
+ * PID tables are namespace-local, not merely host-local. A Linux boot UUID
+ * is shared by containers with different PID namespaces. Reclamation needs
+ * both a matching boot UUID and a matching PID namespace inode.
+ * Legacy Linux v1/v2 records have no such namespace provenance, and must
+ * remain fenced until explicitly reconciled.
+ * Other OS identities still need provider-backed multi-host fencing.
  */
 export function localPidObservationAdmissible(
   storedIdentity: ProcessInstanceIdentity | undefined,
   localIdentity: ProcessInstanceIdentity
 ): boolean {
   if (!storedIdentity) return false;
-  const stored = storedIdentity.started;
-  const linuxBoot = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):ticks:\d+$/.exec(stored)?.[1];
-  if (linuxBoot) {
-    const localBoot = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):ticks:\d+$/.exec(localIdentity.started)?.[1];
-    return localBoot === linuxBoot;
+  const started = storedIdentity.started;
+  const linuxV3 = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):pidns:(\d+):ticks:\d+$/.exec(started);
+  if (linuxV3) {
+    const localV3 = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):pidns:(\d+):ticks:\d+$/.exec(localIdentity.started);
+    return !!localV3 && localV3[1] === linuxV3[1] && localV3[2] === linuxV3[2];
   }
-  if (stored.startsWith('linux-boot-')) return false;
+  if (started.startsWith('linux-boot-')) return false;
   return true;
 }
 
@@ -99,10 +98,15 @@ export function currentProcessInstance(): Promise<ProcessInstanceIdentity> {
 }
 
 function linuxIdentityUpgradeUncertain(left: string, right: string): boolean {
-  const oldPattern = /^linux-boot-ticks:\d+$/;
-  const newPattern = /^linux-boot-id:[0-9a-f-]{36}:ticks:\d+$/;
-  return (oldPattern.test(left) && newPattern.test(right)) ||
-    (newPattern.test(left) && oldPattern.test(right));
+  const format = (value: string): number => {
+    if (/^linux-boot-ticks:\d+$/.test(value)) return 1;
+    if (/^linux-boot-id:[0-9a-f-]{36}:ticks:\d+$/.test(value)) return 2;
+    if (/^linux-boot-id:[0-9a-f-]{36}:pidns:\d+:ticks:\d+$/.test(value)) return 3;
+    return 0;
+  };
+  const leftFormat = format(left);
+  const rightFormat = format(right);
+  return leftFormat > 0 && rightFormat > 0 && leftFormat !== rightFormat;
 }
 
 export function sameProcessInstance(left: ProcessInstanceIdentity, right: ProcessInstanceIdentity | null): boolean {
@@ -190,9 +194,14 @@ async function observeLinuxProcess(pid: number): Promise<ProcessInstanceObservat
     if (closingName < 0) return { status: 'unknown' };
     const fields = stat.slice(closingName + 2).trim().split(/\s+/);
     const startTicks = fields[19]; // field 22 overall; fields begin at process-state field 3.
-    return startTicks
-      ? { status: 'live', identity: { pid, started: `linux-boot-id:${bootId}:ticks:${startTicks}` } }
-      : { status: 'unknown' };
+    if (!startTicks || !/^\d+$/.test(startTicks)) return { status: 'unknown' };
+    // Containers can share one boot ID but have separate PID namespaces.
+    const namespace = await fs.readlink(`/proc/${pid}/ns/pid`);
+    const namespaceInode = /^pid:\[(\d+)\]$/.exec(namespace)?.[1];
+    if (!namespaceInode) return { status: 'unknown' };
+    return { status: 'live', identity: {
+      pid, started: `linux-boot-id:${bootId}:pidns:${namespaceInode}:ticks:${startTicks}`
+    } };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === 'ENOENT' || code === 'ESRCH' ? { status: 'dead' } : { status: 'unknown' };
