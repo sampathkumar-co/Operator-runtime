@@ -282,10 +282,13 @@ test('task API requires separate recovery authority for the exact blocked action
     headers: { ...headers, 'x-operator-recovery-token': recoveryToken },
     body: JSON.stringify({ approvedActionId: actionId })
   });
-  assert.equal(approved.status, 200);
-  const completed = await approved.json() as any;
-  assert.equal(completed.task.state, 'VERIFIED');
-  assert.equal(await fs.readFile(marker, 'utf8'), 'approved');
+  // Recovery authentication alone cannot manufacture a separate action approval.
+  // The trusted approval endpoint must record an actual decision, subsequently
+  // claimed through the exact action + authority binding by the task executor.
+  assert.equal(approved.status, 409);
+  const rejected = await approved.json() as any;
+  assert.equal(rejected.error.code, 'TASK_APPROVAL_DECISION_REQUIRED');
+  await assert.rejects(fs.access(marker));
 });
 
 test('approved local task continuation survives agent restart and resumes without a live waiter', async (t) => {

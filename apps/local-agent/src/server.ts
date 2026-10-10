@@ -1974,8 +1974,19 @@ export function createLocalAgentServer(options: {
               send(res, 409, { ok: false, error: { code: 'TASK_APPROVAL_MISMATCH', message: 'Approval must match the task current blocked action.' } });
               return;
             }
+            // The recovery credential authenticates the caller; it is NOT an
+            // action approval. A former shortcut passed the caller-supplied ID
+            // directly into approvedActionIds, bypassing ApprovalStore.claim.
+            // Require a real, still-valid approval decision and let the
+            // permissionProvider claim/settle the exact action + authority.
+            const approved = (await options.approvals?.list() ?? [])
+              .some((record) => record.actionId === approvedActionId && record.status === 'approved');
+            if (!approved) {
+              send(res, 409, { ok: false, error: { code: 'TASK_APPROVAL_DECISION_REQUIRED', message: 'A separate explicit approval decision is required before resuming this action.' } });
+              return;
+            }
           }
-          task = await options.taskOrchestrator.resume(taskId, approvedActionId ? [approvedActionId] : [], taskAuthorization(approvalAuthority, requestPermissions));
+          task = await options.taskOrchestrator.resume(taskId, [], taskAuthorization(approvalAuthority, requestPermissions));
         }
         send(res, 200, { ok: true, task });
       } catch (error) {
