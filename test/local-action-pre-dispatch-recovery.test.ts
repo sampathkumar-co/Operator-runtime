@@ -7,6 +7,9 @@ import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execut
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
 import { currentProcessInstance } from '../src/core/process-instance.ts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import type { ActionRequest } from '../src/core/types.ts';
 
 const action: ActionRequest = {
@@ -156,5 +159,24 @@ test('independent receipt store instances cannot lose concurrent new action writ
   await Promise.all(instances.map((store, i) => store.begin(actions[i]!)));
   for (let i = 0; i < instances.length; i++) {
     assert.equal((await instances[i]!.lookup(actions[i]!)).status, 'processing');
+  }
+});
+
+test('a truly exited worker can recover an initial PREPARED receipt across OS processes', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-prepared-child-exit-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const worker = fileURLToPath(new URL('./fixtures/local-receipt-prepared-worker.mjs', import.meta.url));
+  await promisify(execFile)(process.execPath,
+    ['--experimental-strip-types', worker, state],
+    { timeout: 20_000, maxBuffer: 16_384 });
+  const prior = JSON.parse(await fs.readFile(path.join(state, 'action-executions.json'), 'utf8')) as any;
+  assert.equal(prior.records[0]?.ownerProcess?.pid > 0, true);
+  const actualAction: ActionRequest = { ...action, id: 'cross-process-prepared-action' };
+  const replacement = new LocalActionExecutionStore(state);
+  const reconciled = await replacement.reconcileWithKernel(actualAction, undefined, new ActionTransitionJournal(state));
+  assert.equal(reconciled.status, 'completed');
+  if (reconciled.status === 'completed') {
+    assert.equal(reconciled.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+    assert.equal(reconciled.result.error?.sideEffectState, 'none');
   }
 });
