@@ -230,6 +230,8 @@ test('legacy v1 migration preserves all currently retained reservation IDs', asy
   const file = path.join(state, 'device-pool.json');
   const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   const legacy = { version: 1, reservations: saved.reservations };
+  // A real pre-upgrade directory had no v2 initialization marker.
+  await fs.rm(path.join(state, 'device-pool-initialized.json'));
   await fs.writeFile(file, JSON.stringify(legacy));
   await scheduler.reserve({ workloadKey: 'job:after-upgrade' }, ads, { reservationId: crypto.randomUUID() });
   const upgraded = JSON.parse(await fs.readFile(file, 'utf8'));
@@ -250,4 +252,84 @@ test('v2 reservation state fails closed when a retained row is absent from histo
   await fs.writeFile(file, JSON.stringify(saved));
   await assert.rejects(scheduler.reserve({ workloadKey: 'job:unsafe' }, ads),
     (error: any) => error?.code === 'DEVICE_POOL_STATE_CORRUPT');
+});
+
+test('missing device pool ledger cannot become an empty unowned capacity after initialization', async t => {
+  const { state, one, registry, routing, scheduler } = await setup(t);
+  const session = crypto.randomUUID(), reservationId = crypto.randomUUID();
+  const ads = [advert(one.deviceId, session)];
+  await scheduler.reserve({ workloadKey: 'before-ledger-loss' }, ads, { reservationId });
+  const marker = path.join(state, 'device-pool-initialized.json');
+  assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')),
+    { version: 1, initialized: true });
+  await fs.rm(path.join(state, 'device-pool.json'));
+  const resumed = new DevicePoolScheduler(state, registry, routing);
+  await assert.rejects(resumed.reserve({ workloadKey: 'reused-reservation' }, ads, { reservationId }),
+    (error: any) => error?.code === 'DEVICE_POOL_LEDGER_MISSING');
+  await assert.rejects(resumed.list({ activeOnly: true }),
+    (error: any) => error?.code === 'DEVICE_POOL_LEDGER_MISSING');
+  await fs.access(marker);
+});
+
+test('restoring a v1 device pool after v2 marker is a rejected history rollback', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  const ads = [advert(one.deviceId, crypto.randomUUID())];
+  await scheduler.reserve({ workloadKey: 'upgraded-v2' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const v2 = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.writeFile(file, JSON.stringify({ version: 1, reservations: v2.reservations }));
+  const restarted = new DevicePoolScheduler(state, registry, routing);
+  await assert.rejects(restarted.reserve({ workloadKey: 'rollback-replay' }, ads),
+    (error: any) => error?.code === 'DEVICE_POOL_HISTORY_INCOMPLETE');
+});
+
+test('saturated legacy reservation rows require trusted reconciliation before new allocations', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  const ads = [advert(one.deviceId, crypto.randomUUID())];
+  const first = await scheduler.reserve({ workloadKey: 'historic-v1-full' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.rm(path.join(state, 'device-pool-initialized.json'));
+  const legacyRows = Array.from({ length: 5_000 }, (_, index) => ({
+    ...saved.reservations[0],
+    id: index === 0 ? first.id : crypto.randomUUID(),
+    state: 'RELEASED'
+  }));
+  await fs.writeFile(file, JSON.stringify({ version: 1, reservations: legacyRows }));
+  const restarted = new DevicePoolScheduler(state, registry, routing);
+  await assert.rejects(restarted.reserve({ workloadKey: 'unknown-old-id' }, ads),
+    (error: any) => error?.code === 'DEVICE_POOL_HISTORY_INCOMPLETE');
+  assert.equal((await restarted.list({ activeOnly: true })).length, 0);
+});
+
+test('existing v2 history without completeness flag fails closed at original compaction threshold', async t => {
+  const { state, registry, routing, one } = await setup(t);
+  const usedReservationIds = Array.from({ length: 5_000 }, (_, i) =>
+    '00000000-0000-4000-8000-' + i.toString(16).padStart(12, '0'));
+  await fs.writeFile(path.join(state, 'device-pool.json'), JSON.stringify({
+    version: 2, reservations: [], usedReservationIds
+  }));
+  const restarted = new DevicePoolScheduler(state, registry, routing);
+  await assert.rejects(restarted.reserve({
+    workloadKey: 'legacy-v2-full'
+  }, [advert(one.deviceId, crypto.randomUUID())]),
+  (error: any) => error?.code === 'DEVICE_POOL_HISTORY_INCOMPLETE');
+  assert.deepEqual((await restarted.list()), []);
+});
+
+test('existing non-saturated v2 reservation history upgrades without discarding known IDs', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  const ads = [advert(one.deviceId, crypto.randomUUID())];
+  const first = await scheduler.reserve({ workloadKey: 'non-saturated-old-v2' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const stored = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete stored.historyComplete;
+  await fs.writeFile(file, JSON.stringify(stored));
+  const restarted = new DevicePoolScheduler(state, registry, routing);
+  await restarted.release(first.id);
+  const next = await restarted.reserve({ workloadKey: 'new-v2-identity' }, ads);
+  const upgraded = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(upgraded.historyComplete, true);
+  assert.ok(upgraded.usedReservationIds.includes(first.id));
+  assert.ok(upgraded.usedReservationIds.includes(next.id));
 });
