@@ -155,7 +155,15 @@ function validateState(input:unknown):EnterpriseIdentityState{
   if(!input||typeof input!=='object'||Array.isArray(input))throw corrupt('State must be an object.');
   const s=input as EnterpriseIdentityState;
   if(s.version!==1)throw corrupt('State version is invalid.');
-  const providers=normalizeProviders(s.providers), subjects=(Array.isArray(s.subjects)?s.subjects:[]).map(normalizeSubject);
+  // Fail closed on missing persisted collections or approval state. Defaulting an
+  // absent subjects array to [] can turn a damaged file into a valid empty SCIM
+  // database and overwrite the original identities on the next upsert.
+  if (!Array.isArray(s.providers) || !Array.isArray(s.subjects)) throw corrupt('Identity providers and subjects are required.');
+  if (s.providers.some((provider) => !provider || typeof provider !== 'object' || typeof provider.enabled !== 'boolean')
+    || s.subjects.some((subject) => !subject || typeof subject !== 'object' || typeof subject.enabled !== 'boolean')) {
+    throw corrupt('Persisted identity enabled flags must be explicit booleans.');
+  }
+  const providers=normalizeProviders(s.providers), subjects=s.subjects.map(normalizeSubject);
   if(subjects.length>100_000)throw corrupt('Too many identity subjects.');
   if(new Set(subjects.map(identityKey)).size!==subjects.length)throw corrupt('Identity subjects must be unique.');
   return{version:1,providers,subjects};
