@@ -274,6 +274,28 @@ function validateState(input: unknown): EventState {
     if (wait.wakeAt !== undefined) iso(wait.wakeAt, 'wait.wakeAt');
     if (wait.satisfiedAt !== undefined) iso(wait.satisfiedAt, 'wait.satisfiedAt');
     if (wait.terminalAt !== undefined) iso(wait.terminalAt, 'wait.terminalAt');
+    // Rehydrating a terminal flag without the event/timer receipt can report
+    // fictitious success to a durable workflow. Event history is bounded, so
+    // validate receipt identity even when its source event has been pruned.
+    if (wait.state === 'SATISFIED') {
+      if (!wait.satisfiedAt || typeof wait.satisfiedBy !== 'string') {
+        throw new OperatorError('EVENT_STATE_CORRUPT', 'Satisfied wait is missing its terminal receipt.');
+      }
+      const timer = wait.satisfiedBy === `timer:${wait.id}` && wait.wakeAt !== undefined;
+      const event = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(wait.satisfiedBy);
+      if (!timer && !event) throw new OperatorError('EVENT_STATE_CORRUPT', 'Satisfied wait has an invalid event/timer receipt identity.');
+      if (event) {
+        // Bounded retention may legitimately prune old events. But when the
+        // referenced event is still stored, its exact type, correlation and
+        // time window must prove that it actually satisfied this wait.
+        const source = state.events.find((candidate) => candidate.id === wait.satisfiedBy);
+        if (source && (!matches(wait, source)
+          || (wait.notBefore && Date.parse(source.occurredAt) < Date.parse(wait.notBefore))
+          || (wait.deadlineAt && Date.parse(source.occurredAt) > Date.parse(wait.deadlineAt)))) {
+          throw new OperatorError('EVENT_STATE_CORRUPT', 'Satisfied wait references an unrelated retained event.');
+        }
+      }
+    }
     if (wait.state === 'WAITING') {
       if (wait.terminalAt) throw new OperatorError('EVENT_STATE_CORRUPT', 'Waiting event wait cannot have terminalAt.');
     } else if (!wait.terminalAt) {
