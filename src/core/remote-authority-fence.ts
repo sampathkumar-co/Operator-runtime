@@ -306,9 +306,8 @@ function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
   if (!record) return null;
   const v = record.value;
   if (v.schemaVersion !== 1) throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Authority record has an unknown schema.');
-  if (v.kind === 'revoked' && Number.isSafeInteger(Number(v.revokedGeneration)) && Number(v.revokedGeneration) >= 1) {
-    const subject = validateSubject({ accountId: String(v.accountId ?? ''), deviceId: String(v.deviceId ?? ''),
-      authorityGeneration: Number(v.revokedGeneration) });
+  if (v.kind === 'revoked') {
+    const subject = storedSubject(v, 'revokedGeneration');
     if (subject.deviceId !== record.key) {
       throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Revocation barrier does not match its device key.');
     }
@@ -316,24 +315,42 @@ function parseValue(record: ControlPlaneRecord | null): LeaseState | null {
       revokedGeneration: subject.authorityGeneration };
   }
   if (v.kind === 'released') {
-    const subject = validateSubject({ accountId: String(v.accountId ?? ''),
-      deviceId: String(v.deviceId ?? ''), authorityGeneration: Number(v.authorityGeneration) });
+    const subject = storedSubject(v, 'authorityGeneration');
     if (subject.deviceId !== record.key) {
       throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Released authority record does not match its device key.');
     }
     return { kind: 'released', ...subject };
   }
   if (v.kind === 'active') {
-    const subject = validateSubject({ accountId: String(v.accountId), deviceId: String(v.deviceId), authorityGeneration: Number(v.authorityGeneration) });
+    const subject = storedSubject(v, 'authorityGeneration');
     const process = validProcessInstance(v.process);
-    if (subject.deviceId !== record.key || !process || !UUID.test(String(v.leaseId)) ||
+    if (subject.deviceId !== record.key || !process ||
+      typeof v.leaseId !== 'string' || !UUID.test(v.leaseId) ||
       typeof v.ownerId !== 'string' || !OWNER.test(v.ownerId) ||
-      !/^[A-Za-z0-9_-]{43}$/.test(String(v.fenceToken ?? ''))) {
+      typeof v.fenceToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(v.fenceToken)) {
       throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Active authority record is malformed.');
     }
     return { kind: 'active', ...subject, ownerId: v.ownerId, process, leaseId: String(v.leaseId), fenceToken: String(v.fenceToken) };
   }
   throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Unknown authority record state.');
+}
+function storedSubject(value: Record<string, unknown>, generationField: 'authorityGeneration' | 'revokedGeneration'): RemoteAuthoritySubject {
+  // Persisted JSON types are part of the fencing contract. Coercing true,
+  // arrays, or strings can recycle a high-water authority generation.
+  const generation = value[generationField];
+  if (typeof value.accountId !== 'string' || typeof value.deviceId !== 'string' ||
+      typeof generation !== 'number') {
+    throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Stored authority identity or generation has invalid JSON types.');
+  }
+  try {
+    return validateSubject({
+      accountId: value.accountId,
+      deviceId: value.deviceId,
+      authorityGeneration: generation
+    });
+  } catch {
+    throw blocked('REMOTE_AUTHORITY_CORRUPT', 'Stored authority identity or generation is invalid.');
+  }
 }
 function sameToken(a: string, b: string): boolean {
   const x=Buffer.from(a),y=Buffer.from(b);
