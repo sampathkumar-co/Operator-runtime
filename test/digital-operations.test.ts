@@ -1715,3 +1715,24 @@ test('real OS process death after request ID write but before child dispatch pro
   }), (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
   assert.equal((await teams.list()).length, 0, 'no child mission may be created after the crash');
 });
+
+test('exhausted immutable request history fails closed without evicting identity or executing work', async t => {
+  const base = await setup(t);
+  const file = path.join(base.state, 'digital-operations.json');
+  const historic = Array.from({ length: 50_000 }, (_, i) =>
+    '00000000-0000-4000-8000-' + i.toString(16).padStart(12, '0'));
+  await fs.writeFile(file, JSON.stringify({ version: 2, operations: [], usedOperationIds: historic }));
+  let effects = 0;
+  const teams = {
+    async submit() { effects++; throw new Error('No provider effect is permitted after history exhaustion'); }
+  };
+  const operations = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  await assert.rejects(operations.submit({
+    requestId: crypto.randomUUID(), objective: 'History limit must fail closed',
+    scopeKey: 'project:history-limit', successConditions: ['No duplicate child'],
+    execution: { kind: 'team', workItems: work() }, run: false
+  }), (error: any) => error?.code === 'OPERATIONS_ID_HISTORY_LIMIT');
+  assert.equal(effects, 0);
+  const after = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(after.usedOperationIds.length, 50_000, 'No historical identity may be discarded');
+});
