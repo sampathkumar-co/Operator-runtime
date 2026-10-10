@@ -217,7 +217,8 @@ export class DevicePoolScheduler {
    */
   async releasePrepared(reservationIdInput: string, requestDigestInput: string): Promise<DeviceReservation | null> {
     const reservationId = validUuid(reservationIdInput, 'reservationId');
-    const requestDigest = String(requestDigestInput ?? '');
+    if (typeof requestDigestInput !== 'string') throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
+    const requestDigest = requestDigestInput;
     if (!/^[0-9a-f]{64}$/.test(requestDigest)) {
       throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
     }
@@ -247,7 +248,8 @@ export class DevicePoolScheduler {
    */
   async inspectPrepared(reservationIdInput: string, requestDigestInput: string): Promise<DeviceReservation | null> {
     const reservationId = validUuid(reservationIdInput, 'reservationId');
-    const requestDigest = String(requestDigestInput ?? '');
+    if (typeof requestDigestInput !== 'string') throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
+    const requestDigest = requestDigestInput;
     if (!/^[0-9a-f]{64}$/.test(requestDigest)) {
       throw new OperatorError('DEVICE_POOL_ALLOCATION_PROOF_INVALID', 'Expected allocation request digest is invalid.');
     }
@@ -306,7 +308,7 @@ function normalizeRequest(input: DevicePoolRequest) {
     requiredCapabilities: uniqueStrings(input.requiredCapabilities ?? [], MAX_CAPABILITIES, 256, 'requiredCapabilities'),
     requiredTags: uniqueStrings(input.requiredTags ?? [], MAX_TAGS, 128, 'requiredTags'),
     minMemoryMb: boundedInteger(input.minMemoryMb ?? 0, 0, 1024 * 1024, 'minMemoryMb'),
-    requireGpu: input.requireGpu === true,
+    requireGpu: input.requireGpu === undefined ? false : explicitBoolean(input.requireGpu, 'requireGpu'),
     slots: boundedInteger(input.slots ?? 1, 1, 64, 'slots'),
     leaseMs: boundedInteger(input.leaseMs ?? 5 * 60_000, MIN_LEASE_MS, MAX_LEASE_MS, 'leaseMs'),
     livenessMs: boundedInteger(input.livenessMs ?? 45_000, 5_000, MAX_LIVENESS_MS, 'livenessMs')
@@ -333,7 +335,7 @@ function validateAdvertisements(input: DeviceResourceAdvertisement[], clock: () 
       observedAt,
       cpuSlots: boundedInteger(item.cpuSlots, 1, 1024, 'cpuSlots'),
       memoryMb: boundedInteger(item.memoryMb, 128, 16 * 1024 * 1024, 'memoryMb'),
-      gpu: item.gpu === true,
+      gpu: explicitBoolean(item.gpu, `advertisements[${index}].gpu`),
       tags: uniqueStrings(item.tags, MAX_TAGS, 128, 'tags'),
       activeJobs: boundedInteger(item.activeJobs, 0, 1024, 'activeJobs'),
       maxConcurrentJobs: boundedInteger(item.maxConcurrentJobs, 1, 1024, 'maxConcurrentJobs')
@@ -355,7 +357,7 @@ function validateState(input: unknown): DevicePoolState {
     if (ids.has(item.id)) throw corrupt('Reservation IDs must be unique.');
     ids.add(item.id);
     if (item.projectKey !== undefined) boundedContext(item.projectKey, 'projectKey');
-    if (item.allocationRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(item.allocationRequestDigest)) throw corrupt('Reservation allocation request digest is invalid.');
+    if (item.allocationRequestDigest !== undefined && (typeof item.allocationRequestDigest !== 'string' || !/^[0-9a-f]{64}$/.test(item.allocationRequestDigest))) throw corrupt('Reservation allocation request digest is invalid.');
     uniqueStrings(item.requiredCapabilities, MAX_CAPABILITIES, 256, 'requiredCapabilities');
     uniqueStrings(item.requiredTags, MAX_TAGS, 128, 'requiredTags');
     // Slot counts are durable capacity reservations, not forgiving request
@@ -374,7 +376,8 @@ function validateState(input: unknown): DevicePoolState {
 function uniqueStrings(input: unknown[], maxItems: number, maxLength: number, label: string): string[] {
   if (!Array.isArray(input) || input.length > maxItems) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} is invalid.`);
   const values = input.map((value, index) => {
-    const text = String(value ?? '');
+    if (typeof value !== 'string') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label}[${index}] is invalid.`);
+    const text = value;
     if (!text || text.length > maxLength || text.includes('\0') || /[\r\n]/.test(text)) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label}[${index}] is invalid.`);
     return text;
   });
@@ -382,22 +385,30 @@ function uniqueStrings(input: unknown[], maxItems: number, maxLength: number, la
   return values.sort();
 }
 function boundedContext(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$/.test(value)) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 function boundedInteger(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 function validUuid(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} must be UUID.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} must be UUID.`);
   return value;
 }
+function explicitBoolean(input: unknown, label: string): boolean {
+  if (typeof input !== 'boolean') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} must be a boolean.`);
+  return input;
+}
 function validIso(input: unknown, label: string): string {
-  const value = String(input ?? ''); const parsed = Date.parse(value);
+  if (typeof input !== 'string') throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} must be ISO timestamp.`);
+  const value = input; const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw new OperatorError('DEVICE_POOL_INPUT_INVALID', `${label} must be ISO timestamp.`);
   return value;
 }
