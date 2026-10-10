@@ -14,8 +14,11 @@ import { DurableCompensationJournal, type DurableCompensationIntent } from './co
 import { ResourceLeaseStore } from './resource-leases.ts';
 
 const MAX_OPERATIONS = 2000;
+// Durable requestId tombstones must never be silently compacted or recycled.
+// Refuse new effects at this bound, never forget provenance to free space.
+const MAX_OPERATION_HISTORY = 50_000;
 const MAX_CONDITIONS = 200;
-const MAX_STATE_BYTES = 16 * 1024 * 1024;
+const MAX_STATE_BYTES = 20 * 1024 * 1024;
 
 export type DigitalOperationState = 'PENDING' | 'RUNNING' | 'PAUSED' | 'BLOCKED' | 'FAILED' | 'CANCELLED' | 'VERIFIED';
 
@@ -67,8 +70,10 @@ export interface DigitalOperation {
 }
 
 interface OperationsState {
-  version: 1;
+  version: 2;
   operations: DigitalOperation[];
+  /** Persisted BEFORE any deterministic child effect can be created. */
+  usedOperationIds: string[];
 }
 
 export type DigitalExecutionSpec =
@@ -204,6 +209,16 @@ export class DigitalOperationsLayer {
         }
         return structuredClone(existing);
       }
+      if (state.usedOperationIds.includes(operationId)) {
+        // The visible record was pruned. A historical UUID cannot acquire
+        // a new contract or reuse deterministic child mission/reservation IDs.
+        throw new OperatorError('OPERATIONS_REQUEST_ID_REUSED',
+          'Request identity belongs to a historical operation and cannot be restarted after retention.');
+      }
+      if (state.usedOperationIds.length >= MAX_OPERATION_HISTORY) {
+        throw new OperatorError('OPERATIONS_ID_HISTORY_LIMIT',
+          'Durable request identity history is full; refusing to recycle child authority.');
+      }
       if (state.operations.length >= MAX_OPERATIONS) {
         const reclaim = state.operations.findIndex((item) => ['FAILED', 'CANCELLED', 'VERIFIED'].includes(item.state));
         if (reclaim >= 0) state.operations.splice(reclaim, 1);
@@ -211,6 +226,13 @@ export class DigitalOperationsLayer {
       }
 
       await this.#assertWorldConditions(normalized.preconditions, 'precondition');
+
+      // CRASH-ATOMIC AUTHORITY BOUNDARY: burn the request ID durably before
+      // any reservation, child mission, or optimizer execution. Reusing an ID
+      // after a crash with an unknown child result is prohibited even if the
+      // parent operation row was never committed.
+      state.usedOperationIds.push(operationId);
+      await this.#write(state);
 
       let selectedProcedureId: string | undefined;
       const candidateStrategies = normalized.strategies.length > 0 ? [...normalized.strategies] : [{ id: 'fresh-plan', staticScore: 0.5 }];
@@ -859,7 +881,7 @@ export class DigitalOperationsLayer {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, operations: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, operations: [], usedOperationIds: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Digital operations state could not be read.');
     }
@@ -867,7 +889,12 @@ export class DigitalOperationsLayer {
 
   async #write(state: OperationsState): Promise<void> {
     validateState(state);
-    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+    const encoded = JSON.stringify(state, null, 2);
+    if (Buffer.byteLength(encoded, 'utf8') > STORE_OPTIONS.maxBytes) {
+      throw new OperatorError('OPERATIONS_ID_HISTORY_LIMIT',
+        'Operation state plus non-recyclable request history exceeds durable storage capacity.');
+    }
+    await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
   }
 }
 
@@ -993,15 +1020,34 @@ function strategyContextFor(scopeKey: string, mode: string): string {
 
 function validateState(input: unknown): OperationsState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as OperationsState;
-  if (state.version !== 1 || !Array.isArray(state.operations) || state.operations.length > MAX_OPERATIONS) throw corrupt('State shape is invalid.');
+  const state = input as Partial<OperationsState> & { version?: number };
+  if ((state.version !== 1 && state.version !== 2) || !Array.isArray(state.operations) ||
+      state.operations.length > MAX_OPERATIONS) throw corrupt('State shape is invalid.');
+  // v1 migration can recover only retained operation IDs. Historical IDs
+  // pruned by an older executable are unknowable and must not be inferred.
+  const historical = state.version === 1
+    ? state.operations.map(op => op.id)
+    : state.usedOperationIds;
+  if (!Array.isArray(historical) || historical.length > MAX_OPERATION_HISTORY) {
+    throw corrupt('Non-recyclable operation history is missing or exceeds its bound.');
+  }
+  const used = new Set<string>();
+  for (const rawId of historical) {
+    if (typeof rawId !== 'string') throw corrupt('Historical operation IDs must be strings.');
+    let id: string;
+    try { id = validUuid(rawId, 'historical operationId'); }
+    catch { throw corrupt('Historical operation ID is invalid.'); }
+    if (id !== rawId || used.has(id)) throw corrupt('Historical operation IDs must be canonical and unique.');
+    used.add(id);
+  }
   const ids = new Set<string>();
   for (const operation of state.operations) {
     validateOperation(operation);
     if (ids.has(operation.id)) throw corrupt('Operation IDs must be unique.');
+    if (!used.has(operation.id)) throw corrupt('Retained operation is missing from immutable request history.');
     ids.add(operation.id);
   }
-  return structuredClone(state);
+  return { version: 2, operations: structuredClone(state.operations), usedOperationIds: [...historical] };
 }
 
 function validateOperation(operation: DigitalOperation): void {
