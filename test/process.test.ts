@@ -356,3 +356,40 @@ test('Windows process termination reconciliation distinguishes still-present fro
   assert.equal(after.result?.ok, true);
   assert.equal((after.result?.output as any).fingerprint, inspected.fingerprint);
 });
+
+test('Windows native one-shot Job Object kills detached descendants after a successful parent exit', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows Job Object containment regression');
+  if (!process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH) return t.skip('native helper unavailable');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-job-close-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'detached-descendant-escaped.txt');
+  const descendant = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'survived'),1200)`;
+  const parent = `const{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:'ignore'});c.unref();`;
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const result = await provider.execute(request('node', ['-e', parent], root));
+  assert.equal(result.ok, true, result.error?.message);
+  await new Promise(resolve => setTimeout(resolve, 1600));
+  await assert.rejects(fs.access(marker), 'detached descendants must be terminated when the Job Object closes');
+});
+
+test('Windows containment-required mode rejects one-shot execution without a native helper', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows containment configuration');
+  const prevRequired = process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT;
+  const prevHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT = '1';
+  delete process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+  t.after(() => {
+    if (prevRequired === undefined) delete process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT;
+    else process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT = prevRequired;
+    if (prevHelper === undefined) delete process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
+    else process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH = prevHelper;
+  });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-job-required-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'must-not-run.txt');
+  const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
+  const result = await provider.execute(request('node', ['-e', `require('fs').writeFileSync(${JSON.stringify(marker)},'bad')`], root));
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, 'PROCESS_JOB_CONTAINMENT_REQUIRED');
+  await assert.rejects(fs.access(marker));
+});
