@@ -1020,7 +1020,7 @@ function strategyContextFor(scopeKey: string, mode: string): string {
 
 function validateState(input: unknown): OperationsState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as Partial<OperationsState> & { version?: number };
+  const state = input as { version?: number; operations?: DigitalOperation[]; usedOperationIds?: unknown };
   if ((state.version !== 1 && state.version !== 2) || !Array.isArray(state.operations) ||
       state.operations.length > MAX_OPERATIONS) throw corrupt('State shape is invalid.');
   // v1 migration can recover only retained operation IDs. Historical IDs
