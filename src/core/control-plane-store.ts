@@ -685,12 +685,12 @@ function objectValue(input:unknown):Record<string,unknown>{
 function expired(record:ControlPlaneRecord,now:number):boolean{return Boolean(record.expiresAt&&Date.parse(record.expiresAt)<=now);}
 function recordKey(namespace:string,key:string):string{return namespace+'\u0000'+key;}
 function digest(value:unknown):string{return crypto.createHash('sha256').update(canonicalJson(value),'utf8').digest('hex');}
-function id(value:unknown,label:string):string{const s=String(value??'');if(!ID.test(s))throw invalid(label+' is invalid.');return s;}
-function iso(value:unknown,label:string):string{const s=String(value??'');if(!s||!Number.isFinite(Date.parse(s))||new Date(s).toISOString()!==s)throw invalid(label+' must be canonical ISO.');return s;}
+function id(value:unknown,label:string):string{if(typeof value!=='string'||!ID.test(value))throw invalid(label+' is invalid.');return value;}
+function iso(value:unknown,label:string):string{if(typeof value!=='string'||!value||!Number.isFinite(Date.parse(value))||new Date(value).toISOString()!==value)throw invalid(label+' must be canonical ISO.');return value;}
 // Persisted CAS and snapshot generations are authority identities, not numeric
 // input fields. PostgreSQL BIGINT rows are converted at the adapter boundary;
 // all internal records must retain a real JSON-number representation.
 function integer(value:unknown,min:number,max:number,label:string):number{if(typeof value!=='number'||!Number.isSafeInteger(value)||value<min||value>max)throw invalid(label+' is invalid.');return value;}
-function sha(value:unknown,label:string):string{const s=String(value??'').toLowerCase();if(!/^[0-9a-f]{64}$/.test(s))throw invalid(label+' must be SHA-256.');return s;}
+function sha(value:unknown,label:string):string{if(typeof value!=='string')throw invalid(label+' must be SHA-256.');const s=value.toLowerCase();if(!/^[0-9a-f]{64}$/.test(s))throw invalid(label+' must be SHA-256.');return s;}
 function invalid(message:string):OperatorError{return new OperatorError('CONTROL_PLANE_STORE_INVALID',message);}
 function corrupt(message:string):OperatorError{return new OperatorError('CONTROL_PLANE_STORE_CORRUPT',message);}
