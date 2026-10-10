@@ -669,24 +669,27 @@ function uniqueKeys(input: unknown): string[] {
   return values;
 }
 function bounded(input: unknown, max: number, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   if (value.length < 1 || value.length > max || value.includes('\0')) throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 function sha(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
 function iso(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw corrupt('Timestamp is invalid.');
+  const value = input;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw corrupt('Timestamp is invalid.');
   return value;
 }
 function integer(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < min || input > max) throw new OperatorError('ACTION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   return value;
 }
 function corrupt(message: string): OperatorError {
