@@ -501,3 +501,42 @@ test('one wrong CAS generation rolls back all writes in an authority-protected b
   ]), (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
   assert.equal((await make().assertCurrent(before.lease)).generation, before.lease.generation);
 });
+
+test('authority policy await cannot authorize a caller-mutated protected payload or storage key', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-batch-payload-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const subject: RemoteAuthoritySubject = {
+    accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 1
+  };
+  let enter!: () => void, resume!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { resume = resolve; });
+  const storage = new EmbeddedControlPlaneStore(dir);
+  const fence = new RemoteAuthorityFenceStore(storage, {
+    authorize: async () => {},
+    authorizeMutation: async (_subject, mutation) => {
+      if (mutation.namespace !== 'authorized-effects' || mutation.key !== 'original') {
+        throw new Error('unauthorized storage scope');
+      }
+      enter();
+      await gate;
+      // Even if a trusted callback mutates its received argument, the
+      // transaction must commit the original immutable intent only.
+      (mutation.value as Record<string, unknown>).owner = 'callback-mutated';
+    }
+  });
+  const lease = await fence.acquire(subject, 'immutable-authorized-provider');
+  const effect = {
+    namespace: 'authorized-effects', key: 'original', expectedGeneration: null,
+    value: { owner: 'original' }
+  };
+  const work = fence.commitProtectedBatch(lease, [effect]);
+  await entered;
+  effect.key = 'injected-key';
+  effect.value.owner = 'attacker-overwrite';
+  resume();
+  const result = await work;
+  assert.equal(result.records[0]?.key, 'original');
+  assert.equal((await storage.get('authorized-effects', 'original'))?.value.owner, 'original');
+  assert.equal(await storage.get('authorized-effects', 'injected-key'), null);
+});
