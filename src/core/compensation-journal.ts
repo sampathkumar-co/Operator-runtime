@@ -150,7 +150,8 @@ function allocationDigest(input: unknown): string {
 }
 
 function bounded(input: unknown, max: number, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('COMPENSATION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   if (value.length < 1 || value.length > max || value.includes('\0')) {
     throw new OperatorError('COMPENSATION_JOURNAL_INPUT_INVALID', `${label} is invalid.`);
   }
@@ -158,7 +159,8 @@ function bounded(input: unknown, max: number, label: string): string {
 }
 
 function iso(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw corrupt('Timestamp is invalid.');
+  const value = input;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw corrupt('Timestamp is invalid.');
   return value;
