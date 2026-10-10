@@ -105,7 +105,7 @@ export class ResourceLeaseStore {
     const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
     const processInstance = this.#processInstance ?? await currentProcessInstance();
     await this.#mutate(async (state) => {
-      await reapDeadHolders(state, this.#observeProcessInstance);
+      await reapDeadHolders(state, this.#observeProcessInstance, processInstance);
       if (mode === 'exclusive') {
         for (const key of keys) {
           const quarantine = state.quarantines.find((item) =>
@@ -220,7 +220,8 @@ export class ResourceLeaseStore {
 
   async inspect(): Promise<LeaseState> {
     const state = await this.#read();
-    await reapDeadHolders(state, this.#observeProcessInstance);
+    const localInstance = this.#processInstance ?? await currentProcessInstance();
+    await reapDeadHolders(state, this.#observeProcessInstance, localInstance);
     return structuredClone(state);
   }
 
@@ -322,9 +323,35 @@ function validateState(input: unknown): LeaseState {
   return { version: 2, resources, quarantines: normalizedQuarantines };
 }
 
-async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObserver): Promise<void> {
+function linuxBootIdentity(identity: ProcessInstanceIdentity | undefined): string | null {
+  if (!identity) return null;
+  return /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):ticks:\d+$/.exec(identity.started)?.[1] ?? null;
+}
+
+function cannotProveLocalLinuxOwner(holder: Holder, localInstance: ProcessInstanceIdentity): boolean {
+  const started = holder.processInstance?.started;
+  if (!started) return false;
+  // Legacy Linux records lack boot provenance entirely. Their PID may belong
+  // to a remote machine; local PID disappearance/reuse proves nothing about
+  // that remote holder. Conservative recovery requires explicit reconciliation.
+  if (/^linux-boot-ticks:\d+$/.test(started)) return true;
+  const holderBoot = linuxBootIdentity(holder.processInstance);
+  if (!holderBoot) return false;
+  const localBoot = linuxBootIdentity(localInstance);
+  // A matching Linux boot UUID is necessary evidence for using the local
+  // process table. A different (or unavailable) boot UUID is NOT proof of
+  // death, even when the local OS reports this PID as dead or reused.
+  return !localBoot || holderBoot !== localBoot;
+}
+
+async function reapDeadHolders(
+  state: LeaseState,
+  observer: ProcessInstanceObserver,
+  localInstance: ProcessInstanceIdentity
+): Promise<void> {
   const observations = new Map<number, ProcessInstanceObservation>();
   for (const holder of state.resources.flatMap((entry) => entry.holders)) {
+    if (cannotProveLocalLinuxOwner(holder, localInstance)) continue;
     if (!observations.has(holder.pid)) {
       let observation: ProcessInstanceObservation;
       try { observation = await observer(holder.pid); }
@@ -333,10 +360,10 @@ async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObser
     }
   }
   for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
+    if (cannotProveLocalLinuxOwner(holder, localInstance)) return true;
     const observation = observations.get(holder.pid) ?? { status: 'unknown' };
-    // A live process observed after the Linux identity-format upgrade may
-    // represent the exact same owner. Treat that upgrade as uncertainty,
-    // never proof that its durable exclusive lease can be evicted.
+    // Same-host process death/PID-reuse is actionable only for a provably local
+    // owner. Unknown or remote liveness must never grant exclusive ownership.
     return !processInstanceDefinitelyStale(holder.processInstance, observation);
   });
   state.resources = state.resources.filter((entry) => entry.holders.length > 0);
