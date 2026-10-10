@@ -41,3 +41,33 @@ for (const kind of ['local-agent', 'relay-server'] as const) {
     });
   }
 }
+
+for (const kind of ['local-agent', 'relay-server'] as const) {
+  for (const caseName of ['string-pid', 'number-token', 'string-version', 'number-timestamp'] as const) {
+    test(kind + ' rejects type-coerced persisted ' + caseName + ' lock owner', async t => {
+      const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-lock-owner-types-'));
+      t.after(() => fs.rm(state, { recursive: true, force: true }));
+      const lockFile = path.join(state, kind === 'local-agent' ? 'local-agent.lock' : 'relay-server.lock');
+      const malformed: Record<string, unknown> = {
+        version: kind === 'local-agent' ? 2 : 1,
+        pid: 42711,
+        processInstance: { pid: 42711, started: ORIGINAL },
+        token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        createdAt: new Date().toISOString()
+      };
+      if (caseName === 'string-pid') malformed.pid = '42711';
+      if (caseName === 'number-token') malformed.token = 12345678901234567890;
+      if (caseName === 'string-version') malformed.version = String(malformed.version);
+      if (caseName === 'number-timestamp') malformed.createdAt = 20261010;
+      await fs.writeFile(lockFile, JSON.stringify(malformed));
+      const options = { pid: 42712, processInstance: { pid: 42712, started: LOCAL } };
+      await assert.rejects(
+        kind === 'local-agent'
+          ? acquireLocalAgentStateInstanceLock(state, options)
+          : acquireRelayStateInstanceLock(state, options),
+        (error: any) => error?.code === (kind === 'local-agent' ? 'LOCAL_AGENT_STATE_LOCK_INVALID' : 'RELAY_STATE_LOCK_INVALID')
+      );
+      assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), malformed);
+    });
+  }
+}
