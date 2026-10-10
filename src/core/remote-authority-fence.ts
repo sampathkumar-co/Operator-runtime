@@ -185,7 +185,11 @@ export class RemoteAuthorityFenceStore {
           typeof mutation.namespace !== 'string' || typeof mutation.key !== 'string') {
         throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must have a valid namespace/key and must not address authority state.');
       }
-      return { ...mutation };
+      // Detach deep request data BEFORE any async authorization hook.
+      // Otherwise a concurrent caller could mutate nested payload fields
+      // after policy checked them but before the atomic provider transaction.
+      try { return structuredClone(mutation); }
+      catch { throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation cannot be safely cloned.'); }
     });
     const touched = new Set<string>();
     for (const mutation of mutations) {
@@ -196,7 +200,9 @@ export class RemoteAuthorityFenceStore {
       touched.add(uniqueKey);
       // Independent trusted provider policy must authorize EVERY changed key,
       // not only the first mutation in a multi-stream transaction.
-      await this.#authorizeMutation(lease, mutation);
+      // The policy receives an independent copy, so it cannot accidentally
+      // mutate the exact committed write while checking it.
+      await this.#authorizeMutation(lease, structuredClone(mutation));
     }
     const now = this.#clock().toISOString();
     const [advanced, ...records] = await this.#store.transact([
