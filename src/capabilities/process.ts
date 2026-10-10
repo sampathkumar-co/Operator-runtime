@@ -1064,13 +1064,30 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     }
     const childEnvironment = safeChildEnvironment(process.env, environmentOverrides);
     const trustedExecutable = resolveTrustedExecutable(executable, childEnvironment);
-    const child = spawn(trustedExecutable, args, {
-      cwd,
-      shell: false,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: childEnvironment
-    });
+    // Windows descendant snapshots have a spawn/escape race. The native helper
+    // creates the child SUSPENDED, places it in KILL_ON_JOB_CLOSE, then resumes
+    // it. The helper, not the child, is the observed one-shot process owner.
+    // This is deliberately distinct from long-lived terminal.session ownership.
+    const windowsNativeHelper = process.platform === 'win32'
+      && path.isAbsolute(process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH ?? '')
+      ? process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
+      : undefined;
+    if (process.platform === 'win32' && process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT === '1'
+        && !windowsNativeHelper) {
+      reject(new OperatorError('PROCESS_JOB_CONTAINMENT_REQUIRED',
+        'Windows one-shot execution requires the trusted native Job Object helper.', {
+          retryable: false, details: { sideEffectState: 'none' }
+        }));
+      return;
+    }
+    const child = spawn(windowsNativeHelper ?? trustedExecutable,
+      windowsNativeHelper ? ['job-run', cwd, trustedExecutable, ...args] : args, {
+        cwd,
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: childEnvironment
+      });
 
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -1105,7 +1122,19 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
     child.once('error', rejectOnce);
 
     const terminateChild = () => {
-      terminationPromise ??= terminateProcessTree(child, child.pid ?? 0).catch((error) => {
+      // Terminating the supervising native helper closes its kernel Job
+      // handle. Windows then terminates ALL assigned descendants, including
+      // detached children omitted by a one-time PID snapshot.
+      terminationPromise ??= (windowsNativeHelper
+        ? Promise.resolve().then(() => {
+          if (child.exitCode === null && child.signalCode === null && !child.kill()) {
+            throw new OperatorError('PROCESS_TREE_TERMINATION_FAILED',
+              'Could not terminate the Windows Job Object owner.', {
+                retryable: false, details: { sideEffectState: 'uncertain' }
+              });
+          }
+        })
+        : terminateProcessTree(child, child.pid ?? 0)).catch((error) => {
         throw error instanceof OperatorError
           ? error
           : new OperatorError('PROCESS_TREE_TERMINATION_FAILED', error instanceof Error ? error.message : String(error), { retryable: false, details: { sideEffectState: 'uncertain' } });
