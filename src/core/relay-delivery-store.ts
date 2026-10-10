@@ -405,8 +405,9 @@ export class RelayDeliveryStore {
     for (const record of records) {
       if (record.key === '__epoch') {
         epochGeneration = record.generation;
-        const counter = Number(record.value.counter ?? 0);
-        if (!Number.isSafeInteger(counter) || counter < 0) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery epoch is invalid.');
+        const counter = record.value.counter;
+        // A persisted epoch is a typed monotonic counter; never normalize missing or coerced values.
+        if (typeof counter !== 'number' || !Number.isSafeInteger(counter) || counter < 0) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery epoch is invalid.');
         epochCounter = counter;
         continue;
       }
