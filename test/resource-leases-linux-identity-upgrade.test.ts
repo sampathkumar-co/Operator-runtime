@@ -35,16 +35,16 @@ test('genuine PID reuse with complete comparable identities can still reclaim de
   const state=await fs.mkdtemp(path.join(os.tmpdir(),'operator-lease-pid-reuse-'));
   t.after(()=>fs.rm(state,{recursive:true,force:true}));
   const key='repo:/tmp/pid-reuse';
-  const original={pid:47333,started:'linux-boot-id:11111111-1111-4111-8111-111111111111:ticks:20'};
+  const original={pid:47333,started:'linux-boot-id:11111111-1111-4111-8111-111111111111:pidns:5555:ticks:20'};
   await fs.writeFile(path.join(state,'resource-leases.json'),JSON.stringify({
     version:2,resources:[{key,holders:[{leaseId:'44444444-4444-4444-8444-444444444444',
       ownerId:'stale-old-holder',pid:original.pid,processInstance:original,
       mode:'exclusive',acquiredAt:new Date().toISOString()}]}],quarantines:[]
   }));
   const store=new ResourceLeaseStore(state,{
-    processInstance:{pid:47444,started:'linux-boot-id:11111111-1111-4111-8111-111111111111:ticks:44'},
+    processInstance:{pid:47444,started:'linux-boot-id:11111111-1111-4111-8111-111111111111:pidns:5555:ticks:44'},
     observeProcessInstance:async pid=>({status:'live',identity:{pid,
-      started:'linux-boot-id:11111111-1111-4111-8111-111111111111:ticks:21'}})
+      started:'linux-boot-id:11111111-1111-4111-8111-111111111111:pidns:5555:ticks:21'}})
   });
   const replacement=await store.acquire('new-owner',[key],'exclusive');
   await replacement.assertOwned();
@@ -84,7 +84,7 @@ test('same Linux boot and confirmed PID death permits reclaim', async t => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-lease-local-dead-'));
   t.after(() => fs.rm(state, { recursive: true, force: true }));
   const key = 'repo:/tmp/local-recovery';
-  const original = { pid: 48801, started: 'linux-boot-id:cccccccc-cccc-4ccc-8ccc-cccccccccccc:ticks:1234' };
+  const original = { pid: 48801, started: 'linux-boot-id:cccccccc-cccc-4ccc-8ccc-cccccccccccc:pidns:6666:ticks:1234' };
   await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({
     version: 2, resources: [{ key, holders: [{
       leaseId: '66666666-6666-4666-8666-666666666666',
@@ -93,10 +93,35 @@ test('same Linux boot and confirmed PID death permits reclaim', async t => {
     }] }], quarantines: []
   }));
   const store = new ResourceLeaseStore(state, {
-    processInstance: { pid: 48802, started: 'linux-boot-id:cccccccc-cccc-4ccc-8ccc-cccccccccccc:ticks:4321' },
+    processInstance: { pid: 48802, started: 'linux-boot-id:cccccccc-cccc-4ccc-8ccc-cccccccccccc:pidns:6666:ticks:4321' },
     observeProcessInstance: async () => ({ status: 'dead' as const })
   });
   const replacement = await store.acquire('live-same-host', [key], 'exclusive');
   await replacement.assertOwned();
   await replacement.release();
+});
+
+test('same Linux boot with another PID namespace cannot evict active exclusive lease', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-lease-pidns-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const key = 'repo:/tmp/shared-boot-separate-container';
+  const boot = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const owner = { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:100' };
+  await fs.writeFile(path.join(state, 'resource-leases.json'), JSON.stringify({
+    version: 2, resources: [{ key, holders: [{
+      leaseId: '99999999-9999-4999-8999-999999999999',
+      ownerId: 'container-a-owner', pid: owner.pid, processInstance: owner,
+      mode: 'exclusive', acquiredAt: new Date().toISOString()
+    }] }], quarantines: []
+  }));
+  for (const status of ['live', 'dead'] as const) {
+    const store = new ResourceLeaseStore(state, {
+      processInstance: { pid: 42712, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:200' },
+      observeProcessInstance: async pid => status === 'dead'
+        ? { status: 'dead' as const }
+        : { status: 'live' as const, identity: { pid, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:201' } }
+    });
+    await assert.rejects(() => store.acquire('container-b', [key], 'exclusive'),
+      (error: any) => error?.code === 'RESOURCE_BUSY');
+  }
 });
