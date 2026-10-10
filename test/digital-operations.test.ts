@@ -1597,6 +1597,8 @@ test('legacy v1 operations migrate retained request IDs without recycling them',
   const original = JSON.parse(await fs.readFile(file, 'utf8'));
   delete original.usedOperationIds;
   original.version = 1;
+  // Simulate a genuinely old pre-upgrade directory, not a rollback of v2.
+  await fs.rm(path.join(base.state, 'digital-operations-initialized.json'));
   await fs.writeFile(file, JSON.stringify(original));
   const restarted = new DigitalOperationsLayer(base.state, base);
   const same = await restarted.submit(input);
@@ -1773,6 +1775,7 @@ test('saturated v1 operation retention cannot claim complete identity history af
   file.version = 1;
   delete file.usedOperationIds;
   delete file.historyComplete;
+  await fs.rm(path.join(base.state, 'digital-operations-initialized.json'));
   file.operations = Array.from({ length: 2_000 }, (_, index) => ({
     ...old, id: index === 0 ? requestId : crypto.randomUUID(),
     teamMissionId: crypto.randomUUID(), createdAt: old.createdAt, updatedAt: old.updatedAt
@@ -1801,4 +1804,27 @@ test('malformed initialization marker with missing ledger fails closed', async t
     JSON.stringify({ version: 1, initialized: false }));
   await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
     (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT');
+});
+
+test('restoring an old v1 state after a v2 identity marker cannot downgrade authority history', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Do not revert upgrade identity',
+    scopeKey: 'project:old-restore-replay', successConditions: ['No replay'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  await base.ops.submit(request);
+  const file = path.join(base.state, 'digital-operations.json');
+  const old = JSON.parse(await fs.readFile(file, 'utf8'));
+  old.version = 1;
+  delete old.usedOperationIds;
+  delete old.historyComplete;
+  await fs.writeFile(file, JSON.stringify(old));
+  // The separately committed marker proves v2 state existed on this machine.
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).submit({
+    ...request, requestId: crypto.randomUUID()
+  }), (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
+    (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
 });
