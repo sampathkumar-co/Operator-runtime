@@ -261,7 +261,7 @@ test('missing device pool ledger cannot become an empty unowned capacity after i
   await scheduler.reserve({ workloadKey: 'before-ledger-loss' }, ads, { reservationId });
   const marker = path.join(state, 'device-pool-initialized.json');
   assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')),
-    { version: 1, initialized: true });
+    { version: 1, initialized: true, allowV1: false });
   await fs.rm(path.join(state, 'device-pool.json'));
   const resumed = new DevicePoolScheduler(state, registry, routing);
   await assert.rejects(resumed.reserve({ workloadKey: 'reused-reservation' }, ads, { reservationId }),
@@ -332,4 +332,55 @@ test('existing non-saturated v2 reservation history upgrades without discarding 
   assert.equal(upgraded.historyComplete, true);
   assert.ok(upgraded.usedReservationIds.includes(first.id));
   assert.ok(upgraded.usedReservationIds.includes(next.id));
+});
+
+test('read-only observation of a pre-upgrade v1 ledger writes a monotonic rollback marker', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  const ads = [advert(one.deviceId, crypto.randomUUID())];
+  const first = await scheduler.reserve({ workloadKey: 'before-legacy-observe' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const data = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.rm(path.join(state, 'device-pool-initialized.json'));
+  await fs.writeFile(file, JSON.stringify({ version: 1, reservations: data.reservations }));
+  const observer = new DevicePoolScheduler(state, registry, routing);
+  assert.equal((await observer.list())[0]?.id, first.id);
+  const marker = path.join(state, 'device-pool-initialized.json');
+  assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')),
+    { version: 1, initialized: true, allowV1: true });
+  // A second read-only observer of the same legitimate v1 file must work.
+  assert.equal((await observer.list())[0]?.id, first.id);
+  await fs.rm(file);
+  await assert.rejects(new DevicePoolScheduler(state, registry, routing).list(),
+    (error: any) => error?.code === 'DEVICE_POOL_LEDGER_MISSING');
+});
+
+test('a stale v1 observer cannot downgrade the independently locked v2 history marker', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  const ads = [advert(one.deviceId, crypto.randomUUID())];
+  const first = await scheduler.reserve({ workloadKey: 'old-history' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const current = JSON.parse(await fs.readFile(file, 'utf8'));
+  await fs.rm(path.join(state, 'device-pool-initialized.json'));
+  await fs.writeFile(file, JSON.stringify({ version: 1, reservations: current.reservations }));
+  const observer = new DevicePoolScheduler(state, registry, routing);
+  await observer.list();
+  assert.equal(JSON.parse(await fs.readFile(path.join(state, 'device-pool-initialized.json'), 'utf8')).allowV1, true);
+  const upgraded = new DevicePoolScheduler(state, registry, routing);
+  await upgraded.release(first.id);
+  const marker = path.join(state, 'device-pool-initialized.json');
+  assert.equal(JSON.parse(await fs.readFile(marker, 'utf8')).allowV1, false);
+  const older = { version: 1, reservations: current.reservations };
+  await fs.writeFile(file, JSON.stringify(older));
+  await assert.rejects(observer.list(),
+    (error: any) => error?.code === 'DEVICE_POOL_HISTORY_INCOMPLETE');
+  assert.equal(JSON.parse(await fs.readFile(marker, 'utf8')).allowV1, false);
+});
+
+test('truncated reservation initialization markers return typed corruption after parent loss', async t => {
+  const { state, registry, routing, one, scheduler } = await setup(t);
+  await scheduler.reserve({ workloadKey: 'marker-corruption' }, [advert(one.deviceId, crypto.randomUUID())]);
+  await fs.rm(path.join(state, 'device-pool.json'));
+  await fs.writeFile(path.join(state, 'device-pool-initialized.json'), '{truncated');
+  await assert.rejects(new DevicePoolScheduler(state, registry, routing).list(),
+    (error: any) => error?.code === 'DEVICE_POOL_STATE_CORRUPT');
 });
