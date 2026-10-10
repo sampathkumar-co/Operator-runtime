@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1538,4 +1541,294 @@ test('stage10 persisted allocation proofs reject coerced digest values', async t
     () => base.ops.inspect(operation.id),
     (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT'
   );
+});
+
+test('evicting a completed operation cannot recycle its original requestId into a new child mission', async t => {
+  const base = await setup(t);
+  let creates = 0;
+  const teams = {
+    async submit(input: { missionId: string }) {
+      creates += 1;
+      return { id: input.missionId, state: 'PENDING' };
+    }
+  };
+  const operations = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Protected request identity after eviction',
+    scopeKey: 'project:nonrecycled-operation',
+    successConditions: ['Do not duplicate a side effect'],
+    execution: { kind: 'team' as const, workItems: work() },
+    run: false
+  };
+  const first = await operations.submit(request);
+  assert.equal(first.id, requestId);
+  assert.equal(creates, 1);
+  const file = path.join(base.state, 'digital-operations.json');
+  const state = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(state.version, 2);
+  assert.deepEqual(state.usedOperationIds, [requestId]);
+  // Exercise the actual compaction outcome without creating 2000 unrelated
+  // tasks: only the terminal operation row is gone, never its authority tombstone.
+  state.operations = [];
+  await fs.writeFile(file, JSON.stringify(state));
+  const restarted = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  await assert.rejects(restarted.submit(request),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  await assert.rejects(restarted.submit({ ...request, objective: 'Malicious changed contract' }),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  assert.equal(creates, 1, 'historical requestId must not trigger a second mission effect');
+  const distinct = await restarted.submit({ ...request, requestId: crypto.randomUUID() });
+  assert.ok(distinct.id !== requestId);
+  assert.equal(creates, 2);
+});
+
+test('legacy v1 operations migrate retained request IDs without recycling them', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const input = {
+    requestId, objective: 'Legacy migration retains authority identity',
+    scopeKey: 'project:legacy-history',
+    successConditions: ['New and old requests remain separate'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  const initial = await base.ops.submit(input);
+  const file = path.join(base.state, 'digital-operations.json');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete original.usedOperationIds;
+  original.version = 1;
+  // Simulate a genuinely old pre-upgrade directory, not a rollback of v2.
+  await fs.rm(path.join(base.state, 'digital-operations-initialized.json'));
+  await fs.writeFile(file, JSON.stringify(original));
+  const restarted = new DigitalOperationsLayer(base.state, base);
+  const same = await restarted.submit(input);
+  assert.equal(same.id, initial.id);
+  const next = await restarted.submit({ ...input, requestId: crypto.randomUUID() });
+  const migrated = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(migrated.usedOperationIds, [requestId, next.id]);
+  migrated.operations = migrated.operations.filter((item: any) => item.id !== requestId);
+  await fs.writeFile(file, JSON.stringify(migrated));
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).submit(input),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+});
+
+test('missing, noncanonical, or duplicated v2 authority history is corrupt and must fail closed', async t => {
+  const base = await setup(t);
+  const request = {
+    requestId: crypto.randomUUID(), objective: 'Persisted authority integrity',
+    scopeKey: 'project:history-integrity',
+    successConditions: ['No history loss'], execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  await base.ops.submit(request);
+  const file = path.join(base.state, 'digital-operations.json');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  for (const bad of [
+    { ...original, usedOperationIds: [] },
+    { ...original, usedOperationIds: [request.requestId.toUpperCase()] },
+    { ...original, usedOperationIds: [request.requestId, request.requestId] },
+    { ...original, usedOperationIds: 'not-an-array' }
+  ]) {
+    await fs.writeFile(file, JSON.stringify(bad));
+    await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(request.requestId),
+      (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT');
+  }
+});
+
+test('request identity is durably burned before any downstream device allocation intent', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  let reserves = 0;
+  const devices = {
+    async reserve() { reserves++; throw new Error('reserve must not run'); },
+    async releasePrepared() { throw new Error('must not release'); }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  compensations.prepare = async () => { throw new Error('injected write-ahead journal failure'); };
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, devices: devices as any, compensations
+  });
+  await assert.rejects(ops.submit({
+    requestId, objective: 'Journal failure after request history persisted',
+    scopeKey: 'project:burn-before-effect', successConditions: ['Never allocate'],
+    execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'burn-before-effect' }, advertisements: [] }
+  }), /injected write-ahead journal failure/);
+  assert.equal(reserves, 0);
+  const state = JSON.parse(await fs.readFile(path.join(base.state, 'digital-operations.json'), 'utf8'));
+  assert.deepEqual(state.operations, []);
+  assert.deepEqual(state.usedOperationIds, [requestId],
+    'write-ahead identity persists even when subsequent preparation fails');
+});
+
+test('real OS process death after request ID write but before child dispatch prohibits replay', async t => {
+  if (process.platform !== 'linux') return t.skip('exact boot-bound stale PID reclamation is Linux-only');
+  const state = await tempDir(t);
+  const requestId = crypto.randomUUID();
+  const fixture = fileURLToPath(new URL('./fixtures/digital-operation-id-burn-crash-worker.mjs', import.meta.url));
+  const child = spawn(process.execPath, ['--experimental-strip-types', fixture, state, requestId], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let output = '', errors = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', part => { errors += String(part); });
+  let started!: () => void, failed!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { started = resolve; failed = reject; });
+  const timeout = setTimeout(() => failed(new Error('OS process did not reach durable boundary: ' + errors)), 20_000);
+  child.stdout.on('data', part => {
+    output += String(part);
+    if (output.includes('ID_BURNED_BEFORE_EFFECT')) started();
+  });
+  child.once('error', error => failed(error));
+  child.once('exit', (code, signal) => {
+    if (!output.includes('ID_BURNED_BEFORE_EFFECT')) {
+      failed(new Error('Worker exited before identity was committed: ' + code + '/' + signal + ': ' + errors));
+    }
+  });
+  try {
+    await ready;
+    const prior = JSON.parse(await fs.readFile(path.join(state, 'digital-operations.json'), 'utf8'));
+    assert.equal(prior.version, 2);
+    assert.deepEqual(prior.usedOperationIds, [requestId]);
+    assert.deepEqual(prior.operations, []);
+    const exited = once(child, 'exit');
+    assert.equal(child.kill('SIGKILL'), true);
+    const [, signal] = await exited;
+    assert.equal(signal, 'SIGKILL');
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+  const teams = new TeamCoordinator(state);
+  const registry = new DeviceRegistryStore(state);
+  const layer = new DigitalOperationsLayer(state, {
+    procedures: new ProcedureMemoryStore(state),
+    world: new WorldModelStore(state),
+    devices: new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry)),
+    optimizer: new ExecutionOptimizerStore(state), teams,
+    organizations: new OrganizationCoordinator(state, teams)
+  });
+  await assert.rejects(layer.submit({
+    requestId, objective: 'Crash after durable request identity commit',
+    scopeKey: 'project:crash-burn-request',
+    successConditions: ['no deterministic mission replay'],
+    execution: { kind: 'team', workItems: work() }, run: false
+  }), (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  assert.equal((await teams.list()).length, 0, 'no child mission may be created after the crash');
+});
+
+test('exhausted immutable request history fails closed without evicting identity or executing work', async t => {
+  const base = await setup(t);
+  const file = path.join(base.state, 'digital-operations.json');
+  const historic = Array.from({ length: 50_000 }, (_, i) =>
+    '00000000-0000-4000-8000-' + i.toString(16).padStart(12, '0'));
+  await fs.writeFile(file, JSON.stringify({ version: 2, operations: [], usedOperationIds: historic, historyComplete: true }));
+  let effects = 0;
+  const teams = {
+    async submit() { effects++; throw new Error('No provider effect is permitted after history exhaustion'); }
+  };
+  const operations = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  await assert.rejects(operations.submit({
+    requestId: crypto.randomUUID(), objective: 'History limit must fail closed',
+    scopeKey: 'project:history-limit', successConditions: ['No duplicate child'],
+    execution: { kind: 'team', workItems: work() }, run: false
+  }), (error: any) => error?.code === 'OPERATIONS_ID_HISTORY_LIMIT');
+  assert.equal(effects, 0);
+  const after = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(after.usedOperationIds.length, 50_000, 'No historical identity may be discarded');
+});
+
+test('losing only the initialized operation ledger never reinitializes request identity', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Main ledger disappeared after operation',
+    scopeKey: 'project:missing-ledger', successConditions: ['No replay'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  await base.ops.submit(request);
+  const marker = path.join(base.state, 'digital-operations-initialized.json');
+  assert.deepEqual(JSON.parse(await fs.readFile(marker, 'utf8')),
+    { version: 1, initialized: true });
+  await fs.rm(path.join(base.state, 'digital-operations.json'));
+  const restarted = new DigitalOperationsLayer(base.state, base);
+  await assert.rejects(restarted.submit(request),
+    (error: any) => error?.code === 'OPERATIONS_LEDGER_MISSING');
+  await assert.rejects(restarted.submit({ ...request, requestId: crypto.randomUUID() }),
+    (error: any) => error?.code === 'OPERATIONS_LEDGER_MISSING');
+  await fs.access(marker); // Missing main file must not erase initialization evidence.
+});
+
+test('saturated v1 operation retention cannot claim complete identity history after migration', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Legacy capacity exhaustion may have pruned identities',
+    scopeKey: 'project:v1-saturation', successConditions: ['Manual recovery only'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  const first = await base.ops.submit(request);
+  const parentPath = path.join(base.state, 'digital-operations.json');
+  const file = JSON.parse(await fs.readFile(parentPath, 'utf8'));
+  const old = file.operations[0];
+  file.version = 1;
+  delete file.usedOperationIds;
+  delete file.historyComplete;
+  await fs.rm(path.join(base.state, 'digital-operations-initialized.json'));
+  file.operations = Array.from({ length: 2_000 }, (_, index) => ({
+    ...old, id: index === 0 ? requestId : crypto.randomUUID(),
+    teamMissionId: crypto.randomUUID(), createdAt: old.createdAt, updatedAt: old.updatedAt
+  }));
+  await fs.writeFile(parentPath, JSON.stringify(file));
+  const restarted = new DigitalOperationsLayer(base.state, base);
+  assert.equal((await restarted.inspect(first.id)).id, first.id);
+  await assert.rejects(restarted.submit({
+    ...request, requestId: crypto.randomUUID()
+  }), (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
+  const remained = JSON.parse(await fs.readFile(parentPath, 'utf8'));
+  assert.equal(remained.version, 1, 'unsafe legacy store must not be silently upgraded to complete');
+  assert.equal(remained.operations.length, 2_000);
+});
+
+test('malformed initialization marker with missing ledger fails closed', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  await base.ops.submit({
+    requestId, objective: 'Corrupt marker detection',
+    scopeKey: 'project:bad-marker', successConditions: ['No replay'],
+    execution: { kind: 'team', workItems: work() }, run: false
+  });
+  await fs.rm(path.join(base.state, 'digital-operations.json'));
+  await fs.writeFile(path.join(base.state, 'digital-operations-initialized.json'),
+    JSON.stringify({ version: 1, initialized: false }));
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
+    (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT');
+  await fs.writeFile(path.join(base.state, 'digital-operations-initialized.json'), '{partial');
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
+    (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT',
+    'Truncated marker JSON must return typed corruption rather than a raw SyntaxError');
+});
+
+test('restoring an old v1 state after a v2 identity marker cannot downgrade authority history', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Do not revert upgrade identity',
+    scopeKey: 'project:old-restore-replay', successConditions: ['No replay'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  await base.ops.submit(request);
+  const file = path.join(base.state, 'digital-operations.json');
+  const old = JSON.parse(await fs.readFile(file, 'utf8'));
+  old.version = 1;
+  delete old.usedOperationIds;
+  delete old.historyComplete;
+  await fs.writeFile(file, JSON.stringify(old));
+  // The separately committed marker proves v2 state existed on this machine.
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).submit({
+    ...request, requestId: crypto.randomUUID()
+  }), (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
+    (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
 });

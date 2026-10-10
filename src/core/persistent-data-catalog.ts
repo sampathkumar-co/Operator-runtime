@@ -88,7 +88,12 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
     ['action-journal', 'action-transitions.json'], ['action-results', 'action-results'], ['sagas', 'durable-sagas.json'],
     ['compensation', 'compensation-intents.json'], ['intent-registry', 'intent'], ['studio-teach', 'studio-teach.json'],
     ['studio-workflows', 'studio-workflows'], ['studio-runs', 'studio-runs.json'], ['events', 'events.json'],
-    ['desired-state', 'desired-state.json'], ['digital-operations', 'digital-operations.json'], ['organization-programs', 'organization-programs.json'],
+    ['desired-state', 'desired-state.json'], ['digital-operations', 'digital-operations.json'],
+    // The local replay-history initialization marker MUST share the parent
+    // task's privacy purge / backup lifecycle, not survive an intentional
+    // category purge as a permanent false "missing authority" error.
+    ['digital-operations-initialized', 'digital-operations-initialized.json'],
+    ['organization-programs', 'organization-programs.json'],
     ['semantic-migrations', 'semantic-migrations.json']
   ].map(([id, location]) => entry({ id, owner: id, location, category: 'tasks', sensitivity: 'sensitive', retention: 'terminal-retention-or-archive', deletion: 'privacy-category', backup: 'include', restore: id.includes('lock') || id.includes('lease') ? 'never' : 'optional', scope: id === 'tasks' || id === 'task-leases' ? 'task' : 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: id.includes('lock') || id.includes('lease') ? 'PROCESS_LOCKED' : id === 'action-journal' || id === 'compensation' ? 'APPEND_ONLY_JOURNALED' : 'SINGLE_PROCESS_ONLY' })),
   ...[
