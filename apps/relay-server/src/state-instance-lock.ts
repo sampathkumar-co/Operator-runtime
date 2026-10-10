@@ -109,12 +109,16 @@ async function readLockRecord(lockPath: string): Promise<LockRecord> {
   catch { throw invalid('Existing relay state lock is unreadable.'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalid('Existing relay state lock is invalid.');
   const raw = parsed as Record<string, unknown>;
-  const pid = Number(raw.pid);
-  const token = String(raw.token ?? '');
-  const createdAt = String(raw.createdAt ?? '');
+  // Persisted ownership identities must retain their exact JSON types.
+  // Coercion can disguise malformed or adversarial lock metadata.
+  const pid = raw.pid;
+  const token = raw.token;
+  const createdAt = raw.createdAt;
   const processInstance = validProcessInstance(raw.processInstance);
-  if (raw.version !== 1 || !Number.isSafeInteger(pid) || pid < 1 || token.length < 16 || token.length > 256
-    || !Number.isFinite(Date.parse(createdAt)) || !processInstance || processInstance.pid !== pid) {
+  if (raw.version !== 1 || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1
+    || typeof token !== 'string' || token.length < 16 || token.length > 256
+    || typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))
+    || !processInstance || processInstance.pid !== pid) {
     throw invalid('Existing relay state lock is invalid.');
   }
   return { version: 1, pid, processInstance, token, createdAt };
