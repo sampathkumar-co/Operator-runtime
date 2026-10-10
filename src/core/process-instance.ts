@@ -44,6 +44,30 @@ export function processInstanceDefinitelyStale(
   return !sameProcessInstance(storedIdentity, observation.identity);
 }
 
+/**
+ * A local PID observer can only reclaim an owner if the stored identity is
+ * plausibly from this host. Linux v2 identifies a single boot; Linux v1
+ * contains no host provenance and must be reconciled conservatively.
+ *
+ * Other platform identities predate host provenance. Their existing local
+ * process checks are NOT a cross-host proof and still require distributed
+ * provider-side fencing before multi-host execution can be certified.
+ */
+export function localPidObservationAdmissible(
+  storedIdentity: ProcessInstanceIdentity | undefined,
+  localIdentity: ProcessInstanceIdentity
+): boolean {
+  if (!storedIdentity) return false;
+  const stored = storedIdentity.started;
+  const linuxBoot = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):ticks:\d+$/.exec(stored)?.[1];
+  if (linuxBoot) {
+    const localBoot = /^linux-boot-id:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):ticks:\d+$/.exec(localIdentity.started)?.[1];
+    return localBoot === linuxBoot;
+  }
+  if (stored.startsWith('linux-boot-')) return false;
+  return true;
+}
+
 let currentIdentity: Promise<ProcessInstanceIdentity> | undefined;
 
 export async function inspectProcessInstance(pid: number): Promise<ProcessInstanceIdentity | null> {
