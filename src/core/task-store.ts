@@ -13,6 +13,7 @@ import { validateRecoveryShadowRecommendation } from './adaptive-recovery-shadow
 import { validateStrategyShadowAssessment } from './adaptive-strategy-shadow.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -178,8 +179,15 @@ export class TaskStore {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
       }
-      const observation = await this.#observeProcessInstance(existing.pid);
-      if (!processInstanceDefinitelyStale(existing.version === 2 ? existing.processInstance : undefined, observation)) {
+      // PID liveness is scoped to the observing OS namespace. A sibling
+      // container's missing/reused PID is not proof that a task owner died.
+      // Legacy v1 records have no host/namespace identity and fail closed.
+      const storedIdentity = existing.version === 2 ? existing.processInstance : undefined;
+      const admissible = localPidObservationAdmissible(storedIdentity, processInstance);
+      const observation = admissible
+        ? await this.#observeProcessInstance(existing.pid)
+        : { status: 'unknown' as const };
+      if (!admissible || !processInstanceDefinitelyStale(storedIdentity, observation)) {
         throw new OperatorError('TASK_ALREADY_RUNNING', `Task ${taskId} is already owned or process ownership cannot be safely disproven.`, {
           details: { acquiredAt: existing.acquiredAt, liveness: observation.status }
         });
