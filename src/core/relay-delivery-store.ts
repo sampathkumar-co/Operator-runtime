@@ -405,13 +405,19 @@ export class RelayDeliveryStore {
     for (const record of records) {
       if (record.key === '__epoch') {
         epochGeneration = record.generation;
-        const counter = Number(record.value.counter ?? 0);
-        if (!Number.isSafeInteger(counter) || counter < 0) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery epoch is invalid.');
+        const counter = record.value.counter;
+        // A persisted epoch is a typed monotonic counter; never normalize missing or coerced values.
+        if (typeof counter !== 'number' || !Number.isSafeInteger(counter) || counter < 0) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery epoch is invalid.');
         epochCounter = counter;
         continue;
       }
-      const stream = (record.value as Record<string, unknown>).stream;
-      if (!stream || typeof stream !== 'object' || Array.isArray(stream)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery stream is invalid.');
+      const stream = record.value.stream;
+      // A shared CAS key is the authenticated storage identity for exactly one device.
+      // Never let persisted data relabel a stream as another device or downgrade its schema.
+      if (record.value.stateVersion !== 2 || !stream || typeof stream !== 'object' || Array.isArray(stream) ||
+          (stream as Record<string, unknown>).deviceId !== record.key) {
+        throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery stream schema or device key is invalid.');
+      }
       streams.push(structuredClone(stream) as DeviceDeliveryStream);
       generations.set(record.key, record.generation);
     }
@@ -580,7 +586,8 @@ function validateState(input: unknown): RelayDeliveryState {
     throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
   }
   const rawState = input as Record<string, unknown>;
-  const version = Number(rawState.version);
+  // Persisted schema versions are exact JSON numbers, never coerced legacy markers.
+  const version = rawState.version;
   if ((version !== 1 && version !== 2) || !Array.isArray(rawState.streams) || rawState.streams.length > MAX_STREAMS) {
     throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
   }
