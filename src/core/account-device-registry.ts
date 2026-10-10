@@ -301,8 +301,8 @@ export class AccountDeviceRegistry {
   async withActiveAuthorityLease<T>(authorityInput: AccountDeviceAuthority, work: () => Promise<T>): Promise<T> {
     const accountId = validUuid(authorityInput?.accountId, 'authority accountId');
     const deviceId = validUuid(authorityInput?.deviceId, 'authority deviceId');
-    const generation = Number(authorityInput?.generation);
-    if (!Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('ACCOUNT_AUTHORITY_INVALID', 'Account-device authority generation is invalid.');
+    const generation = authorityInput?.generation;
+    if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('ACCOUNT_AUTHORITY_INVALID', 'Account-device authority generation is invalid.');
     if (typeof work !== 'function') throw new OperatorError('ACCOUNT_AUTHORITY_INVALID', 'Account-device authority lease work is invalid.');
     return await this.#withQueue(async () => {
       const state = await this.#read();
@@ -633,13 +633,14 @@ function boundedReason(value: string, label: string): string {
 }
 
 function validUuid(value: string, label: string): string {
-  const text = String(value ?? '');
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) throw new OperatorError('ACCOUNT_ID_INVALID', `${label} must be a UUID.`);
+  const text = value;
+  if (typeof text !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) throw new OperatorError('ACCOUNT_ID_INVALID', `${label} must be a UUID.`);
   return text.toLowerCase();
 }
 
 function validIso(value: string, label: string): string {
-  const text = String(value ?? '');
+  const text = value;
+  if (typeof text !== 'string') throw new OperatorError('ACCOUNT_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
   const time = Date.parse(text);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== text) throw new OperatorError('ACCOUNT_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
   return text;
