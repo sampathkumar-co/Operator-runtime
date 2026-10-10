@@ -297,9 +297,14 @@ export class DevicePoolScheduler {
     validateState(state);
     const encoded = JSON.stringify(state, null, 2);
     // The authoritative limit is *serialized bytes*, including retained
-    // reservations, not simply count(IDs). Refuse before a generic durable
-    // writer rejection, and never evict history to make a write fit.
-    if (Buffer.byteLength(encoded, 'utf8') > STORE_OPTIONS.maxBytes) {
+    // reservations, not simply count(IDs). Reserve two extra bytes for EACH
+    // active row: ACTIVE -> RELEASED grows the JSON string by two characters,
+    // and ACTIVE -> EXPIRED grows by one. Otherwise a valid new allocation at
+    // the storage limit could become impossible to release or reconcile.
+    // Invariant: encoded bytes + 2 * activeCount <= capacity, so every subset
+    // of terminal transitions remains serializable without discarding IDs.
+    const activeCount = state.reservations.filter((item) => item.state === 'ACTIVE').length;
+    if (Buffer.byteLength(encoded, 'utf8') + 2 * activeCount > STORE_OPTIONS.maxBytes) {
       throw new OperatorError('DEVICE_POOL_RESERVATION_HISTORY_LIMIT',
         'Durable reservation ID history exceeds store capacity; refusing to recycle any prior allocation identity.');
     }
