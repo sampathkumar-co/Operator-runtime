@@ -320,7 +320,8 @@ function pruneTerminalWaits(state: EventState, now: number, retentionMs: number)
 }
 
 function boundedRuntimeInteger(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw new OperatorError('EVENT_RUNTIME_CONFIG_INVALID', `${label} must be an integer between ${min} and ${max}.`);
+  const value = input;
   if (!Number.isSafeInteger(value) || value < min || value > max) {
     throw new OperatorError('EVENT_RUNTIME_CONFIG_INVALID', `${label} must be an integer between ${min} and ${max}.`);
   }
@@ -339,13 +340,15 @@ function bounded(input: unknown, max: number, label: string): string {
 }
 
 function uuid(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('EVENT_INPUT_INVALID', `${label} must be a UUID.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('EVENT_INPUT_INVALID', `${label} must be a UUID.`);
   return value;
 }
 
 function iso(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('EVENT_INPUT_INVALID', `${label} must be an ISO timestamp.`);
+  const value = input;
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new OperatorError('EVENT_INPUT_INVALID', `${label} must be an ISO timestamp.`);
   return value;
