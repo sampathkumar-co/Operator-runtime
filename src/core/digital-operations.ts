@@ -74,6 +74,8 @@ interface OperationsState {
   operations: DigitalOperation[];
   /** Persisted BEFORE any deterministic child effect can be created. */
   usedOperationIds: string[];
+  /** Fail-closed when a legacy v1 source may already have pruned IDs. */
+  historyComplete: boolean;
 }
 
 export type DigitalExecutionSpec =
@@ -133,6 +135,7 @@ export function digitalOperationChildId(ownerId: string, operation: string): str
 
 export class DigitalOperationsLayer {
   #file: string;
+  #initializedMarker: string;
   #ownership: ResourceLeaseStore;
   #procedures: ProcedureMemoryStore;
   #world: WorldModelStore;
@@ -159,6 +162,10 @@ export class DigitalOperationsLayer {
     compensations?: DurableCompensationJournal;
   }) {
     this.#file = path.join(path.resolve(stateDir), 'digital-operations.json');
+    // Separate durable local marker catches partial restores/deletion of only
+    // the main JSON ledger. Whole-domain rollback still needs an external
+    // monotonic witness and is NEVER claimed safe by this local marker.
+    this.#initializedMarker = path.join(path.resolve(stateDir), 'digital-operations-initialized.json');
     this.#ownership = new ResourceLeaseStore(stateDir);
     this.#procedures = dependencies.procedures;
     this.#world = dependencies.world;
@@ -208,6 +215,10 @@ export class DigitalOperationsLayer {
           throw new OperatorError('OPERATIONS_REQUEST_CONFLICT', 'Operation requestId is already bound to a different outcome contract.');
         }
         return structuredClone(existing);
+      }
+      if (!state.historyComplete) {
+        throw new OperatorError('OPERATIONS_HISTORY_INCOMPLETE',
+          'Legacy operation request history may have been compacted. New effects require independent reconciliation.');
       }
       if (state.usedOperationIds.includes(operationId)) {
         // The visible record was pruned. A historical UUID cannot acquire
@@ -881,7 +892,25 @@ export class DigitalOperationsLayer {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, operations: [], usedOperationIds: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        // The absence of a ledger is NOT proof of first-time initialization.
+        // After the first successful write, losing only the parent JSON while
+        // keeping the local initialization marker must never reset authority.
+        try {
+          const marker = JSON.parse(await readDurableStateText(this.#initializedMarker, {
+            maxBytes: 4096, errorCode: 'OPERATIONS_STATE_CORRUPT',
+            invalidMessage: 'Digital operation initialization marker is invalid.'
+          }));
+          if (!marker || marker.version !== 1 || marker.initialized !== true) throw corrupt('Initialization marker is malformed.');
+          throw new OperatorError('OPERATIONS_LEDGER_MISSING',
+            'Previously initialized operation request authority is missing. Restore or reconcile without replay.');
+        } catch (markerError) {
+          if ((markerError as NodeJS.ErrnoException).code === 'ENOENT') {
+            return { version: 2, operations: [], usedOperationIds: [], historyComplete: true };
+          }
+          throw markerError;
+        }
+      }
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('OPERATIONS_STATE_CORRUPT', 'Digital operations state could not be read.');
     }
@@ -895,6 +924,14 @@ export class DigitalOperationsLayer {
         'Operation state plus non-recyclable request history exceeds durable storage capacity.');
     }
     await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
+    // Written AFTER the main file; a failure here aborts new effects but
+    // leaves their request ID durably burned. Deleting the main file alone
+    // can never silently rebuild a fresh authority ledger after this point.
+    await writeDurableStateText(this.#initializedMarker,
+      JSON.stringify({ version: 1, initialized: true }), {
+        maxBytes: 4096, errorCode: 'OPERATIONS_STATE_CORRUPT',
+        invalidMessage: 'Operation initialization marker cannot be persisted.'
+      });
   }
 }
 
@@ -1020,7 +1057,7 @@ function strategyContextFor(scopeKey: string, mode: string): string {
 
 function validateState(input: unknown): OperationsState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as { version?: number; operations?: DigitalOperation[]; usedOperationIds?: unknown };
+  const state = input as { version?: number; operations?: DigitalOperation[]; usedOperationIds?: unknown; historyComplete?: unknown };
   if ((state.version !== 1 && state.version !== 2) || !Array.isArray(state.operations) ||
       state.operations.length > MAX_OPERATIONS) throw corrupt('State shape is invalid.');
   // v1 migration can recover only retained operation IDs. Historical IDs
@@ -1040,6 +1077,12 @@ function validateState(input: unknown): OperationsState {
     if (id !== rawId || used.has(id)) throw corrupt('Historical operation IDs must be canonical and unique.');
     used.add(id);
   }
+  const historyComplete = state.version === 1
+    ? state.operations.length < MAX_OPERATIONS
+    : state.historyComplete;
+  if (typeof historyComplete !== 'boolean') {
+    throw corrupt('Operation identity completeness proof is missing or invalid.');
+  }
   const ids = new Set<string>();
   for (const operation of state.operations) {
     validateOperation(operation);
@@ -1047,7 +1090,8 @@ function validateState(input: unknown): OperationsState {
     if (!used.has(operation.id)) throw corrupt('Retained operation is missing from immutable request history.');
     ids.add(operation.id);
   }
-  return { version: 2, operations: structuredClone(state.operations), usedOperationIds: [...historical] };
+  return { version: 2, operations: structuredClone(state.operations),
+    usedOperationIds: [...historical], historyComplete };
 }
 
 function validateOperation(operation: DigitalOperation): void {
