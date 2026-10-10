@@ -580,7 +580,8 @@ function validateState(input: unknown): RelayDeliveryState {
     throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
   }
   const rawState = input as Record<string, unknown>;
-  const version = Number(rawState.version);
+  // Persisted schema versions are exact JSON numbers, never coerced legacy markers.
+  const version = rawState.version;
   if ((version !== 1 && version !== 2) || !Array.isArray(rawState.streams) || rawState.streams.length > MAX_STREAMS) {
     throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery state structure is invalid.');
   }
