@@ -354,17 +354,17 @@ function validateState(input: ResultState): ResultState {
       const deliveryId = validUuid(entry.deliveryId, 'deliveryId');
       if (seqs.has(seq) || ids.has(deliveryId)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state contains duplicate sequence or delivery ID.');
       seqs.add(seq); ids.add(deliveryId);
-      const resultSha256 = String(entry.resultSha256 ?? '');
-      if (!/^[0-9a-f]{64}$/.test(resultSha256)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash is invalid.');
-      const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(String(entry.idempotencyKey));
+      const resultSha256 = entry.resultSha256;
+      if (typeof resultSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(resultSha256)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result hash is invalid.');
+      const idempotencyKey = entry.idempotencyKey === undefined ? undefined : validIdempotencyKey(entry.idempotencyKey);
       const replayAuthority = entry.replayAuthority === undefined ? undefined : safeReplayAuthority(entry.replayAuthority, deviceId);
       if (replayAuthority && !idempotencyKey) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay replay authority requires an idempotency key.');
       if (idempotencyKey) {
         if (replayKeys.has(idempotencyKey)) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result state contains duplicate replay authority.');
         replayKeys.add(idempotencyKey);
       }
-      const recordedAt = validIso(String(entry.recordedAt ?? ''));
-      const consumedAt = entry.consumedAt === undefined ? undefined : validIso(String(entry.consumedAt));
+      const recordedAt = validIso(entry.recordedAt);
+      const consumedAt = entry.consumedAt === undefined ? undefined : validIso(entry.consumedAt);
       let result: JsonObject | undefined;
       if (consumedAt) {
         if (entry.result !== undefined || idempotencyKey || replayAuthority) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Consumed relay result must not retain payload or replay authority.');
@@ -387,8 +387,8 @@ function clone(result: StoredRelayResult): StoredRelayResult {
 function safeReplayAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Relay result replay authority is invalid.');
   const raw = input as Record<string, unknown>;
-  const accountId = validUuid(String(raw.accountId ?? ''), 'authority accountId');
-  const deviceId = validUuid(String(raw.deviceId ?? ''), 'authority deviceId');
+  const accountId = validUuid(raw.accountId, 'authority accountId');
+  const deviceId = validUuid(raw.deviceId, 'authority deviceId');
   // Persisted replay authority must retain the original numeric generation.
   const generation = raw.generation;
   if (deviceId !== expectedDeviceId || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Relay result replay authority is invalid.');
@@ -399,25 +399,29 @@ function sameReplayAuthority(a: RelayDeliveryAuthority, b: RelayDeliveryAuthorit
   return a.accountId === b.accountId && a.deviceId === b.deviceId && a.generation === b.generation;
 }
 
-function validIdempotencyKey(input: string): string {
-  const value = String(input ?? '').toLowerCase();
+function validIdempotencyKey(input: unknown): string {
+  if (typeof input !== 'string') throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
   return value;
 }
 
-function validSeq(input: number): number {
-  const seq = Number(input);
+function validSeq(input: unknown): number {
+  if (typeof input !== 'number') throw new OperatorError('RELAY_RESULT_SEQUENCE_INVALID', 'Relay result sequence must be a positive safe integer.');
+  const seq = input;
   if (!Number.isSafeInteger(seq) || seq < 1) throw new OperatorError('RELAY_RESULT_SEQUENCE_INVALID', 'Relay result sequence must be a positive safe integer.');
   return seq;
 }
 
-function validUuid(input: string, label: string): string {
-  const value = String(input ?? '');
+function validUuid(input: unknown, label: string): string {
+  if (typeof input !== 'string') throw new OperatorError('RELAY_RESULT_ID_INVALID', `${label} must be a UUID.`);
+  const value = input;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new OperatorError('RELAY_RESULT_ID_INVALID', `${label} must be a UUID.`);
   return value.toLowerCase();
 }
 
-function validIso(input: string): string {
+function validIso(input: unknown): string {
+  if (typeof input !== 'string') throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result timestamp must be ISO format.');
   const time = Date.parse(input);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== input) throw new OperatorError('RELAY_RESULT_STATE_CORRUPT', 'Relay result timestamp must be ISO format.');
   return input;
