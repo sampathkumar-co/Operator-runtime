@@ -298,19 +298,13 @@ export class DevicePoolScheduler {
   async #read(): Promise<DevicePoolState> {
     try {
       const raw = JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS));
-      if (raw?.version === 1) {
-        try {
-          await readDurableStateText(this.#initializedMarker, {
-            maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
-            invalidMessage: 'Device pool initialization marker is invalid.'
-          });
-          throw new OperatorError('DEVICE_POOL_HISTORY_INCOMPLETE',
-            'Legacy reservation state was restored after authority history initialization.');
-        } catch (markerError) {
-          if ((markerError as NodeJS.ErrnoException).code !== 'ENOENT') throw markerError;
-        }
-      }
-      return validateState(raw);
+      const state = validateState(raw);
+      // Read-only inspection of a genuine pre-marker v1/v2 file must still
+      // establish durable "this store existed" evidence. The marker guard
+      // independently serializes its monotonic schema epoch so old readers
+      // cannot downgrade a later v2 commitment.
+      await this.#ensureInitializedMarker(raw.version === 1);
+      return state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         try {
@@ -318,21 +312,60 @@ export class DevicePoolScheduler {
             maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
             invalidMessage: 'Device pool initialization marker is invalid.'
           }));
-          if (!marker || marker.version !== 1 || marker.initialized !== true) {
-            throw corrupt('Device pool initialization marker is malformed.');
-          }
+          if (!marker || marker.version !== 1 || marker.initialized !== true ||
+              typeof marker.allowV1 !== 'boolean') throw corrupt('Initialization marker is malformed.');
           throw new OperatorError('DEVICE_POOL_LEDGER_MISSING',
             'Previously initialized device reservation authority is missing. Restore or reconcile; do not replay.');
         } catch (markerError) {
           if ((markerError as NodeJS.ErrnoException).code === 'ENOENT') {
             return { version: 2, reservations: [], usedReservationIds: [], historyComplete: true };
           }
-          throw markerError;
+          if (markerError instanceof OperatorError) throw markerError;
+          throw corrupt('Device pool initialization marker JSON is unreadable or truncated.');
         }
       }
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('DEVICE_POOL_STATE_CORRUPT', 'Device pool state could not be read.');
     }
+  }
+
+  /**
+   * A separate process-lock on the marker ensures its v1 allowance can only
+   * move TRUE -> FALSE as the parent ledger is upgraded. It never reverts
+   * after v2 ownership has been persisted, even with concurrent read-only
+   * legacy clients and allocation writers.
+   */
+  async #ensureInitializedMarker(allowV1: boolean): Promise<void> {
+    await withDurableStateLock(this.#initializedMarker, async () => {
+      let existing: { version?: unknown; initialized?: unknown; allowV1?: unknown } | null = null;
+      try {
+        existing = JSON.parse(await readDurableStateText(this.#initializedMarker, {
+          maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
+          invalidMessage: 'Device pool initialization marker is invalid.'
+        }));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          if (error instanceof OperatorError) throw error;
+          throw corrupt('Device pool initialization marker JSON is unreadable or truncated.');
+        }
+      }
+      if (existing && (existing.version !== 1 || existing.initialized !== true ||
+          typeof existing.allowV1 !== 'boolean')) {
+        throw corrupt('Device pool initialization marker is malformed.');
+      }
+      if (allowV1 && existing?.allowV1 === false) {
+        throw new OperatorError('DEVICE_POOL_HISTORY_INCOMPLETE',
+          'Legacy reservation state was restored after authority history initialization.');
+      }
+      if (existing && (existing.allowV1 === false || (allowV1 && existing.allowV1 === true))) return;
+      // Commit marker only after successful validation of the parent file.
+      // The marker itself cannot be reverted by a racing old v1 reader.
+      await writeDurableStateText(this.#initializedMarker,
+        JSON.stringify({ version: 1, initialized: true, allowV1 }), {
+          maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
+          invalidMessage: 'Device pool initialization marker cannot be persisted.'
+        });
+    });
   }
 
   async #write(state: DevicePoolState): Promise<void> {
@@ -351,14 +384,7 @@ export class DevicePoolScheduler {
         'Durable reservation ID history exceeds store capacity; refusing to recycle any prior allocation identity.');
     }
     await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
-    // Marker is committed only AFTER the authoritative reservation ledger.
-    // A partial restore that drops the ledger but preserves the marker can
-    // never silently re-enable recycled reservation identities.
-    await writeDurableStateText(this.#initializedMarker,
-      JSON.stringify({ version: 1, initialized: true }), {
-        maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
-        invalidMessage: 'Device pool initialization marker cannot be persisted.'
-      });
+    await this.#ensureInitializedMarker(false);
   }
 }
 
