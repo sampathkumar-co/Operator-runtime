@@ -6,7 +6,9 @@ import { resourceKeysConflict } from './resource-identity.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceObservation,
@@ -104,7 +106,7 @@ export class ResourceLeaseStore {
     const mutationActionId = options.mutationActionId === undefined ? undefined : bounded(options.mutationActionId, 512, 'mutationActionId');
     const processInstance = this.#processInstance ?? await currentProcessInstance();
     await this.#mutate(async (state) => {
-      await reapDeadHolders(state, this.#observeProcessInstance);
+      await reapDeadHolders(state, this.#observeProcessInstance, processInstance);
       if (mode === 'exclusive') {
         for (const key of keys) {
           const quarantine = state.quarantines.find((item) =>
@@ -219,7 +221,8 @@ export class ResourceLeaseStore {
 
   async inspect(): Promise<LeaseState> {
     const state = await this.#read();
-    await reapDeadHolders(state, this.#observeProcessInstance);
+    const localInstance = this.#processInstance ?? await currentProcessInstance();
+    await reapDeadHolders(state, this.#observeProcessInstance, localInstance);
     return structuredClone(state);
   }
 
@@ -321,9 +324,14 @@ function validateState(input: unknown): LeaseState {
   return { version: 2, resources, quarantines: normalizedQuarantines };
 }
 
-async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObserver): Promise<void> {
+async function reapDeadHolders(
+  state: LeaseState,
+  observer: ProcessInstanceObserver,
+  localInstance: ProcessInstanceIdentity
+): Promise<void> {
   const observations = new Map<number, ProcessInstanceObservation>();
   for (const holder of state.resources.flatMap((entry) => entry.holders)) {
+    if (!localPidObservationAdmissible(holder.processInstance, localInstance)) continue;
     if (!observations.has(holder.pid)) {
       let observation: ProcessInstanceObservation;
       try { observation = await observer(holder.pid); }
@@ -332,11 +340,11 @@ async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObser
     }
   }
   for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
+    if (!localPidObservationAdmissible(holder.processInstance, localInstance)) return true;
     const observation = observations.get(holder.pid) ?? { status: 'unknown' };
-    if (observation.status === 'dead') return false;
-    if (observation.status === 'unknown') return true;
-    if (!holder.processInstance || !observation.identity) return true;
-    return sameProcessInstance(holder.processInstance, observation.identity);
+    // Same-host process death/PID-reuse is actionable only for a provably local
+    // owner. Unknown or remote liveness must never grant exclusive ownership.
+    return !processInstanceDefinitelyStale(holder.processInstance, observation);
   });
   state.resources = state.resources.filter((entry) => entry.holders.length > 0);
 }

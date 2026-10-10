@@ -16,6 +16,7 @@ import { executeCanonicalVerification } from './canonical-verification.ts';
 import { canonicalResourceKeys } from './resource-identity.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -1071,12 +1072,17 @@ class TeamStore {
       }
       try {
         const current = JSON.parse(await fs.readFile(file, 'utf8')) as { pid?: unknown; processInstance?: unknown };
-        const pid = Number(current.pid);
+        // Durable identity is never inferred by coercing a stored PID.
+        // A PID table from a different container/host is not proof of death.
+        const pid = current.pid;
         const storedIdentity = validProcessInstance(current.processInstance);
-        const observation = Number.isSafeInteger(pid) && pid > 0
+        const localOwner = typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0
+          && storedIdentity?.pid === pid
+          && localPidObservationAdmissible(storedIdentity, processInstance);
+        const observation = localOwner
           ? await this.#observeProcessInstance(pid)
-          : { status: 'dead' as const };
-        if (Number.isSafeInteger(pid) && pid > 0 && processInstanceDefinitelyStale(storedIdentity ?? undefined, observation)) {
+          : { status: 'unknown' as const };
+        if (localOwner && processInstanceDefinitelyStale(storedIdentity, observation)) {
           await fs.rm(file, { force: true });
           continue;
         }

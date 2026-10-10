@@ -121,7 +121,7 @@ export const CRITICAL_RESILIENCE_EVIDENCE: readonly ExecutableResilienceEvidence
     id: 'unknown-process-liveness',
     invariant: 'PARALLEL_MUTATION_IS_COORDINATED',
     mechanism: 'Unknown process liveness preserves ownership instead of guessing that a lease is stale',
-    implementationFile: 'src/core/resource-leases.ts', implementationSymbol: "if (observation.status === 'unknown') return true;",
+    implementationFile: 'src/core/resource-leases.ts', implementationSymbol: 'processInstanceDefinitelyStale(holder.processInstance, observation)',
     executableTestFile: 'test/resource-leases.test.ts', executableTestName: 'resource leases preserve a holder when process liveness is unknown',
     injectedFault: 'The runtime cannot determine whether the process holding a resource lease is still alive.',
     expectedEvidence: 'The lease is retained and a conflicting mutation cannot steal ownership.', status: 'EXECUTABLE'

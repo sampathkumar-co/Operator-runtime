@@ -4,6 +4,7 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -90,12 +91,18 @@ export async function acquireLocalAgentStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      const stale = options.isProcessAlive
+      // The production PID observer is only authoritative for an owner
+      // proven to belong to this Linux boot. Legacy v1 has no host provenance;
+      // retain its manual test-only liveness seam, but never guess in production.
+      const localOwner = existing.version === 2
+        ? localPidObservationAdmissible(existing.processInstance, identity)
+        : options.isProcessAlive !== undefined;
+      const stale = localOwner && (options.isProcessAlive
         ? !options.isProcessAlive(existing.pid)
         : processInstanceDefinitelyStale(
             existing.version === 2 ? existing.processInstance : undefined,
             await observer(existing.pid)
-          );
+          ));
       if (!stale) {
         throw new OperatorError(
           'LOCAL_AGENT_ALREADY_RUNNING',
@@ -121,10 +128,14 @@ async function readLockRecord(lockPath: string): Promise<LockRecord | LegacyLock
     throw new OperatorError('LOCAL_AGENT_STATE_LOCK_INVALID', 'Existing Mecord local-agent state lock is invalid.');
   }
   const raw = parsed as Record<string, unknown>;
-  const pid = Number(raw.pid);
-  const token = String(raw.token ?? '');
-  const createdAt = String(raw.createdAt ?? '');
-  if (![1, 2].includes(Number(raw.version)) || !Number.isSafeInteger(pid) || pid < 1 || token.length < 16 || token.length > 256 || !Number.isFinite(Date.parse(createdAt))) {
+  // Persisted ownership identities must retain their exact JSON types.
+  // Coercion can disguise malformed or adversarial lock metadata.
+  const pid = raw.pid;
+  const token = raw.token;
+  const createdAt = raw.createdAt;
+  if ((raw.version !== 1 && raw.version !== 2) || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1
+    || typeof token !== 'string' || token.length < 16 || token.length > 256
+    || typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))) {
     throw new OperatorError('LOCAL_AGENT_STATE_LOCK_INVALID', 'Existing Mecord local-agent state lock is invalid.');
   }
   if (raw.version === 1) return { version: 1, pid, token, createdAt };

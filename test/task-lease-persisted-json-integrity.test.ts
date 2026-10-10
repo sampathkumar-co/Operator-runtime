@@ -41,3 +41,57 @@ test('boolean lease version cannot be used as numeric legacy version', async (t)
   await assert.rejects(lease.assertOwned(),
     (error: any) => error?.code === 'TASK_LEASE_CORRUPT');
 });
+
+for (const status of ['dead', 'reused'] as const) {
+  test('cross-namespace Linux PID ' + status + ' cannot steal task execution', async t => {
+    const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-task-lease-pidns-'));
+    t.after(() => fs.rm(state, { recursive: true, force: true }));
+    const taskId = crypto.randomUUID();
+    const boot = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const remote = { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:100' };
+    const leaseDir = path.join(state, 'task-leases');
+    await fs.mkdir(leaseDir, { recursive: true });
+    const file = path.join(leaseDir, taskId + '.json');
+    const record = {
+      version: 2, taskId, ownerId: crypto.randomUUID(),
+      pid: remote.pid, processInstance: remote, acquiredAt: new Date().toISOString()
+    };
+    await fs.writeFile(file, JSON.stringify(record));
+    let observed = 0;
+    const contender = new TaskStore(state, {
+      processInstance: { pid: 42712, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:200' },
+      observeProcessInstance: async pid => {
+        observed++;
+        return status === 'dead' ? { status: 'dead' as const }
+          : { status: 'live' as const, identity: {
+            pid, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:101'
+          } };
+      }
+    });
+    await assert.rejects(() => contender.acquireExecutionLease(taskId),
+      (error: any) => error?.code === 'TASK_ALREADY_RUNNING');
+    assert.equal(observed, 0, 'unrelated PID namespace must not even be observed');
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), record);
+  });
+}
+
+test('same Linux boot and PID namespace permit proven dead task owner recovery', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-task-recover-local-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const taskId = crypto.randomUUID();
+  const boot = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const original = { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:8888:ticks:100' };
+  const leaseDir = path.join(state, 'task-leases');
+  await fs.mkdir(leaseDir, { recursive: true });
+  await fs.writeFile(path.join(leaseDir, taskId + '.json'), JSON.stringify({
+    version: 2, taskId, ownerId: crypto.randomUUID(),
+    pid: original.pid, processInstance: original, acquiredAt: new Date().toISOString()
+  }));
+  const contender = new TaskStore(state, {
+    processInstance: { pid: 42712, started: 'linux-boot-id:' + boot + ':pidns:8888:ticks:200' },
+    observeProcessInstance: async () => ({ status: 'dead' as const })
+  });
+  const lease = await contender.acquireExecutionLease(taskId);
+  await lease.assertOwned();
+  await lease.release();
+});

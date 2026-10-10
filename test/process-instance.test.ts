@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   inspectProcessInstance,
+  localPidObservationAdmissible,
   processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity
@@ -20,7 +21,7 @@ test('current process identity is inspectable without PID-only authority', async
   assert.equal(identity.pid, process.pid);
   if (process.platform === 'win32') assert.match(identity.started, /^windows-filetime:\d{15,20}$/);
   if (process.platform === 'linux') assert.match(identity.started,
-    /^linux-boot-id:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:ticks:\d+$/);
+    /^linux-boot-id:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:pidns:\d+:ticks:\d+$/);
 });
 
 test('Windows FILETIME identity remains compatible with legacy ISO lock records', () => {
@@ -58,4 +59,21 @@ test('Linux mixed-version lease migration is not proof of process death', () => 
   assert.equal(processInstanceDefinitelyStale(bootBound, { status: 'live', identity: {
     pid: bootBound.pid + 1, started: bootBound.started
   } }), true);
+});
+
+test('same Linux boot cannot authorize PID observations in a different namespace', () => {
+  const boot = 'aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const owner = { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:1234' };
+  const observer = { pid: 42712, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:5678' };
+  assert.equal(localPidObservationAdmissible(owner, observer), false);
+  assert.equal(localPidObservationAdmissible(owner, { ...observer, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:5678' }), true);
+});
+
+test('Linux v2-to-v3 process identity migration is not proof of stale owner', () => {
+  const boot = 'aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const v2 = { pid: 42711, started: 'linux-boot-id:' + boot + ':ticks:1234' };
+  const v3 = { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:1234' };
+  assert.equal(processInstanceDefinitelyStale(v2, { status: 'live', identity: v3 }), false);
+  assert.equal(processInstanceDefinitelyStale(v3, { status: 'live', identity: v2 }), false);
+  assert.equal(localPidObservationAdmissible(v2, v3), false);
 });

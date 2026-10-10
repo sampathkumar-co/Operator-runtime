@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { OperatorError } from './errors.ts';
 import {
-  currentProcessInstance, observeProcessInstance, processInstanceDefinitelyStale,
+  currentProcessInstance, localPidObservationAdmissible, observeProcessInstance, processInstanceDefinitelyStale,
   validProcessInstance, type ProcessInstanceIdentity
 } from './process-instance.ts';
 
@@ -111,7 +111,9 @@ export async function withDurableStateLock<T>(
       }
       try {
         const previous = await lockOwner(file);
-        if (previous) {
+        if (previous && localPidObservationAdmissible(previous.processInstance, identity)) {
+          // A remote host's Linux PID may be absent or reused locally.
+          // Only a matching boot identity permits PID-based lock reclamation.
           const observation = await observeProcessInstance(previous.processInstance.pid);
           if (processInstanceDefinitelyStale(previous.processInstance, observation)) {
             // Verify this is still the same observed token before removing a dead-owner lock.

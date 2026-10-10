@@ -4,6 +4,7 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -83,7 +84,10 @@ export async function acquireRelayStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      const stale = processInstanceDefinitelyStale(existing.processInstance, await observer(existing.pid));
+      // Another host's PID may be absent or reused locally. A Linux boot
+      // mismatch cannot authorize stealing its persistent instance lock.
+      const stale = localPidObservationAdmissible(existing.processInstance, identity)
+        && processInstanceDefinitelyStale(existing.processInstance, await observer(existing.pid));
       if (!stale) {
         throw new OperatorError(
           'RELAY_ALREADY_RUNNING',
@@ -105,12 +109,16 @@ async function readLockRecord(lockPath: string): Promise<LockRecord> {
   catch { throw invalid('Existing relay state lock is unreadable.'); }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalid('Existing relay state lock is invalid.');
   const raw = parsed as Record<string, unknown>;
-  const pid = Number(raw.pid);
-  const token = String(raw.token ?? '');
-  const createdAt = String(raw.createdAt ?? '');
+  // Persisted ownership identities must retain their exact JSON types.
+  // Coercion can disguise malformed or adversarial lock metadata.
+  const pid = raw.pid;
+  const token = raw.token;
+  const createdAt = raw.createdAt;
   const processInstance = validProcessInstance(raw.processInstance);
-  if (raw.version !== 1 || !Number.isSafeInteger(pid) || pid < 1 || token.length < 16 || token.length > 256
-    || !Number.isFinite(Date.parse(createdAt)) || !processInstance || processInstance.pid !== pid) {
+  if (raw.version !== 1 || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1
+    || typeof token !== 'string' || token.length < 16 || token.length > 256
+    || typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))
+    || !processInstance || processInstance.pid !== pid) {
     throw invalid('Existing relay state lock is invalid.');
   }
   return { version: 1, pid, processInstance, token, createdAt };
