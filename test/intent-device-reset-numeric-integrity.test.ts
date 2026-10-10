@@ -35,3 +35,29 @@ test('persisted device-reset authority generation cannot be type-coerced during 
   await fs.writeFile(file,JSON.stringify(pristine));
   assert.equal((await new DeviceResetStore(dir).get(sessionJti))?.authorityGeneration,8);
 });
+
+test('persisted workflow child indexes cannot be coerced into executable step positions',async t=>{
+  const state=await fs.mkdtemp(path.join(os.tmpdir(),'operator-workflow-index-integrity-'));
+  t.after(()=>fs.rm(state,{recursive:true,force:true}));
+  const {TaskStore}=await import('../src/core/task-store.ts');
+  const {createTask}=await import('../src/core/task.ts');
+  const task=createTask({userObjective:'two-stage approved workflow',
+    interpretedObjective:'two-stage approved workflow',authorizedScope:[],
+    prohibitedScope:[],successConditions:['all steps must be verified']});
+  const execution={
+    schemaVersion:1,plannerId:'operator.semantic-workflow.v1',goalKind:'semantic-workflow',
+    plannerState:{workflowIndex:1},maxSteps:10,maxAttemptsPerStep:2,timeoutMs:1000,
+    stepCount:0,records:[]
+  };
+  const file=path.join(state,'tasks',task.id+'.json');
+  await fs.mkdir(path.dirname(file),{recursive:true});
+  for(const invalid of ['1',true,[1],null]){
+    const poisoned={...task,execution:{...execution,plannerState:{workflowIndex:invalid}}};
+    await fs.writeFile(file,JSON.stringify(poisoned));
+    await assert.rejects(()=>new TaskStore(state).get(task.id),
+      (e:any)=>e?.code==='TASK_STATE_CORRUPT',
+      'malformed workflow step identity cannot be normalized');
+  }
+  await fs.writeFile(file,JSON.stringify({...task,execution}));
+  assert.equal((await new TaskStore(state).get(task.id)).execution?.plannerState.workflowIndex,1);
+});
