@@ -34,6 +34,7 @@ async function fixture(t: any) {
 }
 
 test('proven-dead prior owner safely reports pre-dispatch interruption without dispatch', async t => {
+  if (process.platform !== 'linux') return t.skip('only boot- and PID-namespace-bound Linux provenance permits automatic recovery');
   const { state, journal } = await fixture(t);
   const restarted = new LocalActionExecutionStore(state, { observeProcess: async () => ({ status: 'dead' }) });
   const first = await restarted.reconcileWithKernel(action, undefined, journal);
@@ -43,7 +44,8 @@ test('proven-dead prior owner safely reports pre-dispatch interruption without d
   assert.equal(first.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
   assert.equal(first.result.error?.sideEffectState, 'none');
   assert.equal(first.result.error?.executionPhase, 'pre_dispatch');
-  assert.equal((await journal.inspect(action.id)).state, 'PREPARED');
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+  await assert.rejects(journal.markDispatched(action.id, 'should-never-run'), (e: any) => e?.code === 'ACTION_JOURNAL_TRANSITION_INVALID');
   const repeat = await new LocalActionExecutionStore(state).lookup(action);
   assert.equal(repeat.status, 'completed');
   if (repeat.status === 'completed') assert.deepEqual(repeat.result, first.result);
@@ -81,6 +83,7 @@ test('a previous instance with no journal entry remains uncertain', async t => {
 });
 
 test('local agent HTTP receipt recovers a proven-dead pre-dispatch owner without executing the action', async t => {
+  if (process.platform !== 'linux') return t.skip('host-identity proof is unavailable outside Linux v3');
   const { state, journal } = await fixture(t);
   let dispatches = 0;
   const agentKernel = {
@@ -174,9 +177,60 @@ test('a truly exited worker can recover an initial PREPARED receipt across OS pr
   const actualAction: ActionRequest = { ...action, id: 'cross-process-prepared-action' };
   const replacement = new LocalActionExecutionStore(state);
   const reconciled = await replacement.reconcileWithKernel(actualAction, undefined, new ActionTransitionJournal(state));
-  assert.equal(reconciled.status, 'completed');
+  assert.equal(reconciled.status, process.platform === 'linux' ? 'completed' : 'processing');
   if (reconciled.status === 'completed') {
     assert.equal(reconciled.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
     assert.equal(reconciled.result.error?.sideEffectState, 'none');
+  }
+});
+
+test('an unbound Windows-style process identity cannot be reclaimed even with a dead local PID', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-unbound-host-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const fakeOwner = { pid: 8321, started: 'windows-filetime:130000000000000000' };
+  await new LocalActionExecutionStore(state, { ownerProcess: fakeOwner }).begin(action);
+  const journal = new ActionTransitionJournal(state);
+  await journal.prepare({ action, ownerKind: 'local-api', ownerId: action.id, resourceKeys: ['application:uia'] });
+  const restarted = new LocalActionExecutionStore(state, { observeProcess: async () => ({ status: 'dead' }) });
+  assert.equal((await restarted.reconcileWithKernel(action, undefined, journal)).status, 'processing');
+  assert.equal((await journal.inspect(action.id)).state, 'PREPARED');
+});
+
+test('an interrupted journal remains terminal and repairs receipt after a crash between stores', async t => {
+  const { state, journal } = await fixture(t);
+  await journal.interruptPreparedBeforeDispatch(action);
+  await assert.rejects(journal.markDispatched(action.id, 'old-worker'),
+    (e: any) => e?.code === 'ACTION_JOURNAL_TRANSITION_INVALID');
+  const replacement = new LocalActionExecutionStore(state);
+  const outcome = await replacement.reconcileWithKernel(action, undefined, journal);
+  assert.equal(outcome.status, 'completed');
+  if (outcome.status === 'completed') {
+    assert.equal(outcome.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  }
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+});
+
+test('pre-dispatch interruption rejects stale journal after provider dispatch', async t => {
+  const { journal } = await fixture(t);
+  await journal.markDispatched(action.id, 'provider-already-entered');
+  await assert.rejects(journal.interruptPreparedBeforeDispatch(action),
+    (e: any) => e?.code === 'ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN');
+  assert.equal((await journal.inspect(action.id)).state, 'DISPATCHED');
+});
+
+test('atomic interrupt/dispatch race has exactly one terminal winner', async t => {
+  const { journal } = await fixture(t);
+  const contenders = await Promise.allSettled([
+    journal.interruptPreparedBeforeDispatch(action),
+    journal.markDispatched(action.id, 'racing-provider')
+  ]);
+  const settled = contenders.filter(x => x.status === 'fulfilled');
+  assert.equal(settled.length, 1);
+  const state = (await journal.inspect(action.id)).state;
+  assert.ok(state === 'INTERRUPTED' || state === 'DISPATCHED');
+  if (state === 'INTERRUPTED') {
+    await assert.rejects(journal.markDispatched(action.id, 'late-provider'));
+  } else {
+    await assert.rejects(journal.interruptPreparedBeforeDispatch(action));
   }
 });
