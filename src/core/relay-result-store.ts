@@ -383,8 +383,9 @@ function safeReplayAuthority(input: unknown, expectedDeviceId: string): RelayDel
   const raw = input as Record<string, unknown>;
   const accountId = validUuid(String(raw.accountId ?? ''), 'authority accountId');
   const deviceId = validUuid(String(raw.deviceId ?? ''), 'authority deviceId');
-  const generation = Number(raw.generation);
-  if (deviceId !== expectedDeviceId || !Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Relay result replay authority is invalid.');
+  // Persisted replay authority must retain the original numeric generation.
+  const generation = raw.generation;
+  if (deviceId !== expectedDeviceId || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_RESULT_AUTHORITY_INVALID', 'Relay result replay authority is invalid.');
   return { accountId, deviceId, generation };
 }
 

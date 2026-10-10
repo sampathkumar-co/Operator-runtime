@@ -52,8 +52,10 @@ export function validateRelayAccountAuthority(input: unknown): RelayAccountAutho
   const raw = input as Record<string, unknown>;
   const accountId = String(raw.accountId ?? '').toLowerCase();
   const deviceId = String(raw.deviceId ?? '').toLowerCase();
-  const generation = Number(raw.generation);
-  if (!UUID.test(accountId) || !UUID.test(deviceId) || !Number.isSafeInteger(generation) || generation < 1) {
+  // An authorization generation is an exact authority identity, not a
+  // permissively parsed numeric input. Never coerce strings or booleans.
+  const generation = raw.generation;
+  if (!UUID.test(accountId) || !UUID.test(deviceId) || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) {
     invalid('Relay account authority identity or generation is invalid.');
   }
   return { accountId, deviceId, generation };

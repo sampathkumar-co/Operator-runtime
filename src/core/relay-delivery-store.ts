@@ -717,9 +717,10 @@ function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryA
   const raw = input as Record<string, unknown>;
   const accountId = validUuid(String(raw.accountId ?? ''), 'authority accountId');
   const deviceId = validUuid(String(raw.deviceId ?? ''), 'authority deviceId');
-  const generation = Number(raw.generation);
+  // Queue recovery cannot coerce a string or boolean into a valid authority.
+  const generation = raw.generation;
   if (deviceId !== expectedDeviceId) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority device does not match its stream.');
-  if (!Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority generation is invalid.');
+  if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority generation is invalid.');
   return { accountId, deviceId, generation };
 }
 
