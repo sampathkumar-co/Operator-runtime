@@ -153,20 +153,53 @@ export class RemoteAuthorityFenceStore {
    */
   async commitProtected(leaseInput: RemoteAuthorityLease, mutation: ControlPlaneMutation):
     Promise<{ lease: RemoteAuthorityLease; record: ControlPlaneRecord | null }> {
+    const committed = await this.commitProtectedBatch(leaseInput, [mutation]);
+    return { lease: committed.lease, record: committed.records[0] ?? null };
+  }
+
+  /**
+   * Atomic effect-batch commit for writes in the SAME shared ControlPlaneStore.
+   * A relay/provider can change a device stream AND its shared epoch as one
+   * fenced transaction. Revocation or lease rotation wins against ALL writes,
+   * and any one CAS failure rolls back the complete batch.
+   *
+   * This is NOT sufficient for external effects (remote desktop, filesystems,
+   * browsers or databases unrelated to this store); those still require
+   * provider-native authority enforcement and uncertainty reconciliation.
+   */
+  async commitProtectedBatch(
+    leaseInput: RemoteAuthorityLease,
+    mutationsInput: readonly ControlPlaneMutation[]
+  ): Promise<{ lease: RemoteAuthorityLease; records: ControlPlaneRecord[] }> {
     await this.#assertExecutingOwner(leaseInput);
     const lease = await this.assertCurrent(leaseInput);
-    if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS) {
-      throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must not address the authority namespace.');
+    if (!Array.isArray(mutationsInput) || mutationsInput.length < 1 || mutationsInput.length > 10_000) {
+      throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected batch must contain 1 to 10000 mutations.');
     }
     if (!this.#authorizeMutation) {
-      throw blocked('REMOTE_AUTHORITY_MUTATION_POLICY_REQUIRED', 'Provider effect scope authorization is required before protected commit.');
+      throw blocked('REMOTE_AUTHORITY_MUTATION_POLICY_REQUIRED',
+        'Provider effect scope authorization is required before protected commit.');
     }
-    // The mutation authorizer is trusted to verify exact account/device/resource
-    // ownership, not just a caller-supplied label. This check may deny the
-    // operation; the lease generation CAS still guards against revocation races.
-    await this.#authorizeMutation(lease, mutation);
+    const mutations = mutationsInput.map((mutation) => {
+      if (!mutation || typeof mutation !== 'object' || mutation.namespace === NS ||
+          typeof mutation.namespace !== 'string' || typeof mutation.key !== 'string') {
+        throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected mutation must have a valid namespace/key and must not address authority state.');
+      }
+      return { ...mutation };
+    });
+    const touched = new Set<string>();
+    for (const mutation of mutations) {
+      const uniqueKey = JSON.stringify([mutation.namespace, mutation.key]);
+      if (touched.has(uniqueKey)) {
+        throw blocked('REMOTE_AUTHORITY_INVALID', 'Protected batch must not repeat a storage identity.');
+      }
+      touched.add(uniqueKey);
+      // Independent trusted provider policy must authorize EVERY changed key,
+      // not only the first mutation in a multi-stream transaction.
+      await this.#authorizeMutation(lease, mutation);
+    }
     const now = this.#clock().toISOString();
-    const [advanced, committed] = await this.#store.transact([
+    const [advanced, ...records] = await this.#store.transact([
       {
         namespace: NS, key: resourceKey(lease), expectedGeneration: lease.generation,
         value: { kind: 'active', schemaVersion: 1, accountId: lease.accountId,
@@ -175,15 +208,13 @@ export class RemoteAuthorityFenceStore {
           fenceToken: lease.fenceToken },
         expiresAt: lease.expiresAt
       },
-      mutation
+      ...mutations
     ], now);
     if (!advanced) {
-      throw blocked('REMOTE_AUTHORITY_FENCE_LOST', 'Atomic authority checkpoint did not produce a new generation.');
+      throw blocked('REMOTE_AUTHORITY_FENCE_LOST',
+        'Atomic authority checkpoint did not produce a new generation.');
     }
-    return {
-      lease: { ...lease, generation: advanced.generation },
-      record: committed ?? null
-    };
+    return { lease: { ...lease, generation: advanced.generation }, records };
   }
 
   /** Voluntary exact-owner release. Revocation remains a separate, irreversible
