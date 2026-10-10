@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -306,4 +307,58 @@ test('team mission lock never steals ownership when process liveness is unknown'
     (error: any) => error?.code === 'TEAM_LOCK_BUSY'
   );
   assert.equal(JSON.parse(await fs.readFile(lockPath, 'utf8')).pid, 44101);
+});
+
+for (const status of ['dead', 'reused'] as const) {
+  test('sibling Linux PID namespace ' + status + ' probe cannot steal team mission lock', async t => {
+    const state = await stateDir(t);
+    const boot = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    let observed = 0;
+    const coordinator = new TeamCoordinator(state, {
+      processInstance: { pid: 44002, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:20' },
+      observeProcessInstance: async pid => {
+        observed++;
+        return status === 'dead' ? { status: 'dead' as const }
+          : { status: 'live' as const, identity: {
+            pid, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:21'
+          } };
+      }
+    });
+    const mission = await coordinator.submit({
+      objective: 'Separate namespace mission lock fencing',
+      workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+    });
+    const file = path.join(state, 'team-mission-locks', mission.id + '.lock');
+    const remote = {
+      id: crypto.randomUUID(), pid: 44001,
+      processInstance: { pid: 44001, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:10' },
+      at: new Date().toISOString()
+    };
+    await fs.writeFile(file, JSON.stringify(remote));
+    await assert.rejects(() => coordinator.start(mission.id),
+      (error: any) => error?.code === 'TEAM_LOCK_BUSY');
+    assert.equal(observed, 0);
+    assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), remote);
+  });
+}
+
+test('same-namespace proven dead mission lock can be reclaimed', async t => {
+  const state = await stateDir(t);
+  const boot = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const coordinator = new TeamCoordinator(state, {
+    processInstance: { pid: 44002, started: 'linux-boot-id:' + boot + ':pidns:7777:ticks:20' },
+    observeProcessInstance: async () => ({ status: 'dead' as const })
+  });
+  const mission = await coordinator.submit({
+    objective: 'Same namespace mission recovery',
+    workItems: [{ key: 'verify', title: 'Verify', role: 'verifier' }]
+  });
+  const file = path.join(state, 'team-mission-locks', mission.id + '.lock');
+  await fs.writeFile(file, JSON.stringify({
+    id: crypto.randomUUID(), pid: 44001,
+    processInstance: { pid: 44001, started: 'linux-boot-id:' + boot + ':pidns:7777:ticks:10' },
+    at: new Date().toISOString()
+  }));
+  const started = await coordinator.start(mission.id);
+  assert.equal(started.state, 'RUNNING');
 });
