@@ -25,7 +25,7 @@ test('killed account authority holder cannot block future disable or reuse its g
     'const devices={listDevices:async()=>[{deviceId,status:"active"}]};',
     'await new AccountDeviceRegistry(state,devices).withActiveAuthorityLease({accountId,deviceId,generation:Number(gen)},async()=>{',
     '  process.stdout.write("ACQUIRED\\n");',
-    '  await new Promise(()=>{});',
+    '  await new Promise(()=>{ setInterval(()=>{},1000); });',
     '});'
   ].join('\n');
   const child = spawn(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script, source, dir, owner.accountId, deviceId, String(membership.authorityGeneration)], {
@@ -45,9 +45,16 @@ test('killed account authority holder cannot block future disable or reuse its g
     });
     child.on('exit', (code, signal) => { clearTimeout(timer); reject(new Error('Holder died before ready: ' + code + ' ' + signal + ' ' + err)); });
   });
+  // A separate registry instance must not revoke a still-live work holder.
+  const disable = create().disableAccount(owner.accountId, 'post-crash disable');
+  const premature = await Promise.race([
+    disable.then(() => 'disabled', () => 'failed'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 100))
+  ]);
+  assert.equal(premature, 'pending', 'active authority must fence competing disable');
   assert.equal(child.kill('SIGKILL'), true);
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  const disabled = await create().disableAccount(owner.accountId, 'post-crash disable');
+  const disabled = await disable;
   assert.equal(disabled.status, 'disabled');
   await assert.rejects(create().withActiveAuthorityLease(
     { accountId: owner.accountId, deviceId, generation: membership.authorityGeneration },
