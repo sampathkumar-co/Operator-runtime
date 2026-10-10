@@ -266,8 +266,10 @@ function normalizeKeys(input: string[]): string[] {
 function validateState(input: unknown): LeaseState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state must be an object.');
   const raw = input as { version?: unknown; resources?: unknown; quarantines?: unknown };
-  const version = Number(raw.version);
-  if (![1, 2].includes(version) || !Array.isArray(raw.resources) || raw.resources.length > MAX_RESOURCES) {
+  // Do not coerce persisted schema identity. Treating true / '1' as v1
+  // silently drops v2 quarantines, then rewrites the file without them.
+  const version = raw.version;
+  if ((version !== 1 && version !== 2) || !Array.isArray(raw.resources) || raw.resources.length > MAX_RESOURCES) {
     throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource lease state shape is invalid.');
   }
   const resources = raw.resources as ResourceEntry[];
@@ -292,6 +294,12 @@ function validateState(input: unknown): LeaseState {
     }
   }
 
+  // Legitimate v1 stores have no quarantine field. If one is present, this
+  // is not a v1 state: interpreting it as legacy would silently drop action
+  // fences. Reject rather than rewriting a contradictory schema.
+  if (version === 1 && raw.quarantines !== undefined) {
+    throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Legacy lease state cannot contain v2 quarantines.');
+  }
   const quarantines = version === 1 ? [] : raw.quarantines;
   if (!Array.isArray(quarantines) || quarantines.length > MAX_QUARANTINES) {
     throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine state is invalid.');
