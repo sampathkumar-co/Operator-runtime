@@ -63,11 +63,18 @@ test('killed account authority holder cannot block future disable or reuse its g
     });
   assert.equal(child.kill('SIGKILL'), true);
   await exited;
-  const disabled = await Promise.race([
-    disable,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Revocation stalled after confirmed OS process death')), 20_000))
-  ]);
+  let disableTimer: NodeJS.Timeout | undefined;
+  let disabled;
+  try {
+    disabled = await Promise.race([
+      disable,
+      new Promise<never>((_, reject) => {
+        disableTimer = setTimeout(() => reject(new Error('Revocation stalled after confirmed OS process death')), 20_000);
+      })
+    ]);
+  } finally {
+    clearTimeout(disableTimer);
+  }
   assert.equal(disabled.status, 'disabled');
   await assert.rejects(create().withActiveAuthorityLease(
     { accountId: owner.accountId, deviceId, generation: membership.authorityGeneration },
