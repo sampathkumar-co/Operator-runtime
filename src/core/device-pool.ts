@@ -359,7 +359,7 @@ function expireReservations(state: DevicePoolState, now: number): void {
 
 function validateState(input: unknown): DevicePoolState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as DevicePoolState & { version: 1 | 2 };
+  const state = input as { version: 1 | 2; reservations: DeviceReservation[]; usedReservationIds?: string[] };
   if ((state.version !== 1 && state.version !== 2) ||
       !Array.isArray(state.reservations) || state.reservations.length > MAX_RESERVATIONS) {
     throw corrupt('State shape is invalid.');
