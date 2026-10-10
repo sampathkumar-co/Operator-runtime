@@ -151,6 +151,30 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
       e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
     await guardedStore.restoreWithConfiguredWitness(snapshot);
     assert.equal((await guardedStore.get('recovered', 'device'))?.value.authorityGeneration, 4);
+    // An independent publisher's UPDATE must be unable to advance the
+    // witness while the trusted restore callback holds its row lock.
+    let entered, resume;
+    const inside = new Promise(resolve => { entered = resolve; });
+    const hold = new Promise(resolve => { resume = resolve; });
+    const witnessRead = guard.anchor.withLatestExclusive(async latest => {
+      assert.equal(latest.manifest.epoch, 7);
+      entered();
+      await hold;
+    });
+    await inside;
+    const rival = await pool.connect();
+    try {
+      await rival.query('SET statement_timeout = 750');
+      await assert.rejects(rival.query(
+        'UPDATE mecord_restore_witness_anchor SET signature=$2 WHERE anchor_id=$1',
+        [anchorId, signature]),
+        e => e?.code === '57014');
+      await rival.query('SET statement_timeout = 0');
+    } finally {
+      rival.release();
+      resume();
+      await witnessRead;
+    }
     // A signed stale latest-witness row rejects a different snapshot, even
     // though the target already contains data and both DBs are reachable.
     const stale = { ...snapshot, digest: '0'.repeat(64) };
