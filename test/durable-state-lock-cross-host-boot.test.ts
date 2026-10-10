@@ -35,12 +35,16 @@ test('cross-host Linux boot identity forbids local PID-based stale file-lock evi
   assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), remote);
 });
 
-test('Linux PID recovery scope only accepts exact current boot evidence', async () => {
-  const local = { pid: 100, started: 'linux-boot-id:' + BOOT_A + ':ticks:1000' };
+test('Linux PID recovery requires exact boot AND namespace evidence', async () => {
+  const local = { pid: 100, started: 'linux-boot-id:' + BOOT_A + ':pidns:10001:ticks:1000' };
   assert.equal(localPidObservationAdmissible(
-    { pid: 200, started: 'linux-boot-id:' + BOOT_A + ':ticks:2000' }, local), true);
+    { pid: 200, started: 'linux-boot-id:' + BOOT_A + ':pidns:10001:ticks:2000' }, local), true);
   assert.equal(localPidObservationAdmissible(
-    { pid: 200, started: 'linux-boot-id:' + BOOT_B + ':ticks:2000' }, local), false);
+    { pid: 200, started: 'linux-boot-id:' + BOOT_A + ':pidns:10002:ticks:2000' }, local), false);
+  assert.equal(localPidObservationAdmissible(
+    { pid: 200, started: 'linux-boot-id:' + BOOT_B + ':pidns:10001:ticks:2000' }, local), false);
+  assert.equal(localPidObservationAdmissible(
+    { pid: 200, started: 'linux-boot-id:' + BOOT_A + ':ticks:2000' }, local), false);
   assert.equal(localPidObservationAdmissible(
     { pid: 200, started: 'linux-boot-ticks:2000' }, local), false);
   assert.equal(localPidObservationAdmissible(undefined, local), false);
