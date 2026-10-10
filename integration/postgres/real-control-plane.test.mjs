@@ -324,7 +324,7 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
   });
 
 
-  test('independent real PostgreSQL pools fence old owners after delete, restore and expiry', async () => {
+  test('independent real PostgreSQL pools fence old owners after delete and expiry', async () => {
     // Stand in for a second host using its own connection pool, transaction
     // state and advisory-lock session. This must not depend on local JS queues.
     const peerPool = new Pool({
