@@ -372,15 +372,11 @@ test('Windows native one-shot Job Object kills detached descendants after a succ
   await assert.rejects(fs.access(marker), 'detached descendants must be terminated when the Job Object closes');
 });
 
-test('Windows containment-required mode rejects one-shot execution without a native helper', async t => {
+test('Windows one-shot execution rejects missing native Job Object helper by default', async t => {
   if (process.platform !== 'win32') return t.skip('Windows containment configuration');
-  const prevRequired = process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT;
   const prevHelper = process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
-  process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT = '1';
   delete process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
   t.after(() => {
-    if (prevRequired === undefined) delete process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT;
-    else process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT = prevRequired;
     if (prevHelper === undefined) delete process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH;
     else process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH = prevHelper;
   });
