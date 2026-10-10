@@ -62,8 +62,10 @@ export function validIntentBinding(input: unknown): IntentBinding {
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(conversationId)) {
     throw new OperatorError('INTENT_BINDING_INVALID', 'Intent conversationId is invalid.');
   }
-  const intentVersion = Number(raw.intentVersion);
-  if (!Number.isSafeInteger(intentVersion) || intentVersion < 1) {
+  // Intent versions identify an exact authorization revision; rejecting
+  // nonnumeric JSON types prevents implicit conversion of stale/foreign input.
+  const intentVersion = raw.intentVersion;
+  if (typeof intentVersion !== 'number' || !Number.isSafeInteger(intentVersion) || intentVersion < 1) {
     throw new OperatorError('INTENT_BINDING_INVALID', 'Intent version is invalid.');
   }
   const digest = String(raw.digest ?? '').toLowerCase();

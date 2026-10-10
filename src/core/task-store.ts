@@ -345,6 +345,12 @@ function validateExecution(input: unknown): TaskExecution {
   const plannerId = boundedText(raw.plannerId, 256, 'execution plannerId');
   const goalKind = boundedText(raw.goalKind, 256, 'execution goalKind');
   const plannerState = jsonObject(raw.plannerState, 'execution plannerState');
+  // Workflow progress is a durable execution position. Never normalize a
+  // boolean/string/array into a step index during restart or task replay.
+  if (plannerState.workflowIndex !== undefined &&
+      (typeof plannerState.workflowIndex !== 'number' || !Number.isSafeInteger(plannerState.workflowIndex) || plannerState.workflowIndex < 0)) {
+    throw corrupt('execution workflowIndex must be an exact nonnegative integer.');
+  }
   if (plannerState.durablePlan !== undefined) {
     try { plannerState.durablePlan = normalizeDurableTaskPlan(plannerState.durablePlan); }
     catch { throw corrupt('execution durable task plan is invalid.'); }

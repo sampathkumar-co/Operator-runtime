@@ -136,7 +136,9 @@ function validateState(input: ResetState): ResetState {
     seen.add(sessionJti);
     const deviceId = validUuid(String(raw.deviceId ?? ''), 'deviceId');
     const accountId = validUuid(String(raw.accountId ?? ''), 'accountId');
-    const authorityGeneration = validGeneration(Number(raw.authorityGeneration));
+    // Restored device-reset authority cannot turn a string, boolean or array
+    // into a valid generation by JavaScript numeric coercion.
+    const authorityGeneration = validGeneration(raw.authorityGeneration);
     const phase = raw.phase === 'REQUESTED' ? 'REQUESTED' : raw.phase === 'COMPLETE' ? 'COMPLETE' : null;
     if (!phase) throw new OperatorError('DEVICE_RESET_STATE_CORRUPT', 'Device reset phase is invalid.');
     const requestedAt = validIso(String(raw.requestedAt ?? ''), 'requestedAt');

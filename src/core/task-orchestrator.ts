@@ -2158,8 +2158,8 @@ function semanticLearningContext(goal: SemanticTaskGoal, task: TaskCapsule): str
   if (goal.kind !== 'semantic-workflow') return goal.kind;
   const state = task.execution?.plannerState;
   if (!state) return 'semantic-workflow';
-  const index = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
-  if (!Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
+  const index = state.workflowIndex === undefined ? 0 : state.workflowIndex;
+  if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 || index >= goal.steps.length) return 'semantic-workflow';
   return goal.steps[index]?.kind ?? 'semantic-workflow';
 }
 
@@ -2208,8 +2208,8 @@ function emptyTaskIntelligence(goal: SemanticTaskGoal, authorizedScope: string[]
 }
 
 function workflowIndex(state: Record<string, unknown>, length: number): number {
-  const value = state.workflowIndex === undefined ? 0 : Number(state.workflowIndex);
-  if (!Number.isSafeInteger(value) || value < 0 || value > length) {
+  const value = state.workflowIndex === undefined ? 0 : state.workflowIndex;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > length) {
     throw new OperatorError('TASK_WORKFLOW_STATE_INVALID', 'Workflow child index is invalid.');
   }
   return value;
