@@ -138,6 +138,13 @@ export class AgentKernel {
     prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
     if (action.risk !== 'read') prepared = await this.#journal.recoverPendingCompletion(action.id, action);
 
+    // This exact action was conclusively interrupted before provider dispatch.
+    // The terminal journal fence prevents a stale or restarted worker from
+    // re-entering the provider with the same durable action identity.
+    if (prepared.state === 'INTERRUPTED' && action.risk !== 'read') {
+      return reconciliationRequired(action, 'Prior owner ended before dispatch; this action is terminal and cannot be replayed.');
+    }
+
     if (prepared.state === 'COMPLETED' && action.risk !== 'read') {
       const replay = await this.#journal.replayCompleted(action.id);
       if (replay) {

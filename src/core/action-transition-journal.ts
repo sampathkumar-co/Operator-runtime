@@ -17,7 +17,8 @@ export type ActionJournalState =
   | 'OBSERVED'
   | 'UNCERTAIN'
   | 'RECONCILED'
-  | 'COMPLETED';
+  | 'COMPLETED'
+  | 'INTERRUPTED';
 
 export interface ActionJournalTransition {
   seq: number;
@@ -126,15 +127,18 @@ export class ActionTransitionJournal {
       const digest = actionHash(input.action);
       const existing = state.entries.find((entry) => entry.actionId === input.action.id);
       if (existing) {
-        if (existing.actionDigest !== digest || existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId
+        const refreshingCompletedRead = existing.state === 'COMPLETED' && input.action.risk === 'read';
+        if (existing.actionDigest !== digest || (!refreshingCompletedRead && (existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId))
           || existing.capability !== input.action.capability || existing.risk !== input.action.risk
           || canonicalJson(existing.intent ?? null) !== canonicalJson(input.action.intent ?? null)
           || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(uniqueKeys(input.resourceKeys)))) {
           throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Action id is already bound to a different durable execution identity.');
         }
-        if (existing.state === 'COMPLETED' && input.action.risk === 'read') {
+        if (refreshingCompletedRead) {
           const at = now.toISOString();
           existing.generation = (existing.generation ?? 1) + 1;
+          existing.ownerKind = bounded(input.ownerKind, 128, 'ownerKind');
+          existing.ownerId = bounded(input.ownerId, 512, 'ownerId');
           existing.state = 'PREPARED';
           existing.transitions = [{ seq: 1, state: 'PREPARED', at }];
           existing.updatedAt = at;
@@ -163,6 +167,35 @@ export class ActionTransitionJournal {
       };
       state.entries.push(entry);
       state.entries.sort((a, b) => a.actionId.localeCompare(b.actionId));
+      return entry;
+    });
+  }
+
+  /**
+   * Atomically fence a mutation whose original process was independently
+   * proven dead and whose journal has never reached provider dispatch.
+   * Unlike a separate inspect() + receipt.complete(), this transition wins
+   * or loses the exact same durable lock as markDispatched().
+   * INTERRUPTED has no outbound transition, including after restart.
+   */
+  async interruptPreparedBeforeDispatch(actionInput: ActionRequest): Promise<ActionJournalEntry> {
+    const actionDigest = actionHash(actionInput);
+    return await this.#mutate((state, now) => {
+      const entry = findEntry(state, actionInput.id);
+      if (entry.actionDigest !== actionDigest || entry.capability !== actionInput.capability ||
+          entry.risk !== actionInput.risk || entry.risk === 'read') {
+        throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Pre-dispatch interruption requires exact mutation identity.');
+      }
+      if (entry.state === 'INTERRUPTED') return entry;
+      if (entry.generation !== 1 || entry.state !== 'PREPARED' || entry.transitions.length !== 1 ||
+          entry.transitions[0]?.state !== 'PREPARED') {
+        throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
+          'Execution history does not prove the provider was never dispatched.');
+      }
+      applyTransition(entry, 'INTERRUPTED', now, {
+        provider: 'agent-kernel',
+        resultDigest: digest({ actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted' })
+      });
       return entry;
     });
   }
@@ -449,7 +482,7 @@ export class ActionTransitionJournal {
 
 function allowedTransition(current: ActionJournalState, next: ActionJournalState): boolean {
   if (current === next) return true;
-  if (current === 'PREPARED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED';
+  if (current === 'PREPARED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED' || next === 'INTERRUPTED';
   if (current === 'DEFERRED') return next === 'DEFERRED' || next === 'DISPATCHED' || next === 'COMPLETED';
   if (current === 'DISPATCHED') return next === 'PREPARED' || next === 'OBSERVED' || next === 'UNCERTAIN' || next === 'RECONCILED' || next === 'COMPLETED';
   if (current === 'OBSERVED') return next === 'RECONCILED' || next === 'COMPLETED' || next === 'UNCERTAIN';
@@ -522,14 +555,14 @@ function validateState(input: unknown): JournalState {
     if (entry.intent) validIntentBinding(entry.intent);
     entry.resourceKeys = uniqueKeys(entry.resourceKeys);
     entry.generation = entry.generation === undefined ? 1 : integer(entry.generation, 1, Number.MAX_SAFE_INTEGER, 'generation');
-    if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED'].includes(entry.state)) throw corrupt('Entry state is invalid.');
+    if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED','INTERRUPTED'].includes(entry.state)) throw corrupt('Entry state is invalid.');
     if (!Array.isArray(entry.transitions) || entry.transitions.length < 1 || entry.transitions.length > MAX_TRANSITIONS) throw corrupt('Transition history is invalid.');
     if (entry.transitions[0]?.state !== 'PREPARED') throw corrupt('Transition history must begin in PREPARED.');
     let previousAt = -Infinity;
     for (let index = 0; index < entry.transitions.length; index += 1) {
       const transition = entry.transitions[index]!;
       if (transition.seq !== index + 1) throw corrupt('Transition sequence is invalid.');
-      if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED'].includes(transition.state)) throw corrupt('Transition state is invalid.');
+      if (!['PREPARED','DEFERRED','DISPATCHED','OBSERVED','UNCERTAIN','RECONCILED','COMPLETED','INTERRUPTED'].includes(transition.state)) throw corrupt('Transition state is invalid.');
       const transitionAt = Date.parse(iso(transition.at));
       if (transitionAt < previousAt) throw corrupt('Transition timestamps must be nondecreasing.');
       previousAt = transitionAt;
@@ -543,6 +576,17 @@ function validateState(input: unknown): JournalState {
       validateTransitionMetadata(transition, index === 0);
     }
     if (entry.transitions.at(-1)?.state !== entry.state) throw corrupt('Entry state does not match its latest transition.');
+    if (entry.state === 'INTERRUPTED') {
+      const proof = entry.transitions[1];
+      const expectedDigest = digest({
+        actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted'
+      });
+      if (entry.risk === 'read' || entry.generation !== 1 || entry.transitions.length !== 2 ||
+          proof?.state !== 'INTERRUPTED' || proof.provider !== 'agent-kernel' ||
+          proof.resultDigest !== expectedDigest) {
+        throw corrupt('Interrupted journal is not bound to an original never-dispatched mutation.');
+      }
+    }
     const createdAt = Date.parse(iso(entry.createdAt));
     const updatedAt = Date.parse(iso(entry.updatedAt));
     if (createdAt > Date.parse(entry.transitions[0]!.at)) throw corrupt('Entry creation timestamp is after its current generation.');
@@ -578,6 +622,10 @@ function validateTransitionMetadata(transition: ActionJournalTransition, initial
     && transition.reconciliationStatus !== 'completed'
     && transition.reconciliationStatus !== 'not_applied') {
     throw corrupt('RECONCILED transition must record a definitive reconciliation status.');
+  }
+  if (transition.state === 'INTERRUPTED' && (!transition.provider || !transition.resultDigest ||
+    transition.verificationDigest !== undefined || transition.reconciliationStatus !== undefined)) {
+    throw corrupt('Interrupted pre-dispatch transition is missing its durable fence proof.');
   }
   if (transition.state === 'COMPLETED') {
     const verified = transition.verificationDigest !== undefined;
