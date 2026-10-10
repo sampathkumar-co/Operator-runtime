@@ -62,6 +62,8 @@ interface DevicePoolState {
   reservations: DeviceReservation[];
   /** Non-recyclable identity ledger, atomically committed with reservation state. */
   usedReservationIds: string[];
+  /** Legacy saturation or unknown reincarnation history blocks new effects. */
+  historyComplete: boolean;
 }
 
 export interface DevicePoolRequest {
@@ -84,6 +86,7 @@ export function devicePoolAllocationRequestDigest(input: DevicePoolRequest): str
 
 export class DevicePoolScheduler {
   #file: string;
+  #initializedMarker: string;
   #registry: DeviceRegistryStore;
   #routing: DeviceRoutingStore;
   #clock: () => Date;
@@ -91,6 +94,7 @@ export class DevicePoolScheduler {
 
   constructor(stateDir: string, registry: DeviceRegistryStore, routing: DeviceRoutingStore, options: { clock?: () => Date } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'device-pool.json');
+    this.#initializedMarker = path.join(path.resolve(stateDir), 'device-pool-initialized.json');
     this.#registry = registry;
     this.#routing = routing;
     this.#clock = options.clock ?? (() => new Date());
@@ -118,6 +122,10 @@ export class DevicePoolScheduler {
       if (!pinnedDeviceId) pinnedDeviceId = await this.#routing.defaultDevice();
 
       const state = await this.#read();
+      if (!state.historyComplete) {
+        throw new OperatorError('DEVICE_POOL_HISTORY_INCOMPLETE',
+          'Reservation history may be missing earlier identities; new effects require trusted reconciliation.');
+      }
       if (state.usedReservationIds.includes(reservationId)) {
         throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Reservation identity is already allocated; it cannot be replayed or repurposed.');
       }
@@ -289,12 +297,75 @@ export class DevicePoolScheduler {
 
   async #read(): Promise<DevicePoolState> {
     try {
-      return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
+      const raw = JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS));
+      const state = validateState(raw);
+      // Read-only inspection of a genuine pre-marker v1/v2 file must still
+      // establish durable "this store existed" evidence. The marker guard
+      // independently serializes its monotonic schema epoch so old readers
+      // cannot downgrade a later v2 commitment.
+      await this.#ensureInitializedMarker(raw.version === 1);
+      return state;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, reservations: [], usedReservationIds: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        try {
+          const marker = JSON.parse(await readDurableStateText(this.#initializedMarker, {
+            maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
+            invalidMessage: 'Device pool initialization marker is invalid.'
+          }));
+          if (!marker || marker.version !== 1 || marker.initialized !== true ||
+              typeof marker.allowV1 !== 'boolean') throw corrupt('Initialization marker is malformed.');
+          throw new OperatorError('DEVICE_POOL_LEDGER_MISSING',
+            'Previously initialized device reservation authority is missing. Restore or reconcile; do not replay.');
+        } catch (markerError) {
+          if ((markerError as NodeJS.ErrnoException).code === 'ENOENT') {
+            return { version: 2, reservations: [], usedReservationIds: [], historyComplete: true };
+          }
+          if (markerError instanceof OperatorError) throw markerError;
+          throw corrupt('Device pool initialization marker JSON is unreadable or truncated.');
+        }
+      }
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('DEVICE_POOL_STATE_CORRUPT', 'Device pool state could not be read.');
     }
+  }
+
+  /**
+   * A separate process-lock on the marker ensures its v1 allowance can only
+   * move TRUE -> FALSE as the parent ledger is upgraded. It never reverts
+   * after v2 ownership has been persisted, even with concurrent read-only
+   * legacy clients and allocation writers.
+   */
+  async #ensureInitializedMarker(allowV1: boolean): Promise<void> {
+    await withDurableStateLock(this.#initializedMarker, async () => {
+      let existing: { version?: unknown; initialized?: unknown; allowV1?: unknown } | null = null;
+      try {
+        existing = JSON.parse(await readDurableStateText(this.#initializedMarker, {
+          maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
+          invalidMessage: 'Device pool initialization marker is invalid.'
+        }));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          if (error instanceof OperatorError) throw error;
+          throw corrupt('Device pool initialization marker JSON is unreadable or truncated.');
+        }
+      }
+      if (existing && (existing.version !== 1 || existing.initialized !== true ||
+          typeof existing.allowV1 !== 'boolean')) {
+        throw corrupt('Device pool initialization marker is malformed.');
+      }
+      if (allowV1 && existing?.allowV1 === false) {
+        throw new OperatorError('DEVICE_POOL_HISTORY_INCOMPLETE',
+          'Legacy reservation state was restored after authority history initialization.');
+      }
+      if (existing && (existing.allowV1 === false || (allowV1 && existing.allowV1 === true))) return;
+      // Commit marker only after successful validation of the parent file.
+      // The marker itself cannot be reverted by a racing old v1 reader.
+      await writeDurableStateText(this.#initializedMarker,
+        JSON.stringify({ version: 1, initialized: true, allowV1 }), {
+          maxBytes: 4096, errorCode: 'DEVICE_POOL_STATE_CORRUPT',
+          invalidMessage: 'Device pool initialization marker cannot be persisted.'
+        });
+    });
   }
 
   async #write(state: DevicePoolState): Promise<void> {
@@ -313,6 +384,7 @@ export class DevicePoolScheduler {
         'Durable reservation ID history exceeds store capacity; refusing to recycle any prior allocation identity.');
     }
     await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
+    await this.#ensureInitializedMarker(false);
   }
 }
 
@@ -376,7 +448,10 @@ function expireReservations(state: DevicePoolState, now: number): void {
 
 function validateState(input: unknown): DevicePoolState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as { version: 1 | 2; reservations: DeviceReservation[]; usedReservationIds?: string[] };
+  const state = input as {
+    version?: number; reservations?: DeviceReservation[];
+    usedReservationIds?: unknown; historyComplete?: unknown;
+  };
   if ((state.version !== 1 && state.version !== 2) ||
       !Array.isArray(state.reservations) || state.reservations.length > MAX_RESERVATIONS) {
     throw corrupt('State shape is invalid.');
@@ -397,6 +472,18 @@ function validateState(input: unknown): DevicePoolState {
     catch { throw corrupt('Historic reservation ID is invalid.'); }
     if (rawId !== normalized || used.has(normalized)) throw corrupt('Historic reservation IDs must be canonical and unique.');
     used.add(normalized);
+  }
+  // Existing v2 stores without a completeness bit are accepted only while
+  // their total persisted UUID history is BELOW the original 5,000-row
+  // compaction threshold. A saturated v1/v2 migration may have already
+  // forgotten past allocations and must not be used for new reservations.
+  const historyComplete = state.version === 1
+    ? state.reservations.length < MAX_RESERVATIONS
+    : state.historyComplete === undefined
+      ? historic.length < MAX_RESERVATIONS
+      : state.historyComplete;
+  if (typeof historyComplete !== 'boolean') {
+    throw corrupt('Reservation identity completeness status is invalid.');
   }
   const ids = new Set<string>();
   for (const item of state.reservations) {
@@ -423,7 +510,8 @@ function validateState(input: unknown): DevicePoolState {
   return {
     version: 2,
     reservations: structuredClone(state.reservations),
-    usedReservationIds: [...used].sort()
+    usedReservationIds: [...used].sort(),
+    historyComplete
   };
 }
 
