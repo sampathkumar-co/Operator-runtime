@@ -251,4 +251,27 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     }], '2026-10-09T09:00:04.000Z'), (error) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
   });
 
+  test('real PostgreSQL rejects nonnumeric CAS generations before touching committed owner', async () => {
+    const [first] = await store.transact([{
+      namespace: 'authority', key: 'typed-generation', expectedGeneration: null,
+      value: { owner: 'first' }
+    }]);
+    assert.equal(first.generation, 1);
+    for (const invalid of ['1', true, [1]]) {
+      await assert.rejects(
+        store.transact([{
+          namespace: 'authority', key: 'typed-generation',
+          expectedGeneration: invalid, value: { owner: 'forged' }
+        }]),
+        (error) => error?.code === 'CONTROL_PLANE_STORE_INVALID'
+      );
+      assert.deepEqual((await store.get('authority', 'typed-generation'))?.value, { owner: 'first' });
+    }
+    const [second] = await store.transact([{
+      namespace: 'authority', key: 'typed-generation', expectedGeneration: first.generation,
+      value: { owner: 'legitimate' }
+    }]);
+    assert.equal(second.generation, 2);
+  });
+
 }
