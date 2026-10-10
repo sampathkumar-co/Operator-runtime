@@ -4,6 +4,7 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -83,7 +84,10 @@ export async function acquireRelayStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      const stale = processInstanceDefinitelyStale(existing.processInstance, await observer(existing.pid));
+      // Another host's PID may be absent or reused locally. A Linux boot
+      // mismatch cannot authorize stealing its persistent instance lock.
+      const stale = localPidObservationAdmissible(existing.processInstance, identity)
+        && processInstanceDefinitelyStale(existing.processInstance, await observer(existing.pid));
       if (!stale) {
         throw new OperatorError(
           'RELAY_ALREADY_RUNNING',
