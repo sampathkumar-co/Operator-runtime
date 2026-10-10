@@ -1804,6 +1804,10 @@ test('malformed initialization marker with missing ledger fails closed', async t
     JSON.stringify({ version: 1, initialized: false }));
   await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
     (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT');
+  await fs.writeFile(path.join(base.state, 'digital-operations-initialized.json'), '{partial');
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
+    (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT',
+    'Truncated marker JSON must return typed corruption rather than a raw SyntaxError');
 });
 
 test('restoring an old v1 state after a v2 identity marker cannot downgrade authority history', async t => {
