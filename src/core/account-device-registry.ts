@@ -558,8 +558,10 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
     const status = raw.status === 'active' ? 'active' : raw.status === 'removed' ? 'removed' : null;
     if (!status) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership status is invalid.');
     const addedAt = validIso(raw.addedAt, 'addedAt');
-    const authorityGeneration = raw.authorityGeneration === undefined ? 1 : Number(raw.authorityGeneration);
-    if (!Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership authority generation is invalid.');
+    // Legacy records may omit the generation; explicit persisted values must
+    // never coerce booleans, strings or arrays into a valid lease generation.
+    const authorityGeneration = raw.authorityGeneration === undefined ? 1 : raw.authorityGeneration;
+    if (typeof authorityGeneration !== 'number' || !Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership authority generation is invalid.');
     const removedAt = raw.removedAt === undefined ? undefined : validIso(raw.removedAt, 'removedAt');
     const removedReason = raw.removedReason === undefined ? undefined : boundedReason(raw.removedReason, 'removedReason');
     const releasePendingReason = raw.releasePendingReason === undefined ? undefined
