@@ -126,15 +126,18 @@ export class ActionTransitionJournal {
       const digest = actionHash(input.action);
       const existing = state.entries.find((entry) => entry.actionId === input.action.id);
       if (existing) {
-        if (existing.actionDigest !== digest || existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId
+        const refreshingCompletedRead = existing.state === 'COMPLETED' && input.action.risk === 'read';
+        if (existing.actionDigest !== digest || (!refreshingCompletedRead && (existing.ownerKind !== input.ownerKind || existing.ownerId !== input.ownerId))
           || existing.capability !== input.action.capability || existing.risk !== input.action.risk
           || canonicalJson(existing.intent ?? null) !== canonicalJson(input.action.intent ?? null)
           || canonicalJson(canonicalResourceKeys(existing.resourceKeys)) !== canonicalJson(canonicalResourceKeys(uniqueKeys(input.resourceKeys)))) {
           throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Action id is already bound to a different durable execution identity.');
         }
-        if (existing.state === 'COMPLETED' && input.action.risk === 'read') {
+        if (refreshingCompletedRead) {
           const at = now.toISOString();
           existing.generation = (existing.generation ?? 1) + 1;
+          existing.ownerKind = bounded(input.ownerKind, 128, 'ownerKind');
+          existing.ownerId = bounded(input.ownerId, 512, 'ownerId');
           existing.state = 'PREPARED';
           existing.transitions = [{ seq: 1, state: 'PREPARED', at }];
           existing.updatedAt = at;

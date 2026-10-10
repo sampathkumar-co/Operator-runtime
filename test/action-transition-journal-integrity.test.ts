@@ -90,3 +90,44 @@ test('identical dispatched journal retries do not exhaust finite transition hist
   assert.equal(changed.transitions.length, 3);
   assert.equal(changed.transitions[2]?.provider, 'provider.b');
 });
+
+test('completed read generation can rebind to a fresh workload owner without weakening in-flight identity', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-journal-read-rebind-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const action: ActionRequest = {
+    id: 'stateless-client-read-id',
+    capability: 'computer.inspect',
+    risk: 'read',
+    input: {},
+    provenance: { kind: 'chatgpt' }
+  };
+  const result = {
+    ok: true,
+    capability: action.capability,
+    provider: 'system.native',
+    output: { platform: 'test' },
+    evidence: [],
+    durationMs: 1
+  };
+  const journal = new ActionTransitionJournal(stateDir);
+  await journal.prepare({ action, ownerKind: 'workload', ownerId: 'first-workload', resourceKeys: ['computer:local'] });
+  await journal.markDispatched(action.id, result.provider);
+  await journal.observe(action.id, result);
+  await journal.complete(action.id, 'a'.repeat(64));
+
+  const rebound = await journal.prepare({
+    action,
+    ownerKind: 'workload',
+    ownerId: 'second-workload',
+    resourceKeys: ['computer:local']
+  });
+  assert.equal(rebound.generation, 2);
+  assert.equal(rebound.state, 'PREPARED');
+  assert.equal(rebound.ownerId, 'second-workload');
+  assert.deepEqual(rebound.transitions.map((transition) => transition.state), ['PREPARED']);
+
+  await assert.rejects(
+    journal.prepare({ action, ownerKind: 'workload', ownerId: 'third-workload', resourceKeys: ['computer:local'] }),
+    (error: unknown) => (error as { code?: string }).code === 'ACTION_JOURNAL_ID_CONFLICT'
+  );
+});
