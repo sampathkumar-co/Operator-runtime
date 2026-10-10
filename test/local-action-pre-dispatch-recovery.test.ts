@@ -6,6 +6,7 @@ import path from 'node:path';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
+import { currentProcessInstance } from '../src/core/process-instance.ts';
 import type { ActionRequest } from '../src/core/types.ts';
 
 const action: ActionRequest = {
@@ -128,13 +129,11 @@ test('unknown process observation cannot authorize pre-dispatch reconciliation',
 
 test('live matching process identity cannot authorize pre-dispatch reconciliation', async t => {
   const { state, journal } = await fixture(t);
+  const exactProcess = await currentProcessInstance();
   const newInstance = new LocalActionExecutionStore(state, {
-    observeProcess: async pid => ({ status: 'live', identity: { pid, started: 'unrelated-identity' } })
+    observeProcess: async () => ({ status: 'live', identity: exactProcess })
   });
-  // Even a mismatched observed process cannot authorize cross-platform
-  // identity takeover unless the platform provenance check was admissible.
-  const result = await newInstance.reconcileWithKernel(action, undefined, journal);
-  assert.equal(result.status === 'processing' || result.status === 'completed', true);
+  assert.equal((await newInstance.reconcileWithKernel(action, undefined, journal)).status, 'processing');
 });
 
 test('legacy owner-id-only receipt remains uncertain despite a dead PID observation', async t => {
