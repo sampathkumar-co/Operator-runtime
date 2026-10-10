@@ -169,8 +169,11 @@ export class EnterprisePolicyStore {
   }
 
   async assertCurrentAuthority(expectedInput: { digest: string; generation: number }): Promise<void> {
-    const expectedDigest = String(expectedInput?.digest ?? '').toLowerCase();
-    const expectedGeneration = Number(expectedInput?.generation);
+    if (typeof expectedInput?.digest !== 'string' || typeof expectedInput.generation !== 'number') {
+      throw new OperatorError('ENTERPRISE_POLICY_AUTHORITY_INVALID', 'Enterprise policy digest or generation is invalid.');
+    }
+    const expectedDigest = expectedInput.digest.toLowerCase();
+    const expectedGeneration = expectedInput.generation;
     if (!/^[0-9a-f]{64}$/.test(expectedDigest) || !Number.isSafeInteger(expectedGeneration) || expectedGeneration < 1) {
       throw new OperatorError('ENTERPRISE_POLICY_AUTHORITY_INVALID', 'Enterprise policy digest or generation is invalid.');
     }
@@ -212,11 +215,11 @@ function validateState(input: unknown): EnterprisePolicyState {
   }
   if (Object.keys(raw).some((key) => !['version', 'generation', 'roles', 'bindings', 'recordDigest'].includes(key))
     || raw.version !== 2 || typeof raw.generation !== 'number' || !Number.isSafeInteger(raw.generation) || raw.generation < 0
-    || !/^[0-9a-f]{64}$/.test(String(raw.recordDigest ?? '').toLowerCase())) {
+    || typeof raw.recordDigest !== 'string' || !/^[0-9a-f]{64}$/.test(raw.recordDigest.toLowerCase())) {
     throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy state shape is invalid.');
   }
   const policy = validatePolicy(raw.roles, raw.bindings);
-  const state = { version: 2 as const, generation: raw.generation, roles: policy.roles, bindings: policy.bindings, recordDigest: String(raw.recordDigest).toLowerCase() };
+  const state = { version: 2 as const, generation: raw.generation, roles: policy.roles, bindings: policy.bindings, recordDigest: raw.recordDigest.toLowerCase() };
   if (state.recordDigest !== enterprisePolicyRecordDigest(state)) {
     throw new OperatorError('ENTERPRISE_POLICY_CORRUPT', 'Enterprise policy generation or content integrity check failed.');
   }
