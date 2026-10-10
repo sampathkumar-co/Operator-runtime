@@ -270,7 +270,10 @@ export class RemoteAuthorityFenceStore {
 
 function validateSubject(input: RemoteAuthoritySubject): RemoteAuthoritySubject {
   if (!input || typeof input !== 'object') throw blocked('REMOTE_AUTHORITY_INVALID', 'Missing authority subject.');
-  const accountId = String(input.accountId ?? '').toLowerCase(), deviceId = String(input.deviceId ?? '').toLowerCase();
+  if (typeof input.accountId !== 'string' || typeof input.deviceId !== 'string') {
+    throw blocked('REMOTE_AUTHORITY_INVALID', 'Authority account and device IDs must be strings.');
+  }
+  const accountId = input.accountId.toLowerCase(), deviceId = input.deviceId.toLowerCase();
   const authorityGeneration = input.authorityGeneration;
   if (!UUID.test(accountId) || !UUID.test(deviceId) || !Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) {
     throw blocked('REMOTE_AUTHORITY_INVALID', 'Invalid account, device or generation.');
@@ -289,10 +292,12 @@ function ttl(value: number): number {
 function validateLease(input: RemoteAuthorityLease): RemoteAuthorityLease {
   const subject = validateSubject(input);
   const process = validProcessInstance(input.process);
-  if (input.schemaVersion !== 1 || !process || !UUID.test(String(input.leaseId ?? '')) ||
-    !/^[A-Za-z0-9_-]{43}$/.test(String(input.fenceToken ?? '')) ||
+  if (input.schemaVersion !== 1 || !process ||
+    typeof input.leaseId !== 'string' || !UUID.test(input.leaseId) ||
+    typeof input.fenceToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.fenceToken) ||
     !Number.isSafeInteger(input.generation) || input.generation < 1 ||
-    !Number.isFinite(Date.parse(String(input.expiresAt ?? '')))) {
+    typeof input.expiresAt !== 'string' || !Number.isFinite(Date.parse(input.expiresAt)) ||
+    new Date(input.expiresAt).toISOString() !== input.expiresAt) {
     throw blocked('REMOTE_AUTHORITY_INVALID', 'Invalid work lease.');
   }
   return { ...subject, schemaVersion: 1, process, ownerId: owner(input.ownerId),
