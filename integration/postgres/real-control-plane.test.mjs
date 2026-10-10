@@ -323,4 +323,75 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     assert.equal(second.generation, 2);
   });
 
+
+  test('independent real PostgreSQL pools fence old owners after delete, restore and expiry', async () => {
+    // Stand in for a second host using its own connection pool, transaction
+    // state and advisory-lock session. This must not depend on local JS queues.
+    const peerPool = new Pool({
+      host: process.env.PGHOST ?? '127.0.0.1',
+      port: Number(process.env.PGPORT ?? 5432),
+      user: process.env.PGUSER ?? 'operator_test',
+      password: process.env.PGPASSWORD,
+      database: process.env.PGDATABASE ?? 'operator_test',
+      max: 4,
+      connectionTimeoutMillis: 10_000
+    });
+    try {
+      const peer = new PostgresControlPlaneStore(peerPool);
+      const [old] = await store.transact([{
+        namespace: 'cross-pool-authority', key: 'tenant-fence',
+        expectedGeneration: null, value: { owner: 'old-tenant' }
+      }], '2026-10-10T00:00:01.000Z');
+      await peer.transact([{
+        namespace: 'cross-pool-authority', key: 'tenant-fence',
+        expectedGeneration: old.generation, value: null
+      }], '2026-10-10T00:00:02.000Z');
+      assert.equal(await store.get('cross-pool-authority', 'tenant-fence'), null);
+      const [fresh] = await peer.transact([{
+        namespace: 'cross-pool-authority', key: 'tenant-fence',
+        expectedGeneration: null, value: { owner: 'fresh-tenant' }
+      }], '2026-10-10T00:00:03.000Z');
+      assert.ok(fresh.generation > old.generation);
+
+      const races = await Promise.allSettled([
+        store.transact([{
+          namespace: 'cross-pool-authority', key: 'tenant-fence',
+          expectedGeneration: old.generation, value: { owner: 'old-tenant-racing' }
+        }], '2026-10-10T00:00:04.000Z'),
+        peer.transact([{
+          namespace: 'cross-pool-authority', key: 'tenant-fence',
+          expectedGeneration: fresh.generation, value: { owner: 'fresh-tenant-updated' }
+        }], '2026-10-10T00:00:04.000Z')
+      ]);
+      assert.equal(races[0].status, 'rejected');
+      assert.equal(races[0].reason?.code, 'CONTROL_PLANE_CAS_MISMATCH');
+      assert.equal(races[1].status, 'fulfilled');
+      assert.equal((await store.get('cross-pool-authority', 'tenant-fence'))?.value.owner,
+        'fresh-tenant-updated');
+
+      const [expired] = await peer.transact([{
+        namespace: 'cross-pool-authority', key: 'reused-expiry',
+        expectedGeneration: null, value: { owner: 'expired-tenant' },
+        expiresAt: '2026-10-10T00:00:07.000Z'
+      }], '2026-10-10T00:00:05.000Z');
+      assert.equal(await purgeExpiredControlPlaneRecords(store,
+        'cross-pool-authority', '2026-10-10T00:00:08.000Z'), 1);
+      const [afterExpiry] = await store.transact([{
+        namespace: 'cross-pool-authority', key: 'reused-expiry',
+        expectedGeneration: null, value: { owner: 'new-after-expiry' }
+      }], '2026-10-10T00:00:09.000Z');
+      assert.ok(afterExpiry.generation > expired.generation);
+      await assert.rejects(peer.transact([{
+        namespace: 'cross-pool-authority', key: 'reused-expiry',
+        expectedGeneration: expired.generation,
+        value: { owner: 'stale-after-expiry' }
+      }], '2026-10-10T00:00:10.000Z'),
+      error => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+      assert.equal((await peer.get('cross-pool-authority', 'reused-expiry'))?.value.owner,
+        'new-after-expiry');
+    } finally {
+      await peerPool.end();
+    }
+  });
+
 }
