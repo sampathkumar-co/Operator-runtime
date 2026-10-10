@@ -75,11 +75,17 @@ export async function restoreControlPlaneWithSignedWitness(
   catch { throw invalid('Pinned restore witness public key is invalid.'); }
   if (key.asymmetricKeyType !== 'ed25519') throw invalid('Restore witness must use a pinned Ed25519 signing key.');
 
-  const now = (guard.clock ?? (() => new Date()))().getTime();
-  if (!Number.isFinite(now)) throw invalid('Restore authorization clock is unavailable.');
+  // Clock freshness must be checked INSIDE the exclusive witness boundary:
+  // the caller may spend minutes waiting for another restore/publisher to
+  // release the anchor. Never authorize a restore using the entry-time clock.
+  const witnessNow = (): number => {
+    const at = (guard.clock ?? (() => new Date()))().getTime();
+    if (!Number.isFinite(at)) throw invalid('Restore authorization clock is unavailable.');
+    return at;
+  };
   await guard.anchor.withLatestExclusive(async (signed) => {
     if (!signed || typeof signed !== 'object') throw invalid('External restore witness was unavailable.');
-    const manifest = validateManifest(signed.manifest, now);
+    const manifest = validateManifest(signed.manifest, witnessNow());
     if (manifest.anchorId !== guard.anchorId || manifest.snapshotDigest !== snapshot.digest) {
       throw new OperatorError('CONTROL_PLANE_RESTORE_WITNESS_STALE',
         'The external high-water witness does not authorize this exact snapshot. Reconciliation is required.');
@@ -90,6 +96,9 @@ export async function restoreControlPlaneWithSignedWitness(
       throw invalid('Independent restore witness signature is invalid.');
     }
     await guard.authorizeRestore(manifest);
+    // Human/operator authorization can itself wait until the signature
+    // expires. Revalidate immediately before entering the target restore.
+    validateManifest(signed.manifest, witnessNow());
     // The external authority MUST hold its durable exclusive epoch during
     // this call. A new witness cannot supersede it mid-restore.
     await store.restore(snapshot);
