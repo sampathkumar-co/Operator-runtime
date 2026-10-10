@@ -1025,7 +1025,12 @@ test('terminal operation retains device reconciliation when release is unconfirm
     async reserve(_request:unknown,_ads:unknown[],opts:{reservationId:string}){
       return {id:opts.reservationId,sessionId:crypto.randomUUID(),state:'ACTIVE'};
     },
-    async release(id:string){ releases++; return {id,state:'ACTIVE'}; }
+    async releasePrepared(id:string,digest:string){ 
+      assert.equal(digest,devicePoolAllocationRequestDigest({workloadKey:'work:release-confirm'}));
+      releases++;
+      return {id,state:'ACTIVE'};
+    },
+    async release(){ assert.fail('Finalization must never use an ID-only release.'); }
   };
   const ops = new DigitalOperationsLayer(base.state,{...base,devices:devices as any});
   const op = await ops.submit({
@@ -1449,7 +1454,7 @@ test('pre-digest legacy confirmed reservation cannot use naked ID release during
 async function provisionFinalizationReservation(t: test.TestContext) {
   const base = await setup(t);
   const identity = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('pool-owner');
-  await base.registry.registerVerifiedPeer(identity);
+  await new DeviceRegistryStore(base.state).registerVerifiedPeer(identity);
   const request = { workloadKey: 'audit:proof-bound-finalization' };
   const operation = await base.ops.submit({
     objective: 'Complete a proof-bound reservation workload',
