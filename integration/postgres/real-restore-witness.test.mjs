@@ -153,6 +153,8 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     });
     t.after(async () => {
       await readerPool.end();
+      await pool.query(`REVOKE EXECUTE ON FUNCTION public.mecord_restore_witness_lock_read(TEXT) FROM ${role}`);
+      await pool.query(`REVOKE USAGE ON SCHEMA public FROM ${role}`);
       await pool.query(`DROP ROLE ${role}`);
     });
     const permissions = await readerPool.query(
