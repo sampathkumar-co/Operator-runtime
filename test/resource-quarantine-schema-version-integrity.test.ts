@@ -14,7 +14,7 @@ test('malformed durable lease format cannot downgrade v2 and discard quarantined
   const original=JSON.parse(await fs.readFile(file,'utf8'));
   assert.equal(original.version,2);
   assert.equal(original.quarantines.length,1);
-  for(const malformed of [true,'1','2',[1],[2],null]) {
+  for(const malformed of [true,'1','2',[1],[2],null,1]) {
     const damaged={...structuredClone(original),version:malformed};
     await fs.writeFile(file,JSON.stringify(damaged));
     await assert.rejects(()=>new ResourceLeaseStore(dir).inspect(),

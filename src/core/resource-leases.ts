@@ -294,6 +294,12 @@ function validateState(input: unknown): LeaseState {
     }
   }
 
+  // Legitimate v1 stores have no quarantine field. If one is present, this
+  // is not a v1 state: interpreting it as legacy would silently drop action
+  // fences. Reject rather than rewriting a contradictory schema.
+  if (version === 1 && raw.quarantines !== undefined) {
+    throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Legacy lease state cannot contain v2 quarantines.');
+  }
   const quarantines = version === 1 ? [] : raw.quarantines;
   if (!Array.isArray(quarantines) || quarantines.length > MAX_QUARANTINES) {
     throw new OperatorError('RESOURCE_LEASE_CORRUPT', 'Resource quarantine state is invalid.');
