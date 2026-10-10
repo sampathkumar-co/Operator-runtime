@@ -302,9 +302,9 @@ function stateText(v:unknown,max:number,label:string):string{
   return v;
 }
 
-function boundedId(v: unknown, label: string): string { const s=String(v??''); if(!/^[A-Za-z0-9._:@/-]{1,256}$/.test(s)) throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID', label+' is invalid.'); return s; }
+function boundedId(v: unknown, label: string): string { if(typeof v!=='string'||!/^[A-Za-z0-9._:@/-]{1,256}$/.test(v)) throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID', label+' is invalid.'); return v; }
 function boundedText(v: unknown, max: number, label: string): string { if(typeof v!=='string'||!v.trim()||Buffer.byteLength(v,'utf8')>max||v.includes('\0')) throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID', label+' is invalid.'); return v; }
-function boundedInteger(v: unknown, min:number,max:number,label:string):number{const n=Number(v);if(!Number.isSafeInteger(n)||n<min||n>max)throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID',label+' is invalid.');return n;}
-function uuid(v: unknown,label:string):string{const s=String(v??'').toLowerCase();if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(s))throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID',label+' must be UUID.');return s;}
-function canonicalIso(v: unknown,label:string):string{const s=String(v??'');if(!Number.isFinite(Date.parse(s))||new Date(s).toISOString()!==s)throw corrupt(label+' is invalid.');return s;}
+function boundedInteger(v: unknown, min:number,max:number,label:string):number{if(typeof v!=='number'||!Number.isSafeInteger(v)||v<min||v>max)throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID',label+' is invalid.');return v;}
+function uuid(v: unknown,label:string):string{if(typeof v!=='string')throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID',label+' must be UUID.');const s=v.toLowerCase();if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(s))throw new OperatorError('ENTERPRISE_AUTHORITY_LEASE_INVALID',label+' must be UUID.');return s;}
+function canonicalIso(v: unknown,label:string):string{if(typeof v!=='string'||!Number.isFinite(Date.parse(v))||new Date(v).toISOString()!==v)throw corrupt(label+' is invalid.');return v;}
 function corrupt(message:string):OperatorError{return new OperatorError('ENTERPRISE_AUTHORITY_LEASE_CORRUPT',message);}
