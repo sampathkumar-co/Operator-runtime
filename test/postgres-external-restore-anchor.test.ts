@@ -95,6 +95,6 @@ test('an unpinned direct PostgreSQL client cannot be used as an independent witn
     async query() { return { rows: [] }; }
   }, 'external-test'), (error: any) => error?.code === 'CONTROL_PLANE_RESTORE_ANCHOR_POOL_REQUIRED');
   const { db } = fixture();
-  assert.throws(() => new PostgresExternalRestoreAnchor(db, '../wrong'),
+  assert.throws(() => new PostgresExternalRestoreAnchor(db, 'bad anchor with spaces'),
     (error: any) => error?.code === 'CONTROL_PLANE_RESTORE_ANCHOR_INVALID');
 });
