@@ -924,7 +924,8 @@ export class DigitalOperationsLayer {
           if ((markerError as NodeJS.ErrnoException).code === 'ENOENT') {
             return { version: 2, operations: [], usedOperationIds: [], historyComplete: true };
           }
-          throw markerError;
+          if (markerError instanceof OperatorError) throw markerError;
+          throw corrupt('Initialization marker JSON is unreadable or truncated.');
         }
       }
       if (error instanceof OperatorError) throw error;
