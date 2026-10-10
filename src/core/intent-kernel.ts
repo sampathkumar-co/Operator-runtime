@@ -121,14 +121,16 @@ function digestOf(value: unknown): string {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 function validDirective(input: unknown): IntentDirective {
-  const value = String(input ?? '') as IntentDirective;
+  if (typeof input !== 'string') throw new OperatorError('INTENT_INPUT_INVALID', 'Intent directive is invalid.');
+  const value = input as IntentDirective;
   if (!['continue','refine','extend','pause','cancel','redirect','authorize','revoke'].includes(value)) {
     throw new OperatorError('INTENT_INPUT_INVALID', 'Intent directive is invalid.');
   }
   return value;
 }
 function boundedId(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('INTENT_INPUT_INVALID', `${label} is invalid.`);
+  const value = input;
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(value)) throw new OperatorError('INTENT_INPUT_INVALID', `${label} is invalid.`);
   return value;
 }
@@ -145,18 +147,21 @@ function uniqueText(input: unknown, maxItems: number, maxBytes: number, label: s
   return values;
 }
 function digest(input: unknown): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('INTENT_STATE_CORRUPT', 'Intent digest is invalid.');
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('INTENT_STATE_CORRUPT', 'Intent digest is invalid.');
   return value;
 }
 function iso(input: unknown): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('INTENT_STATE_CORRUPT', 'Intent timestamp is invalid.');
+  const value = input;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) throw new OperatorError('INTENT_STATE_CORRUPT', 'Intent timestamp is invalid.');
   return value;
 }
 function integer(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
+  if (typeof input !== 'number') throw new OperatorError('INTENT_STATE_CORRUPT', `${label} is invalid.`);
+  const value = input;
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('INTENT_STATE_CORRUPT', `${label} is invalid.`);
   return value;
 }
