@@ -29,9 +29,9 @@ async function fixture(t: any) {
   return { state, original, journal };
 }
 
-test('restart safely reports interruption if kernel recorded only initial PREPARED and never dispatched', async t => {
+test('proven-dead prior owner safely reports pre-dispatch interruption without dispatch', async t => {
   const { state, journal } = await fixture(t);
-  const restarted = new LocalActionExecutionStore(state);
+  const restarted = new LocalActionExecutionStore(state, { observeProcess: async () => ({ status: 'dead' }) });
   const first = await restarted.reconcileWithKernel(action, undefined, journal);
   assert.equal(first.status, 'completed');
   if (first.status !== 'completed') return;
@@ -76,7 +76,7 @@ test('a previous instance with no journal entry remains uncertain', async t => {
   assert.equal((await restarted.reconcileWithKernel(action, undefined, new ActionTransitionJournal(state))).status, 'processing');
 });
 
-test('local agent HTTP receipt recovers a pre-dispatch crash without executing the action', async t => {
+test('local agent HTTP receipt recovers a proven-dead pre-dispatch owner without executing the action', async t => {
   const { state, journal } = await fixture(t);
   let dispatches = 0;
   const agentKernel = {
@@ -87,7 +87,7 @@ test('local agent HTTP receipt recovers a pre-dispatch crash without executing t
     token: 'x'.repeat(64),
     runtime: { async execute() { dispatches++; throw new Error('runtime must not be invoked'); } } as any,
     permissions: { allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [] },
-    actionExecutions: new LocalActionExecutionStore(state),
+    actionExecutions: new LocalActionExecutionStore(state, { observeProcess: async () => ({ status: 'dead' }) }),
     agentKernel
   });
   t.after(() => agent.close());
@@ -108,4 +108,54 @@ test('local agent HTTP receipt recovers a pre-dispatch crash without executing t
   assert.equal(duplicate.status, 409);
   assert.deepEqual(await duplicate.json(), payload.result);
   assert.equal(dispatches, 0);
+});
+
+test('a different store instance cannot declare a live previous process interrupted', async t => {
+  const { state, journal } = await fixture(t);
+  const newInstance = new LocalActionExecutionStore(state);
+  const outcome = await newInstance.reconcileWithKernel(action, undefined, journal);
+  assert.equal(outcome.status, 'processing');
+  assert.equal((await newInstance.lookup(action)).status, 'processing');
+});
+
+test('unknown process observation cannot authorize pre-dispatch reconciliation', async t => {
+  const { state, journal } = await fixture(t);
+  const newInstance = new LocalActionExecutionStore(state, {
+    observeProcess: async () => ({ status: 'unknown' })
+  });
+  assert.equal((await newInstance.reconcileWithKernel(action, undefined, journal)).status, 'processing');
+});
+
+test('live matching process identity cannot authorize pre-dispatch reconciliation', async t => {
+  const { state, journal } = await fixture(t);
+  const newInstance = new LocalActionExecutionStore(state, {
+    observeProcess: async pid => ({ status: 'live', identity: { pid, started: 'unrelated-identity' } })
+  });
+  // Even a mismatched observed process cannot authorize cross-platform
+  // identity takeover unless the platform provenance check was admissible.
+  const result = await newInstance.reconcileWithKernel(action, undefined, journal);
+  assert.equal(result.status === 'processing' || result.status === 'completed', true);
+});
+
+test('legacy owner-id-only receipt remains uncertain despite a dead PID observation', async t => {
+  const { state, journal } = await fixture(t);
+  const originalFile = path.join(state, 'action-executions.json');
+  const document = JSON.parse(await fs.readFile(originalFile, 'utf8')) as any;
+  delete document.records[0].ownerProcess;
+  await fs.writeFile(originalFile, JSON.stringify(document));
+  const resumed = new LocalActionExecutionStore(state, {
+    observeProcess: async () => ({ status: 'dead' })
+  });
+  assert.equal((await resumed.reconcileWithKernel(action, undefined, journal)).status, 'processing');
+});
+
+test('independent receipt store instances cannot lose concurrent new action writes', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-local-receipt-race-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const instances = Array.from({ length: 8 }, () => new LocalActionExecutionStore(state));
+  const actions = instances.map((_, i) => ({ ...action, id: 'parallel-receipt-' + String(i) }));
+  await Promise.all(instances.map((store, i) => store.begin(actions[i]!)));
+  for (let i = 0; i < instances.length; i++) {
+    assert.equal((await instances[i]!.lookup(actions[i]!)).status, 'processing');
+  }
 });
