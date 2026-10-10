@@ -199,6 +199,25 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
       resume();
       await witnessRead;
     }
+    // The publisher is not trusted to roll the witness backwards or erase
+    // its recorded epoch. Even its database UPDATE/DELETE/TRUNCATE rights are
+    // generation-fenced by the independent witness database itself.
+    await assert.rejects(pool.query(
+      'UPDATE public.mecord_restore_witness_anchor SET signature=$2 WHERE anchor_id=$1',
+      [anchorId, signature]), e => e?.code === '23514');
+    await assert.rejects(pool.query(
+      'DELETE FROM public.mecord_restore_witness_anchor WHERE anchor_id=$1',
+      [anchorId]), e => e?.code === '23514');
+    await assert.rejects(pool.query(
+      'TRUNCATE TABLE public.mecord_restore_witness_anchor'), e => e?.code === '23514');
+    const advanced = { ...manifest, epoch: 8, snapshotDigest: 'b'.repeat(64) };
+    const advancedSignature = crypto.sign(null,
+      Buffer.from(canonicalJson(advanced)), privateKey).toString('base64url');
+    await pool.query(
+      'UPDATE public.mecord_restore_witness_anchor SET signed_manifest=$2::jsonb, signature=$3 WHERE anchor_id=$1',
+      [anchorId, JSON.stringify(advanced), advancedSignature]);
+    await assert.rejects(guardedStore.restoreWithConfiguredWitness(snapshot),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_STALE');
     // A signed stale latest-witness row rejects a different snapshot, even
     // though the target already contains data and both DBs are reachable.
     const stale = { ...snapshot, digest: '0'.repeat(64) };
