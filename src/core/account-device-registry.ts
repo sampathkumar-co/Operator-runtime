@@ -539,8 +539,11 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
   // Old v2 stores have no persisted floor. Their surviving memberships remain
   // authoritative, but an already erased pre-upgrade generation cannot be
   // reconstructed without a separately audited restore/upgrade epoch.
-  const authorityGenerationFloor = input.authorityGenerationFloor === undefined ? 0 : Number(input.authorityGenerationFloor);
-  if (!Number.isSafeInteger(authorityGenerationFloor) || authorityGenerationFloor < 0) {
+  // The high-water mark fences every erased membership. Numeric coercion of
+  // null/false/strings could silently reset it to zero, recycling a revoked
+  // authority generation after the underlying membership has been erased.
+  const authorityGenerationFloor = input.authorityGenerationFloor === undefined ? 0 : input.authorityGenerationFloor;
+  if (typeof authorityGenerationFloor !== 'number' || !Number.isSafeInteger(authorityGenerationFloor) || authorityGenerationFloor < 0) {
     throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Account authority generation high-water mark is invalid.');
   }
   const activeDevices = new Set<string>();
