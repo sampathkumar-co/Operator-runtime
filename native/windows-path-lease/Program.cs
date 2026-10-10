@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 internal static class Program
@@ -85,6 +86,108 @@ internal static class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32 entry);
 
+    private const uint CREATE_SUSPENDED = 0x00000004;
+    private const uint CREATE_NO_WINDOW = 0x08000000;
+    private const uint STARTF_USESTDHANDLES = 0x00000100;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint INFINITE = 0xFFFFFFFF;
+    private const uint WAIT_OBJECT_0 = 0;
+    private const uint WAIT_FAILED = 0xFFFFFFFF;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO
+    {
+        public uint cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public ushort wShowWindow;
+        public ushort cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetInformationJobObject(IntPtr job, int infoClass,
+        ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION information, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcess(string application, StringBuilder commandLine,
+        IntPtr processAttributes, IntPtr threadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint creationFlags,
+        IntPtr environment, string currentDirectory, ref STARTUPINFO startupInfo,
+        out PROCESS_INFORMATION processInformation);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int index);
+
     private sealed class Lease : IDisposable
     {
         private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
@@ -101,6 +204,7 @@ internal static class Program
         try
         {
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
+            if (args.Length >= 3 && args[0] == "job-run") return RunInJob(args);
             if (args.Length == 1 && args[0] == "system-roots") return PrintSystemRoots();
             if (args.Length == 2 && args[0] == "process-instance") return PrintProcessInstance(args[1]);
             if (args.Length == 2 && args[0] == "process-tree") return PrintProcessTree(args[1]);
@@ -122,6 +226,93 @@ internal static class Program
             Console.Error.WriteLine("[operator-path-lease] " + ex.Message);
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Run a shell-free child inside a Windows kernel Job Object. The child
+    /// is CREATED SUSPENDED, assigned to KILL_ON_JOB_CLOSE, and only then
+    /// resumed. Closing/killing this supervising helper therefore terminates
+    /// even detached grandchildren; no process table snapshot can race spawn.
+    /// The helper inherits only the already-sanitized environment and pipes
+    /// supplied by the trusted Node process provider.
+    /// </summary>
+    private static int RunInJob(string[] args)
+    {
+        string cwd = args[1];
+        string executable = args[2];
+        if (!Path.IsPathRooted(cwd) || !Directory.Exists(cwd) ||
+            !Path.IsPathRooted(executable) || !File.Exists(executable))
+            throw new InvalidOperationException("job-run requires an existing absolute cwd and executable");
+        string commandLine = QuoteArgument(executable);
+        for (int i = 3; i < args.Length; i++) commandLine += " " + QuoteArgument(args[i]);
+
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new IOException("cannot create process containment job (Win32 " + Marshal.GetLastWin32Error() + ")");
+        PROCESS_INFORMATION child = new PROCESS_INFORMATION();
+        bool assigned = false;
+        try
+        {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref limits,
+                (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION))))
+                throw new IOException("cannot enable job kill-on-close (Win32 " + Marshal.GetLastWin32Error() + ")");
+            STARTUPINFO startup = new STARTUPINFO();
+            startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = GetStdHandle(-10);
+            startup.hStdOutput = GetStdHandle(-11);
+            startup.hStdError = GetStdHandle(-12);
+            if (!CreateProcess(executable, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero,
+                    true, CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, cwd, ref startup, out child))
+                throw new IOException("cannot launch suspended child (Win32 " + Marshal.GetLastWin32Error() + ")");
+            if (!AssignProcessToJobObject(job, child.hProcess))
+                throw new IOException("cannot assign child to containment job (Win32 " + Marshal.GetLastWin32Error() + ")");
+            assigned = true;
+            if (ResumeThread(child.hThread) == WAIT_FAILED)
+                throw new IOException("cannot resume contained child (Win32 " + Marshal.GetLastWin32Error() + ")");
+            if (WaitForSingleObject(child.hProcess, INFINITE) != WAIT_OBJECT_0)
+                throw new IOException("failed waiting for contained child (Win32 " + Marshal.GetLastWin32Error() + ")");
+            uint code;
+            if (!GetExitCodeProcess(child.hProcess, out code))
+                throw new IOException("cannot read contained child exit status (Win32 " + Marshal.GetLastWin32Error() + ")");
+            return code <= 255 ? (int)code : 1;
+        }
+        finally
+        {
+            // A suspended, unassigned process is never allowed to run.
+            if (child.hProcess != IntPtr.Zero && !assigned) TerminateProcess(child.hProcess, 1);
+            if (child.hThread != IntPtr.Zero) CloseHandle(child.hThread);
+            if (child.hProcess != IntPtr.Zero) CloseHandle(child.hProcess);
+            // Also kills descendants which detached from an otherwise exited
+            // root. On supervisor crash Windows closes this process's handle.
+            CloseHandle(job);
+        }
+    }
+
+    private static string QuoteArgument(string argument)
+    {
+        StringBuilder output = new StringBuilder();
+        output.Append('"');
+        int slashes = 0;
+        foreach (char ch in argument)
+        {
+            if (ch == '\\') { slashes++; continue; }
+            if (ch == '"')
+            {
+                output.Append('\\', slashes * 2 + 1);
+                output.Append('"');
+            }
+            else
+            {
+                output.Append('\\', slashes);
+                output.Append(ch);
+            }
+            slashes = 0;
+        }
+        output.Append('\\', slashes * 2);
+        output.Append('"');
+        return output.ToString();
     }
 
     private static Lease Acquire(string rootInput, string targetInput, bool includeTarget)
