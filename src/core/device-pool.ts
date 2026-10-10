@@ -358,6 +358,12 @@ function validateState(input: unknown): DevicePoolState {
     if (item.allocationRequestDigest !== undefined && !/^[0-9a-f]{64}$/.test(item.allocationRequestDigest)) throw corrupt('Reservation allocation request digest is invalid.');
     uniqueStrings(item.requiredCapabilities, MAX_CAPABILITIES, 256, 'requiredCapabilities');
     uniqueStrings(item.requiredTags, MAX_TAGS, 128, 'requiredTags');
+    // Slot counts are durable capacity reservations, not forgiving request
+    // inputs. Coercing true/strings/arrays into numbers can undercount a live
+    // reservation and grant another workload capacity that is already used.
+    if (typeof item.minMemoryMb !== 'number' || typeof item.slots !== 'number') {
+      throw corrupt('Persisted reservation capacity must use exact JSON number types.');
+    }
     boundedInteger(item.minMemoryMb, 0, 1024 * 1024, 'minMemoryMb'); boundedInteger(item.slots, 1, 64, 'slots');
     if (typeof item.requireGpu !== 'boolean' || !['ACTIVE', 'RELEASED', 'EXPIRED'].includes(item.state)) throw corrupt('Reservation state is invalid.');
     validIso(item.acquiredAt, 'acquiredAt'); validIso(item.heartbeatAt, 'heartbeatAt'); validIso(item.expiresAt, 'expiresAt');
