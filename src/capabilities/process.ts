@@ -1072,8 +1072,10 @@ async function runProcess(executable: string, args: string[], cwd: string, timeo
       && path.isAbsolute(process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH ?? '')
       ? process.env.OPERATOR_WINDOWS_PATH_LEASE_PATH
       : undefined;
-    if (process.platform === 'win32' && process.env.OPERATOR_WINDOWS_REQUIRE_JOB_OBJECT === '1'
-        && !windowsNativeHelper) {
+    // A Windows timeout cannot certify descendant quiescence through
+    // snapshot/taskkill alone. Do not silently downgrade execution when the
+    // packaged security helper was omitted or cannot be located.
+    if (process.platform === 'win32' && !windowsNativeHelper) {
       reject(new OperatorError('PROCESS_JOB_CONTAINMENT_REQUIRED',
         'Windows one-shot execution requires the trusted native Job Object helper.', {
           retryable: false, details: { sideEffectState: 'none' }
