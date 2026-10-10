@@ -295,7 +295,15 @@ export class DevicePoolScheduler {
 
   async #write(state: DevicePoolState): Promise<void> {
     validateState(state);
-    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+    const encoded = JSON.stringify(state, null, 2);
+    // The authoritative limit is *serialized bytes*, including retained
+    // reservations, not simply count(IDs). Refuse before a generic durable
+    // writer rejection, and never evict history to make a write fit.
+    if (Buffer.byteLength(encoded, 'utf8') > STORE_OPTIONS.maxBytes) {
+      throw new OperatorError('DEVICE_POOL_RESERVATION_HISTORY_LIMIT',
+        'Durable reservation ID history exceeds store capacity; refusing to recycle any prior allocation identity.');
+    }
+    await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
   }
 }
 
