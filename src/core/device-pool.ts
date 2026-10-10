@@ -7,6 +7,8 @@ import { withDurableStateLock } from './durable-state-lock.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 
 const MAX_RESERVATIONS = 5000;
+// Exhaustion fails closed; never discard an identity merely to make room.
+const MAX_USED_RESERVATION_IDS = 75_000;
 const MAX_ADVERTISEMENTS = 1000;
 const MAX_CAPABILITIES = 256;
 const MAX_TAGS = 64;
@@ -14,7 +16,11 @@ const MIN_LEASE_MS = 10_000;
 const MAX_LEASE_MS = 24 * 60 * 60_000;
 const MAX_LIVENESS_MS = 5 * 60_000;
 const STORE_OPTIONS = {
-  maxBytes: 4 * 1024 * 1024,
+  // v1 could occupy 4 MiB before migration. V2 must also fit its retained
+  // 5,000 UUIDs and future history without stranding an active v1 allocation.
+  // The expanded but still bounded envelope leaves migration and lifecycle
+  // headroom; exceeding it fails closed rather than dropping identity proof.
+  maxBytes: 8 * 1024 * 1024,
   errorCode: 'DEVICE_POOL_STATE_CORRUPT',
   invalidMessage: 'Device pool state is invalid.'
 } as const;
@@ -52,8 +58,10 @@ export interface DeviceReservation {
 }
 
 interface DevicePoolState {
-  version: 1;
+  version: 2;
   reservations: DeviceReservation[];
+  /** Non-recyclable identity ledger, atomically committed with reservation state. */
+  usedReservationIds: string[];
 }
 
 export interface DevicePoolRequest {
@@ -110,7 +118,7 @@ export class DevicePoolScheduler {
       if (!pinnedDeviceId) pinnedDeviceId = await this.#routing.defaultDevice();
 
       const state = await this.#read();
-      if (state.reservations.some((item) => item.id === reservationId)) {
+      if (state.usedReservationIds.includes(reservationId)) {
         throw new OperatorError('DEVICE_POOL_RESERVATION_ID_CONFLICT', 'Reservation identity is already allocated; it cannot be replayed or repurposed.');
       }
       expireReservations(state, this.#clock().getTime());
@@ -162,7 +170,13 @@ export class DevicePoolScheduler {
         expiresAt: new Date(now.getTime() + request.leaseMs).toISOString(),
         state: 'ACTIVE'
       };
+      if (state.usedReservationIds.length >= MAX_USED_RESERVATION_IDS) {
+        throw new OperatorError('DEVICE_POOL_RESERVATION_HISTORY_LIMIT',
+          'Non-recyclable reservation ID history is full; refusing to forget used identities.');
+      }
       state.reservations.push(reservation);
+      state.usedReservationIds.push(reservationId);
+      state.usedReservationIds.sort();
       state.reservations.sort((a, b) => a.acquiredAt.localeCompare(b.acquiredAt) || a.id.localeCompare(b.id));
       await this.#write(state);
       return structuredClone(reservation);
@@ -277,7 +291,7 @@ export class DevicePoolScheduler {
     try {
       return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, reservations: [] };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, reservations: [], usedReservationIds: [] };
       if (error instanceof OperatorError) throw error;
       throw new OperatorError('DEVICE_POOL_STATE_CORRUPT', 'Device pool state could not be read.');
     }
@@ -285,7 +299,20 @@ export class DevicePoolScheduler {
 
   async #write(state: DevicePoolState): Promise<void> {
     validateState(state);
-    await writeDurableStateText(this.#file, JSON.stringify(state, null, 2), STORE_OPTIONS);
+    const encoded = JSON.stringify(state, null, 2);
+    // The authoritative limit is *serialized bytes*, including retained
+    // reservations, not simply count(IDs). Reserve two extra bytes for EACH
+    // active row: ACTIVE -> RELEASED grows the JSON string by two characters,
+    // and ACTIVE -> EXPIRED grows by one. Otherwise a valid new allocation at
+    // the storage limit could become impossible to release or reconcile.
+    // Invariant: encoded bytes + 2 * activeCount <= capacity, so every subset
+    // of terminal transitions remains serializable without discarding IDs.
+    const activeCount = state.reservations.filter((item) => item.state === 'ACTIVE').length;
+    if (Buffer.byteLength(encoded, 'utf8') + 2 * activeCount > STORE_OPTIONS.maxBytes) {
+      throw new OperatorError('DEVICE_POOL_RESERVATION_HISTORY_LIMIT',
+        'Durable reservation ID history exceeds store capacity; refusing to recycle any prior allocation identity.');
+    }
+    await writeDurableStateText(this.#file, encoded, STORE_OPTIONS);
   }
 }
 
@@ -349,8 +376,28 @@ function expireReservations(state: DevicePoolState, now: number): void {
 
 function validateState(input: unknown): DevicePoolState {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw corrupt('State must be an object.');
-  const state = input as DevicePoolState;
-  if (state.version !== 1 || !Array.isArray(state.reservations) || state.reservations.length > MAX_RESERVATIONS) throw corrupt('State shape is invalid.');
+  const state = input as { version: 1 | 2; reservations: DeviceReservation[]; usedReservationIds?: string[] };
+  if ((state.version !== 1 && state.version !== 2) ||
+      !Array.isArray(state.reservations) || state.reservations.length > MAX_RESERVATIONS) {
+    throw corrupt('State shape is invalid.');
+  }
+  // A v1 file may already have discarded IDs before the upgrade; that lost
+  // pre-upgrade history cannot be reconstructed. Bootstrap all still-retained
+  // IDs and persist a v2 ledger on the next mutation. A v1 binary fails closed
+  // upon seeing v2 instead of silently discarding the new history.
+  const historic = state.version === 2 ? state.usedReservationIds : state.reservations.map(r => r.id);
+  if (!Array.isArray(historic) || historic.length > MAX_USED_RESERVATION_IDS) {
+    throw corrupt('Durable reservation ID history is missing or exceeds the fail-closed bound.');
+  }
+  const used = new Set<string>();
+  for (const rawId of historic) {
+    if (typeof rawId !== 'string') throw corrupt('Historic reservation ID must be an exact string.');
+    let normalized: string;
+    try { normalized = validUuid(rawId, 'historic reservationId'); }
+    catch { throw corrupt('Historic reservation ID is invalid.'); }
+    if (rawId !== normalized || used.has(normalized)) throw corrupt('Historic reservation IDs must be canonical and unique.');
+    used.add(normalized);
+  }
   const ids = new Set<string>();
   for (const item of state.reservations) {
     validUuid(item.id, 'reservation id'); validUuid(item.deviceId, 'deviceId'); validUuid(item.sessionId, 'sessionId'); boundedContext(item.workloadKey, 'workloadKey');
@@ -370,7 +417,14 @@ function validateState(input: unknown): DevicePoolState {
     if (typeof item.requireGpu !== 'boolean' || !['ACTIVE', 'RELEASED', 'EXPIRED'].includes(item.state)) throw corrupt('Reservation state is invalid.');
     validIso(item.acquiredAt, 'acquiredAt'); validIso(item.heartbeatAt, 'heartbeatAt'); validIso(item.expiresAt, 'expiresAt');
   }
-  return structuredClone(state);
+  for (const id of ids) {
+    if (!used.has(id)) throw corrupt('A retained reservation is absent from its non-recyclable ID history.');
+  }
+  return {
+    version: 2,
+    reservations: structuredClone(state.reservations),
+    usedReservationIds: [...used].sort()
+  };
 }
 
 function uniqueStrings(input: unknown[], maxItems: number, maxLength: number, label: string): string[] {
