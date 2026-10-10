@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -1654,4 +1657,61 @@ test('request identity is durably burned before any downstream device allocation
   assert.deepEqual(state.operations, []);
   assert.deepEqual(state.usedOperationIds, [requestId],
     'write-ahead identity persists even when subsequent preparation fails');
+});
+
+test('real OS process death after request ID write but before child dispatch prohibits replay', async t => {
+  if (process.platform !== 'linux') return t.skip('exact boot-bound stale PID reclamation is Linux-only');
+  const state = await tempDir(t);
+  const requestId = crypto.randomUUID();
+  const fixture = fileURLToPath(new URL('./fixtures/digital-operation-id-burn-crash-worker.mjs', import.meta.url));
+  const child = spawn(process.execPath, ['--experimental-strip-types', fixture, state, requestId], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let output = '', errors = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', part => { errors += String(part); });
+  let started!: () => void, failed!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { started = resolve; failed = reject; });
+  const timeout = setTimeout(() => failed(new Error('OS process did not reach durable boundary: ' + errors)), 20_000);
+  child.stdout.on('data', part => {
+    output += String(part);
+    if (output.includes('ID_BURNED_BEFORE_EFFECT')) started();
+  });
+  child.once('error', error => failed(error));
+  child.once('exit', (code, signal) => {
+    if (!output.includes('ID_BURNED_BEFORE_EFFECT')) {
+      failed(new Error('Worker exited before identity was committed: ' + code + '/' + signal + ': ' + errors));
+    }
+  });
+  try {
+    await ready;
+    const prior = JSON.parse(await fs.readFile(path.join(state, 'digital-operations.json'), 'utf8'));
+    assert.equal(prior.version, 2);
+    assert.deepEqual(prior.usedOperationIds, [requestId]);
+    assert.deepEqual(prior.operations, []);
+    const exited = once(child, 'exit');
+    assert.equal(child.kill('SIGKILL'), true);
+    const [, signal] = await exited;
+    assert.equal(signal, 'SIGKILL');
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+  const teams = new TeamCoordinator(state);
+  const registry = new DeviceRegistryStore(state);
+  const layer = new DigitalOperationsLayer(state, {
+    procedures: new ProcedureMemoryStore(state),
+    world: new WorldModelStore(state),
+    devices: new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry)),
+    optimizer: new ExecutionOptimizerStore(state), teams,
+    organizations: new OrganizationCoordinator(state, teams)
+  });
+  await assert.rejects(layer.submit({
+    requestId, objective: 'Crash after durable request identity commit',
+    scopeKey: 'project:crash-burn-request',
+    successConditions: ['no deterministic mission replay'],
+    execution: { kind: 'team', workItems: work() }, run: false
+  }), (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  assert.equal((await teams.list()).length, 0, 'no child mission may be created after the crash');
 });
