@@ -1539,3 +1539,119 @@ test('stage10 persisted allocation proofs reject coerced digest values', async t
     (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT'
   );
 });
+
+test('evicting a completed operation cannot recycle its original requestId into a new child mission', async t => {
+  const base = await setup(t);
+  let creates = 0;
+  const teams = {
+    async submit(input: { missionId: string }) {
+      creates += 1;
+      return { id: input.missionId, state: 'PENDING' };
+    }
+  };
+  const operations = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  const requestId = crypto.randomUUID();
+  const request = {
+    requestId, objective: 'Protected request identity after eviction',
+    scopeKey: 'project:nonrecycled-operation',
+    successConditions: ['Do not duplicate a side effect'],
+    execution: { kind: 'team' as const, workItems: work() },
+    run: false
+  };
+  const first = await operations.submit(request);
+  assert.equal(first.id, requestId);
+  assert.equal(creates, 1);
+  const file = path.join(base.state, 'digital-operations.json');
+  const state = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(state.version, 2);
+  assert.deepEqual(state.usedOperationIds, [requestId]);
+  // Exercise the actual compaction outcome without creating 2000 unrelated
+  // tasks: only the terminal operation row is gone, never its authority tombstone.
+  state.operations = [];
+  await fs.writeFile(file, JSON.stringify(state));
+  const restarted = new DigitalOperationsLayer(base.state, { ...base, teams: teams as any });
+  await assert.rejects(restarted.submit(request),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  await assert.rejects(restarted.submit({ ...request, objective: 'Malicious changed contract' }),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  assert.equal(creates, 1, 'historical requestId must not trigger a second mission effect');
+  const distinct = await restarted.submit({ ...request, requestId: crypto.randomUUID() });
+  assert.ok(distinct.id !== requestId);
+  assert.equal(creates, 2);
+});
+
+test('legacy v1 operations migrate retained request IDs without recycling them', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  const input = {
+    requestId, objective: 'Legacy migration retains authority identity',
+    scopeKey: 'project:legacy-history',
+    successConditions: ['New and old requests remain separate'],
+    execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  const initial = await base.ops.submit(input);
+  const file = path.join(base.state, 'digital-operations.json');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  delete original.usedOperationIds;
+  original.version = 1;
+  await fs.writeFile(file, JSON.stringify(original));
+  const restarted = new DigitalOperationsLayer(base.state, base);
+  const same = await restarted.submit(input);
+  assert.equal(same.id, initial.id);
+  const next = await restarted.submit({ ...input, requestId: crypto.randomUUID() });
+  const migrated = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(migrated.version, 2);
+  assert.deepEqual(migrated.usedOperationIds, [requestId, next.id]);
+  migrated.operations = migrated.operations.filter((item: any) => item.id !== requestId);
+  await fs.writeFile(file, JSON.stringify(migrated));
+  await assert.rejects(new DigitalOperationsLayer(base.state, base).submit(input),
+    (error: any) => error?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+});
+
+test('missing, noncanonical, or duplicated v2 authority history is corrupt and must fail closed', async t => {
+  const base = await setup(t);
+  const request = {
+    requestId: crypto.randomUUID(), objective: 'Persisted authority integrity',
+    scopeKey: 'project:history-integrity',
+    successConditions: ['No history loss'], execution: { kind: 'team' as const, workItems: work() }, run: false
+  };
+  await base.ops.submit(request);
+  const file = path.join(base.state, 'digital-operations.json');
+  const original = JSON.parse(await fs.readFile(file, 'utf8'));
+  for (const bad of [
+    { ...original, usedOperationIds: [] },
+    { ...original, usedOperationIds: [request.requestId.toUpperCase()] },
+    { ...original, usedOperationIds: [request.requestId, request.requestId] },
+    { ...original, usedOperationIds: 'not-an-array' }
+  ]) {
+    await fs.writeFile(file, JSON.stringify(bad));
+    await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(request.requestId),
+      (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT');
+  }
+});
+
+test('request identity is durably burned before any downstream device allocation intent', async t => {
+  const base = await setup(t);
+  const requestId = crypto.randomUUID();
+  let reserves = 0;
+  const devices = {
+    async reserve() { reserves++; throw new Error('reserve must not run'); },
+    async releasePrepared() { throw new Error('must not release'); }
+  };
+  const compensations = new DurableCompensationJournal(base.state);
+  compensations.prepare = async () => { throw new Error('injected write-ahead journal failure'); };
+  const ops = new DigitalOperationsLayer(base.state, {
+    ...base, devices: devices as any, compensations
+  });
+  await assert.rejects(ops.submit({
+    requestId, objective: 'Journal failure after request history persisted',
+    scopeKey: 'project:burn-before-effect', successConditions: ['Never allocate'],
+    execution: { kind: 'team', workItems: work() },
+    device: { request: { workloadKey: 'burn-before-effect' }, advertisements: [] }
+  }), /injected write-ahead journal failure/);
+  assert.equal(reserves, 0);
+  const state = JSON.parse(await fs.readFile(path.join(base.state, 'digital-operations.json'), 'utf8'));
+  assert.deepEqual(state.operations, []);
+  assert.deepEqual(state.usedOperationIds, [requestId],
+    'write-ahead identity persists even when subsequent preparation fails');
+});
