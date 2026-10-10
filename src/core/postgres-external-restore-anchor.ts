@@ -11,11 +11,15 @@ import { OperatorError } from './errors.ts';
  *
  * Operators must provision the witness table and a separate monotonic signed
  * manifest publisher (UPDATE must advance epochs; DELETE/TRUNCATE disallowed).
- * This runtime must receive only SELECT permissions on the witness table.
+ * The runtime is granted EXECUTE on the narrowly scoped SECURITY DEFINER
+ * lock-reader routine; it has NO direct table UPDATE/DELETE permissions.
+ * PostgreSQL row locks require UPDATE privileges even for FOR SHARE, so a
+ * direct SELECT ... FOR UPDATE would violate the read-only role boundary.
  * A witness database restored alongside the target is NOT independent.
  *
- * The callback runs while a PostgreSQL row lock is held. Other publishers
- * updating the same anchor_id must use normal PostgreSQL UPDATE/row locking;
+ * The callback runs while the SECURITY DEFINER function's PostgreSQL row
+ * lock is held by the pinned caller transaction. Other publishers updating
+ * the same anchor_id must use normal PostgreSQL UPDATE/row locking;
  * they cannot advance the current signed manifest during a target restore.
  */
 export class PostgresExternalRestoreAnchor implements ControlPlaneRestoreAnchor {
@@ -62,7 +66,7 @@ export class PostgresExternalRestoreAnchor implements ControlPlaneRestoreAnchor 
         anchor_id: unknown;
         signed_manifest: unknown;
         signature: unknown;
-      }>('SELECT anchor_id, signed_manifest, signature FROM mecord_restore_witness_anchor WHERE anchor_id=$1 FOR UPDATE',
+      }>('SELECT anchor_id, signed_manifest, signature FROM public.mecord_restore_witness_lock_read($1)',
         [this.#anchorId]);
       if (result.rows.length !== 1) {
         throw new OperatorError('CONTROL_PLANE_RESTORE_ANCHOR_UNAVAILABLE',
