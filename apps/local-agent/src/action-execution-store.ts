@@ -157,6 +157,36 @@ export class LocalActionExecutionStore {
     if (entry.actionId !== action.id || entry.actionDigest !== expectedActionHash || entry.capability !== action.capability || entry.risk !== action.risk) {
       throw reconciliationRequired('Local receipt identity does not match the authoritative kernel journal lineage.');
     }
+    // A different, now-ended local-agent instance left a receipt in processing,
+    // but the kernel journal proves no provider was ever dispatched. Only an
+    // initial, single PREPARED transition is sufficient: later PREPARED states
+    // can follow a real dispatch and MUST remain uncertain.
+    if (local.status === 'processing'
+      && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
+      && entry.generation === 1 && entry.state === 'PREPARED'
+      && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED') {
+      const recovered: ActionResult = {
+        ok: false,
+        capability: action.capability,
+        provider: 'agent-kernel',
+        evidence: [{
+          kind: 'pre_dispatch_recovery',
+          status: 'pass',
+          message: 'Previous execution ended before kernel-recorded provider dispatch; the action was not replayed.',
+          timestamp: this.#clock().toISOString()
+        }],
+        error: {
+          code: 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH',
+          message: 'The previous runtime exited before provider dispatch. No external effect was performed by this action.',
+          retryable: false,
+          sideEffectState: 'none',
+          executionPhase: 'pre_dispatch'
+        },
+        durationMs: 0
+      };
+      const record = await this.complete(action, recovered, authority);
+      return { status: 'completed', record, result: cloneResult(recovered) };
+    }
     if (entry.state !== 'COMPLETED') {
       if (local.status === 'completed' && local.result.ok) {
         throw reconciliationRequired(`A successful local receipt conflicts with kernel journal state ${entry.state}.`);
