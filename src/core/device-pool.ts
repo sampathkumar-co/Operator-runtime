@@ -16,7 +16,11 @@ const MIN_LEASE_MS = 10_000;
 const MAX_LEASE_MS = 24 * 60 * 60_000;
 const MAX_LIVENESS_MS = 5 * 60_000;
 const STORE_OPTIONS = {
-  maxBytes: 4 * 1024 * 1024,
+  // v1 could occupy 4 MiB before migration. V2 must also fit its retained
+  // 5,000 UUIDs and future history without stranding an active v1 allocation.
+  // The expanded but still bounded envelope leaves migration and lifecycle
+  // headroom; exceeding it fails closed rather than dropping identity proof.
+  maxBytes: 8 * 1024 * 1024,
   errorCode: 'DEVICE_POOL_STATE_CORRUPT',
   invalidMessage: 'Device pool state is invalid.'
 } as const;
