@@ -45,3 +45,23 @@ test('Linux PID recovery scope only accepts exact current boot evidence', async 
     { pid: 200, started: 'linux-boot-ticks:2000' }, local), false);
   assert.equal(localPidObservationAdmissible(undefined, local), false);
 });
+
+test('same-boot dead Linux lock owner can be reclaimed without remote-host override', async t => {
+  const local = await currentProcessInstance();
+  const match = /^linux-boot-id:([0-9a-f-]{36}):ticks:\d+$/.exec(local.started);
+  if (!match) { t.skip('only Linux exposes a verified boot ID and local PID absence'); return; }
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-local-lock-recovery-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const stateFile = path.join(dir, 'durable-state.json');
+  await fs.writeFile(stateFile + '.lock', JSON.stringify({
+    token: '88888888-8888-4888-8888-888888888888',
+    processInstance: {
+      pid: 2147483646,
+      started: 'linux-boot-id:' + match[1] + ':ticks:100'
+    }
+  }));
+  let entered = false;
+  await withDurableStateLock(stateFile, async () => { entered = true; });
+  assert.equal(entered, true);
+  await assert.rejects(fs.stat(stateFile + '.lock'), (error: any) => error?.code === 'ENOENT');
+});
