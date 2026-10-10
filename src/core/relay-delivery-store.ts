@@ -411,8 +411,13 @@ export class RelayDeliveryStore {
         epochCounter = counter;
         continue;
       }
-      const stream = (record.value as Record<string, unknown>).stream;
-      if (!stream || typeof stream !== 'object' || Array.isArray(stream)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery stream is invalid.');
+      const stream = record.value.stream;
+      // A shared CAS key is the authenticated storage identity for exactly one device.
+      // Never let persisted data relabel a stream as another device or downgrade its schema.
+      if (record.value.stateVersion !== 2 || !stream || typeof stream !== 'object' || Array.isArray(stream) ||
+          (stream as Record<string, unknown>).deviceId !== record.key) {
+        throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Shared relay delivery stream schema or device key is invalid.');
+      }
       streams.push(structuredClone(stream) as DeviceDeliveryStream);
       generations.set(record.key, record.generation);
     }
