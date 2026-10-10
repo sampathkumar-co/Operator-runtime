@@ -4,6 +4,7 @@ import path from 'node:path';
 import { OperatorError } from '../../../src/core/errors.ts';
 import {
   currentProcessInstance,
+  localPidObservationAdmissible,
   observeProcessInstance,
   observerFromLegacyInspector,
   processInstanceDefinitelyStale,
@@ -90,12 +91,18 @@ export async function acquireLocalAgentStateInstanceLock(
         throw readError;
       });
       if (!existing) continue;
-      const stale = options.isProcessAlive
+      // The production PID observer is only authoritative for an owner
+      // proven to belong to this Linux boot. Legacy v1 has no host provenance;
+      // retain its manual test-only liveness seam, but never guess in production.
+      const localOwner = existing.version === 2
+        ? localPidObservationAdmissible(existing.processInstance, identity)
+        : options.isProcessAlive !== undefined;
+      const stale = localOwner && (options.isProcessAlive
         ? !options.isProcessAlive(existing.pid)
         : processInstanceDefinitelyStale(
             existing.version === 2 ? existing.processInstance : undefined,
             await observer(existing.pid)
-          );
+          ));
       if (!stale) {
         throw new OperatorError(
           'LOCAL_AGENT_ALREADY_RUNNING',
