@@ -1757,7 +1757,7 @@ test('losing only the initialized operation ledger never reinitializes request i
     (error: any) => error?.code === 'OPERATIONS_LEDGER_MISSING');
   await assert.rejects(restarted.submit({ ...request, requestId: crypto.randomUUID() }),
     (error: any) => error?.code === 'OPERATIONS_LEDGER_MISSING');
-  await fs.access(marker, 'missing parent file must not erase initialization evidence');
+  await fs.access(marker); // Missing main file must not erase initialization evidence.
 });
 
 test('saturated v1 operation retention cannot claim complete identity history after migration', async t => {
