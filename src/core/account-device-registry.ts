@@ -539,8 +539,11 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
   // Old v2 stores have no persisted floor. Their surviving memberships remain
   // authoritative, but an already erased pre-upgrade generation cannot be
   // reconstructed without a separately audited restore/upgrade epoch.
-  const authorityGenerationFloor = input.authorityGenerationFloor === undefined ? 0 : Number(input.authorityGenerationFloor);
-  if (!Number.isSafeInteger(authorityGenerationFloor) || authorityGenerationFloor < 0) {
+  // The high-water mark fences every erased membership. Numeric coercion of
+  // null/false/strings could silently reset it to zero, recycling a revoked
+  // authority generation after the underlying membership has been erased.
+  const authorityGenerationFloor = input.authorityGenerationFloor === undefined ? 0 : input.authorityGenerationFloor;
+  if (typeof authorityGenerationFloor !== 'number' || !Number.isSafeInteger(authorityGenerationFloor) || authorityGenerationFloor < 0) {
     throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Account authority generation high-water mark is invalid.');
   }
   const activeDevices = new Set<string>();
@@ -555,8 +558,10 @@ function validateState(input: AccountDeviceState): AccountDeviceState {
     const status = raw.status === 'active' ? 'active' : raw.status === 'removed' ? 'removed' : null;
     if (!status) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership status is invalid.');
     const addedAt = validIso(raw.addedAt, 'addedAt');
-    const authorityGeneration = raw.authorityGeneration === undefined ? 1 : Number(raw.authorityGeneration);
-    if (!Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership authority generation is invalid.');
+    // Legacy records may omit the generation; explicit persisted values must
+    // never coerce booleans, strings or arrays into a valid lease generation.
+    const authorityGeneration = raw.authorityGeneration === undefined ? 1 : raw.authorityGeneration;
+    if (typeof authorityGeneration !== 'number' || !Number.isSafeInteger(authorityGeneration) || authorityGeneration < 1) throw new OperatorError('ACCOUNT_STATE_CORRUPT', 'Membership authority generation is invalid.');
     const removedAt = raw.removedAt === undefined ? undefined : validIso(raw.removedAt, 'removedAt');
     const removedReason = raw.removedReason === undefined ? undefined : boundedReason(raw.removedReason, 'removedReason');
     const releasePendingReason = raw.releasePendingReason === undefined ? undefined
