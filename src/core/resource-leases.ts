@@ -7,6 +7,7 @@ import { readDurableStateText, writeDurableStateText } from './durable-state.ts'
 import {
   currentProcessInstance,
   observeProcessInstance,
+  processInstanceDefinitelyStale,
   sameProcessInstance,
   type ProcessInstanceIdentity,
   type ProcessInstanceObservation,
@@ -333,10 +334,10 @@ async function reapDeadHolders(state: LeaseState, observer: ProcessInstanceObser
   }
   for (const entry of state.resources) entry.holders = entry.holders.filter((holder) => {
     const observation = observations.get(holder.pid) ?? { status: 'unknown' };
-    if (observation.status === 'dead') return false;
-    if (observation.status === 'unknown') return true;
-    if (!holder.processInstance || !observation.identity) return true;
-    return sameProcessInstance(holder.processInstance, observation.identity);
+    // A live process observed after the Linux identity-format upgrade may
+    // represent the exact same owner. Treat that upgrade as uncertainty,
+    // never proof that its durable exclusive lease can be evicted.
+    return !processInstanceDefinitelyStale(holder.processInstance, observation);
   });
   state.resources = state.resources.filter((entry) => entry.holders.length > 0);
 }
