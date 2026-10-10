@@ -92,9 +92,12 @@ export function sameProcessInstance(left: ProcessInstanceIdentity, right: Proces
 export function validProcessInstance(input: unknown): ProcessInstanceIdentity | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const value = input as Record<string, unknown>;
-  const pid = Number(value.pid);
+  // Durable leases and recovery tokens must retain the actual OS PID type.
+  // Coercing strings, arrays or booleans into numbers can rebind an invalid
+  // identity to an unrelated live process after a restart or handoff.
+  const pid = value.pid;
   const started = typeof value.started === 'string' ? value.started : '';
-  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fff_ffff || started.length < 1 || started.length > 256 || started.includes('\0')) return null;
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fff_ffff || started.length < 1 || started.length > 256 || started.includes('\0')) return null;
   return { pid, started };
 }
 
