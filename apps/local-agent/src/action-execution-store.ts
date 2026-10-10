@@ -4,6 +4,12 @@ import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
+import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
+import {
+  currentProcessInstance, localPidObservationAdmissible, observeProcessInstance,
+  processInstanceDefinitelyStale, validProcessInstance,
+  type ProcessInstanceIdentity, type ProcessInstanceObserver
+} from '../../../src/core/process-instance.ts';
 import { approvalAuthorityFingerprint, type ApprovalAuthorityContext } from './approval-store.ts';
 import type { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
 
@@ -21,6 +27,8 @@ export type LocalActionExecutionRecord = {
   status: 'processing' | 'completed';
   startedAt: string;
   ownerId?: string;
+  /** Exact OS process incarnation bound to an in-progress receipt. */
+  ownerProcess?: ProcessInstanceIdentity;
   completedAt?: string;
   resultSha256?: string;
   result?: ActionResult;
@@ -37,11 +45,20 @@ export class LocalActionExecutionStore {
   #file: string;
   #clock: () => Date;
   #ownerId = crypto.randomUUID();
+  #ownerProcess?: ProcessInstanceIdentity;
+  #observeProcess: ProcessInstanceObserver;
   #queue: Promise<void> = Promise.resolve();
 
-  constructor(stateDir: string, options: { clock?: () => Date } = {}) {
+  constructor(stateDir: string, options: {
+    clock?: () => Date;
+    /** Trusted local injection, never derived from caller-provided actions. */
+    ownerProcess?: ProcessInstanceIdentity;
+    observeProcess?: ProcessInstanceObserver;
+  } = {}) {
     this.#file = path.join(path.resolve(stateDir), 'action-executions.json');
     this.#clock = options.clock ?? (() => new Date());
+    this.#ownerProcess = options.ownerProcess;
+    this.#observeProcess = options.observeProcess ?? observeProcessInstance;
   }
 
   async begin(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<
@@ -50,6 +67,7 @@ export class LocalActionExecutionStore {
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
     const identity = executionIdentity(action, authority);
+    const ownerProcess = this.#ownerProcess ?? await currentProcessInstance();
     return await this.#mutate((state) => {
       prune(state, this.#clock().getTime());
       const existing = state.records.find((entry) => entry.actionId === action.id);
@@ -61,6 +79,7 @@ export class LocalActionExecutionStore {
           }
           existing.status = 'processing';
           existing.ownerId = this.#ownerId;
+          existing.ownerProcess = ownerProcess;
           existing.startedAt = this.#clock().toISOString();
           existing.completedAt = undefined;
           existing.resultSha256 = undefined;
@@ -80,7 +99,8 @@ export class LocalActionExecutionStore {
         risk: action.risk,
         status: 'processing',
         startedAt: this.#clock().toISOString(),
-        ownerId: this.#ownerId
+        ownerId: this.#ownerId,
+        ownerProcess
       };
       state.records.push(record);
       return { status: 'started', record: clone(record) };
@@ -157,12 +177,22 @@ export class LocalActionExecutionStore {
     if (entry.actionId !== action.id || entry.actionDigest !== expectedActionHash || entry.capability !== action.capability || entry.risk !== action.risk) {
       throw reconciliationRequired('Local receipt identity does not match the authoritative kernel journal lineage.');
     }
+    // A new instance UUID cannot establish a previous process has exited.
+    // Legacy UUID-only processing receipts stay uncertain. Only locally
+    // admissible exact process observations can prove an old owner is gone.
+    const currentProcess = this.#ownerProcess ?? await currentProcessInstance();
+    const storedProcess = local.record.ownerProcess;
+    const oldOwnerDefinitelyExited = local.status === 'processing'
+      && storedProcess !== undefined
+      && localPidObservationAdmissible(storedProcess, currentProcess)
+      && processInstanceDefinitelyStale(storedProcess, await this.#observeProcess(storedProcess.pid));
     // A different, now-ended local-agent instance left a receipt in processing,
     // but the kernel journal proves no provider was ever dispatched. Only an
     // initial, single PREPARED transition is sufficient: later PREPARED states
     // can follow a real dispatch and MUST remain uncertain.
     if (local.status === 'processing'
       && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
+      && oldOwnerDefinitelyExited
       && entry.generation === 1 && entry.state === 'PREPARED'
       && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED') {
       const recovered: ActionResult = {
@@ -275,10 +305,12 @@ export class LocalActionExecutionStore {
     this.#queue = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      const state = await this.#read();
-      const value = await fn(state);
-      await this.#write(state);
-      return value;
+      return await withDurableStateLock(this.#file, async () => {
+        const state = await this.#read();
+        const value = await fn(state);
+        await this.#write(state);
+        return value;
+      });
     } finally {
       release();
     }
@@ -331,6 +363,8 @@ function validateRecord(input: unknown, ids: Set<string>): LocalActionExecutionR
   if (status !== 'processing' && status !== 'completed') throw corrupt();
   const startedAt = validIso(raw.startedAt);
   const ownerId = raw.ownerId === undefined ? undefined : validUuid(raw.ownerId);
+  const ownerProcess = raw.ownerProcess === undefined ? undefined : validProcessInstance(raw.ownerProcess);
+  if (raw.ownerProcess !== undefined && ownerProcess === null) throw corrupt();
   const completedAt = raw.completedAt === undefined ? undefined : validIso(raw.completedAt);
   const resultSha256 = raw.resultSha256 === undefined ? undefined : validSha(raw.resultSha256);
   const result = raw.result === undefined ? undefined : validateResult(raw.result);
@@ -345,6 +379,7 @@ function validateRecord(input: unknown, ids: Set<string>): LocalActionExecutionR
   return {
     actionId, actionHash: actionHashValue, authorityHash,
     risk: raw.risk as ActionRequest['risk'], status, startedAt, ownerId,
+    ...(ownerProcess ? { ownerProcess } : {}),
     completedAt, resultSha256, result, kernelCompletion
   };
 }
