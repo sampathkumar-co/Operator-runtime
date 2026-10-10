@@ -191,3 +191,63 @@ test('independent schedulers sharing a state directory cannot overbook one capac
   await schedulerB.release(successes[0]!.value.id);
   assert.equal((await schedulerA.list({ activeOnly: true })).length, 0);
 });
+
+test('persisted reservation ID history survives compaction and rejects old deterministic UUID replay', async t => {
+  const { state, one, scheduler } = await setup(t);
+  const session = crypto.randomUUID();
+  const ads = [advert(one.deviceId, session, { maxConcurrentJobs: 2 })];
+  const oldId = crypto.randomUUID();
+  const allocated = await scheduler.reserve({ workloadKey: 'job:old' }, ads, { reservationId: oldId });
+  assert.equal(allocated.id, oldId);
+  await scheduler.release(oldId);
+  const file = path.join(state, 'device-pool.json');
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(saved.version, 2);
+  assert.ok(saved.usedReservationIds.includes(oldId));
+  // Exact effect of capacity compaction: remove the terminal row while
+  // preserving the atomic, append-only ID history.
+  saved.reservations = saved.reservations.filter((item: any) => item.id !== oldId);
+  await fs.writeFile(file, JSON.stringify(saved));
+  const restarted = new DevicePoolScheduler(state, new DeviceRegistryStore(state),
+    new DeviceRoutingStore(state, new DeviceRegistryStore(state)));
+  await assert.rejects(
+    restarted.reserve({ workloadKey: 'job:replacement' }, ads, { reservationId: oldId }),
+    (error: any) => error?.code === 'DEVICE_POOL_RESERVATION_ID_CONFLICT'
+  );
+  const replacement = await restarted.reserve({ workloadKey: 'job:replacement' }, ads, { reservationId: crypto.randomUUID() });
+  assert.equal(replacement.state, 'ACTIVE');
+  const persisted = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.ok(persisted.usedReservationIds.includes(oldId));
+  assert.ok(persisted.usedReservationIds.includes(replacement.id));
+});
+
+test('legacy v1 migration preserves all currently retained reservation IDs', async t => {
+  const { state, one, scheduler } = await setup(t);
+  const session = crypto.randomUUID();
+  const ads = [advert(one.deviceId, session, { maxConcurrentJobs: 2 })];
+  const oldId = crypto.randomUUID();
+  await scheduler.reserve({ workloadKey: 'job:legacy' }, ads, { reservationId: oldId });
+  const file = path.join(state, 'device-pool.json');
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  const legacy = { version: 1, reservations: saved.reservations };
+  await fs.writeFile(file, JSON.stringify(legacy));
+  await scheduler.reserve({ workloadKey: 'job:after-upgrade' }, ads, { reservationId: crypto.randomUUID() });
+  const upgraded = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(upgraded.version, 2);
+  assert.ok(upgraded.usedReservationIds.includes(oldId));
+  await assert.rejects(scheduler.reserve({ workloadKey: 'job:old-replay' }, ads, { reservationId: oldId }),
+    (error: any) => error?.code === 'DEVICE_POOL_RESERVATION_ID_CONFLICT');
+});
+
+test('v2 reservation state fails closed when a retained row is absent from historical IDs', async t => {
+  const { state, one, scheduler } = await setup(t);
+  const session = crypto.randomUUID();
+  const ads = [advert(one.deviceId, session)];
+  await scheduler.reserve({ workloadKey: 'job:typed-history' }, ads);
+  const file = path.join(state, 'device-pool.json');
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  saved.usedReservationIds = [];
+  await fs.writeFile(file, JSON.stringify(saved));
+  await assert.rejects(scheduler.reserve({ workloadKey: 'job:unsafe' }, ads),
+    (error: any) => error?.code === 'DEVICE_POOL_STATE_CORRUPT');
+});
