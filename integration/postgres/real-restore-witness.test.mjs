@@ -132,19 +132,41 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
       issuedAt: '2026-10-09T11:59:00.000Z', expiresAt: '2026-10-09T12:09:00.000Z'
     };
     const signature = crypto.sign(null, Buffer.from(canonicalJson(manifest)), privateKey).toString('base64url');
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS mecord_restore_witness_anchor (
-        anchor_id TEXT PRIMARY KEY, signed_manifest JSONB NOT NULL, signature TEXT NOT NULL
-      )`);
+    // Operate the witness routine with a separate SELECT/EXECUTE-only
+    // principal, not the privileged publisher account used in earlier tests.
+    const witnessSetup = await fs.readFile(
+      new URL('../../deploy/postgres/external-restore-witness-reader.sql', import.meta.url), 'utf8');
+    await pool.query(witnessSetup);
     await pool.query(
-      'INSERT INTO mecord_restore_witness_anchor(anchor_id,signed_manifest,signature) VALUES($1,$2::jsonb,$3)',
+      'INSERT INTO public.mecord_restore_witness_anchor(anchor_id,signed_manifest,signature) VALUES($1,$2::jsonb,$3)',
       [anchorId, JSON.stringify(manifest), signature]);
+    const role = 'witness_reader_ci_' + crypto.randomBytes(6).toString('hex');
+    const readerPassword = crypto.randomBytes(20).toString('base64url');
+    await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${readerPassword}'`);
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
+    await pool.query(`GRANT EXECUTE ON FUNCTION public.mecord_restore_witness_lock_read(TEXT) TO ${role}`);
+    const readerPool = new Pool({
+      host: process.env.PGHOST ?? '127.0.0.1',
+      port: Number(process.env.PGPORT ?? 5432),
+      user: role, password: readerPassword, database: process.env.PGDATABASE,
+      max: 2, connectionTimeoutMillis: 10_000
+    });
+    t.after(async () => {
+      await readerPool.end();
+      await pool.query(`DROP ROLE ${role}`);
+    });
+    const permissions = await readerPool.query(
+      "SELECT has_table_privilege(current_user, 'public.mecord_restore_witness_anchor', 'UPDATE') AS can_update");
+    assert.equal(permissions.rows[0].can_update, false);
+    await assert.rejects(readerPool.query(
+      'SELECT anchor_id FROM public.mecord_restore_witness_anchor WHERE anchor_id=$1 FOR UPDATE', [anchorId]),
+      e => e?.code === '42501');
     const guard = {
       anchorId,
       publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       clock: () => new Date('2026-10-09T12:00:00.000Z'),
       authorizeRestore: async () => {},
-      anchor: new PostgresExternalRestoreAnchor(pool, anchorId)
+      anchor: new PostgresExternalRestoreAnchor(readerPool, anchorId)
     };
     const guardedStore = new PostgresControlPlaneStore(pool, { restoreGuard: guard, requireWitnessForRestore: true });
     await assert.rejects(guardedStore.restore(snapshot),
