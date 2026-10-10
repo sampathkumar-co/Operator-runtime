@@ -396,12 +396,12 @@ test('Windows kernel Job Object terminates recursively detached grandchildren on
     'Windows native containment test requires its built and configured kernel helper');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-job-grandchild-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const started = path.join(root, 'intermediary-started.txt');
+  const started = path.join(root, 'grandchild-started.txt');
   const escaped = path.join(root, 'grandchild-survived.txt');
   // The intermediary is DETACHED and exits after spawning a second DETACHED
   // process. taskkill /T on the original PID could miss the grandchild.
-  const grandchild = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(escaped)},'escaped'),5200);setInterval(()=>{},1000)`;
-  const intermediary = `const fs=require('fs'),{spawn}=require('child_process');fs.writeFileSync(${JSON.stringify(started)},'spawned');const c=spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,stdio:'ignore'});c.unref()`;
+  const grandchild = `const fs=require('fs');fs.writeFileSync(${JSON.stringify(started)},'grandchild-live');setTimeout(()=>fs.writeFileSync(${JSON.stringify(escaped)},'escaped'),5200);setInterval(()=>{},1000)`;
+  const intermediary = `const{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,stdio:'ignore'});c.unref()`;
   const parent = `const{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify(intermediary)}],{detached:true,stdio:'ignore'});c.unref();setInterval(()=>{},1000)`;
   const provider = new ProcessProvider({ allowedRoots: [root], allowedExecutables: ['node'] });
   const result = await provider.execute({
@@ -411,7 +411,7 @@ test('Windows kernel Job Object terminates recursively detached grandchildren on
   });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, 'PROCESS_TIMEOUT');
-  await fs.access(started); // A real intermediary must have started pre-timeout.
+  await fs.access(started); // The GRANDCHILD itself must have executed before timeout.
   await new Promise(resolve => setTimeout(resolve, 5600));
   await assert.rejects(fs.access(escaped),
     'All descendants, including two-generation detached grandchildren, must remain terminated');
