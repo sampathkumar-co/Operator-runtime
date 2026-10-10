@@ -58,10 +58,8 @@ async function killedAfterTransition(args: string[], stage: string): Promise<voi
 }
 
 test('real SIGKILL at reservation journal boundaries preserves exact identity and no duplicate allocation', async (t) => {
-  if (process.platform === 'win32') {
-    t.skip('POSIX SIGKILL semantics are required for this fault injection; Windows is covered by platform and regular recovery tests');
-    return;
-  }
+  // Node maps SIGKILL to forced child-process termination on Windows too.
+  // The helper asserts actual process death before recovery reloads durable state.
   for (const stage of ['prepared', 'reserved', 'confirmed']) {
     await t.test(stage, async (caseContext) => {
       const state = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-sigkill-reservation-'));
