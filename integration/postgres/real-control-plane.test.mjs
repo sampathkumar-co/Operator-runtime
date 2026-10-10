@@ -119,6 +119,55 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     await assert.rejects(store.restore(snapshot),
       (error) => error?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
   });
+  test('real PostgreSQL snapshot restore retains deleted and expired generation fences', async () => {
+    const now = '2026-10-08T00:00:01.000Z';
+    const [deleted] = await store.transact([{
+      namespace: 'authority', key: 'deleted-restore-key', expectedGeneration: null,
+      value: { owner: 'retired' }
+    }], now);
+    await store.transact([{
+      namespace: 'authority', key: 'deleted-restore-key',
+      expectedGeneration: deleted.generation, value: null
+    }], '2026-10-08T00:00:02.000Z');
+    const [expired] = await store.transact([{
+      namespace: 'authority', key: 'expired-restore-key', expectedGeneration: null,
+      value: { owner: 'expired' }, expiresAt: '2026-10-08T00:00:03.000Z'
+    }], now);
+    const backup = await store.snapshot('2026-10-08T00:00:04.000Z');
+    assert.equal(backup.records.length, 0);
+    assert.deepEqual(
+      backup.tombstones.map(x => [x.key, x.generation]).sort(),
+      [['deleted-restore-key', deleted.generation], ['expired-restore-key', expired.generation]]
+    );
+
+    // A restore is allowed only in a truly empty replacement database.
+    await pool.query('DROP TABLE IF EXISTS mecord_control_plane');
+    await store.initialize();
+    await store.restore(backup);
+    for (const [key, oldGeneration] of [
+      ['deleted-restore-key', deleted.generation],
+      ['expired-restore-key', expired.generation]
+    ]) {
+      assert.equal(await store.get('authority', key), null);
+      const history = await pool.query(
+        'SELECT generation, is_deleted FROM mecord_control_plane WHERE namespace=$1 AND record_key=$2',
+        ['authority', key]
+      );
+      assert.equal(Number(history.rows[0]?.generation), oldGeneration);
+      assert.equal(history.rows[0]?.is_deleted, true);
+      const [newOwner] = await store.transact([{
+        namespace: 'authority', key, expectedGeneration: null, value: { owner: 'new-tenant' }
+      }], '2026-10-08T00:00:05.000Z');
+      assert.ok(newOwner.generation > oldGeneration);
+      await assert.rejects(store.transact([{
+        namespace: 'authority', key, expectedGeneration: oldGeneration,
+        value: { owner: 'stale-tenant' }
+      }], '2026-10-08T00:00:06.000Z'),
+      error => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+      assert.equal((await store.get('authority', key))?.value.owner, 'new-tenant');
+    }
+  });
+
   test('real PostgreSQL delete and expiry purge never recycle a CAS generation', async () => {
     const [first] = await store.transact([{
       namespace: 'leases', key: 'aba-key', expectedGeneration: null, value: { owner: 'first' }
