@@ -96,4 +96,52 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     assert.equal(await secondStore.get('provider-effects', 'late'), null);
     assert.equal((await secondStore.get('provider-effects', 'committed'))?.value.verified, true);
   });
+  test('real PostgreSQL commits a two-key provider batch with one authority generation', async () => {
+    const who = subject();
+    const lease = await fence(firstStore).acquire(who, 'batch-host');
+    const committed = await fence(secondStore).commitProtectedBatch(lease, [
+      { namespace: 'provider-effects', key: 'device-stream',
+        expectedGeneration: null, value: { seq: 1 } },
+      { namespace: 'provider-effects', key: '__epoch',
+        expectedGeneration: null, value: { counter: 1 } }
+    ]);
+    assert.equal(committed.records.length, 2);
+    assert.ok(committed.lease.generation > lease.generation);
+    assert.equal((await firstStore.get('provider-effects', 'device-stream'))?.value.seq, 1);
+    assert.equal((await firstStore.get('provider-effects', '__epoch'))?.value.counter, 1);
+    await fence(firstStore).revoke(who);
+    await assert.rejects(fence(secondStore).commitProtectedBatch(committed.lease, [
+      { namespace: 'provider-effects', key: 'stale-batch', expectedGeneration: null, value: { seq: 2 } }
+    ]), e => e?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+    assert.equal(await firstStore.get('provider-effects', 'stale-batch'), null);
+  });
+
+  test('real PostgreSQL revocation wins against a delayed two-key batch with no partial rows', async () => {
+    const who = subject();
+    const lease = await fence(firstStore).acquire(who, 'before-revocation');
+    let entered, resume;
+    const reachedCommit = new Promise(resolve => { entered = resolve; });
+    const continueCommit = new Promise(resolve => { resume = resolve; });
+    const delayedStore = {
+      get: firstStore.get.bind(firstStore),
+      list: firstStore.list.bind(firstStore),
+      snapshot: firstStore.snapshot.bind(firstStore),
+      restore: firstStore.restore.bind(firstStore),
+      transact: async (mutations, now) => {
+        if (mutations.length === 3) { entered(); await continueCommit; }
+        return firstStore.transact(mutations, now);
+      }
+    };
+    const effect = fence(delayedStore).commitProtectedBatch(lease, [
+      { namespace: 'provider-effects', key: 'rolled-back-stream', expectedGeneration: null, value: { seq: 1 } },
+      { namespace: 'provider-effects', key: 'rolled-back-epoch', expectedGeneration: null, value: { counter: 1 } }
+    ]);
+    await reachedCommit;
+    await fence(secondStore).revoke(who);
+    resume();
+    await assert.rejects(effect, e => e?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+    assert.equal(await firstStore.get('provider-effects', 'rolled-back-stream'), null);
+    assert.equal(await secondStore.get('provider-effects', 'rolled-back-epoch'), null);
+  });
+
 }

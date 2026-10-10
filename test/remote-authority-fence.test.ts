@@ -421,3 +421,122 @@ test('forged released record with mismatched device fails closed', async t => {
     accountId: crypto.randomUUID(), deviceId, authorityGeneration: 2
   }, 'untrusted'), (e: any) => e?.code === 'REMOTE_AUTHORITY_CORRUPT');
 });
+
+test('atomic authority batch binds a stream and epoch in one generation transaction', async t => {
+  const { make, subject } = await fixture(t);
+  const lease = await make().acquire(subject, 'batched-provider');
+  const result = await make().commitProtectedBatch(lease, [
+    { namespace: 'relay-stream-test', key: subject.deviceId, expectedGeneration: null,
+      value: { accountId: subject.accountId, seq: 1 } },
+    { namespace: 'relay-stream-test', key: '__epoch', expectedGeneration: null,
+      value: { counter: 1 } }
+  ]);
+  assert.equal(result.records.length, 2);
+  assert.ok(result.lease.generation > lease.generation);
+  assert.equal((await make().assertCurrent(result.lease)).leaseId, lease.leaseId);
+  await assert.rejects(make().commitProtectedBatch(lease, [
+    { namespace: 'relay-stream-test', key: 'stale-update', expectedGeneration: null, value: { seq: 2 } }
+  ]), (error: any) => error?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+});
+
+test('provider batch authorizes every storage key and rejects duplicate effects before commit', async t => {
+  const { make, subject } = await fixture(t);
+  const lease = await make().acquire(subject, 'policy-bound-batch');
+  await assert.rejects(make().commitProtectedBatch(lease, [
+    { namespace: 'provider-effects', key: 'should-not-be-written', expectedGeneration: null, value: { n: 1 } },
+    { namespace: 'unauthorized-effects', key: 'denied', expectedGeneration: null, value: { n: 2 } }
+  ]), /provider scope denied/);
+  await assert.rejects(make().commitProtectedBatch(lease, [
+    { namespace: 'provider-effects', key: 'same-key', expectedGeneration: null, value: { n: 1 } },
+    { namespace: 'provider-effects', key: 'same-key', expectedGeneration: null, value: { n: 2 } }
+  ]), (error: any) => error?.code === 'REMOTE_AUTHORITY_INVALID');
+  assert.equal((await make().assertCurrent(lease)).generation, lease.generation,
+    'rejected batch must not consume or rotate authority');
+});
+
+test('revocation after a batch policy check atomically cancels ALL effects', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-authority-batch-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const subject: RemoteAuthoritySubject = {
+    accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 3
+  };
+  const fixedNow = () => new Date('2026-10-09T00:00:00.000Z');
+  let enter!: () => void, resume!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const resumed = new Promise<void>(resolve => { resume = resolve; });
+  const authorize = async () => {};
+  const worker = new RemoteAuthorityFenceStore(new EmbeddedControlPlaneStore(dir), {
+    authorize, clock: fixedNow,
+    authorizeMutation: async (_identity, mutation) => {
+      if (mutation.key === '__epoch') { enter(); await resumed; }
+    }
+  });
+  const revoker = new RemoteAuthorityFenceStore(new EmbeddedControlPlaneStore(dir), {
+    authorize, clock: fixedNow
+  });
+  const lease = await worker.acquire(subject, 'worker-before-revoke');
+  const operation = worker.commitProtectedBatch(lease, [
+    { namespace: 'relay-stream-test', key: subject.deviceId, expectedGeneration: null, value: { seq: 1 } },
+    { namespace: 'relay-stream-test', key: '__epoch', expectedGeneration: null, value: { counter: 1 } }
+  ]);
+  await entered;
+  await revoker.revoke(subject);
+  resume();
+  await assert.rejects(operation, (error: any) =>
+    error?.code === 'CONTROL_PLANE_CAS_MISMATCH' || error?.code === 'REMOTE_AUTHORITY_FENCE_LOST');
+  const storage = new EmbeddedControlPlaneStore(dir);
+  assert.equal(await storage.get('relay-stream-test', subject.deviceId), null);
+  assert.equal(await storage.get('relay-stream-test', '__epoch'), null);
+});
+
+test('one wrong CAS generation rolls back all writes in an authority-protected batch', async t => {
+  const { make, subject } = await fixture(t);
+  const lease = await make().acquire(subject, 'cas-batch');
+  const before = await make().commitProtectedBatch(lease, [
+    { namespace: 'batch-contents', key: 'already-exists', expectedGeneration: null, value: { status: 'original' } }
+  ]);
+  await assert.rejects(make().commitProtectedBatch(before.lease, [
+    { namespace: 'batch-contents', key: 'would-be-new', expectedGeneration: null, value: { status: 'should-rollback' } },
+    { namespace: 'batch-contents', key: 'already-exists', expectedGeneration: null, value: { status: 'wrong-cas' } }
+  ]), (error: any) => error?.code === 'CONTROL_PLANE_CAS_MISMATCH');
+  assert.equal((await make().assertCurrent(before.lease)).generation, before.lease.generation);
+});
+
+test('authority policy await cannot authorize a caller-mutated protected payload or storage key', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-batch-payload-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const subject: RemoteAuthoritySubject = {
+    accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), authorityGeneration: 1
+  };
+  let enter!: () => void, resume!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const gate = new Promise<void>(resolve => { resume = resolve; });
+  const storage = new EmbeddedControlPlaneStore(dir);
+  const fence = new RemoteAuthorityFenceStore(storage, {
+    authorize: async () => {},
+    authorizeMutation: async (_subject, mutation) => {
+      if (mutation.namespace !== 'authorized-effects' || mutation.key !== 'original') {
+        throw new Error('unauthorized storage scope');
+      }
+      enter();
+      await gate;
+      // Even if a trusted callback mutates its received argument, the
+      // transaction must commit the original immutable intent only.
+      (mutation.value as Record<string, unknown>).owner = 'callback-mutated';
+    }
+  });
+  const lease = await fence.acquire(subject, 'immutable-authorized-provider');
+  const effect = {
+    namespace: 'authorized-effects', key: 'original', expectedGeneration: null,
+    value: { owner: 'original' }
+  };
+  const work = fence.commitProtectedBatch(lease, [effect]);
+  await entered;
+  effect.key = 'injected-key';
+  effect.value.owner = 'attacker-overwrite';
+  resume();
+  const result = await work;
+  assert.equal(result.records[0]?.key, 'original');
+  assert.equal((await storage.get('authorized-effects', 'original'))?.value.owner, 'original');
+  assert.equal(await storage.get('authorized-effects', 'injected-key'), null);
+});
