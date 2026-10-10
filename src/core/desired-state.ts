@@ -535,7 +535,8 @@ function validateState(input: unknown): DesiredStateFile {
 }
 
 function iso(input: unknown, label: string): string {
-  const value = String(input ?? '');
+  if (typeof input !== 'string') throw new OperatorError('DESIRED_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
+  const value = input;
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
     throw new OperatorError('DESIRED_STATE_CORRUPT', `${label} must be an ISO timestamp.`);
@@ -548,7 +549,8 @@ function isTerminal(operation: DigitalOperation): boolean {
 }
 
 function validRisk(input: unknown): ActionRisk {
-  const value = String(input ?? '') as ActionRisk;
+  if (typeof input !== 'string') throw new OperatorError('DESIRED_STATE_INPUT_INVALID', 'maxRisk is invalid.');
+  const value = input as ActionRisk;
   if (!['read', 'write', 'external', 'system', 'destructive'].includes(value)) throw new OperatorError('DESIRED_STATE_INPUT_INVALID', 'maxRisk is invalid.');
   return value;
 }
@@ -573,17 +575,18 @@ function uniqueStrings(input: unknown, max: number, maxLength: number, label: st
   return values;
 }
 function integer(input: unknown, min: number, max: number, label: string): number {
-  const value = Number(input);
-  if (!Number.isSafeInteger(value) || value < min || value > max) throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} is invalid.`);
-  return value;
+  if (typeof input !== 'number' || !Number.isSafeInteger(input) || input < min || input > max) throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} is invalid.`);
+  return input;
 }
 function sha(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} must be SHA-256.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(value)) throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} must be SHA-256.`);
   return value;
 }
 function uuid(input: unknown, label: string): string {
-  const value = String(input ?? '').toLowerCase();
+  if (typeof input !== 'string') throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} must be a UUID.`);
+  const value = input.toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) throw new OperatorError('DESIRED_STATE_INPUT_INVALID', `${label} must be a UUID.`);
   return value;
 }
