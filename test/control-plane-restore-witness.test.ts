@@ -194,3 +194,47 @@ test('a configured witness cannot be switched to another caller-supplied signer 
   await strict.restoreWithConfiguredWitness(snapshot);
   assert.equal((await strict.get('authority','device'))?.value.owner, 'trusted');
 });
+
+test('restore witness expiry is checked after lock wait, not at method entry', async t => {
+  const { source, destination } = await stores(t);
+  await source.transact([{ namespace: 'restore', key: 'wait-expired', expectedGeneration: null,
+    value: { state: 'original' } }]);
+  const snapshot = await source.snapshot('2026-10-09T12:00:00.000Z');
+  const approval = fixture(snapshot.digest);
+  let current = new Date('2026-10-09T12:00:00.000Z');
+  const guard: ControlPlaneRestoreGuard = {
+    ...approval.guard,
+    clock: () => current,
+    anchor: { withLatestExclusive: async work => {
+      // Simulates another transaction monopolizing the PostgreSQL witness
+      // lock until after our snapshot approval has expired.
+      current = new Date('2026-10-09T12:10:00.000Z');
+      return await work(approval.sign(approval.manifest));
+    } }
+  };
+  await assert.rejects(restoreControlPlaneWithSignedWitness(destination, snapshot, guard),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_EXPIRED');
+  assert.equal(await destination.get('restore', 'wait-expired'), null);
+});
+
+test('slow operator approval cannot restore a snapshot after the witness expires', async t => {
+  const { source, destination } = await stores(t);
+  await source.transact([{ namespace: 'restore', key: 'approval-expired', expectedGeneration: null,
+    value: { state: 'original' } }]);
+  const snapshot = await source.snapshot('2026-10-09T12:00:00.000Z');
+  const approval = fixture(snapshot.digest);
+  let current = new Date('2026-10-09T12:00:00.000Z');
+  let authorized = false;
+  const guard: ControlPlaneRestoreGuard = {
+    ...approval.guard,
+    clock: () => current,
+    authorizeRestore: async () => {
+      authorized = true;
+      current = new Date('2026-10-09T12:10:00.000Z');
+    }
+  };
+  await assert.rejects(restoreControlPlaneWithSignedWitness(destination, snapshot, guard),
+    (e: any) => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_EXPIRED');
+  assert.equal(authorized, true);
+  assert.equal(await destination.get('restore', 'approval-expired'), null);
+});

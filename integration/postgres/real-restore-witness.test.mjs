@@ -8,6 +8,7 @@ import pg from 'pg';
 import { canonicalJson } from '../../src/core/action-identity.ts';
 import { EmbeddedControlPlaneStore, PostgresControlPlaneStore } from '../../src/core/control-plane-store.ts';
 import { restoreControlPlaneWithSignedWitness } from '../../src/core/control-plane-restore-witness.ts';
+import { PostgresExternalRestoreAnchor } from '../../src/core/postgres-external-restore-anchor.ts';
 
 if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
   test('PostgreSQL restore witness requires ephemeral test database', { skip: true }, () => {});
@@ -115,4 +116,113 @@ if (process.env.OPERATOR_REAL_PG_TEST !== '1') {
     await assert.rejects(guarded.restoreWithConfiguredWitness(snapshot),
       e => e?.code === 'CONTROL_PLANE_RESTORE_CONFLICT');
   });
+  test('real PostgreSQL externally pinned witness authorizes the latest signed restore', async t => {
+    // This test checks PostgreSQL row locks and signed-restore integration.
+    // Production must use a DIFFERENT witness DB/backup/administrator domain.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-external-restore-pg-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const source = new EmbeddedControlPlaneStore(dir);
+    await source.transact([{ namespace: 'recovered', key: 'device', expectedGeneration: null,
+      value: { authorityGeneration: 4 } }], '2026-10-09T11:01:00.000Z');
+    const snapshot = await source.snapshot('2026-10-09T11:02:00.000Z');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const anchorId = 'witness-test-' + crypto.randomUUID();
+    const manifest = {
+      schemaVersion: 1, anchorId, epoch: 7, snapshotDigest: snapshot.digest,
+      issuedAt: '2026-10-09T11:59:00.000Z', expiresAt: '2026-10-09T12:09:00.000Z'
+    };
+    const signature = crypto.sign(null, Buffer.from(canonicalJson(manifest)), privateKey).toString('base64url');
+    // Operate the witness routine with a separate SELECT/EXECUTE-only
+    // principal, not the privileged publisher account used in earlier tests.
+    const witnessSetup = await fs.readFile(
+      new URL('../../deploy/postgres/external-restore-witness-reader.sql', import.meta.url), 'utf8');
+    await pool.query(witnessSetup);
+    await pool.query(
+      'INSERT INTO public.mecord_restore_witness_anchor(anchor_id,signed_manifest,signature) VALUES($1,$2::jsonb,$3)',
+      [anchorId, JSON.stringify(manifest), signature]);
+    const role = 'witness_reader_ci_' + crypto.randomBytes(6).toString('hex');
+    const readerPassword = crypto.randomBytes(20).toString('base64url');
+    await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${readerPassword}'`);
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
+    await pool.query(`GRANT EXECUTE ON FUNCTION public.mecord_restore_witness_lock_read(TEXT) TO ${role}`);
+    const readerPool = new Pool({
+      host: process.env.PGHOST ?? '127.0.0.1',
+      port: Number(process.env.PGPORT ?? 5432),
+      user: role, password: readerPassword, database: process.env.PGDATABASE,
+      max: 2, connectionTimeoutMillis: 10_000
+    });
+    t.after(async () => {
+      await readerPool.end();
+      await pool.query(`REVOKE EXECUTE ON FUNCTION public.mecord_restore_witness_lock_read(TEXT) FROM ${role}`);
+      await pool.query(`REVOKE USAGE ON SCHEMA public FROM ${role}`);
+      await pool.query(`DROP ROLE ${role}`);
+    });
+    const permissions = await readerPool.query(
+      "SELECT has_table_privilege(current_user, 'public.mecord_restore_witness_anchor', 'UPDATE') AS can_update");
+    assert.equal(permissions.rows[0].can_update, false);
+    await assert.rejects(readerPool.query(
+      'SELECT anchor_id FROM public.mecord_restore_witness_anchor WHERE anchor_id=$1 FOR UPDATE', [anchorId]),
+      e => e?.code === '42501');
+    const guard = {
+      anchorId,
+      publicKeyPem: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      clock: () => new Date('2026-10-09T12:00:00.000Z'),
+      authorizeRestore: async () => {},
+      anchor: new PostgresExternalRestoreAnchor(readerPool, anchorId)
+    };
+    const guardedStore = new PostgresControlPlaneStore(pool, { restoreGuard: guard, requireWitnessForRestore: true });
+    await assert.rejects(guardedStore.restore(snapshot),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_REQUIRED');
+    await guardedStore.restoreWithConfiguredWitness(snapshot);
+    assert.equal((await guardedStore.get('recovered', 'device'))?.value.authorityGeneration, 4);
+    // An independent publisher's UPDATE must be unable to advance the
+    // witness while the trusted restore callback holds its row lock.
+    let entered, resume;
+    const inside = new Promise(resolve => { entered = resolve; });
+    const hold = new Promise(resolve => { resume = resolve; });
+    const witnessRead = guard.anchor.withLatestExclusive(async latest => {
+      assert.equal(latest.manifest.epoch, 7);
+      entered();
+      await hold;
+    });
+    await inside;
+    const rival = await pool.connect();
+    try {
+      await rival.query('SET statement_timeout = 750');
+      await assert.rejects(rival.query(
+        'UPDATE mecord_restore_witness_anchor SET signature=$2 WHERE anchor_id=$1',
+        [anchorId, signature]),
+        e => e?.code === '57014');
+      await rival.query('SET statement_timeout = 0');
+    } finally {
+      rival.release();
+      resume();
+      await witnessRead;
+    }
+    // The publisher is not trusted to roll the witness backwards or erase
+    // its recorded epoch. Even its database UPDATE/DELETE/TRUNCATE rights are
+    // generation-fenced by the independent witness database itself.
+    await assert.rejects(pool.query(
+      'UPDATE public.mecord_restore_witness_anchor SET signature=$2 WHERE anchor_id=$1',
+      [anchorId, signature]), e => e?.code === '23514');
+    await assert.rejects(pool.query(
+      'DELETE FROM public.mecord_restore_witness_anchor WHERE anchor_id=$1',
+      [anchorId]), e => e?.code === '23514');
+    await assert.rejects(pool.query(
+      'TRUNCATE TABLE public.mecord_restore_witness_anchor'), e => e?.code === '23514');
+    const advanced = { ...manifest, epoch: 8, snapshotDigest: 'b'.repeat(64) };
+    const advancedSignature = crypto.sign(null,
+      Buffer.from(canonicalJson(advanced)), privateKey).toString('base64url');
+    await pool.query(
+      'UPDATE public.mecord_restore_witness_anchor SET signed_manifest=$2::jsonb, signature=$3 WHERE anchor_id=$1',
+      [anchorId, JSON.stringify(advanced), advancedSignature]);
+    await assert.rejects(guardedStore.restoreWithConfiguredWitness(snapshot),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_STALE');
+    // A signed stale latest-witness row rejects a different snapshot, even
+    // though the target already contains data and both DBs are reachable.
+    const stale = { ...snapshot, digest: '0'.repeat(64) };
+    await assert.rejects(guardedStore.restoreWithConfiguredWitness(stale),
+      e => e?.code === 'CONTROL_PLANE_RESTORE_WITNESS_STALE');
+  });
+
 }
