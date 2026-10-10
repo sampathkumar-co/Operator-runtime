@@ -51,6 +51,8 @@ export interface DigitalOperation {
   selectedProcedureId?: string;
   procedureCapture?: ProcedureCaptureSpec;
   deviceReservationId?: string;
+  /** Immutable allocation proof required before releasing an owned reservation. */
+  deviceAllocationRequestDigest?: string;
   deviceReservationSessionId?: string;
   deviceReservationStatus?: 'active' | 'released' | 'reconciliation_required';
   deviceReservationErrorCode?: string;
@@ -385,6 +387,8 @@ export class DigitalOperationsLayer {
         ...(selectedProcedureId ? { selectedProcedureId } : {}),
         ...(normalized.captureProcedure ? { procedureCapture: normalized.captureProcedure } : {}),
         ...(deviceReservationId ? { deviceReservationId } : {}),
+        ...(deviceReservationId && normalized.device
+          ? { deviceAllocationRequestDigest: devicePoolAllocationRequestDigest(normalized.device.request) } : {}),
         ...(deviceReservationSessionId ? { deviceReservationSessionId } : {}),
         ...(deviceReservationId ? { deviceReservationStatus: 'active' as const } : {}),
         ...(teamMissionId ? { teamMissionId } : {}),
@@ -745,9 +749,16 @@ export class DigitalOperationsLayer {
     } finally {
       if (operation.deviceReservationId) {
         try {
-          const released = await this.#devices.release(operation.deviceReservationId);
-          if (released.id !== operation.deviceReservationId || !['RELEASED', 'EXPIRED'].includes(released.state)) {
-            releaseErrorCode = 'DEVICE_RESERVATION_RELEASE_UNCONFIRMED';
+          // A reservation UUID is not an ownership capability. In particular,
+          // compacted IDs can reappear on an unrelated allocation. Release only
+          // when the exact immutable allocation request proof is still present
+          // in provider state, under the provider's mutation lock.
+          const digest = operation.deviceAllocationRequestDigest;
+          const released = digest
+            ? await this.#devices.releasePrepared(operation.deviceReservationId, digest)
+            : null;
+          if (!released || released.id !== operation.deviceReservationId || !['RELEASED', 'EXPIRED'].includes(released.state)) {
+            releaseErrorCode = digest ? 'DEVICE_RESERVATION_RELEASE_UNCONFIRMED' : 'DEVICE_RESERVATION_PROOF_MISSING';
           }
         } catch (error) {
           releaseErrorCode = typeof (error as any)?.code === 'string' ? (error as any).code : 'DEVICE_RESERVATION_RELEASE_FAILED';
@@ -1006,6 +1017,13 @@ function validateOperation(operation: DigitalOperation): void {
   if (operation.selectedProcedureId !== undefined) validUuid(operation.selectedProcedureId, 'selectedProcedureId');
   if (operation.procedureCapture !== undefined) normalizeProcedureCapture(operation.procedureCapture);
   if (operation.deviceReservationId !== undefined) validUuid(operation.deviceReservationId, 'deviceReservationId');
+  if (operation.deviceAllocationRequestDigest !== undefined) {
+    if (typeof operation.deviceAllocationRequestDigest !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(operation.deviceAllocationRequestDigest) ||
+        operation.deviceReservationId === undefined) {
+      throw corrupt('Device allocation proof must bind a reservation ID and a native SHA-256 string.');
+    }
+  }
   if (operation.deviceReservationSessionId !== undefined) validUuid(operation.deviceReservationSessionId, 'deviceReservationSessionId');
   if (operation.deviceReservationId !== undefined && operation.deviceReservationSessionId === undefined) {
     // Legacy records are accepted and are blocked safely on their next refresh.
