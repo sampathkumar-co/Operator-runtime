@@ -182,19 +182,32 @@ export class LocalActionExecutionStore {
     // admissible exact process observations can prove an old owner is gone.
     const currentProcess = this.#ownerProcess ?? await currentProcessInstance();
     const storedProcess = local.record.ownerProcess;
+    // Linux v3 binds both boot UUID and PID namespace. Windows filetime and
+    // portable ps timestamps have NO independent host provenance: copying a
+    // state directory across hosts could otherwise reclaim a still-live owner.
+    // Those environments must fail closed pending a provider-backed host proof.
+    const locallyBound = (identity: ProcessInstanceIdentity): boolean =>
+      /^linux-boot-id:[0-9a-f-]{36}:pidns:\d+:ticks:\d+$/.test(identity.started);
     const oldOwnerDefinitelyExited = local.status === 'processing'
       && storedProcess !== undefined
+      && locallyBound(storedProcess) && locallyBound(currentProcess)
       && localPidObservationAdmissible(storedProcess, currentProcess)
       && processInstanceDefinitelyStale(storedProcess, await this.#observeProcess(storedProcess.pid));
     // A different, now-ended local-agent instance left a receipt in processing,
     // but the kernel journal proves no provider was ever dispatched. Only an
     // initial, single PREPARED transition is sufficient: later PREPARED states
     // can follow a real dispatch and MUST remain uncertain.
+    const initiallyPrepared = oldOwnerDefinitelyExited
+      && entry.generation === 1 && entry.state === 'PREPARED'
+      && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED';
     if (local.status === 'processing'
       && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
-      && oldOwnerDefinitelyExited
-      && entry.generation === 1 && entry.state === 'PREPARED'
-      && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED') {
+      && (entry.state === 'INTERRUPTED' || initiallyPrepared)) {
+      // The prior PREPARED check is merely a candidate. Only an atomic,
+      // terminal journal transition on the journal's OWN cross-process lock
+      // can prove provider dispatch did not win this race. Crash between
+      // journal fence and receipt write is safely replayable on restart.
+      await journal.interruptPreparedBeforeDispatch(action);
       const recovered: ActionResult = {
         ok: false,
         capability: action.capability,
