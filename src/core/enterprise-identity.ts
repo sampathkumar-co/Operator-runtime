@@ -170,7 +170,7 @@ function validateState(input:unknown):EnterpriseIdentityState{
 }
 function identityKey(s:Pick<EnterpriseIdentitySubject,'providerId'|'subject'>):string{return s.providerId+'\0'+s.subject;}
 function list(v:unknown,max:number,label:string):string[]{if(!Array.isArray(v)||v.length>max)throw invalid(label+' is invalid.');return[...new Set(v.map((x)=>id(x,label)))].sort();}
-function id(v:unknown,label:string):string{const s=String(v??'');if(!/^[A-Za-z0-9._:@/-]{1,256}$/.test(s))throw invalid(label+' is invalid.');return s;}
+function id(v:unknown,label:string):string{if(typeof v!=='string'||!/^[A-Za-z0-9._:@/-]{1,256}$/.test(v))throw invalid(label+' is invalid.');return v;}
 function text(v:unknown,max:number,label:string):string{if(typeof v!=='string'||!v.trim()||Buffer.byteLength(v,'utf8')>max||v.includes('\0'))throw invalid(label+' is invalid.');return v;}
 function url(v:unknown,label:string):string{const s=text(v,2048,label);let u:URL;try{u=new URL(s);}catch{throw invalid(label+' is invalid.');}if(u.protocol!=='https:')throw invalid(label+' must use HTTPS.');return u.toString().replace(/\/$/,'');}
 function invalid(m:string):OperatorError{return new OperatorError('ENTERPRISE_IDENTITY_INVALID',m);}
