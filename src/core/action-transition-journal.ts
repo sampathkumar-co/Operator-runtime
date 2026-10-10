@@ -576,6 +576,17 @@ function validateState(input: unknown): JournalState {
       validateTransitionMetadata(transition, index === 0);
     }
     if (entry.transitions.at(-1)?.state !== entry.state) throw corrupt('Entry state does not match its latest transition.');
+    if (entry.state === 'INTERRUPTED') {
+      const proof = entry.transitions[1];
+      const expectedDigest = digest({
+        actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted'
+      });
+      if (entry.risk === 'read' || entry.generation !== 1 || entry.transitions.length !== 2 ||
+          proof?.state !== 'INTERRUPTED' || proof.provider !== 'agent-kernel' ||
+          proof.resultDigest !== expectedDigest) {
+        throw corrupt('Interrupted journal is not bound to an original never-dispatched mutation.');
+      }
+    }
     const createdAt = Date.parse(iso(entry.createdAt));
     const updatedAt = Date.parse(iso(entry.updatedAt));
     if (createdAt > Date.parse(entry.transitions[0]!.at)) throw corrupt('Entry creation timestamp is after its current generation.');
