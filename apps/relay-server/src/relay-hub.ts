@@ -291,10 +291,18 @@ export class RelayHub {
   }
 
   async bindProject(accountId: string, projectKey: string, deviceId: string): Promise<void> {
-    if (!(await this.#accounts.ownsDevice(accountId, deviceId))) {
+    const membership = await this.#accounts.activeMembershipForDevice(deviceId);
+    if (!membership || membership.accountId !== accountId) {
       throw new OperatorError('ACCOUNT_DEVICE_NOT_OWNED', 'Project can only be bound to an active device owned by the account.');
     }
-    await this.#withAccountRuntime(accountId, async ({ routing }) => { await routing.bindProject(projectKey, deviceId); });
+    // The lookup is not a commit fence: removal/erasure may revoke it before
+    // the routing write. Hold the exact membership authority through commit,
+    // just as setDefaultDevice does, so removal cannot race past this write.
+    await this.#accounts.withActiveAuthorityLease({
+      accountId, deviceId, generation: membership.authorityGeneration
+    }, async () => {
+      await this.#withAccountRuntime(accountId, async ({ routing }) => { await routing.bindProject(projectKey, deviceId); });
+    });
   }
 
   async setDefaultDevice(accountId: string, deviceId: string): Promise<void> {
