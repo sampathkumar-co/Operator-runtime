@@ -1445,3 +1445,92 @@ test('pre-digest legacy confirmed reservation cannot use naked ID release during
   assert.equal(releaseCalls, 0, 'unproven pre-upgrade cleanup must remain quarantined');
   assert.equal((await journal.pending('digital-operation'))[0]?.targetId, reservationId);
 });
+
+async function provisionFinalizationReservation(t: test.TestContext) {
+  const base = await setup(t);
+  const identity = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' }).loadOrCreate('pool-owner');
+  await base.registry.registerVerifiedPeer(identity);
+  const request = { workloadKey: 'audit:proof-bound-finalization' };
+  const operation = await base.ops.submit({
+    objective: 'Complete a proof-bound reservation workload',
+    scopeKey: 'project:release-proof',
+    successConditions: ['The operation is safely finalized'],
+    execution: { kind: 'team', workItems: work() },
+    device: {
+      request,
+      advertisements: [{
+        deviceId: identity.deviceId,
+        sessionId: crypto.randomUUID(),
+        capabilities: ['file.read'],
+        observedAt: new Date().toISOString(),
+        cpuSlots: 4,
+        memoryMb: 8192,
+        gpu: false,
+        tags: [],
+        activeJobs: 0,
+        maxConcurrentJobs: 1
+      }]
+    },
+    run: true
+  });
+  assert.ok(operation.deviceReservationId);
+  assert.equal(operation.deviceAllocationRequestDigest, devicePoolAllocationRequestDigest(request));
+  return { base, operation };
+}
+
+test('stage10 normal finalization releases only exact proven allocation and persists its proof', async t => {
+  const { base, operation } = await provisionFinalizationReservation(t);
+  const id = operation.deviceReservationId!;
+  const digest = operation.deviceAllocationRequestDigest!;
+  assert.equal((await base.devices.inspectPrepared(id, digest))?.state, 'ACTIVE');
+  const cancelled = await base.ops.cancel(operation.id);
+  assert.equal(cancelled.outcomeRecorded, true);
+  assert.equal(cancelled.deviceReservationStatus, 'released');
+  assert.equal((await base.devices.inspectPrepared(id, digest))?.state, 'RELEASED');
+});
+
+test('stage10 normal finalization never releases a foreign reservation with reused ID', async t => {
+  const { base, operation } = await provisionFinalizationReservation(t);
+  const poolFile = path.join(base.state, 'device-pool.json');
+  const pool = JSON.parse(await fs.readFile(poolFile, 'utf8'));
+  const reservation = pool.reservations.find((r: any) => r.id === operation.deviceReservationId);
+  assert.ok(reservation);
+  reservation.allocationRequestDigest = 'f'.repeat(64);
+  assert.notEqual(reservation.allocationRequestDigest, operation.deviceAllocationRequestDigest);
+  await fs.writeFile(poolFile, JSON.stringify(pool, null, 2));
+
+  const cancelled = await base.ops.cancel(operation.id);
+  assert.equal(cancelled.outcomeRecorded, true);
+  assert.equal(cancelled.deviceReservationStatus, 'reconciliation_required');
+  assert.equal(cancelled.deviceReservationErrorCode, 'DEVICE_POOL_ALLOCATION_PROOF_MISMATCH');
+  assert.equal((await base.devices.list({ activeOnly: true }))[0]?.id, operation.deviceReservationId);
+});
+
+test('stage10 legacy operation without allocation digest cannot release a reservation by ID alone', async t => {
+  const { base, operation } = await provisionFinalizationReservation(t);
+  const opsFile = path.join(base.state, 'digital-operations.json');
+  const state = JSON.parse(await fs.readFile(opsFile, 'utf8'));
+  const persisted = state.operations.find((o: any) => o.id === operation.id);
+  assert.ok(persisted);
+  delete persisted.deviceAllocationRequestDigest;
+  await fs.writeFile(opsFile, JSON.stringify(state, null, 2));
+
+  const cancelled = await base.ops.cancel(operation.id);
+  assert.equal(cancelled.deviceReservationStatus, 'reconciliation_required');
+  assert.equal(cancelled.deviceReservationErrorCode, 'DEVICE_RESERVATION_PROOF_MISSING');
+  assert.equal((await base.devices.list({ activeOnly: true }))[0]?.id, operation.deviceReservationId);
+});
+
+test('stage10 persisted allocation proofs reject coerced digest values', async t => {
+  const { base, operation } = await provisionFinalizationReservation(t);
+  const opsFile = path.join(base.state, 'digital-operations.json');
+  const state = JSON.parse(await fs.readFile(opsFile, 'utf8'));
+  const persisted = state.operations.find((o: any) => o.id === operation.id);
+  assert.ok(persisted);
+  persisted.deviceAllocationRequestDigest = ['f'.repeat(64)];
+  await fs.writeFile(opsFile, JSON.stringify(state, null, 2));
+  await assert.rejects(
+    () => base.ops.inspect(operation.id),
+    (error: any) => error?.code === 'OPERATIONS_STATE_CORRUPT'
+  );
+});
