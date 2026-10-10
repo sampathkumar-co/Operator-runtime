@@ -890,7 +890,23 @@ export class DigitalOperationsLayer {
 
   async #read(): Promise<OperationsState> {
     try {
-      return validateState(JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS)));
+      const raw = JSON.parse(await readDurableStateText(this.#file, STORE_OPTIONS));
+      if (raw?.version === 1) {
+        // A v1 file with an already initialized v2 marker is a partial
+        // restore/downgrade, not a fresh legacy upgrade. Never erase history
+        // from an earlier upgraded state to recreate its deterministic IDs.
+        try {
+          await readDurableStateText(this.#initializedMarker, {
+            maxBytes: 4096, errorCode: 'OPERATIONS_STATE_CORRUPT',
+            invalidMessage: 'Digital operation initialization marker is invalid.'
+          });
+          throw new OperatorError('OPERATIONS_HISTORY_INCOMPLETE',
+            'Legacy operation state was restored after identity history initialization.');
+        } catch (markerError) {
+          if ((markerError as NodeJS.ErrnoException).code !== 'ENOENT') throw markerError;
+        }
+      }
+      return validateState(raw);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         // The absence of a ledger is NOT proof of first-time initialization.
