@@ -248,10 +248,12 @@ async function readTaskLease(file: string, expectedTaskId: string): Promise<Stor
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease must be an object.');
   const value = raw as Record<string, unknown>;
-  if (![1, 2].includes(Number(value.version)) || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
+  if ((value.version !== 1 && value.version !== 2) || validLeaseId(value.taskId, 'taskId') !== expectedTaskId) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease identity is invalid.');
   const ownerId = validLeaseId(value.ownerId, 'ownerId');
-  const pid = Number(value.pid);
-  if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease PID is invalid.');
+  if (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid < 1 || value.pid > 0x7fffffff) {
+    throw new OperatorError('TASK_LEASE_CORRUPT', 'Stored task execution lease PID is invalid.');
+  }
+  const pid = value.pid;
   const acquiredAt = validIso(value.acquiredAt, 'lease acquiredAt');
   if (value.version === 1) return { version: 1, taskId: expectedTaskId, ownerId, pid, acquiredAt };
   const processInstance = validProcessInstance(value.processInstance);
@@ -260,7 +262,8 @@ async function readTaskLease(file: string, expectedTaskId: string): Promise<Stor
 }
 
 function validLeaseId(input: unknown, label: string): string {
-  try { return validTaskId(String(input ?? '')); }
+  if (typeof input !== 'string') throw new OperatorError('TASK_LEASE_CORRUPT', `Stored task execution lease ${label} is invalid.`);
+  try { return validTaskId(input); }
   catch { throw new OperatorError('TASK_LEASE_CORRUPT', `Stored task execution lease ${label} is invalid.`); }
 }
 
