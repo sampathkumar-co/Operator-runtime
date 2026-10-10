@@ -52,9 +52,22 @@ test('killed account authority holder cannot block future disable or reuse its g
     new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 100))
   ]);
   assert.equal(premature, 'pending', 'active authority must fence competing disable');
+  // Register the exit observer BEFORE signalling: on heavily loaded Windows
+  // runners the exit event can arrive synchronously with test scheduling.
+  const exited = child.exitCode !== null || child.signalCode !== null
+    ? Promise.resolve()
+    : new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Killed lease owner did not exit')), 20_000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+    });
   assert.equal(child.kill('SIGKILL'), true);
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  const disabled = await disable;
+  await exited;
+  const disabled = await Promise.race([
+    disable,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Revocation stalled after confirmed OS process death')), 20_000))
+  ]);
   assert.equal(disabled.status, 'disabled');
   await assert.rejects(create().withActiveAuthorityLease(
     { accountId: owner.accountId, deviceId, generation: membership.authorityGeneration },
