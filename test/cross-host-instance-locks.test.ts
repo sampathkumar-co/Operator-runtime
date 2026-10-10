@@ -71,3 +71,36 @@ for (const kind of ['local-agent', 'relay-server'] as const) {
     });
   }
 }
+
+for (const kind of ['local-agent', 'relay-server'] as const) {
+  for (const status of ['live', 'dead'] as const) {
+    test(kind + ' retains same-boot owner from another PID namespace under ' + status + ' probe', async t => {
+      const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-instance-pidns-'));
+      t.after(() => fs.rm(state, { recursive: true, force: true }));
+      const lockFile = path.join(state, kind === 'local-agent' ? 'local-agent.lock' : 'relay-server.lock');
+      const boot = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const remote = {
+        version: kind === 'local-agent' ? 2 : 1,
+        pid: 42711,
+        processInstance: { pid: 42711, started: 'linux-boot-id:' + boot + ':pidns:10001:ticks:1234' },
+        token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        createdAt: new Date().toISOString()
+      };
+      await fs.writeFile(lockFile, JSON.stringify(remote));
+      const options = {
+        pid: 42712,
+        processInstance: { pid: 42712, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:5678' },
+        observeProcessInstance: async (pid: number) => status === 'dead'
+          ? { status: 'dead' as const }
+          : { status: 'live' as const, identity: { pid, started: 'linux-boot-id:' + boot + ':pidns:10002:ticks:7777' } }
+      };
+      await assert.rejects(
+        kind === 'local-agent'
+          ? acquireLocalAgentStateInstanceLock(state, options)
+          : acquireRelayStateInstanceLock(state, options),
+        (error: any) => error?.code === (kind === 'local-agent' ? 'LOCAL_AGENT_ALREADY_RUNNING' : 'RELAY_ALREADY_RUNNING')
+      );
+      assert.deepEqual(JSON.parse(await fs.readFile(lockFile, 'utf8')), remote);
+    });
+  }
+}
