@@ -722,8 +722,8 @@ function sameAuthority(left: RelayDeliveryAuthority | undefined, right: RelayDel
 function safeAuthority(input: unknown, expectedDeviceId: string): RelayDeliveryAuthority {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority is invalid.');
   const raw = input as Record<string, unknown>;
-  const accountId = validUuid(String(raw.accountId ?? ''), 'authority accountId');
-  const deviceId = validUuid(String(raw.deviceId ?? ''), 'authority deviceId');
+  const accountId = validUuid(raw.accountId, 'authority accountId');
+  const deviceId = validUuid(raw.deviceId, 'authority deviceId');
   // Queue recovery cannot coerce a string or boolean into a valid authority.
   const generation = raw.generation;
   if (deviceId !== expectedDeviceId) throw new OperatorError('RELAY_QUEUE_CORRUPT', 'Relay delivery authority device does not match its stream.');
@@ -742,44 +742,51 @@ function safePayload(input: unknown): JsonObject {
   return parsed as JsonObject;
 }
 
-function validKind(value: string): string {
-  const kind = String(value ?? '');
+function validKind(value: unknown): string {
+  if (typeof value !== 'string') throw new OperatorError('RELAY_KIND_INVALID', 'Relay delivery kind is invalid.');
+  const kind = value;
   if (!kind || kind.length > MAX_KIND || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(kind)) throw new OperatorError('RELAY_KIND_INVALID', 'Relay delivery kind is invalid.');
   return kind;
 }
 
-function validIdempotencyKey(value: string): string {
-  const key = String(value ?? '').toLowerCase();
+function validIdempotencyKey(value: unknown): string {
+  if (typeof value !== 'string') throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
+  const key = value.toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(key)) throw new OperatorError('RELAY_IDEMPOTENCY_INVALID', 'Relay idempotency key is invalid.');
   return key;
 }
 
-function boundedLimit(value: number): number {
-  const limit = Number(value);
+function boundedLimit(value: unknown): number {
+  if (typeof value !== 'number') throw new OperatorError('RELAY_LIMIT_INVALID', 'Relay delivery limit must be numeric.');
+  const limit = value;
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PENDING_RETURN) throw new OperatorError('RELAY_LIMIT_INVALID', `Relay delivery limit must be between 1 and ${MAX_PENDING_RETURN}.`);
   return limit;
 }
 
-function validSeq(value: number): number {
-  const seq = Number(value);
+function validSeq(value: unknown): number {
+  if (typeof value !== 'number') throw new OperatorError('RELAY_SEQUENCE_INVALID', 'Relay sequence must be a positive safe integer.');
+  const seq = value;
   if (!Number.isSafeInteger(seq) || seq < 1) throw new OperatorError('RELAY_SEQUENCE_INVALID', 'Relay sequence must be a positive safe integer.');
   return seq;
 }
 function validPositiveSeq(value: number): number { return validSeq(value); }
-function validNonNegativeSeq(value: number): number {
-  const seq = Number(value);
+function validNonNegativeSeq(value: unknown): number {
+  if (typeof value !== 'number') throw new OperatorError('RELAY_SEQUENCE_INVALID', 'Relay sequence must be a non-negative safe integer.');
+  const seq = value;
   if (!Number.isSafeInteger(seq) || seq < 0) throw new OperatorError('RELAY_SEQUENCE_INVALID', 'Relay sequence must be a non-negative safe integer.');
   return seq;
 }
 
-function validUuid(value: string, label: string): string {
-  const text = String(value ?? '');
+function validUuid(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new OperatorError('RELAY_ID_INVALID', `${label} must be a UUID.`);
+  const text = value;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)) throw new OperatorError('RELAY_ID_INVALID', `${label} must be a UUID.`);
   return text.toLowerCase();
 }
 
-function validIso(value: string, label: string): string {
-  const text = String(value ?? '');
+function validIso(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new OperatorError('RELAY_QUEUE_CORRUPT', `${label} must be an ISO timestamp.`);
+  const text = value;
   const time = Date.parse(text);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== text) throw new OperatorError('RELAY_QUEUE_CORRUPT', `${label} must be an ISO timestamp.`);
   return text;
