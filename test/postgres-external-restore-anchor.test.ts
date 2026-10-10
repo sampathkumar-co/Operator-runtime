@@ -22,7 +22,7 @@ function fixture(options: { missing?: boolean; malformed?: boolean; rollbackFail
     async query(sql: string, values?: unknown[]) {
       calls.push(sql);
       if (sql === 'ROLLBACK' && options.rollbackFails) throw new Error('witness link lost');
-      if (sql.includes('FOR UPDATE')) {
+      if (sql.includes('mecord_restore_witness_lock_read')) {
         assert.deepEqual(values, ['external-test']);
         if (options.missing) return { rows: [] };
         return { rows: [{
@@ -55,7 +55,7 @@ test('independent witness pins one exact transaction and holds row lock for enti
   });
   await reached;
   assert.deepEqual(calls, ['BEGIN',
-    'SELECT anchor_id, signed_manifest, signature FROM mecord_restore_witness_anchor WHERE anchor_id=$1 FOR UPDATE']);
+    'SELECT anchor_id, signed_manifest, signature FROM public.mecord_restore_witness_lock_read($1)']);
   resume();
   assert.equal(await work, 42);
   assert.equal(calls.at(-1), 'COMMIT');
