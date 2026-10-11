@@ -140,3 +140,23 @@ Original Sampath isolated Windows/Chrome localhost fixture, 30 repetitions each,
 The five-step measurement was run after alternating tab focus 30 times, leaving the target in the background. **It is not a general foreground-operation figure.** Follow-up isolates foreground session behavior and adds an exact CDP-method allowlist to distinguish runtime evaluation from network protocol roundtrips. The run excluded hosted MCP, relay network and ChatGPT model costs; avoid promoting it to global slowest-stage status.
 
 The new code also measures actual journal transition/completion operations instead of only preparation. CDP method tracing deliberately records recognized protocol names only, never parameters, selectors, page titles, URLs, or script content.
+
+## Foreground-vs-background verification — source 6820140fe9f7502c89d219a50fdd056c66cb60aa
+
+A second 30-repetition isolated real Chrome run explicitly focused the original workflow target after the tab-switch scenario. The benchmark fixture, hardware and invocation class were otherwise held consistent. **4,592 spans, 0 dropped**, Windows_NT 10.0.26200, Chrome 154.0.8037.98.
+
+| Stage/scenario | Foreground p50 ms | Foreground p95 ms |
+|---|---:|---:|
+| Navigation | 22.4 | 53.3 |
+| SPA interaction | 354.8 | 366.4 |
+| Tab switch | 11.9 | 13.9 |
+| Five-step workflow | **1,156.3** | **1,195.0** |
+| Failed action plus safe recovery | 191.8 | 203.8 |
+| Cold inspect | 107.9 | 110.5 |
+| Warm inspect | 94.0 | 96.3 |
+
+Previous background-target five-step p50 was **11,187.2 ms** with p95 11,213.3 ms. Foreground p50 is approximately 9.7x faster under the controlled fixture; this is a difference between sequential test conditions, not a proven hosted or user-facing optimization. Do not label the previous background-target benchmark as the ordinary warm foreground baseline.
+
+**Foreground CDP command attribution** (all 30-scenario mixed benchmark, no parameters logged): Runtime.evaluate: 1,445 calls, p50 1.11 ms, p95 12.93 ms, 3,762.6 ms total. Input.dispatchMouseEvent: 270 calls, 465.9 ms total. Accessibility.getFullAXTree: 121 calls, 426.1 ms total. The 3,680 CDP round trips collectively accounted for approximately 6,527 ms across the run. The full browser operation span count was 364 and included the browser/CDP work within it, so these times overlap, and must never be summed as disjoint e2e contributions.
+
+Machine-readable report and source-matched Markdown: artifacts/pipeline-latency-2026-10-11T17-16-38-456Z/. Hosted and ChatGPT model/tool overhead remain unobservable to this source-only candidate until source-matched hosted deployment is separately authorized. Checklist #5 still lacks final hosted certification.
