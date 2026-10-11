@@ -14,7 +14,7 @@ export const PIPELINE_STAGES = [
  'local.journal_audit','local.resource_lease','local.capability_routing',
  'browser.target_discovery','browser.cdp_connection','browser.cdp_roundtrip','browser.operation',
  'browser.dom_postcondition','kernel.verify_complete','relay.result_transport',
- 'hosted.response_serialization','hosted.relay_roundtrip','model.tool_overhead_observed','unobservable_gap'
+ 'hosted.response_serialization','hosted.relay_roundtrip','hosted.request_processing','local.http_execution','model.tool_overhead_observed','unobservable_gap'
 ] as const;
 export type PipelineStage = typeof PIPELINE_STAGES[number];
 export type PipelineOrigin = 'hosted-mcp'|'relay-server'|'local-agent'|'browser'|'benchmark';

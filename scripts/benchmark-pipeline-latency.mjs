@@ -1,4 +1,4 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -19,12 +19,14 @@ const samples = (values) => {
 const delay = (ms) => new Promise(resolve=>setTimeout(resolve,ms));
 const browserPath = process.env.MECORD_BENCH_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const repetitions = Math.max(30, Math.min(1000, Number(process.env.MECORD_BENCH_REPS || 30)));
+const extended = process.env.MECORD_BENCH_SCENARIOS === 'extended';
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'mecord-isolated-browser-benchmark-'));
 const page = '<!doctype html><html><head><title>Mecord Synthetic Fixture</title></head><body><h1>Local synthetic benchmark</h1>'
   + Array.from({length:10}, (_,i)=>'<label>Field '+i+'<input id="f'+i+'" type="text" aria-label="Field '+i+'"></label>').join('')
   + '<button id="tap" onclick="document.querySelector(\'#status\').textContent=String(Number(document.querySelector(\'#status\').textContent||0)+1);this.textContent=String(Date.now())">Tap</button><output id="status">0</output></body></html>';
+const extendedPage = page.replace('</body></html>', "<button id=\"spa\" onclick=\"this.dataset.steps=String(Number(this.dataset.steps||0)+1);location.hash='#/spa'+this.dataset.steps;document.getElementById('spa-state').textContent=this.dataset.steps\">SPA</button><output id=\"spa-state\">idle</output></body></html>");
 const server = http.createServer((req,res)=> {
-  res.setHeader('content-type','text/html; charset=utf-8');res.setHeader('cache-control','no-store');res.end(page);
+  res.setHeader('content-type','text/html; charset=utf-8');res.setHeader('cache-control','no-store');res.end(extendedPage);
 });
 const listen = new Promise((resolve,reject)=>{server.once('error',reject); server.listen(0,'127.0.0.1',resolve);});
 await listen;
@@ -50,12 +52,12 @@ try {
   assert.ok(port,'Isolated Chrome CDP launch timed out');
   provider=new BrowserCdpProvider('http://127.0.0.1:'+port);
   let actionIndex=0;
-  const call=async(capability,risk,input)=>{
+  const call=async(capability,risk,input,allowFailure=false)=>{
     const t=performance.now();
     const result=await provider.execute({id:'synthetic-bench-'+(++actionIndex),capability,risk,input,
       provenance:{kind:'runtime',source:'synthetic-benchmark'}});
     const ms=performance.now()-t;
-    if(!result.ok)throw new Error(capability+' '+(result.error?.code||'UNKNOWN')+': '+(result.error?.message||'unknown'));
+    if(!result.ok && !allowFailure)throw new Error(capability+' '+(result.error?.code||'UNKNOWN')+': '+(result.error?.message||'unknown'));
     return {result,ms};
   };
   const nav=await call('browser.navigate','external',{url:fixture,newTab:true});
@@ -66,6 +68,7 @@ try {
   report.warmSemanticInspection=[];
   report.warmClick=[];
   report.tenFieldForm=[];
+  if (!extended) {
   for(let i=0;i<repetitions;i++){
     const discovery=await call('browser.inspect','read',{});
     report.warmTabDiscovery.push(discovery.ms);
@@ -82,9 +85,58 @@ try {
     }
     report.tenFieldForm.push(performance.now()-t);
   }
+  }
+  else {
+    report.navigation=[];report.spa=[];report.tabSwitch=[];report.fiveStep=[];
+    report.failedRecovery=[];report.coldSessionInspection=[];report.warmSessionInspection=[];
+    for(let i=0;i<repetitions;i++){
+      const navAgain=await call('browser.navigate','external',{targetId,url:fixture+'?iteration='+i});
+      report.navigation.push(navAgain.ms);
+    }
+    for(let i=0;i<repetitions;i++){
+      const changed=await call('browser.interact','external',{targetId,operation:'click',target:{css:'#spa'}});
+      report.spa.push(changed.ms);
+    }
+    const other=await call('browser.navigate','external',{url:fixture+'?tab=two',newTab:true});
+    const otherId=other.result.output.targetId;
+    assert.ok(otherId);
+    for(let i=0;i<repetitions;i++){
+      const focused=await call('browser.tab.focus','external',{targetId:i%2===0?targetId:otherId});
+      report.tabSwitch.push(focused.ms);
+    }
+    for(let i=0;i<repetitions;i++){
+      const t=performance.now();
+      await call('browser.inspect','read',{targetId});
+      await call('browser.interact','external',{targetId,operation:'type',target:{css:'#f0'},value:'workflow-'+i});
+      await call('browser.interact','external',{targetId,operation:'click',target:{css:'#tap'}});
+      await call('browser.interact','external',{targetId,operation:'click',target:{css:'#spa'}});
+      await call('browser.verify','read',{targetId,expect:{urlContains:'#/spa'}});
+      report.fiveStep.push(performance.now()-t);
+    }
+    for(let i=0;i<repetitions;i++){
+      const t=performance.now();
+      const failed=await call('browser.interact','external',{targetId,operation:'click',target:{css:'#no-such-control'}},true);
+      assert.equal(failed.result.ok,false);
+      const recovered=await call('browser.inspect','read',{targetId});
+      assert.equal(recovered.result.ok,true);
+      report.failedRecovery.push(performance.now()-t);
+    }
+    for(let i=0;i<repetitions;i++){
+      provider.close();
+      report.coldSessionInspection.push((await call('browser.inspect','read',{targetId})).ms);
+      report.warmSessionInspection.push((await call('browser.inspect','read',{targetId})).ms);
+    }
+  }
   const finish=await call('browser.inspect','read',{targetId});
   assert.equal(finish.result.ok,true);
-  const result={...report, warmTabDiscovery:samples(report.warmTabDiscovery),
+  const result=extended ? {
+    ...report,scenarioMode:'extended',navigation:samples(report.navigation),
+    spa:samples(report.spa),tabSwitch:samples(report.tabSwitch),
+    fiveStep:samples(report.fiveStep),failedRecovery:samples(report.failedRecovery),
+    coldSessionInspection:samples(report.coldSessionInspection),
+    warmSessionInspection:samples(report.warmSessionInspection)
+  } : {...report,scenarioMode:'baseline',
+    warmTabDiscovery:samples(report.warmTabDiscovery),
     warmSemanticInspection:samples(report.warmSemanticInspection),
     warmClick:samples(report.warmClick),tenFieldForm:samples(report.tenFieldForm)};
   const chromeMetadata=await (await fetch('http://127.0.0.1:'+port+'/json/version')).json();
@@ -92,7 +144,7 @@ try {
   const metadata={sourceSha,runtimeVersion:process.env.MECORD_BENCH_RUNTIME_VERSION||'source-checkout',
     operatingSystem:os.type()+' '+os.release(),chromeVersion:String(chromeMetadata.Browser||'unknown'),
     machine:process.env.MECORD_BENCH_MACHINE||'original-Sampath-isolated-synthetic-Chrome',
-    conditions:'isolated headless Chrome; loopback synthetic fixture; repetitions='+repetitions+'; hosted/model excluded'};
+    conditions:'isolated headless Chrome; loopback synthetic fixture; mode='+(extended?'extended':'baseline')+'; repetitions='+repetitions+'; hosted/model excluded'};
   const stageReport=pipelineLatency.report(metadata);
   const outputDir=path.resolve(process.env.MECORD_PIPELINE_REPORT_DIR||
     path.join(process.cwd(),'artifacts','pipeline-latency-'+new Date().toISOString().replace(/[:.]/g,'-')));

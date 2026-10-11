@@ -41,6 +41,7 @@ import { semanticCheckpointDigest, type SemanticCheckpointManager, type SignedSe
 import { projectTaskRuntime } from '../../../src/core/runtime-projection.ts';
 import { buildApprovalCenterModel, buildGuidedOnboardingModel, buildRecoveryCenterModel, type RecoveryCandidateInput } from '../../../src/core/control-center-ux.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
 import type { UniversalAgentGateway } from '../../../src/core/universal-agent-gateway.ts';
 import {
   boundedString,
@@ -235,6 +236,8 @@ export function createLocalAgentServer(options: {
     signal?: AbortSignal,
     basePermissions: PermissionProfile = options.permissions
   ): Promise<ActionResult> => {
+    return await pipelineLatency.measure({ stage: 'local.http_execution', origin: 'local-agent',
+      traceId: action.taskId ?? action.id }, async () => {
     const emergencySignal = emergencyExecutionGeneration.signal;
     const executionSignal = signal ? AbortSignal.any([signal, emergencySignal]) : emergencySignal;
     let approvalLeaseId: string | null = null;
@@ -295,6 +298,7 @@ export function createLocalAgentServer(options: {
       }
     }
     return result;
+    });
   };
 
   const executeStudioActionWithApproval = async (

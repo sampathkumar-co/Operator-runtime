@@ -15,7 +15,7 @@ import {
 import type { FastifyReply } from 'fastify';
 import * as z from 'zod/v4';
 import { LocalAgentClient } from './local-agent-client.ts';
-import { mcpInvocationScope, withMcpInvocation } from './request-context.ts';
+import { mcpInvocationScope, withMcpInvocation, currentMcpTaskId } from './request-context.ts';
 import { principalFromAuthInfo, readPublicMcpEdgeConfig, resolveMcpBindHost } from './public-edge.ts';
 import type { ActionRequest, ActionRisk } from '../../../src/core/types.ts';
 import { stableActionId } from '../../../src/core/action-identity.ts';
@@ -214,7 +214,10 @@ app.all('/mcp', async (request, reply) => {
     delete request.raw.headers.authorization;
     (request.raw as typeof request.raw & { auth?: AuthInfo }).auth = authInfo;
   }
-  return withMcpInvocation(request.body, invocationScope, () => nodeHandler(request.raw, reply.raw, request.body));
+  return withMcpInvocation(request.body, invocationScope, () =>
+    pipelineLatency.measure({ stage: 'hosted.request_processing', origin: 'hosted-mcp',
+      traceId: currentMcpTaskId() ?? String(request.id) },
+      () => nodeHandler(request.raw, reply.raw, request.body)));
 });
 app.get('/health', async () => ({
   ok: true,
