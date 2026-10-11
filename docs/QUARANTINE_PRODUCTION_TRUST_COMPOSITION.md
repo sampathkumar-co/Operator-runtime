@@ -24,7 +24,7 @@ A trusted HTTPS server handles `POST <reviewer-base>/authorize` with **separate 
 
 - For `kind:'request-bound-review'`: body contains `scope={programId,targetKey,returnedMissionId}` and the original human-provided `session` from `x-quarantine-review-session`. The reviewer service **must validate** the fresh independently signed human session, current revocation, principal, exact program/target/mission scope, admin permission and freshness; never trust a display name or `operatorId` request field.
 - For `kind:'provider-claim-authorization'`: body contains `operatorId` and the **provider-signed claim**, including program, target, intended/exact returned IDs, process, device, session, authority generation and origin digest. The external reviewer checks fresh operator permissions and revoked authority *again* at the adjudicator's effect boundary.
-- Only an HTTPS 200 JSON response with `{ "authorized": true, "operatorId": "the-verified-operator-id" }` is accepted; all other results and network errors deny review.
+Only an HTTPS 200 JSON response with `authorized: true` and a validated `operatorId` is accepted. The reviewer must also return the **exact `scope`** in request-bound review responses, or a **SHA-256 `claimDigest`** matching the exact serialized signed-provider claim in provider-claim authorization responses. Missing/mismatched attestation, negative authorization and all network errors deny review.
 - Maintain independent immutable authorization receipts and short-lived credentials on this external service; local process metadata is not proof of production identity.
 
 ## Contract: independent CAS high-water anchor
