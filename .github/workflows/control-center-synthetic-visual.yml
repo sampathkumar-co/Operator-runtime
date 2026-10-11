@@ -1,0 +1,65 @@
+name: Control Center Synthetic Visual Certification
+
+on:
+  pull_request:
+    paths:
+      - 'apps/control-center/src/**'
+      - 'scripts/audit-gkktt227-control-center-playwright.mjs'
+      - '.github/workflows/control-center-synthetic-visual.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/control-center/src/**'
+      - 'scripts/audit-gkktt227-control-center-playwright.mjs'
+      - '.github/workflows/control-center-synthetic-visual.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-chrome:
+    name: Windows Chrome synthetic visual, 3 viewports, 13 tabs and ARIA keyboard checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Test-only Playwright installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $deps = Join-Path $env:RUNNER_TEMP 'mecord-visual-test-deps'
+          npm install --prefix $deps --ignore-scripts --no-audit --no-fund playwright@1.56.1
+          if ($LASTEXITCODE -ne 0) { throw 'Test-only Playwright install failed' }
+          $exe = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Google Chrome is missing from runner' }
+          "MECORD_VISUAL_PLAYWRIGHT_PATH=$(Join-Path $deps 'node_modules\playwright\index.mjs')" >> $env:GITHUB_ENV
+          "MECORD_VISUAL_CHROME=$exe" >> $env:GITHUB_ENV
+      - name: Synthetic UI audit (NOT GKKTT227 physical certification)
+        shell: pwsh
+        env:
+          MECORD_VISUAL_CI_SYNTHETIC: '1'
+          MECORD_VISUAL_ARTIFACT_DIR: ${{ runner.temp }}/control-center-visual-evidence
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/audit-gkktt227-control-center-playwright.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Control Center synthetic visual audit failed' }
+          $r = Get-Content (Join-Path $env:MECORD_VISUAL_ARTIFACT_DIR 'report.json') -Raw | ConvertFrom-Json
+          if ($r.counts.expectedTabChecks -ne 39 -or $r.counts.passingTabChecks -ne 39 -or $r.counts.failures -ne 0 -or $r.counts.consoleErrors -ne 0) {
+            throw 'Visual tab, page error or responsive certification is incomplete'
+          }
+          if ($r.suite -notlike 'HEADLESS CI synthetic*') {
+            throw 'CI must not impersonate a physical GKKTT227 headed Playwright run'
+          }
+      - name: Upload synthetic-only screenshots, video, traces and report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: control-center-synthetic-visual-${{ github.sha }}
+          path: ${{ runner.temp }}/control-center-visual-evidence
+          if-no-files-found: warn
+          retention-days: 14
