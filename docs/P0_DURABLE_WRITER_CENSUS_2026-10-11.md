@@ -32,3 +32,7 @@ Instance-local `#serial` / `#queue` never supplies cross-process ownership by it
 - **PR #302 on actual PostgreSQL 18 CI service:** 11/11 witness, quarantine CAS, authority and process crash tests; a disposable database, **not production WAL restore**.
 
 This is **source-entry-path evidence** rather than proof that every indirect caller or future writer uses a lock. Production independent provider signer, external trust-domain restore witness, mixed-version deployed clients, unrelated out-of-scope durable stores and the actual public package still need separate evidence. Owner-deferred two-machine certification is explicitly not claimed. **Do not close #157's wider production acceptance from this report alone.**
+
+## Additional independently instantiated writer collision tests
+
+`test/priority-durable-writer-collisions.test.ts` adds three generic nonbenchmark cross-instance race probes: (1) 20 simultaneous world-model evidence sources survive with 20 distinct source claims, (2) 24 simultaneous optimizer receipts all commit once and 24 independent retries do not double-count, and (3) 12 independent enterprise-policy configurations retain 12 distinct, non-recycled durable generations. Alongside existing simultaneous enterprise SCIM upsert/revocation tests, **five focused tests passed**, zero failures, on Sampath Windows. `scripts/check.ts` also passed. They exercise separate in-process store objects sharing one state root; not separate physical machines.
