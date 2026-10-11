@@ -1,0 +1,146 @@
+// Read-only, machine-pinned *headed* Playwright visual audit of the source Control Center UI.
+// This is a synthetic local fixture, not authentication or a production UI integration test.
+// No remote network requests or live approvals/tasks are permitted.
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const actualHost = os.hostname().toUpperCase();
+assert.equal(actualHost, 'LAPTOP-GKKTT227',
+  'This audit is reserved for LAPTOP-GKKTT227; refusing to run on another machine.');
+
+const root = process.cwd();
+const uiDir = path.join(root, 'apps', 'control-center', 'src');
+const sources = await Promise.all([
+  fs.readFile(path.join(uiDir, 'shell.html'), 'utf8'),
+  fs.readFile(path.join(uiDir, 'styles.css'), 'utf8'),
+  fs.readFile(path.join(uiDir, 'app.js'), 'utf8')
+]);
+const [shell, style, script] = sources;
+const hash = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });
+assert.equal(hash.status, 0, 'A valid Operator-runtime Git checkout is required.');
+const sourceCommit = hash.stdout.trim();
+for (const marker of ['__MECORD_NONCE__', '__MECORD_STYLE__', '__MECORD_SCRIPT__']) {
+  assert.ok(shell.includes(marker), 'Expected Control Center source marker ' + marker);
+}
+const html = shell
+  .replace('__MECORD_NONCE__', 'synthetic-audit-only')
+  .replace('__MECORD_STYLE__', style)
+  .replace('__MECORD_SCRIPT__', script);
+
+let chromium;
+try {
+  ({ chromium } = await import('playwright'));
+} catch {
+  throw new Error('Playwright is not installed in this audit checkout. Install playwright in an isolated test environment before running.');
+}
+
+const browserPath = process.env.MECORD_VISUAL_CHROME ||
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+await fs.access(browserPath);
+const output = process.env.MECORD_VISUAL_ARTIFACT_DIR ||
+  path.join(os.tmpdir(), 'mecord-gkktt227-visual-' + new Date().toISOString().replaceAll(/[:.]/g, '-'));
+await fs.mkdir(output, { recursive: true });
+
+const failures = [];
+const consoles = [];
+const viewports = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'tablet', width: 768, height: 1024 },
+  { name: 'mobile', width: 390, height: 844 }
+];
+const tabs = ['tasks', 'approvals', 'recovery', 'onboarding', 'activity', 'devices',
+  'policies', 'knowledge', 'diagnostics', 'teams', 'studio', 'desired', 'goals'];
+const browser = await chromium.launch({
+  executablePath: browserPath,
+  headless: false,
+  args: ['--no-first-run', '--no-default-browser-check', '--disable-background-networking']
+});
+const results = [];
+try {
+  for (const viewport of viewports) {
+    const context = await browser.newContext({
+      viewport: { width: viewport.width, height: viewport.height },
+      deviceScaleFactor: 1,
+      recordVideo: { dir: path.join(output, 'videos'), size: { width: viewport.width, height: viewport.height } }
+    });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    const page = await context.newPage();
+    page.on('pageerror', e => consoles.push({ viewport: viewport.name, kind: 'pageerror', message: e.message }));
+    page.on('console', m => { if (m.type() === 'error') consoles.push({ viewport: viewport.name, kind: 'console', message: m.text() }); });
+    // No external requests: synthetic page has no authentication, live sessions or privileged API connection.
+    await page.route('**/*', async route => {
+      failures.push({ viewport: viewport.name, type: 'unexpected-network-request',
+        url: route.request().url().slice(0, 160) });
+      await route.abort();
+    });
+    try {
+      await page.setContent(html, { waitUntil: 'load' });
+      await page.getByRole('heading', { name: 'Mecord Control Center' }).waitFor({ timeout: 5000 });
+      assert.equal(await page.locator('input[type=password]').count(), 2);
+      assert.equal(await page.locator('[role=tab]').count(), tabs.length);
+
+      const layout = await page.evaluate(() => {
+        const tablist = document.querySelector('[role=tablist]');
+        const outer = tablist.getBoundingClientRect();
+        const bounds = [...tablist.querySelectorAll('[role=tab]')].map(t => {
+          const r = t.getBoundingClientRect();
+          return { name: t.textContent, left: r.left, right: r.right };
+        });
+        return { viewport: innerWidth, docWidth: document.documentElement.scrollWidth,
+          tabViewport: Math.round(outer.width),
+          tabScrollWidth: tablist.scrollWidth,
+          tabOverflowX: getComputedStyle(tablist).overflowX,
+          unreachableTabs: bounds.filter(r => r.right > outer.right + 2 || r.left < outer.left - 2).map(r => r.name) };
+      });
+      if (layout.docWidth > viewport.width + 2) {
+        failures.push({ viewport: viewport.name, type: 'horizontal-page-overflow', ...layout });
+      }
+      if (layout.unreachableTabs.length > 0 && layout.tabOverflowX === 'visible') {
+        failures.push({ viewport: viewport.name, type: 'clipped-non-scrollable-tabs', ...layout });
+      }
+      results.push({ viewport: viewport.name, type: 'layout', ...layout });
+
+      for (const id of tabs) {
+        const selector = '[role=tab][data-tab="' + id + '"]';
+        try {
+          await page.locator(selector).click({ timeout: 5000 });
+          assert.equal(await page.locator(selector).getAttribute('aria-selected'), 'true');
+          assert.equal(await page.locator('#' + id).evaluate(el => getComputedStyle(el).display !== 'none'), true);
+          await page.screenshot({ path: path.join(output, viewport.name + '-' + id + '.png'), fullPage: true });
+          results.push({ viewport: viewport.name, type: 'tab', id, passed: true });
+        } catch (err) {
+          failures.push({ viewport: viewport.name, type: 'tab-interaction', id, message: String(err).slice(0, 500) });
+          await page.screenshot({ path: path.join(output, viewport.name + '-' + id + '-failure.png'), fullPage: true });
+        }
+      }
+      await page.keyboard.press('Tab');
+      const focused = await page.evaluate(() => document.activeElement?.tagName ?? null);
+      results.push({ viewport: viewport.name, type: 'keyboard-focus', element: focused });
+      if (!focused || focused === 'BODY') failures.push({ viewport: viewport.name, type: 'keyboard-focus-missing' });
+    } finally {
+      await context.tracing.stop({ path: path.join(output, viewport.name + '-trace.zip') });
+      await context.close();
+    }
+  }
+} finally {
+  await browser.close();
+}
+
+const report = {
+  hostname: actualHost, sourceCommit, timestamp: new Date().toISOString(),
+  suite: 'headed synthetic Control Center source UI; no live account, runtime or hosted relay',
+  browserExecutable: browserPath, outputDirectory: output,
+  counts: { viewports: viewports.length, expectedTabChecks: tabs.length * viewports.length,
+    passingTabChecks: results.filter(r => r.type === 'tab' && r.passed).length,
+    failures: failures.length, consoleErrors: consoles.length },
+  failures, consoleErrors: consoles, results
+};
+const reportFile = path.join(output, 'report.json');
+await fs.writeFile(reportFile, JSON.stringify(report, null, 2) + '\n');
+process.stdout.write('MECORD_GKKTT227_VISUAL_AUDIT=' + JSON.stringify({
+  sourceCommit, reportFile, ...report.counts
+}) + '\n');
+if (failures.length || consoles.length) process.exitCode = 1;
