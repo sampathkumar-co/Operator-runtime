@@ -8,6 +8,7 @@ import { OperatorError } from './errors.ts';
 import { executionContextDigest, executionContextIdentityFrom } from './execution-context-identity.ts';
 import type { OperationTraceOutcome, OperationTraceStage } from './operation-trace.ts';
 import { OperationTraceStore } from './operation-trace.ts';
+import { pipelineLatency } from './pipeline-latency.ts';
 import { canonicalResourceKeys, resolvePhysicalResourceKeysForAction, resourceKeysConflict } from './resource-identity.ts';
 import type { ResourceLeaseStore } from './resource-leases.ts';
 import type { OperatorRuntime } from './runtime.ts';
@@ -128,14 +129,16 @@ export class AgentKernel {
         const denied = authorityFailure(action, error);
         if (denied.error?.code === 'APPROVAL_REQUIRED') {
           await this.#trace(action, 'APPROVAL', 'BLOCKED', { code: 'APPROVAL_REQUIRED' });
-          prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+          prepared = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys }));
           await this.#journal.defer(action.id, denied);
         }
         return denied;
       }
     }
 
-    prepared = await this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys });
+    prepared = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+      () => this.#journal.prepare({ action, ownerKind, ownerId, resourceKeys }));
     if (action.risk !== 'read') prepared = await this.#journal.recoverPendingCompletion(action.id, action);
 
     // This exact action was conclusively interrupted before provider dispatch.
@@ -267,7 +270,8 @@ export class AgentKernel {
       result = await this.#publishObservation(action, result);
       if (!result.ok) return result;
 
-      const receipt = verifyActionOutcome({ action, result, journal: journalEntry });
+      const receipt = await pipelineLatency.measure({ stage: 'kernel.verify_complete', origin: 'local-agent',
+        traceId: action.taskId ?? action.id }, () => verifyActionOutcome({ action, result, journal: journalEntry }));
       await this.#trace(action, 'VERIFY', receipt.verified ? 'OK' : 'FAILED', { verifier: 'agent-kernel' });
       if (!receipt.verified) {
         return {

@@ -28,6 +28,7 @@ import { PUBLIC_PLUGIN_SURFACE_VERSION, PUBLIC_PLUGIN_TOOL_NAMES } from '../../.
 import { TOOL_NAMES } from './tool-surface.ts';
 import { CAPABILITY_RISK_RULES } from '../../../src/core/capability-policy.ts';
 import { createMultiFileEditPlan } from '../../../src/core/multi-file-edit-plan.ts';
+import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
 
 const agentUrl = process.env.OPERATOR_AGENT_URL ?? 'http://127.0.0.1:47100';
 const agentToken = process.env.OPERATOR_AGENT_TOKEN?.trim() ?? '';
@@ -120,11 +121,12 @@ if (publicEdge) {
     const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
     let authInfo: AuthInfo;
     try {
-      authInfo = await verifyBearerToken(request.headers.authorization, {
+      authInfo = await pipelineLatency.measure({ stage: 'hosted.ingress_auth', origin: 'hosted-mcp', traceId: String(request.id) },
+        () => verifyBearerToken(request.headers.authorization, {
         verifier: publicEdge.verifier,
         requiredScopes: [publicEdge.writeScope],
         resourceMetadataUrl
-      });
+      }));
     } catch (error) {
       const failed = publicAuthFailureLimiter!.hit(clientKey);
       if (!failed.allowed) return sendRateLimit(reply, failed);
@@ -178,7 +180,8 @@ if (publicEdge) {
 app.all('/mcp', async (request, reply) => {
   let invocationScope = mcpInvocationScope(request.headers['mcp-session-id']);
   if (publicEdge) {
-    const webRequest = await toWebRequest(request.raw, request.body);
+    const webRequest = await pipelineLatency.measure({ stage: 'hosted.validation_serialization',
+      origin: 'hosted-mcp', traceId: String(request.id) }, () => toWebRequest(request.raw, request.body));
     const rejected = validatePublicHeaders(webRequest);
     if (rejected) return sendSdkResponse(reply, rejected);
     const clientKey = requestClientKey(request.raw);
@@ -189,11 +192,12 @@ app.all('/mcp', async (request, reply) => {
     const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(publicEdge.publicUrl);
     let authInfo: AuthInfo;
     try {
-      authInfo = await verifyBearerToken(request.headers.authorization, {
+      authInfo = await pipelineLatency.measure({ stage: 'hosted.ingress_auth', origin: 'hosted-mcp', traceId: String(request.id) },
+        () => verifyBearerToken(request.headers.authorization, {
         verifier: publicEdge.verifier,
         requiredScopes: developerEdge ? [publicEdge.developerScope!] : publicEdge.requiredScopes,
         resourceMetadataUrl
-      });
+      }));
     } catch (error) {
       const failed = publicAuthFailureLimiter!.hit(clientKey);
       if (!failed.allowed) return sendRateLimit(reply, failed);

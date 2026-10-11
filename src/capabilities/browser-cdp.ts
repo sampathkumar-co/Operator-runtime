@@ -1,6 +1,7 @@
 import type { ActionRequest, ActionResult, CapabilityExecutionContext, CapabilityProvider, CapabilityScore, ProviderReconciliationResult } from '../core/types.ts';
 import { evidence } from '../core/evidence.ts';
 import { OperatorError } from '../core/errors.ts';
+import { pipelineLatency } from '../core/pipeline-latency.ts';
 import { CdpConnection, CdpSessionManager, type CdpTarget, type JsonMap } from './browser-cdp-connection.ts';
 import { inspectOopifFrames, observeSemanticTargetState, performSemanticInteraction } from './browser-cdp-frames.ts';
 import {
@@ -125,6 +126,11 @@ export class BrowserCdpProvider implements CapabilityProvider {
   score(): CapabilityScore { return SCORE; }
 
   async execute(action: ActionRequest, context: CapabilityExecutionContext = {}): Promise<ActionResult> {
+    return await pipelineLatency.measure({ stage: 'browser.operation', origin: 'browser', traceId: action.taskId ?? action.id },
+      () => this.#executeMeasured(action, context));
+  }
+
+  async #executeMeasured(action: ActionRequest, context: CapabilityExecutionContext): Promise<ActionResult> {
     const started = performance.now();
     try {
       throwIfAborted(context.signal);
@@ -559,7 +565,8 @@ export class BrowserCdpProvider implements CapabilityProvider {
       }
       interactionDispatched = true;
       const matchedAutocomplete = Boolean(value.matched && typeof value.matched === 'object' && (value.matched as JsonMap).autocomplete === true);
-      const settle = await settleAfterInteraction(session, signal, operation === 'type' && matchedAutocomplete ? 350 : 50);
+      const settle = await pipelineLatency.measure({ stage: 'browser.dom_postcondition', origin: 'browser' },
+        () => settleAfterInteraction(session, signal, operation === 'type' && matchedAutocomplete ? 350 : 50));
       throwIfAborted(signal);
       const after = await pageIdentity(session);
       const afterTarget = await observeSemanticTargetState(session, targetSpec, signal);
@@ -751,6 +758,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
   }
 
   async #listTargets(signal?: AbortSignal): Promise<CdpTarget[]> {
+    return await pipelineLatency.measure({ stage: 'browser.target_discovery', origin: 'browser', networkRoundTrips: 1 }, async () => {
     const response = await fetch(new URL('/json/list', this.#endpoint), { redirect: 'error', signal: combinedSignal(signal, 3_000) });
     if (!response.ok) throw new OperatorError('CDP_HTTP_ERROR', `CDP returned HTTP ${response.status}.`, { retryable: true });
     const raw = await boundedDiscoveryJson(response);
@@ -764,6 +772,7 @@ export class BrowserCdpProvider implements CapabilityProvider {
       url: typeof tab.url === 'string' ? tab.url : undefined,
       webSocketDebuggerUrl: typeof tab.webSocketDebuggerUrl === 'string' ? tab.webSocketDebuggerUrl : undefined
     })).filter((tab) => tab.id.length > 0);
+    });
   }
 
   async #createTarget(url: string, signal?: AbortSignal): Promise<CdpTarget> {

@@ -7,6 +7,7 @@ import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
 import type { ApprovalAuthorityContext } from './approval-store.ts';
 import { containsRestrictedData } from '../../../src/core/public-restricted-data.ts';
+import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
 import { readRelaySessionTokenFile, type RelaySessionCredentialProvider } from './relay-session-credentials.ts';
 
 const MAX_RESULT_BYTES = 256 * 1024;
@@ -100,6 +101,8 @@ export class LocalAgentRelayRunner {
   state(): ReturnType<RelayClient['state']> { return this.#client.state(); }
 
   async #handleDelivery(delivery: RelayDelivery): Promise<void> {
+    return await pipelineLatency.measure({ stage: 'local.request_processing', origin: 'local-agent',
+      traceId: typeof delivery.payload.traceId === 'string' ? delivery.payload.traceId : delivery.id }, async () => {
     const identity = await this.#identity.loadOrCreate();
     const stored = await this.#outbox.get(identity.deviceId, delivery.seq);
     if (stored) {
@@ -130,6 +133,7 @@ export class LocalAgentRelayRunner {
     }
     await this.#outbox.put(identity.deviceId, delivery.seq, delivery.id, safe);
     await this.#submitResultWithRetry(delivery.seq, delivery.id, safe);
+    });
   }
 
   async #recoverStoredResult(seq: number, deliveryId: string, delivery?: RelayDelivery): Promise<RelayRecoveryDecision> {

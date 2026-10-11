@@ -7,6 +7,7 @@ import type {
   TaskControlOperation, TaskSubmitInput, TaskTransportResult
 } from './local-agent-client.ts';
 import { currentMcpTaskId } from './request-context.ts';
+import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
 
 const MAX_TIMEOUT_MS = 10 * 60_000;
 
@@ -66,6 +67,7 @@ export class RelayAgentClient {
   }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
+    return await pipelineLatency.measure({ stage: 'hosted.relay_roundtrip', origin: 'hosted-mcp', traceId: action.taskId ?? action.id, networkRoundTrips: 1 }, async () => {
     const taskId = action.taskId ?? currentMcpTaskId();
     const outboundAction = taskId ? { ...action, taskId } : action;
     const response = await fetch(this.#url, {
@@ -87,11 +89,13 @@ export class RelayAgentClient {
       }),
       signal: AbortSignal.timeout(this.#waitMs + 5_000)
     });
-    const body = await response.json() as ActionResult;
+    const body = await pipelineLatency.measure({ stage: 'hosted.response_serialization', origin: 'hosted-mcp' },
+      async () => await response.json()) as ActionResult;
     if (!body || typeof body !== 'object' || typeof body.ok !== 'boolean' || !Array.isArray(body.evidence) || typeof body.provider !== 'string') {
       throw new Error(`Relay control returned malformed HTTP ${response.status} response.`);
     }
     return body;
+    });
   }
 
   async submitTask(input: TaskSubmitInput): Promise<TaskTransportResult> {
