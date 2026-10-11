@@ -193,16 +193,18 @@ export class LocalActionExecutionStore {
       && locallyBound(storedProcess) && locallyBound(currentProcess)
       && localPidObservationAdmissible(storedProcess, currentProcess)
       && processInstanceDefinitelyStale(storedProcess, await this.#observeProcess(storedProcess.pid));
-    // A different, now-ended local-agent instance left a receipt in processing,
-    // but the kernel journal proves no provider was ever dispatched. Only an
-    // initial, single PREPARED transition is sufficient: later PREPARED states
-    // can follow a real dispatch and MUST remain uncertain.
-    const initiallyPrepared = oldOwnerDefinitelyExited
-      && entry.generation === 1 && entry.state === 'PREPARED'
-      && entry.transitions.length === 1 && entry.transitions[0]?.state === 'PREPARED';
+    // Only an original PREPARED state or its single policy DEFERRED successor
+    // can be fenced before dispatch. A later PREPARED/DEFERRED after provider
+    // dispatch must never be interpreted as proof of no side effect.
+    const originalPreDispatch = entry.generation === 1 && entry.transitions[0]?.state === 'PREPARED'
+      && ((entry.state === 'PREPARED' && entry.transitions.length === 1)
+        || (entry.state === 'DEFERRED' && entry.transitions.length === 2
+          && entry.transitions[1]?.state === 'DEFERRED'
+          && entry.transitions[1]?.provider === 'policy'
+          && typeof entry.transitions[1]?.resultDigest === 'string'));
     if (local.status === 'processing'
       && local.record.ownerId !== undefined && local.record.ownerId !== this.#ownerId
-      && (entry.state === 'INTERRUPTED' || initiallyPrepared)) {
+      && (entry.state === 'INTERRUPTED' || (oldOwnerDefinitelyExited && originalPreDispatch))) {
       // The prior PREPARED check is merely a candidate. Only an atomic,
       // terminal journal transition on the journal's OWN cross-process lock
       // can prove provider dispatch did not win this race. Crash between

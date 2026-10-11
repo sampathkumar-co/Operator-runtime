@@ -234,3 +234,97 @@ test('atomic interrupt/dispatch race has exactly one terminal winner', async t =
     await assert.rejects(journal.interruptPreparedBeforeDispatch(action));
   }
 });
+
+function approvalDeferred(provider = 'policy') {
+  return {
+    ok: false, capability: action.capability, provider,
+    error: {
+      code: 'APPROVAL_REQUIRED', message: 'Explicit approval required',
+      retryable: false, sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const
+    },
+    evidence: [], durationMs: 0
+  };
+}
+
+test('an original policy-DEFERRED action can be terminally fenced without provider dispatch', async t => {
+  const { journal } = await fixture(t);
+  await journal.defer(action.id, approvalDeferred());
+  const interrupted = await journal.interruptPreparedBeforeDispatch(action);
+  assert.equal(interrupted.state, 'INTERRUPTED');
+  assert.deepEqual(interrupted.transitions.map(x => x.state), ['PREPARED', 'DEFERRED', 'INTERRUPTED']);
+  assert.equal(interrupted.transitions[1]?.provider, 'policy');
+  assert.deepEqual(await journal.interruptPreparedBeforeDispatch(action), interrupted);
+  await assert.rejects(journal.markDispatched(action.id, 'late-provider'),
+    (e: any) => e?.code === 'ACTION_JOURNAL_TRANSITION_INVALID');
+});
+
+test('automatic recovery of original policy-DEFERRED receipt still requires host-bound dead owner', async t => {
+  if (process.platform !== 'linux') return t.skip('only Linux v3 has sufficient automatic owner provenance');
+  const { state, journal } = await fixture(t);
+  await journal.defer(action.id, approvalDeferred());
+  const resumed = new LocalActionExecutionStore(state, { observeProcess: async () => ({ status: 'dead' }) });
+  const recovered = await resumed.reconcileWithKernel(action, undefined, journal);
+  assert.equal(recovered.status, 'completed');
+  if (recovered.status === 'completed') {
+    assert.equal(recovered.result.error?.code, 'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+    assert.equal(recovered.result.error?.sideEffectState, 'none');
+  }
+  assert.equal((await journal.inspect(action.id)).state, 'INTERRUPTED');
+  const replay = await new LocalActionExecutionStore(state).lookup(action);
+  assert.equal(replay.status, 'completed');
+});
+
+test('legacy owner-only policy-DEFERRED action never auto-recovers, including when PID appears dead', async t => {
+  const { state, journal } = await fixture(t);
+  await journal.defer(action.id, approvalDeferred());
+  const file = path.join(state, 'action-executions.json');
+  const data = JSON.parse(await fs.readFile(file, 'utf8')) as any;
+  delete data.records[0].ownerProcess;
+  await fs.writeFile(file, JSON.stringify(data));
+  const result = await new LocalActionExecutionStore(state, {
+    observeProcess: async () => ({ status: 'dead' })
+  }).reconcileWithKernel(action, undefined, journal);
+  assert.equal(result.status, 'processing');
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+});
+
+test('non-policy deferral and repeated deferral cannot be falsely certified as pre-dispatch', async t => {
+  const { journal } = await fixture(t);
+  await journal.defer(action.id, approvalDeferred('other-provider'));
+  await assert.rejects(journal.interruptPreparedBeforeDispatch(action),
+    (e: any) => e?.code === 'ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN');
+  assert.equal((await journal.inspect(action.id)).state, 'DEFERRED');
+  await journal.defer(action.id, approvalDeferred());
+  await assert.rejects(journal.interruptPreparedBeforeDispatch(action),
+    (e: any) => e?.code === 'ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN');
+});
+
+test('policy deferral after any prior provider dispatch remains uncertain', async t => {
+  const { journal } = await fixture(t);
+  await journal.markDispatched(action.id, 'real-provider');
+  await journal.observe(action.id, {
+    ok: false, capability: action.capability, provider: 'real-provider',
+    error: { code: 'NOT_APPLIED', message: 'not applied', sideEffectState: 'none' as const, executionPhase: 'pre_dispatch' as const },
+    evidence: [], durationMs: 0
+  });
+  await journal.defer(action.id, approvalDeferred());
+  await assert.rejects(journal.interruptPreparedBeforeDispatch(action),
+    (e: any) => e?.code === 'ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN');
+});
+
+test('policy-DEFERRED interruption and concurrent provider dispatch have only one winner', async t => {
+  const { state, journal } = await fixture(t);
+  await journal.defer(action.id, approvalDeferred());
+  const results = await Promise.allSettled([
+    journal.interruptPreparedBeforeDispatch(action),
+    new ActionTransitionJournal(state).markDispatched(action.id, 'racing-provider')
+  ]);
+  assert.equal(results.filter(x => x.status === 'fulfilled').length, 1);
+  const persisted = (await new ActionTransitionJournal(state).inspect(action.id)).state;
+  assert.ok(persisted === 'INTERRUPTED' || persisted === 'DISPATCHED');
+  if (persisted === 'INTERRUPTED') {
+    await assert.rejects(journal.markDispatched(action.id, 'late-provider'));
+  } else {
+    await assert.rejects(journal.interruptPreparedBeforeDispatch(action));
+  }
+});
