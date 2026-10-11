@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "benchmarkProgram": "Mecord Stage 21 Competitive Evaluation",
+  "frozenAt": "2026-09-28",
+  "mecord": {
+    "sourceCommit": "f2b002a15eef1aa432c4c03e4d35c533dc1cef92",
+    "npmRuntime": "2.0.1",
+    "publicToolCount": 9,
+    "developerToolCount": 32
+  },
+  "host": {
+    "platform": "Windows 11",
+    "version": "10.0.26200",
+    "architecture": "x64",
+    "cpuCount": 12,
+    "memoryBytes": 16888967168,
+    "node": "v22.14.0"
+  },
+  "externalSuites": {
+    "osworld": {
+      "repository": "xlang-ai/OSWorld",
+      "observedHead": "b138d348256078fa634fc3b73567a7337c793e6b",
+      "status": "environment-not-yet-runnable",
+      "reason": "Bare-metal Windows host requires VMware/VirtualBox; neither was installed at baseline time."
+    },
+    "osworldV2": {
+      "repository": "xlang-ai/OSWorld-V2",
+      "recommendedRelease": "osworld-v2.1",
+      "observedHead": "acdd3493808e716825975b0f0208194bb2faf3c3",
+      "status": "environment-not-yet-runnable",
+      "reason": "Official release requires pinned provider assets and supported provider infrastructure."
+    },
+    "windowsAgentArena": {
+      "repository": "microsoft/WindowsAgentArena",
+      "observedHead": "6d39ed88c545a0d40a7a02e39b928e278df7332b",
+      "status": "environment-not-yet-runnable",
+      "reason": "Requires a running Docker daemon and Python 3.9 environment."
+    },
+    "browserGym": {
+      "repository": "ServiceNow/BrowserGym",
+      "observedHead": "c05d7f38f4f788d6e4ee960512c3d5c8aabc6e42",
+      "attemptedPackage": "browsergym-miniwob==0.14.3",
+      "status": "environment-and-scorer-ready",
+      "reason": "Pinned MiniWoB++ assets reset successfully in BrowserGym 0.14.3; deterministic native reward self-test returned reward 1.0 and terminated=true on browsergym/miniwob.click-test.",
+      "harnessSelfTest": {
+        "runId": 36465396396,
+        "jobId": 109074082473,
+        "task": "browsergym/miniwob.click-test",
+        "reward": 1,
+        "terminated": true
+      }
+    }
+  }
+}
