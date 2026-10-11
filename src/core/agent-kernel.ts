@@ -219,12 +219,13 @@ export class AgentKernel {
       }
     }
 
-    const lease = await this.#leases.acquire(
+    const lease = await pipelineLatency.measure({ stage: 'local.resource_lease', origin: 'local-agent',
+      traceId: action.taskId ?? action.id }, () => this.#leases.acquire(
       `kernel:${ownerKind}:${ownerId}:${crypto.randomUUID()}`,
       resourceKeys,
       action.risk === 'read' ? 'shared' : 'exclusive',
       action.risk === 'read' ? {} : { mutationActionId: action.id }
-    );
+    ));
     await this.#trace(action, 'LEASE', 'OK', { resourceCount: resourceKeys.length, mode: action.risk === 'read' ? 'shared' : 'exclusive' });
     let quarantineArmed = false;
     let retainQuarantine = false;

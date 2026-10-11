@@ -92,3 +92,7 @@ This is low-overhead in the synthetic benchmark, not proof of bounded overhead a
 - npm --prefix apps/mcp-server run check: PASS (tsc).
 - node --experimental-strip-types --test apps/mcp-server/test/relay-mode-e2e.test.ts: PASS 1/1 after installing locked dependencies in isolated clone.
 - Sampath's Node 22.14.0 is below the MCP server's declared minimum 22.19.0; run supported-version certification in CI or isolated environment before claiming production compatibility.
+
+## Follow-up source-only instrumentation (after original local Chrome benchmark)
+
+The next dedicated-branch commit adds measured authorization/policy evaluation and capability/provider ranking in runtime.ts, precise kernel resource lease acquisition in agent-kernel.ts, and HTTP result submission transport in relay-agent.ts. These are measurement-only wrappers that preserve returns/errors and existing security boundaries. The local Chrome report remains properly labeled to its own older source SHA; these extra hosted/relay/local stages require new instrumented corresponding traffic for per-stage distributions. Do not treat a stage absent from the local Chrome fixture as evidence that the hook failed.

@@ -404,12 +404,12 @@ export class LocalAgentRelayRunner {
     const token = await this.#sessionCredentials.forRequest();
     let response: Response;
     try {
-      response = await fetchWithDeadline(this.#resultUrl, {
+      response = await pipelineLatency.measure({ stage: 'relay.result_transport', origin: 'local-agent', networkRoundTrips: 1 }, () => fetchWithDeadline(this.#resultUrl, {
         redirect: 'error',
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
         body: JSON.stringify({ seq, deliveryId, result })
-      }, this.#resultSubmitTimeoutMs, 'relay result submission');
+      }, this.#resultSubmitTimeoutMs, 'relay result submission'));
     } catch (error) {
       throw new OperatorError('RELAY_RESULT_SUBMIT_FAILED', `Relay result submission failed: ${error instanceof Error ? error.message : String(error)}`, {
         retryable: true,
