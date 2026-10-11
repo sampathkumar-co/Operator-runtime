@@ -125,6 +125,8 @@ export const PERSISTENT_DATA_CATALOG: readonly PersistentDataEntry[] = Object.fr
   entry({ id: 'device-identity', owner: 'device-identity', location: 'device-identity.json', category: 'device-identity', sensitivity: 'secret', retention: 'device-lifetime', deletion: 'device-reset-only', backup: 'exclude-secret', restore: 'never', scope: 'device', secretMaterial: 'encrypted', participatesInDeletion: true, concurrency: 'SINGLE_PROCESS_ONLY' }),
   ...[
     ['device-registry', 'device-registry.json'], ['device-routing', 'device-routing.json'], ['device-pool', 'device-pool.json'],
+    // Monotonic local reservation-history marker must be backed up and purged with its owner.
+    ['device-pool-initialized', 'device-pool-initialized.json'],
     ['device-enrollments', 'device-enrollments.json'], ['device-resets', 'device-resets.json'], ['account-devices', 'account-devices.json'],
     ['enterprise-policy', 'enterprise-policy.json'], ['bootstrap', 'bootstrap.json'], ['local-device-reset', 'local-device-reset.json']
   ].map(([id, location]) => entry({ id, owner: id, location, category: 'pairing-state', sensitivity: 'sensitive', retention: 'account-or-device-lifetime', deletion: 'account-device-erasure', backup: 'include', restore: id === 'device-registry' || id === 'account-devices' ? 'required' : 'optional', scope: id === 'account-devices' ? 'account' : 'device', secretMaterial: 'derived', participatesInDeletion: true, concurrency: id === 'account-devices' ? 'PROCESS_LOCKED' : 'SINGLE_PROCESS_ONLY' }))
