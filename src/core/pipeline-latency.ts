@@ -4,6 +4,9 @@
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 
 export const PIPELINE_STAGES = [
  'hosted.ingress_auth','hosted.validation_serialization','relay.queue','relay.dispatch',
@@ -41,6 +44,7 @@ export interface PipelineReport {
 const context=new AsyncLocalStorage<{traceId:string;spanId:string}>();
 const stages=new Set<string>(PIPELINE_STAGES);
 const origins=new Set<string>(['hosted-mcp','relay-server','local-agent','browser','benchmark']);
+const spanUuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export function opaqueTraceId(identity:string):string {
  return crypto.createHash('sha256').update(identity,'utf8').digest('hex');
 }
@@ -88,7 +92,11 @@ export class PipelineLatencyRecorder {
  record(span:PipelineSpan):void {
   if(!this.enabled||!stages.has(span.stage)||!origins.has(span.origin)
    ||!Number.isFinite(span.durationMs)||span.durationMs<0
-   ||!/^[0-9a-f]{64}$/.test(span.traceId))return;
+   ||!/^[0-9a-f]{64}$/.test(span.traceId)
+   ||!spanUuid.test(span.spanId)
+   ||(span.parentSpanId!==undefined&&!spanUuid.test(span.parentSpanId))
+   ||!['ok','failed','timeout','cancelled'].includes(span.result)
+   ||!Number.isFinite(Date.parse(span.startTime)))return;
   const safe:PipelineSpan={traceId:span.traceId,spanId:span.spanId,
    ...(span.parentSpanId?{parentSpanId:span.parentSpanId}:{}),
    stage:span.stage,origin:span.origin,startTime:span.startTime,
@@ -159,3 +167,68 @@ export function pipelineReportMarkdown(r:PipelineReport):string{
  return lines.join('\n');
 }
 export const pipelineLatency=new PipelineLatencyRecorder();
+
+/**
+ * Export is strictly opt-in, asynchronous and replaces one bounded file.
+ * No read by, or write to, production journal / relay authority state.
+ * Operators can collect one file from each authorized process and aggregate offline.
+ */
+export interface PipelineSnapshot {
+ schemaVersion:1; capturedAt:string; metadata:PipelineReport['metadata'];
+ droppedSpans:number; spans:PipelineSpan[];
+}
+const MAX_SNAPSHOT_BYTES=8*1024*1024;
+export async function writePipelineSnapshot(
+ destination:string,
+ metadata:PipelineReport['metadata'],
+ recorder:PipelineLatencyRecorder=pipelineLatency
+):Promise<{spans:number;bytes:number}>{
+ if(!path.isAbsolute(destination)||path.extname(destination).toLowerCase()!=='.json')
+  throw new Error('Pipeline snapshot requires an explicit absolute JSON destination.');
+ const snapshot:PipelineSnapshot={schemaVersion:1,capturedAt:new Date().toISOString(),
+   metadata:{...metadata},droppedSpans:recorder.droppedSpans,spans:recorder.snapshot()};
+ const bytes=Buffer.from(JSON.stringify(snapshot)+'\n','utf8');
+ if(bytes.length>MAX_SNAPSHOT_BYTES)throw new Error('Pipeline snapshot exceeded bounded 8MiB.');
+ const temporary=destination+'.'+crypto.randomUUID()+'.tmp';
+ await fs.mkdir(path.dirname(destination),{recursive:true,mode:0o700});
+ try{
+  await fs.writeFile(temporary,bytes,{flag:'wx',mode:0o600});
+  await fs.rename(temporary,destination);
+ }catch(error){
+  await fs.rm(temporary,{force:true}).catch(()=>undefined);
+  throw error;
+ }
+ return {spans:snapshot.spans.length,bytes:bytes.length};
+}
+
+export function installPeriodicPipelineSnapshot(
+ options:{destination?:string;intervalMs?:number;metadata?:PipelineReport['metadata']}={}
+):()=>void {
+ const destination=options.destination??process.env.OPERATOR_PIPELINE_TRACE_EXPORT_PATH;
+ if(!pipelineLatency.enabled||!destination)return ()=>undefined;
+ const configuredInterval=options.intervalMs??Number(process.env.OPERATOR_PIPELINE_TRACE_EXPORT_INTERVAL_MS||15_000);
+ const interval=Number.isFinite(configuredInterval)
+  ?Math.max(5_000,Math.min(300_000,configuredInterval)):15_000;
+ const metadata:PipelineReport['metadata']=options.metadata??{
+  sourceSha:process.env.OPERATOR_SOURCE_SHA||'unverified',
+  runtimeVersion:process.env.OPERATOR_RUNTIME_VERSION||'unverified',
+  operatingSystem:os.type()+' '+os.release(),
+  chromeVersion:process.env.OPERATOR_PIPELINE_CHROME_VERSION||'unverified',
+  machine:process.env.OPERATOR_PIPELINE_MACHINE_LABEL||'unidentified-process',
+  conditions:'opt-in asynchronous span snapshot; no captured sensitive bodies'
+ };
+ // No queue. A write taking longer than the interval skips instead of piling up work.
+ let writing=false;
+ const flush=async()=>{
+  if(writing)return;
+  writing=true;
+  try{await writePipelineSnapshot(destination,metadata);}
+  catch{ /* telemetry must never alter authorization, durability, or delivery */ }
+  finally{writing=false;}
+ };
+ const timer=setInterval(()=>{void flush();},interval);
+ timer.unref();
+ return ()=>clearInterval(timer);
+}
+// Off by default. Import-time installation does NOT perform filesystem I/O.
+installPeriodicPipelineSnapshot();

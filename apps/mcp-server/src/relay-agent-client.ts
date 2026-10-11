@@ -67,8 +67,8 @@ export class RelayAgentClient {
   }
 
   async execute(action: ActionRequest): Promise<ActionResult> {
-    return await pipelineLatency.measure({ stage: 'hosted.relay_roundtrip', origin: 'hosted-mcp', traceId: action.taskId ?? action.id, networkRoundTrips: 1 }, async () => {
     const taskId = action.taskId ?? currentMcpTaskId();
+    return await pipelineLatency.measure({ stage: 'hosted.relay_roundtrip', origin: 'hosted-mcp', traceId: taskId ?? action.id, networkRoundTrips: 1 }, async () => {
     const outboundAction = taskId ? { ...action, taskId } : action;
     const response = await fetch(this.#url, {
       redirect: 'error',

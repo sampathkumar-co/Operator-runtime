@@ -96,3 +96,29 @@ This is low-overhead in the synthetic benchmark, not proof of bounded overhead a
 ## Follow-up source-only instrumentation (after original local Chrome benchmark)
 
 The next dedicated-branch commit adds measured authorization/policy evaluation and capability/provider ranking in runtime.ts, precise kernel resource lease acquisition in agent-kernel.ts, and HTTP result submission transport in relay-agent.ts. These are measurement-only wrappers that preserve returns/errors and existing security boundaries. The local Chrome report remains properly labeled to its own older source SHA; these extra hosted/relay/local stages require new instrumented corresponding traffic for per-stage distributions. Do not treat a stage absent from the local Chrome fixture as evidence that the hook failed.
+
+## Correlated capture and offline aggregation — follow-up work
+
+The full-runtime tracing remains opt-in. For an **isolated test process**, an authorized operator may set:
+
+- OPERATOR_PIPELINE_TRACE_ENABLED=1
+- OPERATOR_PIPELINE_TRACE_EXPORT_PATH=<absolute path ending in .json>
+- OPERATOR_PIPELINE_TRACE_EXPORT_INTERVAL_MS=15000 (clamped to 5–300 seconds)
+- OPERATOR_SOURCE_SHA=<exact process source commit>
+- OPERATOR_RUNTIME_VERSION=<exact installed runtime version>
+- OPERATOR_PIPELINE_MACHINE_LABEL=<non-sensitive machine label>
+- OPERATOR_PIPELINE_CHROME_VERSION=<measured Chrome version, if known>
+
+When enabled, the recorder writes a maximum 8 MiB JSON snapshot asynchronously to an atomic replacement file (not an unbounded log). In-memory retention stays capped at 8,192 spans. No new trace write is part of an authorization, policy or durable journal transaction. An invalid export destination fails without affecting user operations. Off by default.
+
+Copy the independently collected snapshots to a controlled analysis checkout, then run:
+
+    node --experimental-strip-types scripts/aggregate-pipeline-latency.mjs <hosted-snapshot.json> <relay-snapshot.json> <local-snapshot.json>
+
+This writes correlated and per-stage JSON/Markdown reports; it never accesses the live device or alters the runtime. Identical, task-derived SHA-256 trace keys provide correlation across processes, including stable retries that retain the same task identity. Parent-span IDs are presently *within a process only*. Cross-host parent relationships cannot be asserted until authenticated propagation has been certified.
+
+**Honest remaining limitations:** This does not mean the real hosted service has been instrumented and redeployed. No hosted trace snapshots have been taken against this candidate source. Browser/CDP and mocked two-process offline aggregator tests are local evidence. Network one-way delivery cannot be computed by subtracting unsynchronized server/device timestamps. The report explicitly leaves unknown durations null, and the PR must remain a draft until source-matched hosted runs, tail samples, and end-to-end reconciliation pass.
+
+## 2026-10-11 follow-up CI correction
+
+The original PR head failed the repository-wide network boundary audit because a latency wrapper obscured one literal bounded redirect-protected fetch call in the source. The wrapper was moved outside the helper without changing its redirect behavior, authorization, or transport semantics. The formerly failing test and the pipeline privacy/export tests passed together (21/21). The hosted client now computes its effective MCP taskId before starting the relay span, aligning trace identity across the hosted and device execution paths. Fresh full-head CI is required.
