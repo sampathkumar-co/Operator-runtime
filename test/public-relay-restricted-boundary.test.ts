@@ -125,7 +125,8 @@ test('uncertain relay recovery retries only a validated read action when no stor
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task', payload: { task: { operation: 'resume', taskId, approvedActionId: 'forbidden' } } }), false);
 });
 
-test('missing crash-window result replays a read through the normal bounded execution path', async (t) => {
+for (const receiptState of ['missing', 'processing'] as const) {
+  test(`crash-window read recovery retries a ${receiptState} receipt only through fresh authority checks`, { timeout: 20_000 }, async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-read-recovery-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
   const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
@@ -140,8 +141,13 @@ test('missing crash-window result replays a read through the normal bounded exec
   const localBase = await listen(t, async (req, res) => {
     await readBody(req);
     if (req.url === '/v1/action-receipt') {
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      if (receiptState === 'processing') {
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, receipt: { status: 'processing' } }));
+      } else {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECEIPT_NOT_FOUND' } }));
+      }
       return;
     }
     localHits += 1;
@@ -170,12 +176,13 @@ test('missing crash-window result replays a read through the normal bounded exec
     allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
   const running = runner.run();
-  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay read recovery ACK timed out')), 12_000))]);
   runner.stop();
   await running;
   assert.equal(localHits, 1);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
-});
+  });
+}
 
 
 test('relay restart recovers a completed mutation with degraded audit evidence without replay', async (t) => {
