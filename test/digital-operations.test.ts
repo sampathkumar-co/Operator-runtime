@@ -1832,3 +1832,86 @@ test('restoring an old v1 state after a v2 identity marker cannot downgrade auth
   await assert.rejects(new DigitalOperationsLayer(base.state, base).inspect(requestId),
     (error: any) => error?.code === 'OPERATIONS_HISTORY_INCOMPLETE');
 });
+
+test('real OS crash after persisted reservation and before compensation confirm safely releases exact allocation', async t => {
+  const state = await tempDir(t);
+  const identity = await new DeviceIdentityStore(await tempDir(t), { platform: 'linux' })
+    .loadOrCreate('crash-bound-allocation-peer');
+  const registry = new DeviceRegistryStore(state);
+  await registry.registerVerifiedPeer(identity);
+  const sessionId = crypto.randomUUID();
+  const requestId = crypto.randomUUID();
+  const reservationId = digitalOperationChildId(requestId, 'release-device-reservation');
+  const request = { workloadKey: 'exact-allocation-crash-recovery', slots: 1 };
+  const digest = devicePoolAllocationRequestDigest(request);
+  const worker = fileURLToPath(new URL('./fixtures/digital-operation-reservation-crash-worker.mjs', import.meta.url));
+  const child = spawn(process.execPath, [
+    '--experimental-strip-types', worker, state, requestId, identity.deviceId, sessionId
+  ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  let output = '', errors = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', piece => { errors += String(piece); });
+  let resolveReady!: () => void, rejectReady!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const timeout = setTimeout(() => rejectReady(new Error('Reservation never persisted before crash: ' + errors)), 20_000);
+  child.stdout.on('data', piece => {
+    output += String(piece);
+    if (output.includes('RESERVATION_PERSISTED:' + reservationId)) resolveReady();
+  });
+  child.once('error', rejectReady);
+  child.once('exit', (code, signal) => {
+    if (!output.includes('RESERVATION_PERSISTED:' + reservationId)) {
+      rejectReady(new Error('Child exited before the durable allocation: ' + code + '/' + signal + ': ' + errors));
+    }
+  });
+  try {
+    await ready;
+    const before = await new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry))
+      .inspectPrepared(reservationId, digest);
+    assert.equal(before?.state, 'ACTIVE', 'persisted allocation was not in the expected crash window');
+    const intents = await new DurableCompensationJournal(state).pending('digital-operation');
+    assert.ok(intents.some(intent => intent.targetId === reservationId &&
+      intent.operation === 'release-device-reservation' && !intent.confirmedAt &&
+      intent.allocationRequestDigest === digest), 'write-ahead intent must precede allocation');
+    const exited = once(child, 'exit');
+    assert.equal(child.kill('SIGKILL'), true);
+    await exited;
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit').catch(() => {});
+    }
+  }
+
+  const teams = new TeamCoordinator(state);
+  const pool = new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry));
+  const reopened = new DigitalOperationsLayer(state, {
+    procedures: new ProcedureMemoryStore(state), world: new WorldModelStore(state),
+    devices: pool, optimizer: new ExecutionOptimizerStore(state),
+    teams, organizations: new OrganizationCoordinator(state, teams),
+    availableCapabilities: ['file.read']
+  });
+  const result = await reopened.recoverPendingCompensations();
+  assert.equal(result.pending, 0, 'no provably owned prepared allocation may remain stranded');
+  assert.ok(result.recovered >= 1);
+  assert.equal((await pool.inspectPrepared(reservationId, digest))?.state, 'RELEASED');
+  assert.deepEqual(await new DurableCompensationJournal(state).pending('digital-operation'), []);
+  const independent = new DigitalOperationsLayer(state, {
+    procedures: new ProcedureMemoryStore(state), world: new WorldModelStore(state),
+    devices: new DevicePoolScheduler(state, registry, new DeviceRoutingStore(state, registry)),
+    optimizer: new ExecutionOptimizerStore(state), teams,
+    organizations: new OrganizationCoordinator(state, teams), availableCapabilities: ['file.read']
+  });
+  assert.deepEqual(await independent.recoverPendingCompensations(), { recovered: 0, pending: 0 },
+    'independently restarted worker must not replay an already finalized compensation');
+  await assert.rejects(reopened.submit({
+    requestId, objective: 'Crash after exact device allocation but before compensation confirmation',
+    scopeKey: 'project:synthetic-reservation-crash',
+    successConditions: ['exact durable allocation recovered'],
+    device: { request, advertisements: [] },
+    execution: { kind: 'team', workItems: work() }, run: false
+  }), (e: any) => e?.code === 'OPERATIONS_REQUEST_ID_REUSED');
+  assert.equal((await teams.list()).length, 0, 'no child mission replay after an uncertain reservation');
+});
