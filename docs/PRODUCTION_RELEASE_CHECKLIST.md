@@ -2,12 +2,22 @@
 
 **Last reviewed:** 2026-10-11 (Asia/Kolkata)  
 **Release candidate:** [PR #295](https://github.com/sampathkumar-co/Operator-runtime/pull/295), branch `integration/p0-hardening-20261011`  
-**Evidence head reviewed:** `01d2e5a1e1d6151afddf499b2eadf7e750e03fe6` (before this checklist commit)  
+**Evidence head reviewed:** `8d2fb30424d5aba0edc873004cb7ce5832a2f20d` (before this checklist commit; current head runs separate CI)  
 **Release decision:** **HOLD**. No production deployment, npm publication, or replacement of protected local runtimes until all required gates are checked against a single final source commit.
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
 
 ## A. Verified evidence from prior 2026-10-11 work
+
+### Latest physically verified release-candidate evidence (2026-10-11)
+
+- [x] All **13/13 GitHub workflows** passed on prior exact commit `9823ab89dc5df011484d5896ab2abecdbc558830` including Windows, Ubuntu, macOS and runtime signing **smoke**. A newer commit must pass its own CI.
+- [x] `scripts/certify-live-uia-parity.mjs`: original Sampath Windows with isolated real Google Chrome and native UIA helper passed; direct action denied `APPROVAL_REQUIRED`, durable task `BLOCKED`, zero unauthorized native dispatch, exact approved action `VERIFIED`, repeat completed task 409 `TASK_NOT_RESUMABLE` without second native dispatch. **Source/native evidence only; published 2.0.6 installed-hosted parity remains unchecked**.
+- [x] Synthetic *sequence-exact* durable outbox recovery regression `test/public-relay-restricted-boundary.test.ts`: starts from ACK 3134 with one successful unconsumed 3135 result; accepts signed-matching replay delivery, resubmits existing result and ACKs exactly once with **zero local mutation dispatches**. Independently passed on original Sampath and second Windows device6 at `8d2fb30424d5aba0edc873004cb7ce5832a2f20d`. Full targeted relay suite 12/12 passed on original Sampath. **Not a claim of production result 3135 being transmitted/consumed**.
+- [x] Read-only original Sampath protected state audit: ACK `3134`, no processing entry, one unconsumed successful result `3135`, verified stored result SHA-256. Never copied, reset or manually acknowledged; original installed 2.0.5 owner not restarted.
+- [x] Original Sampath native Windows containment stress five consecutive rounds passed; independent second Windows device6 authority/durable-writer regression 11/11 passed.
+- [ ] **P0 final gates remaining:** authenticated original-host MCP routing; actual installed source-matched 2.0.6 hosted/Chrome parity; owner-controlled signed npm publication; genuine two-host shared-store crash/restore witness; separately administered production reviewer, Ed25519 provider signer and high-water CAS anchor; signed deployment and rollback. Release decision still **HOLD**.
+
 
 - [x] Source-level approval-path regression on Sampath Windows: 18/18 tests passed (`test/approval-path-parity.test.ts`, `approval-lifecycle.test.ts`, `session-approval.test.ts`); **not** live published-runtime parity.
 - [x] Windows local performance suite passed 7/7 on source `9e697bf3`: local agent, policy, durable relay and soak; **not** model-to-laptop E2E.
@@ -95,5 +105,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 | 2026-10-11 | Cross-instance enterprise lease authority collision regressions (issue #157) | 12 instance-level issuance writers, 12 revoke/child races, 12 halt/issue races, 3 independent OS processes × 4 writes; 6/6 new + existing scoped tests passed | Enterprise authority-file narrow race checks passed; broader writer census remains open |
 | 2026-10-11 | Physical crash injection after reservation persist/before compensation confirm, plus independent recovery | Sampath Windows real OS kill, deterministic exact digest, fail-closed request replay; 76 passed/1 skip in focused suite | #146 single-host crash window evidenced; cross-host and release artifact still open |
 | 2026-10-11 | Created this persistent checklist on integration branch | File committed and branch verified | Release HOLD unchanged |
+
+| 2026-10-11 | Added cross-device exact 3134→3135 pre-existing-result recovery regression and reusable physical Chrome UIA parity | Original Sampath UIA physical PASS; Sampath + device6 synthetic recovery PASS; Sampath full relay suite 12/12 PASS; previous 9823ab8 exact-head GitHub CI 13/13 PASS | Source/recovery regression evidence complete; protected production 3135, installed package, external trust and two-host shared authority remain open |
 
 **Update rule:** after each code/document/test change, append a dated row, check off only independently evidenced steps, link the final artifact/CI run, and show the user the current checklist in the reply.
