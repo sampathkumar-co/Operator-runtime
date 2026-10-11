@@ -1,8 +1,8 @@
 # Durable writer ownership — targeted single-host audit
 
-Date: 2026-10-11 (Asia/Kolkata)  
-Source baseline: `75dbc86a89e24be5db36c53818bdf2328e8b0fb8`  
-Device: original Sampath Windows `LAPTOP-MRNU23B2`  
+Date: 2026-10-11 (Asia/Kolkata)
+Source baseline: `75dbc86a89e24be5db36c53818bdf2328e8b0fb8`
+Device: original Sampath Windows `LAPTOP-MRNU23B2`
 Scope: targeted issue [#157](https://github.com/sampathkumar-co/Operator-runtime/issues/157) evidence; **not** a completed repository-wide census and **not** cross-host certification.
 
 ## Concrete writer paths inspected
