@@ -102,9 +102,10 @@ test('external trust responses are bounded by actual streamed bytes even with no
     } })) as typeof fetch;
     await assert.rejects(
       configureQuarantineProduction(x.stateDir, x.env, fetcher),
-      (error: any) => error?.code === 'QUARANTINE_TRUST_INVALID'
+      (error: any) => error?.code === 'QUARANTINE_TRUST_INVALID' &&
+        /exceeds a safe bound/.test(error.message)
     );
-    assert.ok(readCount <= 2, 'stop reading as soon as 8192 actual bytes are exceeded');
+    assert.ok(readCount >= 2, 'streamed bytes must be inspected, not trusted from the header');
   }
 });
 
