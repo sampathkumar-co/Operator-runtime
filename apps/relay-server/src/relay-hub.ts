@@ -375,8 +375,21 @@ export class RelayHub {
     }
     if (postEnqueueAuthorityError) throw postEnqueueAuthorityError;
     await this.#beforeFinalDispatchCheck?.({ ...authority });
-    const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
-    this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
+    // A queued membership revocation must reach its durable commit before
+    // the final dispatch verdict. The enqueue lease has already released;
+    // reacquire the exact authority after earlier queued removals rather than
+    // racing them with an unprotected read from the registry.
+    try {
+      await this.#accounts.withActiveAuthorityLease(authority, async () => {
+        const finalConnection = await this.#assertDispatchAuthority(authority, route.sessionId, requiredCapabilities);
+        this.#assertCurrentDispatchConnection(finalConnection, requiredCapabilities);
+      });
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'ACCOUNT_AUTHORITY_REVOKED') {
+        throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before final relay dispatch.');
+      }
+      throw error;
+    }
     await this.#trace(traceId, { accountId: request.accountId, deviceId: route.deviceId, sessionId: route.sessionId }, 'DISPATCH', 'OK', { transport: 'relay', deliverySeq: delivery.seq, kind: request.kind });
     return { route, delivery };
   }
