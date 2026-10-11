@@ -122,8 +122,8 @@ try {
     method: 'POST', headers, body: '{}'
   });
   const repeatTask = await repeated.json();
-  assert.equal(repeated.status, 200, JSON.stringify(repeatTask).slice(0, 400));
-  assert.equal(repeatTask.task?.state, 'VERIFIED');
+  assert.equal(repeated.status, 409, JSON.stringify(repeatTask).slice(0, 400));
+  assert.equal(repeatTask.error?.code, 'TASK_NOT_RESUMABLE');
   assert.equal(dispatches, 1, 'completed approved work must not redispatch on duplicate resume');
 
   const observed = await provider.execute({
