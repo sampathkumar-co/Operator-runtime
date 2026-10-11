@@ -230,13 +230,21 @@ test('device session rotation revokes the old JTI and stops after ownership remo
 });
 
 
-test('result service physically prunes expired payloads at startup and periodically without a read', async (t) => {
+test('result service preserves unacknowledged replay evidence and prunes consumed tombstones at startup and periodically', async (t) => {
   const state = await tempDir(t, 'operator-result-gc-');
   let nowMs = Date.parse('2026-09-14T00:00:00.000Z');
   const results = new RelayResultStore(state, { clock: () => new Date(nowMs), retentionMs: 60_000 });
   const deviceId = '123e4567-e89b-42d3-a456-426614174000';
   const firstId = '123e4567-e89b-42d3-a456-426614174001';
+  const pendingId = '123e4567-e89b-42d3-a456-426614174002';
+  const periodicId = '123e4567-e89b-42d3-a456-426614174003';
+  const file = path.join(state, 'relay-results.json');
+
+  // ACKed results lose their sensitive payload immediately. After retention,
+  // startup GC must physically remove these minimal, already-consumed records.
   await results.put(deviceId, 1, firstId, { output: { secret: 'startup-sensitive-result' } });
+  assert.equal((await results.consume(deviceId, 1, firstId))?.result?.output?.secret, 'startup-sensitive-result');
+  await results.put(deviceId, 2, pendingId, { output: { secret: 'pending-replay-proof' } });
   nowMs += 60_001;
 
   const service = new RelayResultService({ stateDir: state, results, gcIntervalMs: 20 });
@@ -244,25 +252,34 @@ test('result service physically prunes expired payloads at startup and periodica
   assert.ok(port > 0);
   cleanupAfter(t, service);
 
-  const file = path.join(state, 'relay-results.json');
   let persisted = await fs.readFile(file, 'utf8');
   assert.equal(persisted.includes('startup-sensitive-result'), false);
-  assert.deepEqual(JSON.parse(persisted).streams, []);
-  const secondId = '123e4567-e89b-42d3-a456-426614174002';
-  await results.put(deviceId, 2, secondId, { output: { secret: 'periodic-sensitive-result' } });
+  assert.equal(persisted.includes(firstId), false, 'startup removes expired consumed tombstones');
+  assert.equal(persisted.includes('pending-replay-proof'), true,
+    'startup must preserve old unacknowledged mutation evidence');
+  assert.equal((await results.get(deviceId, 2))?.result?.output?.secret, 'pending-replay-proof');
+
+  await results.put(deviceId, 3, periodicId, { output: { secret: 'periodic-sensitive-result' } });
+  assert.equal((await results.consume(deviceId, 3, periodicId))?.result?.output?.secret, 'periodic-sensitive-result');
+  persisted = await fs.readFile(file, 'utf8');
+  assert.equal(persisted.includes('periodic-sensitive-result'), false,
+    'consume must redact the sensitive payload immediately');
+  assert.equal(persisted.includes(periodicId), true, 'fresh consumed tombstone is retained');
   nowMs += 60_001;
 
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     persisted = await fs.readFile(file, 'utf8');
-    if (!persisted.includes('periodic-sensitive-result')) break;
+    if (!persisted.includes(periodicId)) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   persisted = await fs.readFile(file, 'utf8');
-  assert.equal(persisted.includes('periodic-sensitive-result'), false);
-  assert.deepEqual(JSON.parse(persisted).streams, []);
+  assert.equal(persisted.includes(periodicId), false,
+    'periodic GC removes expired consumed tombstones without a read');
+  assert.equal(persisted.includes('pending-replay-proof'), true,
+    'periodic GC must not discard unacknowledged replay safety evidence');
+  assert.equal(await results.has(deviceId, 2, pendingId), true);
 });
-
 
 test('result endpoint bounds pre-auth token verification attempts per client', async (t) => {
   const state = await tempDir(t, 'operator-result-rate-preauth-');
