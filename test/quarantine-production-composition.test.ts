@@ -97,7 +97,8 @@ test('reviewer verifies the exact request-bound human session via independent HT
     if (u === URL_ANCHOR + 'position') return ok({ position: GENESIS });
     if (u === URL_REVIEW + 'authorize') return ok({
       authorized: reviewerAllowed,
-      operatorId: 'human:security-reviewer'
+      operatorId: 'human:security-reviewer',
+      scope: body?.scope
     });
     throw new Error('Unexpected independent authority path');
   }) as typeof fetch;
