@@ -37,3 +37,15 @@ Diagnostic variants:
 Do not automatically activate another tab, replace trusted mouse input with `element.click()`, disable authorization, reduce postcondition checks, or apply focus emulation to arbitrary existing user tabs. For any market release a separate browser ownership/consent design, a real non-synthetic website test matrix, cancellation/reconnect regression tests, and P0 security acceptance are necessary. This branch contributes exact root-cause evidence and a repeatable isolated diagnostic, not production acceptance.
 
 The full hosted end-to-end certification remains dependent on an authorized release of the tracing branch and belongs to the installed-runtime workstream, not this local investigation.
+
+## Critical focus-emulation rollback failure (negative safety certification)
+
+The 10-repetition emulation run showed p50 2,027.6 ms versus approximately 11,190 ms without emulation, but it also changed document visibility and focus observables while enabled. Repeated explicit restoration tests reproduced:
+
+- Initial inactive synthetic target: \`{visible:"hidden",focused:false}\`
+- After \`Emulation.setFocusEmulationEnabled({enabled:false})\`: \`{visible:"hidden",focused:true}\`
+- After also activating the original other tab in the isolated Chrome: still \`{visible:"hidden",focused:true}\`
+
+The strict restoration assertion correctly **failed** in both 30-trial and 3-trial follow-up attempts. The disposable Chrome process was closed afterward and cannot affect a user tab. **Do not enable focus emulation on a real user's browser, even transiently.** The ~2-second result is not releasable performance improvement. A controlled managed-browser solution should use ordinary tab focus *inside an independently owned profile*; that approach has already shown p50 ~1.16s for a foreground target without altering the user's normal Chrome state.
+
+The benchmark retains an explicit emulation diagnostic only when the operator sets an opt-in test environment variable. It fails closed if the initial page focus/visibility state cannot be restored. The tested standard benchmark never changes focus emulation.

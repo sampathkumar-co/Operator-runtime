@@ -44,6 +44,7 @@ const chrome = spawn(browserPath,['--headless=new','--no-first-run','--no-defaul
 });
 let provider;
 let focusEmulationConnection;
+let originalActiveTestTab;
 const report={sourceCommit:process.env.MECORD_BENCH_SHA||null, platform:process.platform,node:process.version,
   suite:'isolated real-Chrome CDP provider; excludes MCP/relay/model latency',browserPath};
 try {
@@ -118,11 +119,15 @@ try {
     report.workflowTargetFocused=!skipWorkflowFocus;
     report.backgroundFlags=backgroundFlags;
     report.focusEmulation=focusEmulation;
+    originalActiveTestTab=otherId;
     if (focusEmulation) {
       const targets=await (await fetch('http://127.0.0.1:'+port+'/json/list')).json();
       const selected=targets.find(t=>t.id===targetId);
       assert.ok(selected?.webSocketDebuggerUrl,'Isolated synthetic target must have a CDP endpoint.');
       focusEmulationConnection=new CdpConnection(targetId,selected.webSocketDebuggerUrl);
+      const baseline=await focusEmulationConnection.send('Runtime.evaluate',{
+        expression:'({visible: document.visibilityState, focused: document.hasFocus()})',returnByValue:true});
+      report.beforeFocusEmulationState=baseline?.result?.value??null;
       await focusEmulationConnection.send('Emulation.setFocusEmulationEnabled',{enabled:true});
       const status=await focusEmulationConnection.send('Runtime.evaluate',{
         expression:'({visible: document.visibilityState, focused: document.hasFocus()})',returnByValue:true});
@@ -155,14 +160,16 @@ try {
   assert.equal(finish.result.ok,true);
   if (focusEmulationConnection) {
     await focusEmulationConnection.send('Emulation.setFocusEmulationEnabled',{enabled:false});
+    // A bare disable restores visibility but can leave document.hasFocus() true.
+    // Re-focus ONLY the other tab in this owned temporary Chrome, never a user tab.
+    if(originalActiveTestTab) await call('browser.tab.focus','external',{targetId:originalActiveTestTab});
     const restored=await focusEmulationConnection.send('Runtime.evaluate',{
       expression:'({visible: document.visibilityState, focused: document.hasFocus()})',returnByValue:true});
     report.afterFocusEmulationRestore=restored?.result?.value??null;
     // The synthetic target MUST return to background semantics before exiting.
-    assert.equal(report.afterFocusEmulationRestore?.focused,false,
-      'Synthetic focus emulation did not restore the background target focus state');
-    assert.equal(report.afterFocusEmulationRestore?.visible,'hidden',
-      'Synthetic focus emulation did not restore the hidden target visibility state');
+    process.stdout.write('MECORD_FOCUS_RESTORE_STATE=' + JSON.stringify({before:report.beforeFocusEmulationState,after:report.afterFocusEmulationRestore}) + '\n');
+    assert.deepEqual(report.afterFocusEmulationRestore,report.beforeFocusEmulationState,
+      'Synthetic focus emulation failed to restore the exact initial focus and visibility state');
     focusEmulationConnection.close();
     focusEmulationConnection=undefined;
   }
