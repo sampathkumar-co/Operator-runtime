@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { configureQuarantineProduction } from '../apps/local-agent/src/quarantine-production.ts';
+import { DurableCompensationJournal } from '../src/core/compensation-journal.ts';
+import { stableOrganizationMissionId, organizationCompensationIntentId } from '../src/core/organization-identity.ts';
 
 const GENESIS = { count: 0, headMac: '0'.repeat(64) };
 const URL_REVIEW = 'https://independent-reviewer.example/reviewer/';
@@ -18,7 +20,7 @@ async function fixture(t: test.TestContext) {
   const secrets = path.join(root, 'independent-secrets');
   await fs.mkdir(stateDir);
   await fs.mkdir(secrets);
-  const { publicKey } = crypto.generateKeyPairSync('ed25519');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const file = async (name: string, content: string | Buffer) => {
     const f = path.join(secrets, name);
     await fs.writeFile(f, content, { mode: 0o600 });
@@ -35,7 +37,7 @@ async function fixture(t: test.TestContext) {
     OPERATOR_QUARANTINE_REVIEWER_SERVICE_KEY_FILE: await file('reviewer-token', 'r'.repeat(48)),
     OPERATOR_QUARANTINE_ANCHOR_SERVICE_KEY_FILE: await file('anchor-token', 'a'.repeat(48))
   };
-  return { root, stateDir, env };
+  return { root, stateDir, env, privateKey };
 }
 
 function ok(json: unknown) {
@@ -138,4 +140,77 @@ test('independent trust response fails closed on HTML, unsigned or mismatched re
     programId: crypto.randomUUID(), targetKey: 'review', returnedMissionId: crypto.randomUUID()
   }, { headers: { 'x-quarantine-review-session': 's'.repeat(64) } } as any),
   (e: any) => e?.code === 'QUARANTINE_TRUST_INVALID');
+});
+
+test('production adapter revalidates exact signed provider claim with independent reviewer and commits anchored decision', async t => {
+  const x = await fixture(t);
+  const programId = crypto.randomUUID(), returnedMissionId = crypto.randomUUID();
+  const targetKey = 'service';
+  const expectedMissionId = stableOrganizationMissionId(programId, targetKey);
+  const intentId = organizationCompensationIntentId(programId, 'reconcile-untrusted-team-identity', returnedMissionId);
+  const originalIntentId = organizationCompensationIntentId(programId, 'cancel-team-mission', expectedMissionId);
+  const journal = new DurableCompensationJournal(x.stateDir);
+  await journal.prepare({ id: originalIntentId, ownerKind: 'organization', ownerId: programId,
+    subjectKey: targetKey, targetId: expectedMissionId, operation: 'cancel-team-mission' });
+  await journal.prepare({ id: intentId, ownerKind: 'organization', ownerId: programId,
+    subjectKey: targetKey, targetId: returnedMissionId, operation: 'reconcile-untrusted-team-identity' });
+  const now = Date.now();
+  const claim = {
+    schemaVersion: 1 as const, intentId, programId, targetKey, expectedMissionId, returnedMissionId,
+    classification: 'verified-unrelated' as const,
+    evidenceDigest: crypto.createHash('sha256').update('independent-test-provider').digest('hex'),
+    providerDeviceId: crypto.randomUUID(), providerProcessId: 'provider:isolated-instance',
+    providerSessionId: crypto.randomUUID(), authorityGeneration: 5,
+    issuedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60000).toISOString()
+  };
+  const signed = {
+    claim, signature: crypto.sign(null, Buffer.from(JSON.stringify(claim)), x.privateKey).toString('base64url')
+  };
+  let anchor = { ...GENESIS };
+  let approvals = 0, writes = 0;
+  const fetcher = (async (url: URL, init: RequestInit) => {
+    const u = url.toString();
+    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    if (u === URL_ANCHOR + 'position') return ok({ position: anchor });
+    if (u === URL_REVIEW + 'authorize') {
+      assert.equal(body.kind, 'provider-claim-authorization');
+      assert.equal(body.operatorId, 'human:security-reviewer');
+      approvals++;
+      return ok({ authorized: true, operatorId: body.operatorId,
+        claimDigest: crypto.createHash('sha256').update(JSON.stringify(body.claim)).digest('hex') });
+    }
+    if (u === URL_ANCHOR + 'compare-and-advance') {
+      assert.deepEqual(body.expected, anchor);
+      assert.equal(body.next.count, anchor.count + 1);
+      anchor = { ...body.next };
+      writes++;
+      return ok({ ok: true, position: anchor });
+    }
+    throw new Error('Unexpected independent service route');
+  }) as typeof fetch;
+  const configured = await configureQuarantineProduction(x.stateDir, x.env, fetcher);
+  assert.ok(configured);
+  await assert.rejects(configured.adjudicator.review({
+    intentId, programId, targetKey, expectedMissionId, returnedMissionId,
+    operatorId: 'human:security-reviewer',
+    providerClaim: { ...signed, signature: crypto.sign(null, Buffer.from('wrong-provider'), x.privateKey).toString('base64url') }
+  }), (e: any) => e?.code === 'QUARANTINE_EVIDENCE_INVALID');
+  assert.equal(writes, 0, 'invalid provider signature must not advance external anchor');
+  const record = await configured.adjudicator.review({
+    intentId, programId, targetKey, expectedMissionId, returnedMissionId,
+    operatorId: 'human:security-reviewer', providerClaim: signed
+  });
+  assert.equal(record.classification, 'verified-unrelated');
+  assert.equal(anchor.count, 1);
+  assert.equal(writes, 1);
+  assert.ok(approvals >= 1);
+  const pending = await journal.pending('organization');
+  assert.ok(pending.some(q => q.id === originalIntentId), 'original child cleanup authority retained');
+  assert.ok(!pending.some(q => q.id === intentId), 'only independently adjudicated foreign-ID quarantine retired');
+  const repeat = await configured.adjudicator.review({
+    intentId, programId, targetKey, expectedMissionId, returnedMissionId,
+    operatorId: 'human:security-reviewer', providerClaim: signed
+  });
+  assert.deepEqual(repeat, record);
+  assert.equal(anchor.count, 1, 'idempotent repeat cannot advance external anchor twice');
 });
