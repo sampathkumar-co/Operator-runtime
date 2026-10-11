@@ -10,7 +10,7 @@ import { DevicePoolScheduler, type DevicePoolRequest, type DeviceReservation, ty
 import { OperatorError } from '../../../src/core/errors.ts';
 import { executionContextDigest, executionContextIdentityFrom } from '../../../src/core/execution-context-identity.ts';
 import { OperationTraceStore, type OperationTraceOutcome, type OperationTraceStage } from '../../../src/core/operation-trace.ts';
-import { pipelineLatency } from '../../../src/core/pipeline-latency.ts';
+import { pipelineLatency, opaqueTraceId } from '../../../src/core/pipeline-latency.ts';
 import { RelayClusterCoordinator, type RelayClusterLease } from '../../../src/core/relay-cluster-control.ts';
 import { applyBoundedHttpServerPolicy } from '../../../src/core/network-authority.ts';
 import { FixedWindowRateLimiter, requestClientKey } from '../../../src/core/rate-limit.ts';
@@ -139,6 +139,9 @@ export class RelayHub {
   #instanceId: string;
   #clusterLeaseMs: number;
   #operationTrace?: OperationTraceStore;
+  // Observational only. Bounded, process-local enqueue-to-WebSocket-send timing;
+  // restores/restarts without this origin measurement remain unobservable.
+  #queuedLatencyStarts = new Map<string, { startedMs:number; at:string; traceId:string }>();
 
   constructor(options: RelayHubOptions) {
     this.#stateDir = path.resolve(options.stateDir);
@@ -368,6 +371,14 @@ export class RelayHub {
         throw new OperatorError('RELAY_AUTHORITY_CHANGED', 'Account-device authority changed before relay delivery commit.');
       }
       throw error;
+    }
+    if (pipelineLatency.enabled) {
+      this.#queuedLatencyStarts.set(delivery.id, { startedMs: performance.now(),
+        at: new Date().toISOString(), traceId: opaqueTraceId(traceId) });
+      if (this.#queuedLatencyStarts.size > 4096) {
+        const evict = this.#queuedLatencyStarts.keys().next().value;
+        if (evict) this.#queuedLatencyStarts.delete(evict);
+      }
     }
     let postEnqueueAuthorityError: unknown;
     try {
@@ -863,6 +874,16 @@ export class RelayHub {
       } catch (error) {
         connection.inFlight.delete(next.seq);
         throw error;
+      }
+      const queueStart = this.#queuedLatencyStarts.get(next.id);
+      if (queueStart) {
+        this.#queuedLatencyStarts.delete(next.id);
+        const durationMs = Math.max(0, performance.now() - queueStart.startedMs);
+        if (durationMs <= 24 * 60 * 60_000) pipelineLatency.record({
+          traceId: queueStart.traceId, spanId: crypto.randomUUID(),
+          stage: 'relay.queue_wait', origin: 'relay-server', startTime: queueStart.at,
+          durationMs, result: 'ok'
+        });
       }
       if (!readOnly) return;
     }

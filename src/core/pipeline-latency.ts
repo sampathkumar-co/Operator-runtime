@@ -9,7 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 export const PIPELINE_STAGES = [
- 'hosted.ingress_auth','hosted.validation_serialization','relay.queue','relay.dispatch',
+ 'hosted.ingress_auth','hosted.validation_serialization','relay.queue','relay.queue_wait','relay.dispatch',
  'relay.network_to_device','local.request_processing','local.authorization_approval',
  'local.journal_audit','local.resource_lease','local.capability_routing',
  'browser.target_discovery','browser.cdp_connection','browser.cdp_roundtrip','browser.operation',

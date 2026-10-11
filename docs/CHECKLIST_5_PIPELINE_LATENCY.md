@@ -160,3 +160,9 @@ Previous background-target five-step p50 was **11,187.2 ms** with p95 11,213.3 m
 **Foreground CDP command attribution** (all 30-scenario mixed benchmark, no parameters logged): Runtime.evaluate: 1,445 calls, p50 1.11 ms, p95 12.93 ms, 3,762.6 ms total. Input.dispatchMouseEvent: 270 calls, 465.9 ms total. Accessibility.getFullAXTree: 121 calls, 426.1 ms total. The 3,680 CDP round trips collectively accounted for approximately 6,527 ms across the run. The full browser operation span count was 364 and included the browser/CDP work within it, so these times overlap, and must never be summed as disjoint e2e contributions.
 
 Machine-readable report and source-matched Markdown: artifacts/pipeline-latency-2026-10-11T17-16-38-456Z/. Hosted and ChatGPT model/tool overhead remain unobservable to this source-only candidate until source-matched hosted deployment is separately authorized. Checklist #5 still lacks final hosted certification.
+
+## Relay queue timing boundary
+
+Added a bounded, opt-in, process-monotonic enqueue-to-successful-WebSocket-write span named relay.queue_wait, stored by opaque hashed trace identity. It distinguishes the existing enqueue persistence cost from waiting to write a queued message to an authenticated device socket. The in-memory start map is capped at 4,096 entries; if a message predates the current relay process, is evicted, or the relay restarts, that latency is unobservable and MUST NOT be backfilled with wall-clock subtraction. A socket write does not establish device receipt or network one-way time.
+
+Isolated relay integration verification with OPERATOR_PIPELINE_TRACE_ENABLED=1 and locked relay npm dependency installed: 71/71 PASS across relay hub, control service and result service. No change to approval boundaries, durable ACK order or protected runtime state. Actual hosted queue and device delivery metrics still require deployment of this source and authenticated production capture.
