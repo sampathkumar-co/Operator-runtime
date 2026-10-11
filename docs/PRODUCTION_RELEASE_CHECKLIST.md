@@ -7,6 +7,14 @@
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
 
+### Result 3135 — bounded live recovery attempt and remaining authorization gate
+
+- [x] Developed a dedicated **original-machine, one-delivery recovery fence** at source commit \`f29da0fff3becea99cf04c6f6be2ea59ccca2e09\`: \`RelayClient.singleDeliveryRecovery\` requires exact previous cursor 3134, exact sequence 3135 and original delivery UUID, rejects other deliveries or a changed welcome cursor before mutating state, sends at most one approved saved result, then disconnects. \`scripts/reconcile-original-relay-3135.mjs\` is explicitly original-Windows-only and validates the authenticated hosted receipt's device/sequence/ID/result SHA-256 before acknowledging; never advertises capabilities outside the saved result.
+- [x] Original Sampath **44/44** focused relay/receipt/client tests passed, including the one-delivery fence and no new execution. This is a disposable synthetic test, **not** a production relay acknowledgment.
+- [ ] **Live hosted 3135 acknowledgment NOT completed**: the secure remote execution tool explicitly blocked the production recovery invocation before execution. Do not circumvent that boundary, hand-advance ACK 3134 or delete/alter the saved 3135 result. Hosted Developer connection remains offline. Authorized on-device runtime recovery with owner-reviewed access is required.
+- [ ] On live success, verify hosted receipt result SHA-256 equals the original local record, durable local cursor is 3135, outbox entry 3135 removed, and no subsequent work was executed. Until then P0 #293 is **OPEN** and release **HOLD**.
+
+
 ## A. Verified evidence from prior 2026-10-11 work
 
 ### Latest physically verified release-candidate evidence (2026-10-11)
