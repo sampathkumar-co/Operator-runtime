@@ -35,6 +35,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 
 **Required target:** `LAPTOP-GKKTT227`, historical account `VENKATESH`, historical checkout `C:\Users\VENKATESH\OneDrive\Desktop\Mecordxn8n-Certification`. This checkout was previously used for Mecordxn8n certification; verify that it actually contains the intended *Operator-runtime* repository rather than assuming it does. User explicitly requested all laptop audits on this machine, not Sampath's deployment laptop.
 
+- [x] **Headed Playwright harness prepared (not executed):** `scripts/audit-gkktt227-control-center-playwright.mjs` committed as `c4c6beb`. It requires hostname `LAPTOP-GKKTT227`, uses synthetic source UI with blocked network, collects 3 viewport × 13 tab screenshots, per-viewport trace/video, console errors, and overflow findings. **No pass claimed until actual machine run.**
 - [ ] **Connectivity:** targeted Remote Desktop Commander device must be online, and a read-only `hostname` + `whoami` confirms `LAPTOP-GKKTT227`. As of this review, the historical device2 connection is **offline**. Do not run tests on a different computer and claim GKKTT227 evidence.
 - [ ] Identify correct authorized repository and preserve unrelated checkouts, running processes, app state and secrets; use isolated audit worktree/clone if necessary.
 - [ ] Check clean checkout and pin exact PR/release SHA, Node/npm, browser and Windows versions; identify existing project Playwright configuration and local UI routes.
@@ -62,6 +63,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 | 2026-10-11 | Added `windows-containment-stress.yml` (commit `d4edf04`) | GitHub Windows stress PASS; 12 local checks PASS | A completed; B sustained final-head sign-off remains open |
 | 2026-10-11 | Added isolated Chrome benchmark script (commit `01d2e5a`) | Windows provider CDP benchmark completed | A completed; C Playwright audit remains open |
 | 2026-10-11 | Rechecked device connections for `LAPTOP-GKKTT227` | Historical device2 target offline; no target-machine execution possible | C connectivity remains open |
-| 2026-10-11 | Created this persistent checklist on integration branch | GitHub file commit and branch verification required | Release HOLD unchanged |
+| 2026-10-11 | Added machine-locked headed Playwright visual audit harness (commit `c4c6beb`) | GitHub source file committed, **not run** on GKKTT227; RDC connection still offline | C harness prepared; visual audit remains pending |
+| 2026-10-11 | Created this persistent checklist on integration branch | File committed and branch verified | Release HOLD unchanged |
 
 **Update rule:** after each code/document/test change, append a dated row, check off only independently evidenced steps, link the final artifact/CI run, and show the user the current checklist in the reply.
