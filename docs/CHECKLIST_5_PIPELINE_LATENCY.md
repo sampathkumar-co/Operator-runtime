@@ -62,3 +62,33 @@ Microbenchmark, not production overhead certification: 1,000 no-I/O operations m
 - [ ] Production bottleneck ranking based on complete non-dropped stage evidence; hosted CI signoff.
 
 No architectural batching or unrelated P0 fix is included.
+
+## Source-matched corrected local stage report
+
+Follow-up synthetic benchmark used commit 0a32475bdad430d44f139113a137699b8b5bc163 on original Sampath, Windows_NT 10.0.26200, Chrome 154.0.8037.98, Node 22.14.0. The isolated 30-repeat browser test retained **6,739 spans, 0 dropped**. Only local browser stages were exercised; hosted/relay unobserved stages remain marked missing.
+
+| Observed local stage | Samples | p50 (ms) | p95 (ms) | sum (ms) |
+|---|---:|---:|---:|---:|
+| Browser operation inclusive | 392 | 347.38 | 362.11 | 119382.78 |
+| DOM postcondition settling | 330 | 150.59 | 153.92 | 49677.16 |
+| CDP command roundtrip | 5623 | 0.73 | 3.83 | 6883.62 |
+| Target discovery | 391 | 0.98 | 1.55 | 398.60 |
+| CDP connection setup | 3 | 16.34 | 16.38 | 48.86 |
+
+Per-scenario corrected local p50: tab discovery 1.1 ms, semantic inspection 93.1 ms, click 351.0 ms, 10-field form 3511.0 ms; cold nav 202.9 ms (n=1). DOM settling is a meaningful nested share of local browser operation time; the stage sums overlap and DO NOT represent mutually exclusive or full hosted end-to-end totals. CDP command roundtrips (5,623) are Chrome protocol roundtrips only, not hosted connector network RTTs. Stage rank is **local only**; a globally ranked bottleneck list remains blocked on hosted correlated samples.
+
+Machine-readable and Markdown reports: artifacts/pipeline-latency-2026-10-11T15-46-06-903Z/. Previous dropped-span artifact intentionally remains uncommitted.
+
+## Paired tracing overhead — 30 matched batches
+
+Source 0a32475bdad430d44f139113a137699b8b5bc163. In-process async no-op (not Chrome or hosted), 30 alternating-order batches of 1,000 operations per mode on Windows_NT 10.0.26200 / Node v22.14.0:
+- disabled p50 0.394 ms per 1,000 operations (p95 2.846 ms).
+- enabled p50 3.744 ms per 1,000 operations (p95 9.853 ms).
+- paired difference p50 **0.003156 ms per operation (3.156 microseconds)**, p95 0.008880 ms per operation (8.880 microseconds).
+This is low-overhead in the synthetic benchmark, not proof of bounded overhead across hosted full workloads. Machine-readable stats in artifacts/pipeline-overhead-2026-10-11T15-49-04-875Z/.
+
+## Additional verification
+
+- npm --prefix apps/mcp-server run check: PASS (tsc).
+- node --experimental-strip-types --test apps/mcp-server/test/relay-mode-e2e.test.ts: PASS 1/1 after installing locked dependencies in isolated clone.
+- Sampath's Node 22.14.0 is below the MCP server's declared minimum 22.19.0; run supported-version certification in CI or isolated environment before claiming production compatibility.
