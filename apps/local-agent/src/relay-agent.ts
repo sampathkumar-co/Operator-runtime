@@ -150,7 +150,12 @@ export class LocalAgentRelayRunner {
         await this.#submitResultWithRetry(seq, deliveryId, safe);
         return 'ack';
       }
-      if (recovered.state === 'processing') return 'stop';
+      // A nonmutating read with a durable in-progress receipt can be retried
+      // through the normal execution path after revalidating fresh relay
+      // authority. All side-effecting actions remain fail-closed: neither
+      // approval state nor a journal entry proves an unknown effect did not
+      // occur, so do not replay a mutation.
+      if (recovered.state === 'processing') return canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
