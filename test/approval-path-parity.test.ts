@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { ApprovalStore } from '../apps/local-agent/src/approval-store.ts';
+import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { SessionApprovalStore } from '../apps/local-agent/src/session-approval.ts';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { TaskOrchestrator } from '../src/core/task-orchestrator.ts';
@@ -195,4 +196,84 @@ test('an explicitly approved session authorizes direct and durable Chrome-style 
   assert.equal(foreign.status, 409);
   assert.equal((await foreign.json() as any).error.code, 'APPROVAL_REQUIRED');
   assert.equal(provider.operateCalls, 2);
+});
+
+test('relay direct app-operation returns a terminal no-dispatch approval result before upstream timeout', async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-relay-approval-deadline-'));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const provider = new TabProvider();
+  const runtime = new OperatorRuntime().register(provider);
+  const approvals = new ApprovalStore(state);
+  const sessionApprovals = new SessionApprovalStore();
+  const actionExecutions = new LocalActionExecutionStore(state);
+  const permissions = {
+    allowedCapabilities: ['app.inspect', 'app.operate'], allowedRoots: [],
+    allowExternalWrites: false, allowDestructive: false, allowSystemChanges: false
+  };
+  const token = 'l'.repeat(64), recoveryToken = 'm'.repeat(64), relayInternalToken = 'n'.repeat(64);
+  const agent = createLocalAgentServer({
+    runtime, token, recoveryToken, relayInternalToken, approvals, sessionApprovals,
+    actionExecutions, permissions, inlineApprovalWaitMs: 45_000
+  });
+  t.after(() => Promise.allSettled([agent.close(), runtime.close()]));
+  const { port } = await agent.listen('127.0.0.1', 0);
+  const base = `http://127.0.0.1:${port}`;
+  const headers = {
+    authorization: `Bearer ${token}`, 'content-type': 'application/json',
+    'x-operator-relay-request': '1', 'x-operator-relay-auth': relayInternalToken
+  };
+  const authority = {
+    accountId: '11111111-1111-4111-8111-111111111111',
+    deviceId: '22222222-2222-4222-8222-222222222222', generation: 13
+  };
+  const action: ActionRequest = {
+    id: 'relay-fast-approval-tab',
+    capability: 'app.operate', risk: 'external',
+    input: { operation: 'select', selector: { automationId: 'chrome-tab-2', controlType: 'TabItem', processId: 77 } },
+    provenance: { kind: 'chatgpt' }
+  };
+  const started = Date.now();
+  const first = await Promise.race([
+    fetch(`${base}/v1/execute`, { method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority }) }),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay execution blocked on inline approval')), 2_000))
+  ]);
+  assert.ok(Date.now() - started < 2_000);
+  const denied = await first.json() as any;
+  assert.equal(first.status, 409, JSON.stringify(denied));
+  assert.equal(denied.error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
+  const receipt = await actionExecutions.lookup(action, authority);
+  assert.equal(receipt.status, 'completed', 'no unfinished external receipt may block reconnect after a timed-out approval');
+  if (receipt.status === 'completed') assert.equal(receipt.result.error?.code, 'APPROVAL_REQUIRED');
+
+  const pending = (await approvals.list()).find(item => item.actionId === action.id);
+  assert.equal(pending?.status, 'pending');
+  const approved = await approvals.approve(action.id, pending!.approvalRequestId);
+  sessionApprovals.grant(approved, permissions);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(provider.operateCalls, 0, 'late approval must not redispatch the completed historical action');
+
+  const oldReplay = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers, body: JSON.stringify({ action, approvalAuthority: authority })
+  });
+  assert.equal(oldReplay.status, 409);
+  assert.equal((await oldReplay.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 0);
+
+  const freshAction = { ...action, id: 'relay-fresh-explicit-session-tab' };
+  const fresh = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers, body: JSON.stringify({ action: freshAction, approvalAuthority: authority })
+  });
+  assert.equal(fresh.status, 200, JSON.stringify(await fresh.clone().json()));
+  assert.equal((await fresh.json() as any).ok, true);
+  assert.equal(provider.operateCalls, 1, 'the only external dispatch is a new explicit action under the same approved session');
+
+  const unrelated = { ...action, id: 'relay-different-device-tab' };
+  const foreign = await fetch(`${base}/v1/execute`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ action: unrelated, approvalAuthority: { ...authority, deviceId: '33333333-3333-4333-8333-333333333333' } })
+  });
+  assert.equal(foreign.status, 409);
+  assert.equal((await foreign.json() as any).error.code, 'APPROVAL_REQUIRED');
+  assert.equal(provider.operateCalls, 1);
 });
