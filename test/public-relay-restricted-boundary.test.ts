@@ -310,14 +310,16 @@ test('physical crash-window shape ACK 3134 with durable result 3135 resubmits on
     socketFactory: url => new ScriptedRelaySocket(url, frame, acknowledge, 3134)
   });
   const running = runner.run();
+  let ackDeadline: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
       acked,
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('durable 3135 result ACK timed out')), 12_000
-      ))
+      new Promise<never>((_, reject) => {
+        ackDeadline = setTimeout(() => reject(new Error('durable 3135 result ACK timed out')), 12_000);
+      })
     ]);
   } finally {
+    if (ackDeadline) clearTimeout(ackDeadline);
     runner.stop();
     await running;
   }
