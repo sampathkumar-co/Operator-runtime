@@ -1,0 +1,67 @@
+# Mecord Connect — Production Release Checklist
+
+**Last reviewed:** 2026-10-11 (Asia/Kolkata)  
+**Release candidate:** [PR #295](https://github.com/sampathkumar-co/Operator-runtime/pull/295), branch `integration/p0-hardening-20261011`  
+**Evidence head reviewed:** `01d2e5a1e1d6151afddf499b2eadf7e750e03fe6` (before this checklist commit)  
+**Release decision:** **HOLD**. No production deployment, npm publication, or replacement of protected local runtimes until all required gates are checked against a single final source commit.
+
+This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
+
+## A. Verified evidence from prior 2026-10-11 work
+
+- [x] Source-level approval-path regression on Sampath Windows: 18/18 tests passed (`test/approval-path-parity.test.ts`, `approval-lifecycle.test.ts`, `session-approval.test.ts`); **not** live published-runtime parity.
+- [x] Windows local performance suite passed 7/7 on source `9e697bf3`: local agent, policy, durable relay and soak; **not** model-to-laptop E2E.
+- [x] Isolated real-Chrome CDP benchmark on Sampath Windows source `9e697bf3`: warm click p50 346.3ms/p95 362.3ms; 10-field form p50 3489.2ms/p95 3530ms; 30 and 10 samples respectively. Script `scripts/benchmark-browser-cdp-live.mjs`. **This is not Playwright visual testing or remote/MCP latency.**
+- [x] Dedicated PostgreSQL 18 CAS generation/stale-writer CI on integration PR: [run 38111332452](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38111332452), passed.
+- [x] Windows native Job Object synthetic local regressions: 3 iterations × 4 tests = 12/12 passed on Sampath Windows.
+- [x] Dedicated Windows descendant-containment CI: [run 38111332437](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38111332437), passed.
+- [x] Main CI, R1, R2, npm runtime CI and Windows signing *smoke* for `01d2e5a`: GitHub actions completed successfully. **Signing smoke is not a production certificate/signature.**
+- [x] Historical relay delivery #2944 recovered without replay according to PR #295's original-machine operator attestation and canary receipts. Treat as *incident-specific recovery*, not a blanket recovery guarantee.
+
+## B. Highest-priority release security and reliability gates
+
+- [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
+- [ ] **P0 #146:** reservation-to-compensation durable handoff and genuine multi-process/host crash injection; demonstrate no duplicate reservation, no leaked authority, no blind replay.
+- [ ] **P0 #192:** prove embedded + real PostgreSQL deletion/expiry/restore non-recycled generations on the final release head, including independent restore witness and stale clients. Dedicated PostgreSQL CI exists; actual restore/replay drills remain.
+- [ ] **#151:** authority-backed operator resolution of quarantined team/mission identities, including unrelated identity, lost result, restart, and decision persistence.
+- [ ] **#157:** complete remaining shared durable-writer lost-update/authority race audit; classify every listed store and add cross-process collision tests for confirmed gaps.
+- [ ] **#279:** review newly green Windows contention and detached-descendant regression evidence, then independently certify under sustained concurrent load on final release head.
+- [ ] **#293:** corroborate source-level pre-dispatch interruption and historical #2944 remediation with correct signed recovery proof and final-release artifact.
+- [ ] Review code changes in #295 for downgrade/rollback/compaction and failure-path safety, with an independent security reviewer.
+- [ ] Complete `npm run certify:nonbenchmark` on final candidate with the required native helpers and save the *terminal PASS* marker; a launched/partially logged run does not count.
+- [ ] Final platform matrix (Ubuntu/Windows/macOS) must show completed success for **one single frozen final commit SHA**.
+
+## C. GKKTT227 physical laptop and visual Playwright audit
+
+**Required target:** `LAPTOP-GKKTT227`, historical account `VENKATESH`, historical checkout `C:\Users\VENKATESH\OneDrive\Desktop\Mecordxn8n-Certification`. This checkout was previously used for Mecordxn8n certification; verify that it actually contains the intended *Operator-runtime* repository rather than assuming it does. User explicitly requested all laptop audits on this machine, not Sampath's deployment laptop.
+
+- [ ] **Connectivity:** targeted Remote Desktop Commander device must be online, and a read-only `hostname` + `whoami` confirms `LAPTOP-GKKTT227`. As of this review, the historical device2 connection is **offline**. Do not run tests on a different computer and claim GKKTT227 evidence.
+- [ ] Identify correct authorized repository and preserve unrelated checkouts, running processes, app state and secrets; use isolated audit worktree/clone if necessary.
+- [ ] Check clean checkout and pin exact PR/release SHA, Node/npm, browser and Windows versions; identify existing project Playwright configuration and local UI routes.
+- [ ] Run real **headed/visible Playwright** in an isolated browser profile against an explicitly authorized **local** Control Center app/test fixture, without changing external accounts or submitting live forms.
+- [ ] Capture Playwright trace, screenshots and video for navigation, login/session, onboarding, approval/recovery panels, tasks and browser/tab interactions **where implemented**, with browser console errors, request failures, and redaction of secrets.
+- [ ] Test desktop/tablet/mobile viewports, zoom, keyboard navigation, WCAG-oriented accessibility scans, component visibility/occlusion, layouts and focus/scroll stability. Distinguish unavailable screens from failing screens.
+- [ ] Exercise synthetic negative/security paths: failed approvals, revoked access, stale identities, browser disconnect, rendering errors, and safe restart/recovery without side effects.
+- [ ] Measure Playwright workflow p50/p95/p99 across 30+ warm/cold runs where feasible and compare to the isolated Chrome CDP baseline; record model/relay/host latency **separately**.
+- [ ] Record a machine-linked visual audit report with exact code SHA, screenshots/trace locations, each failure, fix, rerun and pass/fail counts. Do not mark visual Playwright complete until artifacts exist.
+
+## D. Distributed and deployment gates
+
+- [ ] Two independently online physical machines: crash/restore/authority revocation/fencing and cross-host races (not just simulated unit tests).
+- [ ] Restore-epoch witness drills, snapshot rollback protection, backup integrity, and mixed-version worker compatibility.
+- [ ] Signed, provenance-verified Windows/npm successor artifact: build exact tree, notarize/sign as appropriate, verify install/uninstall/upgrade and package identity.
+- [ ] Publish new npm release **only after** authorization and production gate approval, then independently install and verify published bytes. Existing installed 2.0.5 is older than the hardening branch.
+- [ ] Stage canary -> verify remote MCP/relay/approvals/diagnostics -> progressive deployment, monitored rollback and post-release smoke.
+- [ ] Record release owner and independent reviewer sign-off; update `docs/CURRENT_RELEASE_STATE.md` and machine-readable release truth **only after actual deployment**.
+
+## E. Audit log / change history
+
+| Date | Change | Verification | Checklist consequence |
+| --- | --- | --- | --- |
+| 2026-10-11 | Added `control-plane-live-postgres.yml` (commit `7cbfe58`) | GitHub CI real PostgreSQL PASS | A completed; B restore/physical gate remains open |
+| 2026-10-11 | Added `windows-containment-stress.yml` (commit `d4edf04`) | GitHub Windows stress PASS; 12 local checks PASS | A completed; B sustained final-head sign-off remains open |
+| 2026-10-11 | Added isolated Chrome benchmark script (commit `01d2e5a`) | Windows provider CDP benchmark completed | A completed; C Playwright audit remains open |
+| 2026-10-11 | Rechecked device connections for `LAPTOP-GKKTT227` | Historical device2 target offline; no target-machine execution possible | C connectivity remains open |
+| 2026-10-11 | Created this persistent checklist on integration branch | GitHub file commit and branch verification required | Release HOLD unchanged |
+
+**Update rule:** after each code/document/test change, append a dated row, check off only independently evidenced steps, link the final artifact/CI run, and show the user the current checklist in the reply.
