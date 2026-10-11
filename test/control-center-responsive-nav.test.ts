@@ -35,3 +35,24 @@ test('All Control Center tab buttons target present panel IDs with exactly one i
     assert.ok(html.includes('id="' + id + '"'), 'Missing panel for tab ' + id);
   }
 });
+
+test('Control Center tabs use roving keyboard focus and labelled panels', async () => {
+  const script = await fs.readFile(path.join(ui, 'app.js'), 'utf8');
+  const tabs = [...html.matchAll(/<button\\b[^>]*role="tab"[^>]*data-tab="([^"]+)"[^>]*>/g)];
+  const panels = [...html.matchAll(/<div id="([^"]+)" class="panelBody tabPage[^"]*"[^>]*>/g)];
+  assert.equal(tabs.length, 13);
+  assert.equal(panels.length, 13);
+  assert.equal(tabs.filter(t => /tabindex="0"/.test(t[0])).length, 1);
+  for (const match of tabs) {
+    const id = match[1];
+    assert.ok(match[0].includes('id="tab-' + id + '"'));
+    assert.ok(match[0].includes('aria-controls="' + id + '"'));
+    const panel = panels.find(p => p[1] === id);
+    assert.ok(panel);
+    assert.ok(panel[0].includes('role="tabpanel"'));
+    assert.ok(panel[0].includes('aria-labelledby="tab-' + id + '"'));
+  }
+  for (const key of ['ArrowRight','ArrowLeft','Home','End']) assert.ok(script.includes('e.key==="' + key + '"'));
+  assert.match(script, /t\.tabIndex=active\?0:-1/);
+  assert.match(script, /e\.preventDefault\(\)/);
+});
