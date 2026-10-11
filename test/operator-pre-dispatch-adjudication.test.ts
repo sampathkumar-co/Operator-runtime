@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
+import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { OperatorPreDispatchAdjudicator } from '../apps/local-agent/src/operator-pre-dispatch-adjudication.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
@@ -123,4 +124,38 @@ test('direct journal operator recovery without a prior signed ledger is forbidde
     generation:c.journalGeneration,transitionsDigest:c.transitionsDigest
   }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_REQUIRED');
   assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
+});
+
+test('signed operator fence repairs relay HTTP receipt and refuses identical action replay',async t=>{
+  const {state,journal,identity}=await setup(t);
+  const op=new OperatorPreDispatchAdjudicator(state,{signer:identity});
+  const c=await op.inspect(action.id);
+  await op.adjudicate({actionId:action.id,caseDigest:c.caseDigest,
+    confirmation:'AUTHORIZE-NO-REPLAY:'+c.caseDigest,
+    ownerAttestation:'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'});
+  let dispatches=0;
+  const agent=createLocalAgentServer({
+    token:'x'.repeat(64),
+    permissions:{allowedCapabilities:['app.inspect','app.operate'],allowedRoots:[]},
+    runtime:{async execute(){dispatches++;throw new Error('provider must not run');}} as any,
+    agentKernel:{journal,async execute(){dispatches++;throw new Error('kernel must not dispatch');}} as any,
+    actionExecutions:new LocalActionExecutionStore(state)
+  });
+  t.after(()=>agent.close());
+  const bound=await agent.listen('127.0.0.1',0);
+  const invoke=(endpoint:string)=>fetch('http://127.0.0.1:'+bound.port+endpoint,{
+    method:'POST',
+    headers:{authorization:'Bearer '+'x'.repeat(64),'content-type':'application/json'},
+    body:JSON.stringify({action})
+  });
+  const recovered=await invoke('/v1/action-receipt');
+  assert.equal(recovered.status,200);
+  const body=await recovered.json() as any;
+  assert.equal(body.receipt.status,'completed');
+  assert.equal(body.result.error.code,'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  assert.equal(body.result.error.sideEffectState,'none');
+  const duplicate=await invoke('/v1/execute');
+  assert.equal(duplicate.status,409);
+  assert.equal((await duplicate.json() as any).error.code,'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  assert.equal(dispatches,0);
 });
