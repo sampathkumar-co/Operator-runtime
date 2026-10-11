@@ -277,6 +277,32 @@ export class ActionTransitionJournal {
       if (!valid) {
         throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision signature is not authentic.');
       }
+      // Verify the signed authority and legacy owner against the ACTUAL
+      // durable receipt, not merely a caller's claimed action hash. The
+      // provider dispatch lock remains held while this comparison occurs.
+      let receipts: any;
+      try {
+        receipts = JSON.parse(await readDurableStateText(
+          path.join(stateRoot, 'action-executions.json'), {
+            maxBytes: 32 * 1024 * 1024,
+            errorCode: 'OPERATOR_RECOVERY_PROOF_INVALID',
+            invalidMessage: 'Original local action receipt is unavailable.'
+          }));
+      } catch {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+          'Original processing receipt cannot be authenticated for local operator adjudication.');
+      }
+      const matching = Array.isArray(receipts?.records)
+        ? receipts.records.filter((record: any) => record?.actionId === entry.actionId)
+        : [];
+      const receipt = matching.length === 1 ? matching[0] : null;
+      if (!receipt || receipt.status !== 'processing' || receipt.risk !== 'external' ||
+          receipt.ownerProcess !== undefined || receipt.ownerId !== decision.receiptOwnerId ||
+          receipt.actionHash !== entry.actionDigest ||
+          receipt.authorityHash !== decision.receiptAuthorityHash) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+          'Signed operator proof no longer matches the original pending receipt and authority.');
+      }
       applyTransition(entry, 'INTERRUPTED', now, {
         provider: 'agent-kernel',
         resultDigest: digest({ actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted' })

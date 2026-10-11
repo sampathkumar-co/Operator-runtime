@@ -159,3 +159,25 @@ test('signed operator fence repairs relay HTTP receipt and refuses identical act
   assert.equal((await duplicate.json() as any).error.code,'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
   assert.equal(dispatches,0);
 });
+
+test('journal refuses a signed operator decision if legacy receipt authority changes before fence',async t=>{
+  const {state,journal,identity}=await setup(t);
+  const before=JSON.parse(await fs.readFile(path.join(state,'action-transitions.json'),'utf8'));
+  const op=new OperatorPreDispatchAdjudicator(state,{signer:identity});
+  const c=await op.inspect(action.id);
+  await op.adjudicate({
+    actionId:action.id,caseDigest:c.caseDigest,confirmation:'AUTHORIZE-NO-REPLAY:'+c.caseDigest,
+    ownerAttestation:'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'
+  });
+  // Fault-injection fixture: restore journal only to its original pre-dispatch
+  // transition sequence while keeping the legitimate signed operator proof.
+  await fs.writeFile(path.join(state,'action-transitions.json'),JSON.stringify(before));
+  const file=path.join(state,'action-executions.json');
+  const receipts=JSON.parse(await fs.readFile(file,'utf8'));
+  receipts.records[0].authorityHash='f'.repeat(64);
+  await fs.writeFile(file,JSON.stringify(receipts));
+  await assert.rejects(journal.interruptOperatorReviewedPolicyDeferral({
+    actionId:action.id,actionDigest:c.actionDigest,generation:1,transitionsDigest:c.transitionsDigest
+  }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_INVALID');
+  assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
+});
