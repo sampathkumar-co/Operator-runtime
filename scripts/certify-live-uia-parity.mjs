@@ -118,6 +118,14 @@ try {
   assert.equal(result.task.state, 'VERIFIED', JSON.stringify(result).slice(0, 400));
   assert.equal(dispatches, 1, 'only the exact authorized native action may execute');
 
+  const repeated = await fetch(api + '/v1/tasks/' + task.task.id + '/resume', {
+    method: 'POST', headers, body: '{}'
+  });
+  const repeatTask = await repeated.json();
+  assert.equal(repeated.status, 200, JSON.stringify(repeatTask).slice(0, 400));
+  assert.equal(repeatTask.task?.state, 'VERIFIED');
+  assert.equal(dispatches, 1, 'completed approved work must not redispatch on duplicate resume');
+
   const observed = await provider.execute({
     id: crypto.randomUUID(), capability: 'app.inspect', risk: 'read',
     provenance: { kind: 'runtime', source: 'physical-synthetic-parity' },
