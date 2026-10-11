@@ -33,3 +33,11 @@ Supporting tests in test/browser-managed.test.ts check unauthorized endpoint inj
 Only a future authorized caller that explicitly supplies a newly managed profile may enable dedicatedProfileOnly. **Do not** auto-opt a user-owned profile into dedicated mode, use focus emulation, or infer exclusive ownership from a healthy port alone. Any product feature that automatically activates internal tabs must independently obtain permission and preserve action security, audit/journal, and resource-fencing guarantees. This PR does not introduce automatic tab switching.
 
 Performance evidence from the isolated original Sampath experiment: a 30-sample five-step workflow on an active tab in its own headless profile had p50 1,156.4 ms and p95 1,188.9 ms; inactive background-target five-step tests had p50 ~11,187 ms. These are **local** browser timings. Hosted Mecord certification and a production release require source-matched 2.0.6 deployment, monitored cross-host trace collection, and review of this ownership mode.
+
+## Concurrent startup and lifecycle follow-up
+
+The opt-in dedicated launcher now serializes simultaneous ensureEndpoint() requests through one in-flight launch promise. The provider also serializes delegate endpoint rebinding and waits for in-flight initialization before closing. This prevents duplicate Chrome launches or racing delegation when multiple read actions arrive before a fresh managed instance is ready.
+
+Real isolated Sampath Windows/Chrome smoke: **three concurrent cold-start browser.inspect operations** all returned success; then localhost navigation, explicitly authorized-scope tab focus, native mouse click and verified postcondition passed. The owned process and temporary profile were cleaned afterward. The concurrency smoke remains a manually executable release-gate test, not a hosted production certification.
+
+For safety, an old or unexpected DevToolsActivePort in the requested profile still fails closed rather than being silently erased. Product-level restart and profile reuse need explicit owner-provenance/lease handling before adopting persistent signed-in profiles. Do not reuse a standard Chrome or protected .operator directory.

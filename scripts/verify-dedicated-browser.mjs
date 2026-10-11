@@ -18,10 +18,14 @@ const provider=new ManagedBrowserProvider({
  ...(process.env.MECORD_BENCH_CHROME?{executablePath:process.env.MECORD_BENCH_CHROME}:{})
 });
 try{
- const outcome=await provider.execute({id:'synthetic-owned-browser-inspect',
+ const outcomes=await Promise.all(Array.from({length:3},(_,i)=>provider.execute({
+  id:'synthetic-owned-browser-inspect-'+i,
   capability:'browser.inspect',risk:'read',input:{},
-  provenance:{kind:'runtime',source:'isolated-managed-smoke'}});
- assert.equal(outcome.ok,true,'Owned headless browser must inspect independently.');
+  provenance:{kind:'runtime',source:'isolated-managed-smoke'}
+ })));
+ assert.ok(outcomes.every(o=>o.ok && o.provider==='browser.managed'),
+  'Concurrent startup must share one owned Chrome process and complete all three independent reads.');
+ const outcome=outcomes[0];
  assert.equal(outcome.provider,'browser.managed');
  const navigate=await provider.execute({id:'owned-nav',capability:'browser.navigate',risk:'external',
   input:{url:fixture,newTab:true},provenance:{kind:'runtime',source:'isolated-managed-smoke'}});

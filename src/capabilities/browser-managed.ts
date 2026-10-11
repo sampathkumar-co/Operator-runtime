@@ -214,6 +214,7 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   #options: ManagedBrowserOptions;
   #child?: ChildProcess;
   #launchedEndpoint?: string;
+  #dedicatedEnsureInFlight?: Promise<string>;
 
   constructor(options: ManagedBrowserOptions = {}) {
     this.#options = options;
@@ -222,14 +223,13 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   async ensureEndpoint(): Promise<string> {
     if (this.#options.dedicatedProfileOnly) {
       assertDedicatedProfileOptions(this.#options);
-      if (this.#child && this.#child.exitCode === null && this.#child.signalCode === null
-          && this.#launchedEndpoint && await endpointHealthy(this.#launchedEndpoint)) {
-        return this.#launchedEndpoint;
+      if (this.#dedicatedEnsureInFlight) return await this.#dedicatedEnsureInFlight;
+      const attempt = this.#ensureDedicatedEndpoint();
+      this.#dedicatedEnsureInFlight = attempt;
+      try { return await attempt; }
+      finally {
+        if (this.#dedicatedEnsureInFlight === attempt) this.#dedicatedEnsureInFlight = undefined;
       }
-      // No configured/discovered endpoint can prove child-process ownership.
-      // Retire only a child owned by this launcher before any fresh spawn.
-      if (this.#child) await this.#terminateChild();
-      return await this.#launchDedicated();
     }
     const configured = this.#options.endpoint ?? 'http://127.0.0.1:9222';
     if (await endpointHealthy(configured)) return configured;
@@ -246,6 +246,17 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
     }
 
     return await this.#launchDedicated();
+  }
+
+  async #ensureDedicatedEndpoint(): Promise<string> {
+      if (this.#child && this.#child.exitCode === null && this.#child.signalCode === null
+          && this.#launchedEndpoint && await endpointHealthy(this.#launchedEndpoint)) {
+        return this.#launchedEndpoint;
+      }
+      // No configured/discovered endpoint can prove child-process ownership.
+      // Retire only a child owned by this launcher before any fresh spawn.
+      if (this.#child) await this.#terminateChild();
+      return await this.#launchDedicated();
   }
 
   async #launchDedicated(): Promise<string> {
@@ -309,6 +320,9 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
   }
 
   async close(): Promise<void> {
+    if (this.#dedicatedEnsureInFlight) {
+      await this.#dedicatedEnsureInFlight.catch(() => undefined);
+    }
     await this.#terminateChild();
   }
 
@@ -357,6 +371,7 @@ export class ManagedChromiumLauncher implements BrowserEndpointLauncher {
 export class ManagedBrowserProvider implements CapabilityProvider {
   readonly name = 'browser.managed';
   #dedicatedProfileOnly: boolean;
+  #dedicatedBindInFlight?: Promise<void>;
   #delegate: CapabilityProvider;
   #launcher: BrowserEndpointLauncher;
   #endpoint: string;
@@ -397,9 +412,20 @@ export class ManagedBrowserProvider implements CapabilityProvider {
           durationMs: Math.round(performance.now() - started) };
       }
       if (endpoint !== this.#endpoint) {
-        await this.#delegate.close?.();
-        this.#endpoint = endpoint;
-        this.#delegate = new BrowserCdpProvider(endpoint);
+        if (!this.#dedicatedBindInFlight) {
+          const binding = (async () => {
+            if (endpoint !== this.#endpoint) {
+              await this.#delegate.close?.();
+              this.#endpoint = endpoint;
+              this.#delegate = new BrowserCdpProvider(endpoint);
+            }
+          })();
+          this.#dedicatedBindInFlight = binding;
+          void binding.finally(() => {
+            if (this.#dedicatedBindInFlight === binding) this.#dedicatedBindInFlight = undefined;
+          }).catch(() => undefined);
+        }
+        await this.#dedicatedBindInFlight;
       }
       // Delegate failures remain authoritative. Never reclassify a possibly
       // dispatched mutation as sideEffectState=none or implicitly replay it.
@@ -481,6 +507,9 @@ export class ManagedBrowserProvider implements CapabilityProvider {
   }
 
   async #closeOwnedResources(): Promise<void> {
+    if (this.#dedicatedProfileOnly && this.#dedicatedBindInFlight) {
+      await this.#dedicatedBindInFlight.catch(() => undefined);
+    }
     const results = await Promise.allSettled([
       (async () => this.#delegate.close?.())(),
       (async () => this.#launcher.close())()
