@@ -32,6 +32,7 @@ test('quarantine API requires recovery secret and independently scoped identity;
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const runtime=createRuntime({allowedRoots:[root],allowedExecutables:['node'],browserAutoLaunch:false});
   const token='b'.repeat(64),recoveryToken='r'.repeat(64);
+  const reviewerSession=crypto.randomBytes(24).toString('base64url');
   const programId=crypto.randomUUID(),returnedMissionId=crypto.randomUUID();
   let reviews=0, decisions=0, denied=false;
   const coordinator={
@@ -48,10 +49,11 @@ test('quarantine API requires recovery secret and independently scoped identity;
     runtime,token,recoveryToken,
     permissions:{allowedCapabilities:['computer.inspect'],allowedRoots:[root]},
     organizations:coordinator as any,
-    quarantineReviewAuthorization:async (scope)=>{
+    quarantineReviewAuthorization:async (scope,request)=>{
       reviews++;
       assert.deepEqual(scope,{programId,targetKey:'service',returnedMissionId});
-      if(denied)throw new OperatorError('QUARANTINE_OPERATOR_UNAUTHORIZED','Reviewer lacks scoped authority');
+      if(request.headers['x-quarantine-review-session']!==reviewerSession || denied)
+        throw new OperatorError('QUARANTINE_OPERATOR_UNAUTHORIZED','A scoped human reviewer session was not authenticated');
       return {operatorId:'independently-authenticated-security-admin'};
     }
   });
@@ -73,12 +75,18 @@ test('quarantine API requires recovery secret and independently scoped identity;
   assert.equal(response.status,400);
   assert.equal(reviews,0);
   response=await request(valid,{'x-operator-recovery-token':recoveryToken});
+  assert.equal(response.status,403,'recovery secret alone must not authenticate a human reviewer');
+  assert.equal((await response.json() as any).error.code,'QUARANTINE_OPERATOR_UNAUTHORIZED');
+  assert.equal(decisions,0);
+  response=await request(valid,{'x-operator-recovery-token':recoveryToken,
+    'x-quarantine-review-session':reviewerSession});
   assert.equal(response.status,200);
   assert.equal((await response.json() as any).decision.operatorId,'independently-authenticated-security-admin');
-  assert.equal(reviews,1);
+  assert.equal(reviews,2);
   assert.equal(decisions,1);
   denied=true;
-  response=await request(valid,{'x-operator-recovery-token':recoveryToken});
+  response=await request(valid,{'x-operator-recovery-token':recoveryToken,
+    'x-quarantine-review-session':reviewerSession});
   assert.equal(response.status,403);
   assert.equal((await response.json() as any).error.code,'QUARANTINE_OPERATOR_UNAUTHORIZED');
   assert.equal(decisions,1,'independent permission failure must not reach provider decision');

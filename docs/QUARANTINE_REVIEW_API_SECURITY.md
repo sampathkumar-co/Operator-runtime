@@ -7,7 +7,7 @@
 Required independently:
 1. Normal local-agent bearer authentication.
 2. A **separate** `x-operator-recovery-token`, configured out of band.
-3. A **trusted server-supplied** `quarantineReviewAuthorization({programId,targetKey,returnedMissionId})` callback returning the actual approved `operatorId` after checking the requesting human's scoped identity. Never derive operator identity from request JSON, display name, client-supplied headers, or relay-originated actions.
+3. A **trusted server-supplied** `quarantineReviewAuthorization({programId,targetKey,returnedMissionId}, incomingRequest)` callback returning the actual approved `operatorId` after checking the requesting human's scoped identity. Never derive operator identity from request JSON, display name, client-supplied headers, or relay-originated actions.
 4. The injected `OrganizationCoordinator` must itself be wired with `OrganizationQuarantineAdjudicator`, pinned independent Ed25519 provider verification key, strong MAC secret, signed origin evidence, appropriate operator permission, and an **external CAS high-water anchor** outside the restored state domain (production `requireExternalAnchor: true`).
 
 Request JSON is exactly the claimed target identity and provider attestation:
@@ -32,3 +32,5 @@ A classification of `verified-owned` **does not authorize cancellation** or reti
 On original Sampath Windows, `node --experimental-strip-types --test test/organization-quarantine-api.test.ts test/organization-quarantine-adjudication.test.ts`: 13 pass / 0 fail, including separate recovery-token denial, spoofed operator identity rejection, independently scoped identity, signed attestation and external anchor failure.
 
 **Not production certified:** no independent production provider origin signer, immutable key provisioning, external anchor deployment, authenticated reviewer service, or real terminal provider effect receipt has been supplied for this integration. Keep [#151](https://github.com/sampathkumar-co/Operator-runtime/issues/151) open. Do not attach a demo key, default allow-all callback, or unscoped operator token to make deployment appear complete.
+
+Reviewer service integration note: The trusted authorization callback receives the actual `http.IncomingMessage` as its second argument. A production verifier MUST independently validate a fresh request-bound signed human session, authorization scope, and revocation before returning an operator identity. The sample test uses a disposable random reviewer-session marker only to prove recovery-token-only callers fail closed; this marker is NOT a production authentication implementation. A fixed allow-all operator callback is prohibited.
