@@ -84,11 +84,11 @@ test('non-policy deferral cannot become operator recovery candidate',async t=>{
   await assert.rejects(new OperatorPreDispatchAdjudicator(state,{signer:identity}).inspect(action.id),denied);
 });
 
-test('operator recovery refuses process-bound receipt (including unbound Windows owner)',async t=>{
+test('operator recovery refuses malformed or unsupported process-bound receipt',async t=>{
   const {state,identity}=await setup(t);
   const file=path.join(state,'action-executions.json');
   const data=JSON.parse(await fs.readFile(file,'utf8'));
-  data.records[0].ownerProcess={pid:321,started:'windows-filetime:133444444444444444'};
+  data.records[0].ownerProcess={pid:321,started:'unsupported-host-identity'};
   await fs.writeFile(file,JSON.stringify(data));
   await assert.rejects(new OperatorPreDispatchAdjudicator(state,{signer:identity}).inspect(action.id),denied);
 });
@@ -176,6 +176,54 @@ test('journal refuses a signed operator decision if legacy receipt authority cha
   const receipts=JSON.parse(await fs.readFile(file,'utf8'));
   receipts.records[0].authorityHash='f'.repeat(64);
   await fs.writeFile(file,JSON.stringify(receipts));
+  await assert.rejects(journal.interruptOperatorReviewedPolicyDeferral({
+    actionId:action.id,actionDigest:c.actionDigest,generation:1,transitionsDigest:c.transitionsDigest
+  }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_INVALID');
+  assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
+});
+
+test('Windows original-device operator review fences an exited process-bound approval without dispatch',async t=>{
+  if(process.platform!=='win32') {t.skip('Windows process identity and host proof');return;}
+  const {state,journal,identity}=await setup(t);
+  const file=path.join(state,'action-executions.json');
+  const data=JSON.parse(await fs.readFile(file,'utf8'));
+  data.records[0].ownerProcess={pid:2_000_000_000,started:'windows-filetime:134361639345200387'};
+  await fs.writeFile(file,JSON.stringify(data));
+  const op=new OperatorPreDispatchAdjudicator(state,{signer:identity});
+  const c=await op.inspect(action.id);
+  assert.match(c.receiptOwnerProcessDigest??'',/^[a-f0-9]{64}$/);
+  const result=await op.adjudicate({actionId:action.id,caseDigest:c.caseDigest,
+    confirmation:'AUTHORIZE-NO-REPLAY:'+c.caseDigest,
+    ownerAttestation:'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'});
+  assert.equal(result.state,'INTERRUPTED');
+  const ledger=JSON.parse(await fs.readFile(path.join(state,'operator-pre-dispatch-adjudications.json'),'utf8'));
+  assert.equal(ledger.decisions[0].receiptOwnerProcessDigest,c.receiptOwnerProcessDigest);
+  assert.deepEqual((await journal.inspect(action.id)).transitions.map(t=>t.state),['PREPARED','DEFERRED','INTERRUPTED']);
+  const repaired=await new LocalActionExecutionStore(state).reconcileWithKernel(action,undefined,journal);
+  assert.equal(repaired.status,'completed');
+  if(repaired.status==='completed')assert.equal(repaired.result.error?.sideEffectState,'none');
+  await assert.rejects(journal.markDispatched(action.id,'late-provider'),(e:any)=>e?.code==='ACTION_JOURNAL_TRANSITION_INVALID');
+});
+
+test('Windows signed process-bound operator proof cannot fence a changed owner identity',async t=>{
+  if(process.platform!=='win32') {t.skip('Windows process identity and host proof');return;}
+  const {state,journal,identity}=await setup(t);
+  const receiptsFile=path.join(state,'action-executions.json');
+  const receipt=JSON.parse(await fs.readFile(receiptsFile,'utf8'));
+  receipt.records[0].ownerProcess={pid:2_000_000_000,started:'windows-filetime:134361639345200387'};
+  await fs.writeFile(receiptsFile,JSON.stringify(receipt));
+  const journalFile=path.join(state,'action-transitions.json');
+  const before=await fs.readFile(journalFile,'utf8');
+  const op=new OperatorPreDispatchAdjudicator(state,{signer:identity});
+  const c=await op.inspect(action.id);
+  await op.adjudicate({actionId:action.id,caseDigest:c.caseDigest,
+    confirmation:'AUTHORIZE-NO-REPLAY:'+c.caseDigest,
+    ownerAttestation:'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'});
+  // Crash/restore fixture: journal write from before fence, signed proof retained.
+  // A different durable process identity must not inherit the signed intent.
+  await fs.writeFile(journalFile,before);
+  receipt.records[0].ownerProcess.started='windows-filetime:134361639345200388';
+  await fs.writeFile(receiptsFile,JSON.stringify(receipt));
   await assert.rejects(journal.interruptOperatorReviewedPolicyDeferral({
     actionId:action.id,actionDigest:c.actionDigest,generation:1,transitionsDigest:c.transitionsDigest
   }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_INVALID');

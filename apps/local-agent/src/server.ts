@@ -2389,7 +2389,14 @@ export function createLocalAgentServer(options: {
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
-          const decision = options.recoveryToken
+          // A relay/MCP request cannot promise an inline approval window:
+          // its upstream deadline may be shorter than the local 45-second wait.
+          // If a user approves after the caller times out, a delayed mutation
+          // would strand the durable receipt and poison the relay cursor.
+          // Return APPROVAL_REQUIRED promptly, persist its no-dispatch receipt,
+          // and require a *new explicit action* after any session grant.
+          // Interactive local-only requests retain the old inline behavior.
+          const decision = options.recoveryToken && !relayRequest
             ? await waitForApprovalDecision(action.id, pending.approvalRequestId)
             : null;
           if (decision === 'deny') {
