@@ -28,6 +28,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 
 - [x] **P0 #151 fail-closed local review API:** `POST /v1/organizations/:id/quarantines/review` requires agent bearer, separate recovery secret, independently authenticated scoped reviewer callback, and the existing coordinator's verified provider-signed claim; rejects body-injected operator IDs and relay-originated calls. 13/13 API and signed-adjudication tests pass. [Security contract](QUARANTINE_REVIEW_API_SECURITY.md). **Actual production signer, reviewer service, external CAS high-water anchor and verified-owned terminal provider effect remain unconfigured: issue #151 still OPEN.**
 
+- [x] **P0 #157 17-store selected durable writer census and physical single-host regressions:** see [writer classification and 26-suite evidence](P0_DURABLE_WRITER_CENSUS_2026-10-11.md). Priority store entry paths inspected for shared locks, process-bound leases and CAS; 174/178 writer tests passed (4 skipped), 108/109 crash/CAS/recovery tests passed (1 skip), 15/15 repeated Windows containment checks passed. **#157 remains open until all externally deployed writers and trust-domain boundaries are certified.**
+
 ## B. Highest-priority release security and reliability gates
 
 - [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
