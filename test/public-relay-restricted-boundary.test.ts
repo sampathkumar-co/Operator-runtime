@@ -270,9 +270,11 @@ test('physical crash-window shape ACK 3134 with durable result 3135 resubmits on
   };
   await fs.writeFile(path.join(stateDir, 'relay-client.json'),
     JSON.stringify({ version: 1, lastAckedServerSeq: 3134 }), 'utf8');
-  await new RelayResultStore(path.join(stateDir, 'relay-outbox')).put(
-    device.deviceId, 3135, deliveryId, originalResult
-  );
+  // Simulate a device remaining offline past the old 24h result TTL.
+  // The original effect happened once, long before the eventual reconnect.
+  await new RelayResultStore(path.join(stateDir, 'relay-outbox'), {
+    clock: () => new Date('2026-09-01T00:00:00.000Z')
+  }).put(device.deviceId, 3135, deliveryId, originalResult);
   let localMutations = 0;
   const localBase = await listen(t, async (_req, res) => {
     localMutations++;
