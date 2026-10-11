@@ -5,11 +5,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const actualHost = os.hostname().toUpperCase();
-assert.equal(actualHost, 'LAPTOP-GKKTT227',
-  'This audit is reserved for LAPTOP-GKKTT227; refusing to run on another machine.');
+const ciSyntheticOnly = process.env.GITHUB_ACTIONS === 'true'
+  && process.env.MECORD_VISUAL_CI_SYNTHETIC === '1';
+if (!ciSyntheticOnly) assert.equal(actualHost, 'LAPTOP-GKKTT227',
+  'Physical audit reserved for LAPTOP-GKKTT227; CI synthetic run does not certify the laptop.');
 
 const root = process.cwd();
 const uiDir = path.join(root, 'apps', 'control-center', 'src');
@@ -32,7 +35,9 @@ const html = shell
 
 let chromium;
 try {
-  ({ chromium } = await import('playwright'));
+  ({ chromium } = process.env.MECORD_VISUAL_PLAYWRIGHT_PATH
+    ? await import(pathToFileURL(process.env.MECORD_VISUAL_PLAYWRIGHT_PATH).href)
+    : await import('playwright'));
 } catch {
   throw new Error('Playwright is not installed in this audit checkout. Install playwright in an isolated test environment before running.');
 }
@@ -55,7 +60,7 @@ const tabs = ['tasks', 'approvals', 'recovery', 'onboarding', 'activity', 'devic
   'policies', 'knowledge', 'diagnostics', 'teams', 'studio', 'desired', 'goals'];
 const browser = await chromium.launch({
   executablePath: browserPath,
-  headless: false,
+  headless: ciSyntheticOnly,
   args: ['--no-first-run', '--no-default-browser-check', '--disable-background-networking']
 });
 const results = [];
@@ -131,7 +136,9 @@ try {
 
 const report = {
   hostname: actualHost, sourceCommit, timestamp: new Date().toISOString(),
-  suite: 'headed synthetic Control Center source UI; no live account, runtime or hosted relay',
+  suite: ciSyntheticOnly
+    ? 'HEADLESS CI synthetic Control Center UI; NOT GKKTT227 physical visual certification'
+    : 'headed GKKTT227 synthetic Control Center UI; not live integration or hosted relay',
   browserExecutable: browserPath, outputDirectory: output,
   counts: { viewports: viewports.length, expectedTabChecks: tabs.length * viewports.length,
     passingTabChecks: results.filter(r => r.type === 'tab' && r.passed).length,
