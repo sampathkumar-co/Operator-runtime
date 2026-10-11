@@ -38,7 +38,7 @@ test('All Control Center tab buttons target present panel IDs with exactly one i
 
 test('Control Center tabs use roving keyboard focus and labelled panels', async () => {
   const script = await fs.readFile(path.join(ui, 'app.js'), 'utf8');
-  const tabs = [...html.matchAll(/<button\\b[^>]*role="tab"[^>]*data-tab="([^"]+)"[^>]*>/g)];
+  const tabs = [...html.matchAll(/<button\b[^>]*role="tab"[^>]*data-tab="([^"]+)"[^>]*>/g)];
   const panels = [...html.matchAll(/<div id="([^"]+)" class="panelBody tabPage[^"]*"[^>]*>/g)];
   assert.equal(tabs.length, 13);
   assert.equal(panels.length, 13);
