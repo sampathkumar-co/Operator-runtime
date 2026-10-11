@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -77,4 +79,34 @@ test('independent emergency halt vs issuance cannot admit active authority after
     await assert.rejects(reopened().issue(input('agent:after-halt-'+iteration)),
       (e:any)=>e?.code==='ENTERPRISE_EMERGENCY_HALTED');
   }
+});
+
+test('distinct OS writer processes commit exact shared authority without losing leases', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-enterprise-process-collision-'));
+  t.after(() => fs.rm(dir, { recursive:true, force:true }));
+  const worker = fileURLToPath(new URL('./fixtures/enterprise-authority-writer-worker.mjs', import.meta.url));
+  const children = Array.from({length:3},(_,i)=>spawn(process.execPath,
+    ['--experimental-strip-types', worker, dir, 'agent:os-writer-'+i, '4'],
+    {stdio:['ignore','pipe','pipe'], windowsHide:true}));
+  t.after(() => { for (const child of children) if(child.exitCode===null && child.signalCode===null) child.kill('SIGKILL'); });
+  const results = await Promise.all(children.map((child,i)=>new Promise<string>((resolve,reject)=>{
+    let output='',error='';
+    const timer=setTimeout(()=>{child.kill('SIGKILL'); reject(new Error('OS worker '+i+' timed out: '+error));},20_000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data',piece=>{output+=String(piece);});
+    child.stderr.on('data',piece=>{error+=String(piece);});
+    child.once('error',e=>{clearTimeout(timer);reject(e);});
+    child.once('exit',(code,signal)=>{
+      clearTimeout(timer);
+      if(code!==0)reject(new Error('OS worker '+i+' exited '+code+'/'+signal+': '+error));
+      else resolve(output);
+    });
+  })));
+  for(let i=0;i<results.length;i++)assert.match(results[i]!,new RegExp('COMPLETE:agent:os-writer-'+i+':4'));
+  const state = await new EnterpriseAuthorityLeaseStore(dir).list();
+  assert.equal(state.length,12, 'separate processes must preserve every independent lease');
+  assert.equal(new Set(state.map(item=>item.id)).size,12);
+  assert.equal(new Set(state.map(item=>item.principalId)).size,12);
+  assert.ok(state.every(item=>item.state==='ACTIVE'));
 });
