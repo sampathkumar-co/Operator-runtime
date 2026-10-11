@@ -30,6 +30,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 
 - [x] **P0 #157 17-store selected durable writer census and physical single-host regressions:** see [writer classification and 26-suite evidence](P0_DURABLE_WRITER_CENSUS_2026-10-11.md). Priority store entry paths inspected for shared locks, process-bound leases and CAS; 174/178 writer tests passed (4 skipped), 108/109 crash/CAS/recovery tests passed (1 skip), 15/15 repeated Windows containment checks passed. **#157 remains open until all externally deployed writers and trust-domain boundaries are certified.**
 
+- [x] **P0 #151 production startup trust composition (software):** [PR #305](https://github.com/sampathkumar-co/Operator-runtime/pull/305) adds opt-in fail-closed live construction of an Ed25519-signed provider adjudicator, request-bound independent HTTPS reviewer and separately hosted high-water CAS transport; incomplete config, local stored secrets, untrusted network responses and unverified review scopes are denied. [Deployment contract](QUARANTINE_PRODUCTION_TRUST_COMPOSITION.md). **Real independent service provisioning, provider signer, operator permissions, external backup-domain attestation, terminal provider effect and live acceptance are NOT done; #151 remains OPEN until that infrastructure is actually verified.**
+
 ## B. Highest-priority release security and reliability gates
 
 - [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
