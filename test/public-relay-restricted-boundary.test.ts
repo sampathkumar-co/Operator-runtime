@@ -182,17 +182,36 @@ for (const receiptState of ['missing', 'processing', 'revoked'] as const) {
     allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
   });
   const running = runner.run();
-  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay read recovery ACK timed out')), 12_000))]);
-  runner.stop();
-  await running;
-  assert.equal(localHits, receiptState === 'revoked' ? 0 : 1,
-    'revoked authority cannot reach even a read-only local provider');
-  assert.equal(resultBodies.length, 1);
   if (receiptState === 'revoked') {
-    assert.equal(resultBodies[0]!.result?.error?.code, 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
-  } else {
-    assert.equal(resultBodies[0]!.result?.ok, true);
+    // An unconfirmed hosted generation fails closed. No result is submitted,
+    // the local read is never executed and the original cursor is preserved.
+    try {
+      await assert.rejects(running, (error: any) =>
+        error?.code === 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+    } finally {
+      runner.stop();
+    }
+    assert.equal(localHits, 0);
+    assert.equal(resultBodies.length, 0);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), {
+      version: 1, lastAckedServerSeq: 0,
+      processing: { seq: 1, id: deliveryId, startedAt: '2026-09-22T04:56:29.297Z' }
+    });
+    return;
   }
+  let watchdog: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([acked, new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('relay read recovery ACK timed out')), 12_000);
+    })]);
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    runner.stop();
+    await running;
+  }
+  assert.equal(localHits, 1);
+  assert.equal(resultBodies.length, 1);
+  assert.equal(resultBodies[0]!.result?.ok, true);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
   });
 }
