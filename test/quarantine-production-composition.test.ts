@@ -86,6 +86,28 @@ test('independent anchor must be reachable and return authentic non-rewinding ge
     (e: any) => e?.code === 'QUARANTINE_TRUST_UNAVAILABLE');
 });
 
+test('external trust responses are bounded by actual streamed bytes even with no or false Content-Length', async t => {
+  const x = await fixture(t);
+  for (const advertisedLength of [undefined, '8']) {
+    let readCount = 0;
+    const fetcher = (async (_url: URL) => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        readCount += 1;
+        controller.enqueue(new TextEncoder().encode(' '.repeat(5000)));
+        if (readCount >= 4) controller.close();
+      }
+    }), { status: 200, headers: {
+      'content-type': 'application/json',
+      ...(advertisedLength ? { 'content-length': advertisedLength } : {})
+    } })) as typeof fetch;
+    await assert.rejects(
+      configureQuarantineProduction(x.stateDir, x.env, fetcher),
+      (error: any) => error?.code === 'QUARANTINE_TRUST_INVALID'
+    );
+    assert.ok(readCount <= 2, 'stop reading as soon as 8192 actual bytes are exceeded');
+  }
+});
+
 test('reviewer verifies the exact request-bound human session via independent HTTPS and does not accept body identity', async t => {
   const x = await fixture(t);
   const seen: Array<{ url: string; auth: string | null; body?: any }> = [];
