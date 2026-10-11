@@ -12,7 +12,7 @@ import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { RelayResultStore } from '../src/core/relay-result-store.ts';
 import type { RelaySocketLike } from '../src/core/relay-client.ts';
 
-async function listen(t: test.TestContext, handler: http.RequestListener): Promise<string> {
+async function listen(t: test.TestContext, handler: http.RequestListener, authorityStatus = 200): Promise<string> {
   // Transport/fault-injection suites below use a scripted relay socket and an
   // in-memory HTTP result server, not the real RelayResultService. Supply the
   // newly required fresh-authority RPC contract here without consuming the
@@ -20,6 +20,11 @@ async function listen(t: test.TestContext, handler: http.RequestListener): Promi
   // decisions are tested using actual session+store state in result-service.test.
   const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/v1/device-authority/check') {
+      if (authorityStatus !== 200) {
+        res.writeHead(authorityStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: { code: 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED' } }));
+        return;
+      }
       try {
         const body = JSON.parse(await readBody(req));
         if (!Number.isSafeInteger(body.seq) || body.seq < 1 ||
@@ -125,7 +130,7 @@ test('uncertain relay recovery retries only a validated read action when no stor
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task', payload: { task: { operation: 'resume', taskId, approvedActionId: 'forbidden' } } }), false);
 });
 
-for (const receiptState of ['missing', 'processing'] as const) {
+for (const receiptState of ['missing', 'processing', 'revoked'] as const) {
   test(`crash-window read recovery retries a ${receiptState} receipt only through fresh authority checks`, { timeout: 20_000 }, async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-read-recovery-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
@@ -141,7 +146,7 @@ for (const receiptState of ['missing', 'processing'] as const) {
   const localBase = await listen(t, async (req, res) => {
     await readBody(req);
     if (req.url === '/v1/action-receipt') {
-      if (receiptState === 'processing') {
+      if (receiptState !== 'missing') {
         res.writeHead(202, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, receipt: { status: 'processing' } }));
       } else {
@@ -154,11 +159,12 @@ for (const receiptState of ['missing', 'processing'] as const) {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, capability: 'git.diff', provider: 'git.native', output: { files: [] }, evidence: [], durationMs: 1 }));
   });
+  const resultBodies: any[] = [];
   const resultBase = await listen(t, async (req, res) => {
-    await readBody(req);
+    resultBodies.push(JSON.parse(await readBody(req)));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
-  });
+  }, receiptState === 'revoked' ? 403 : 200);
   const sessionTokenFile = path.join(stateDir, 'relay-session.token');
   await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
   const delivery = {
@@ -179,7 +185,14 @@ for (const receiptState of ['missing', 'processing'] as const) {
   await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay read recovery ACK timed out')), 12_000))]);
   runner.stop();
   await running;
-  assert.equal(localHits, 1);
+  assert.equal(localHits, receiptState === 'revoked' ? 0 : 1,
+    'revoked authority cannot reach even a read-only local provider');
+  assert.equal(resultBodies.length, 1);
+  if (receiptState === 'revoked') {
+    assert.equal(resultBodies[0]!.result?.error?.code, 'RELAY_EXECUTION_AUTHORITY_UNCONFIRMED');
+  } else {
+    assert.equal(resultBodies[0]!.result?.ok, true);
+  }
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
   });
 }
