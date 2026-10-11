@@ -46,6 +46,10 @@ if (!saved || !saved.result || saved.consumedAt || saved.seq !== EXPECTED_SEQ ||
     !/^[0-9a-f]{64}$/.test(saved.resultSha256)) {
   fail('RECOVERY_UNACKNOWLEDGED_3135_RECEIPT_REQUIRED');
 }
+if (typeof saved.result.capability !== 'string' ||
+    !/^[a-z][a-z0-9.-]{1,80}$/.test(saved.result.capability)) {
+  fail('RECOVERY_SAVED_CAPABILITY_INVALID');
+}
 const expectedId = saved.deliveryId;
 const protectedStoreLock = await acquireLocalAgentStateInstanceLock(stateDir);
 const protector = new WindowsDpapiProtector(dpapiHelper);
@@ -72,7 +76,9 @@ try {
   client = new RelayClient({
     stateDir, url: RELAY_WS, identity,
     getSessionToken: () => credential.forConnection(),
-    supportedCapabilities: [], // recovery-only session cannot claim ability to execute new tasks
+    // Advertise only the existing saved delivery's capability to verify the
+    // immutable hosted authority binding. No fresh work can execute.
+    supportedCapabilities: [saved.result.capability],
     maxConcurrentReadDeliveries: 1,
     singleDeliveryRecovery: {
       previousSeq: EXPECTED_PREVIOUS_SEQ, seq: EXPECTED_SEQ, deliveryId: expectedId
