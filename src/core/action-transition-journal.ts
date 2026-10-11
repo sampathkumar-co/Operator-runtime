@@ -8,6 +8,7 @@ import { withDurableStateLock } from './durable-state-lock.ts';
 import { canonicalResourceKeys } from './resource-identity.ts';
 import type { ActionRequest, ActionResult, IntentBinding, ProviderReconciliationResult } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
+import { DeviceIdentityStore } from './device-identity.ts';
 import { kernelVerificationDigest, verifyActionOutcome } from './action-verification.ts';
 
 export type ActionJournalState =
@@ -217,7 +218,7 @@ export class ActionTransitionJournal {
     generation: number;
     transitionsDigest: string;
   }): Promise<ActionJournalEntry> {
-    return await this.#mutate((state, now) => {
+    return await this.#mutate(async (state, now) => {
       const entry = findEntry(state, input.actionId);
       if (entry.actionDigest !== input.actionDigest || entry.generation !== input.generation ||
           entry.risk !== 'external') {
@@ -230,6 +231,51 @@ export class ActionTransitionJournal {
           digest(entry.transitions) !== input.transitionsDigest) {
         throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
           'Operator recovery requires the exact original policy deferral without any provider dispatch.');
+      }
+      // The public method cannot itself grant recovery authority. Validate
+      // the precommitted original-device Ed25519 operator decision INSIDE the
+      // same journal lock as markDispatched(), independent of the caller.
+      const stateRoot = path.dirname(this.#file);
+      let ledger: unknown;
+      try {
+        ledger = JSON.parse(await readDurableStateText(
+          path.join(stateRoot, 'operator-pre-dispatch-adjudications.json'), {
+            maxBytes: 256 * 1024,
+            errorCode: 'OPERATOR_RECOVERY_PROOF_INVALID',
+            invalidMessage: 'Signed operator recovery decisions could not be verified.'
+          }));
+      } catch {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_REQUIRED',
+          'The signed local-operator recovery decision must precede journal fencing.');
+      }
+      const raw = ledger as { version?: unknown; decisions?: unknown };
+      if (!raw || raw.version !== 1 || !Array.isArray(raw.decisions)) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery ledger shape is invalid.');
+      }
+      const matches = (raw.decisions as any[]).filter((item) => item?.actionId === entry.actionId);
+      if (matches.length !== 1) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_REQUIRED', 'One exact signed operator decision is required.');
+      }
+      const decision = matches[0] as Record<string, unknown>;
+      const device = new DeviceIdentityStore(stateRoot);
+      const existing = await device.loadExisting();
+      if (!existing || decision.deviceId !== existing.deviceId ||
+          decision.deviceFingerprint !== existing.fingerprint ||
+          decision.actionDigest !== entry.actionDigest ||
+          decision.transitionsDigest !== input.transitionsDigest ||
+          decision.journalGeneration !== entry.generation ||
+          decision.operatorAttestation !== 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED' ||
+          !Number.isSafeInteger(decision.epoch) || (decision.epoch as number) < 1 ||
+          typeof decision.caseDigest !== 'string' || !/^[a-f0-9]{64}$/.test(decision.caseDigest) ||
+          typeof decision.signature !== 'string') {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision is not bound to this device, action and generation.');
+      }
+      const { signature, ...unsigned } = decision;
+      let valid = false;
+      try { valid = await device.verify(Buffer.from(canonicalJson(unsigned)), signature as string); }
+      catch { /* no signature errors may authorize journal mutation */ }
+      if (!valid) {
+        throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision signature is not authentic.');
       }
       applyTransition(entry, 'INTERRUPTED', now, {
         provider: 'agent-kernel',

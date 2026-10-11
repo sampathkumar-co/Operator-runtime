@@ -1,20 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { OperatorPreDispatchAdjudicator } from '../apps/local-agent/src/operator-pre-dispatch-adjudication.ts';
 import { ActionTransitionJournal } from '../src/core/action-transition-journal.ts';
-function signer() {
-  const {publicKey,privateKey} = crypto.generateKeyPairSync('ed25519');
-  const deviceId = '22222222-2222-4222-8222-222222222222';
-  const fingerprint = 'a'.repeat(64);
+import { DeviceIdentityStore } from '../src/core/device-identity.ts';
+async function signer(state: string) {
+  // Test-only reversible protector makes a real existing identity without
+  // depending on physical Windows secrets or provisioning new identities.
+  const secretProtector = {
+    scheme: 'windows-dpapi-current-user' as const,
+    async protect(b:Buffer) { return Buffer.from(b); },
+    async unprotect(b:Buffer) { return Buffer.from(b); }
+  };
+  const identity=new DeviceIdentityStore(state,{secretProtector});
+  await identity.loadOrCreate('operator-test-device');
+  return identity;
+}
+function foreignSigner() {
   return {
-    async loadExisting() { return { deviceId, fingerprint, deviceName:'test', createdAt:new Date(0).toISOString(), publicKeyPem:'' }; },
-    async sign(payload: Uint8Array) { return crypto.sign(null,payload,privateKey).toString('base64url'); },
-    async verify(payload: Uint8Array,signature:string) { return crypto.verify(null,payload,publicKey,Buffer.from(signature,'base64url')); }
+    async loadExisting() { return {deviceId:'33333333-3333-4333-8333-333333333333',
+      fingerprint:'foreign',deviceName:'foreign',createdAt:new Date(0).toISOString(),publicKeyPem:''}; },
+    async sign() { throw new Error('foreign signer unavailable'); },
+    async verify() { return false; }
   };
 }
 const action = {id:'mcp-legacy-policy-defer', capability:'app.operate', risk:'external' as const,
@@ -33,7 +43,7 @@ async function setup(t:test.TestContext,provider='policy') {
   const data=JSON.parse(await fs.readFile(p,'utf8'));
   delete data.records[0].ownerProcess;
   await fs.writeFile(p,JSON.stringify(data));
-  return {state,journal,identity:signer()};
+  return {state,journal,identity:await signer(state)};
 }
 
 test('operator signs exact policy deferral, terminally fences it, and replays decision idempotently',async t=>{
@@ -50,6 +60,15 @@ test('operator signs exact policy deferral, terminally fences it, and replays de
   const ledger=JSON.parse(await fs.readFile(path.join(state,'operator-pre-dispatch-adjudications.json'),'utf8'));
   assert.equal(ledger.decisions.length,1);
   assert.equal(ledger.decisions[0].actionDigest,c.actionDigest);
+  // The relay's original action envelope can reconcile a negative, no-effect
+  // receipt after the signed journal fence without invoking any provider.
+  const repaired = await new LocalActionExecutionStore(state).reconcileWithKernel(action,undefined,journal);
+  assert.equal(repaired.status,'completed');
+  if (repaired.status === 'completed') {
+    assert.equal(repaired.result.ok,false);
+    assert.equal(repaired.result.error?.sideEffectState,'none');
+    assert.equal(repaired.result.error?.code,'ACTION_EXECUTION_INTERRUPTED_BEFORE_DISPATCH');
+  }
 });
 test('a prior provider dispatch wins over stale operator case review',async t=>{
   const {state,journal,identity}=await setup(t);
@@ -77,7 +96,7 @@ test('operator signed history rejects tampering and a foreign signing identity',
   const op=new OperatorPreDispatchAdjudicator(state,{signer:identity});
   const c=await op.inspect(action.id);
   await op.adjudicate({actionId:action.id,caseDigest:c.caseDigest,confirmation:'AUTHORIZE-NO-REPLAY:'+c.caseDigest,ownerAttestation:'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED'});
-  await assert.rejects(new OperatorPreDispatchAdjudicator(state,{signer:signer()}).inspect(action.id),denied);
+  await assert.rejects(new OperatorPreDispatchAdjudicator(state,{signer:foreignSigner()}).inspect(action.id),denied);
   const file=path.join(state,'operator-pre-dispatch-adjudications.json');
   const ledger=JSON.parse(await fs.readFile(file,'utf8'));
   ledger.decisions[0].receiptAuthorityHash='f'.repeat(64);
@@ -94,4 +113,14 @@ test('signed operator recovery versus provider dispatch has one winner under the
   ]);
   assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
   assert.ok(['INTERRUPTED','DISPATCHED'].includes((await journal.inspect(action.id)).state));
+});
+
+test('direct journal operator recovery without a prior signed ledger is forbidden',async t=>{
+  const {state,journal,identity}=await setup(t);
+  const c=await new OperatorPreDispatchAdjudicator(state,{signer:identity}).inspect(action.id);
+  await assert.rejects(journal.interruptOperatorReviewedPolicyDeferral({
+    actionId:action.id,actionDigest:c.actionDigest,
+    generation:c.journalGeneration,transitionsDigest:c.transitionsDigest
+  }),(e:any)=>e?.code==='OPERATOR_RECOVERY_PROOF_REQUIRED');
+  assert.equal((await journal.inspect(action.id)).state,'DEFERRED');
 });
