@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type http from 'node:http';
@@ -185,6 +186,21 @@ export async function configureQuarantineProduction(
     if (data.authorized !== true || typeof data.operatorId !== 'string' ||
         !OPERATOR.test(data.operatorId)) {
       throw denied('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Independent operator verification did not grant review authority.');
+    }
+    if (payload.kind === 'request-bound-review') {
+      const expected = payload.scope as ReviewScope;
+      const verified = data.scope as Partial<ReviewScope> | undefined;
+      if (!verified || verified.programId !== expected.programId ||
+          verified.targetKey !== expected.targetKey || verified.returnedMissionId !== expected.returnedMissionId) {
+        throw denied('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Reviewer did not attest the exact requested scope.');
+      }
+    } else if (payload.kind === 'provider-claim-authorization') {
+      const digest = crypto.createHash('sha256').update(JSON.stringify(payload.claim)).digest('hex');
+      if (data.claimDigest !== digest) {
+        throw denied('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Reviewer did not attest the exact provider-origin claim.');
+      }
+    } else {
+      throw denied('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Unsupported independent reviewer decision.');
     }
     return data.operatorId;
   };
