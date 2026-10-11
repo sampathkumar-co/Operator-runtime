@@ -1180,23 +1180,23 @@ test('single-delivery recovery stops after one proven hosted ACK and refuses sub
   let acknowledged = 0;
   socket.onSend = (frame) => {
     if (frame.type !== 'hello') return;
-    const session = modernSession(frame, { connectionId: 'recovery-once', capabilities: [], resumeFromSeq: 3134, readConcurrency: 1 });
+    const session = modernSession(frame, { connectionId: 'recovery-once', capabilities: ['app.operate'], resumeFromSeq: 3134, readConcurrency: 1 });
     queueMicrotask(() => {
       socket.server(session.welcome);
       socket.server({
         type: 'delivery', seq: 3135, id: deliveryId, kind: 'action',
-        ...session.delivery([]), payload: session.payload({ action: { capability: 'app.operate' } })
+        ...session.delivery(['app.operate']), payload: session.payload({ action: { capability: 'app.operate' } })
       });
       socket.server({
         type: 'delivery', seq: 3136, id: extraId, kind: 'action',
-        ...session.delivery([]), payload: session.payload({ action: { capability: 'app.operate' } })
+        ...session.delivery(['app.operate']), payload: session.payload({ action: { capability: 'app.operate' } })
       });
     });
   };
   const client = new RelayClient({
     stateDir: state, url: 'ws://127.0.0.1:9976/device', allowLoopbackInsecureWs: true,
     identity, socketFactory: () => { queueMicrotask(() => socket.open()); return socket; },
-    supportedCapabilities: [], maxConcurrentReadDeliveries: 1,
+    supportedCapabilities: ['app.operate'], maxConcurrentReadDeliveries: 1,
     singleDeliveryRecovery: { previousSeq: 3134, seq: 3135, deliveryId },
     getSessionToken: async () => 'mock-session-token',
     onDelivery: async delivery => {
