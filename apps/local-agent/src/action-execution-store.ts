@@ -134,6 +134,17 @@ export class LocalActionExecutionStore {
     });
   }
 
+  /** Read-only, metadata-only local operator review. Not wired to MCP/relay. */
+  async inspectOperatorReceipt(actionId: string): Promise<LocalActionExecutionRecord | null> {
+    if (typeof actionId !== 'string' || actionId.length < 1 || actionId.length > 256) {
+      throw new OperatorError('ACTION_EXECUTION_ACTION_MISMATCH', 'Invalid operator recovery action identity.');
+    }
+    await this.#queue;
+    const state = await this.#read();
+    const found = state.records.find((entry) => entry.actionId === actionId);
+    return found ? clone(found) : null;
+  }
+
   async lookup(action: ActionRequest, authority?: ApprovalAuthorityContext): Promise<
     | { status: 'missing' }
     | { status: 'processing'; record: LocalActionExecutionRecord }

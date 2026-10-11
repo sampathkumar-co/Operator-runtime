@@ -205,6 +205,40 @@ export class ActionTransitionJournal {
     });
   }
 
+  /**
+   * Trusted local-operator repair for an original policy deferral whose legacy
+   * receipt cannot prove the prior owner's host. Caller MUST independently
+   * authorize the exact receipt/journal digest and persist a signed recovery
+   * decision before invoking this method. Never exposed to relay/MCP callers.
+   */
+  async interruptOperatorReviewedPolicyDeferral(input: {
+    actionId: string;
+    actionDigest: string;
+    generation: number;
+    transitionsDigest: string;
+  }): Promise<ActionJournalEntry> {
+    return await this.#mutate((state, now) => {
+      const entry = findEntry(state, input.actionId);
+      if (entry.actionDigest !== input.actionDigest || entry.generation !== input.generation ||
+          entry.risk !== 'external') {
+        throw new OperatorError('ACTION_JOURNAL_ID_CONFLICT', 'Operator recovery identity or generation conflicts.');
+      }
+      if (entry.state !== 'DEFERRED' || entry.generation !== 1 || entry.transitions.length !== 2 ||
+          entry.transitions[0]?.state !== 'PREPARED' ||
+          entry.transitions[1]?.state !== 'DEFERRED' || entry.transitions[1]?.provider !== 'policy' ||
+          !entry.transitions[1]?.resultDigest ||
+          digest(entry.transitions) !== input.transitionsDigest) {
+        throw new OperatorError('ACTION_JOURNAL_PRE_DISPATCH_UNPROVEN',
+          'Operator recovery requires the exact original policy deferral without any provider dispatch.');
+      }
+      applyTransition(entry, 'INTERRUPTED', now, {
+        provider: 'agent-kernel',
+        resultDigest: digest({ actionId: entry.actionId, actionDigest: entry.actionDigest, kind: 'pre_dispatch_interrupted' })
+      });
+      return entry;
+    });
+  }
+
   async markDispatched(actionId: string, provider?: string): Promise<ActionJournalEntry> {
     return await this.#transition(actionId, 'DISPATCHED', provider ? { provider: bounded(provider, 256, 'provider') } : {});
   }
