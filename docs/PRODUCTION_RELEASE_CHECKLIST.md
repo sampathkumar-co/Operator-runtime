@@ -23,6 +23,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 
 - [x] **Single-host physical reservation crash at allocation→confirm (#146):** on original Sampath Windows, a distinct Node process persisted an actual scheduler reservation under a prepared exact-ID/digest compensation, then was killed with OS `SIGKILL` before confirmation. Independent restarted recovery released only the proven allocation, emptied journal, rejected deterministic request-ID replay, and did not create a mission. New test `digital-operations.test.ts` + child worker fixture; target suite 76 pass / 1 platform skip. **Does not certify cross-host recovery or independently deployed restore authority.**
 
+- [x] **P0 #151 fail-closed local review API:** `POST /v1/organizations/:id/quarantines/review` requires agent bearer, separate recovery secret, independently authenticated scoped reviewer callback, and the existing coordinator's verified provider-signed claim; rejects body-injected operator IDs and relay-originated calls. 13/13 API and signed-adjudication tests pass. [Security contract](QUARANTINE_REVIEW_API_SECURITY.md). **Actual production signer, reviewer service, external CAS high-water anchor and verified-owned terminal provider effect remain unconfigured: issue #151 still OPEN.**
+
 ## B. Highest-priority release security and reliability gates
 
 - [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
