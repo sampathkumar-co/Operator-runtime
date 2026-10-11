@@ -120,8 +120,8 @@ export function createLocalAgentServer(options: {
   devicePool?: DevicePoolScheduler;
   optimizer?: ExecutionOptimizerStore;
   organizations?: OrganizationCoordinator;
-  /** Independent trusted operator identity/permission verifier; never derive this from the HTTP request body. */
-  quarantineReviewAuthorization?: (input: { programId: string; targetKey: string; returnedMissionId: string }) => Promise<{ operatorId: string }>;
+  /** Independent trusted operator verifier; validate a fresh request-bound human session, never body-claimed operatorId or bearer token alone. */
+  quarantineReviewAuthorization?: (input: { programId: string; targetKey: string; returnedMissionId: string }, request: http.IncomingMessage) => Promise<{ operatorId: string }>;
   operations?: DigitalOperationsLayer;
   events?: DurableEventRuntime;
   perception?: PerceptionGraphStore;
@@ -1508,7 +1508,7 @@ export function createLocalAgentServer(options: {
         const programId = quarantineReviewRoute[1]!;
         const targetKey = body.targetKey;
         const returnedMissionId = body.returnedMissionId;
-        const authorized = await options.quarantineReviewAuthorization({ programId, targetKey, returnedMissionId });
+        const authorized = await options.quarantineReviewAuthorization({ programId, targetKey, returnedMissionId }, req);
         if (!authorized || typeof authorized.operatorId !== 'string' || !authorized.operatorId.trim()) {
           throw new OperatorError('QUARANTINE_OPERATOR_UNAUTHORIZED', 'Independent operator identity has not been verified.');
         }
