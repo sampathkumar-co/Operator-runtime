@@ -9,6 +9,7 @@ import { canonicalResourceKeys } from './resource-identity.ts';
 import type { ActionRequest, ActionResult, IntentBinding, ProviderReconciliationResult } from './types.ts';
 import { validIntentBinding } from './intent-registry.ts';
 import { DeviceIdentityStore } from './device-identity.ts';
+import { observeProcessInstance } from './process-instance.ts';
 import { kernelVerificationDigest, verifyActionOutcome } from './action-verification.ts';
 
 export type ActionJournalState =
@@ -277,7 +278,7 @@ export class ActionTransitionJournal {
       if (!valid) {
         throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Operator recovery decision signature is not authentic.');
       }
-      // Verify the signed authority and legacy owner against the ACTUAL
+      // Verify signed authority and exact owner identity against the ACTUAL
       // durable receipt, not merely a caller's claimed action hash. The
       // provider dispatch lock remains held while this comparison occurs.
       let receipts: any;
@@ -297,11 +298,28 @@ export class ActionTransitionJournal {
         : [];
       const receipt = matching.length === 1 ? matching[0] : null;
       if (!receipt || receipt.status !== 'processing' || receipt.risk !== 'external' ||
-          receipt.ownerProcess !== undefined || receipt.ownerId !== decision.receiptOwnerId ||
+          receipt.ownerId !== decision.receiptOwnerId ||
           receipt.actionHash !== entry.actionDigest ||
           receipt.authorityHash !== decision.receiptAuthorityHash) {
         throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
           'Signed operator proof no longer matches the original pending receipt and authority.');
+      }
+      // A Windows FILETIME process identity is not transferable host proof.
+      // The signed original-device operator attestation is mandatory, and
+      // this exact PID must independently be observed dead at fence commit.
+      const ownerProcess = receipt.ownerProcess;
+      if (ownerProcess === undefined) {
+        if (decision.receiptOwnerProcessDigest !== undefined) {
+          throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID', 'Owner identity changed after signed operator review.');
+        }
+      } else {
+        if (process.platform !== 'win32' || !Number.isSafeInteger(ownerProcess.pid) || ownerProcess.pid < 1 ||
+            typeof ownerProcess.started !== 'string' || !/^windows-filetime:[0-9]{15,20}$/.test(ownerProcess.started) ||
+            decision.receiptOwnerProcessDigest !== digest(ownerProcess) ||
+            (await observeProcessInstance(ownerProcess.pid)).status !== 'dead') {
+          throw new OperatorError('OPERATOR_RECOVERY_PROOF_INVALID',
+            'Signed Windows owner identity changed or its original process is not proven stopped.');
+        }
       }
       applyTransition(entry, 'INTERRUPTED', now, {
         provider: 'agent-kernel',

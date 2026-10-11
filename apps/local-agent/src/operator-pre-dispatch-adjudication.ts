@@ -6,6 +6,7 @@ import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
 import { ActionTransitionJournal } from '../../../src/core/action-transition-journal.ts';
+import { observeProcessInstance } from '../../../src/core/process-instance.ts';
 import { LocalActionExecutionStore } from './action-execution-store.ts';
 
 const MAX_BYTES = 256 * 1024;
@@ -19,7 +20,7 @@ const denied = (reason: string) => new OperatorError('OPERATOR_RECOVERY_DENIED',
 type DeviceSigner = Pick<DeviceIdentityStore, 'loadExisting' | 'sign' | 'verify'>;
 type SignedDecision = {
   version: 1; epoch: number; actionId: string; actionDigest: string;
-  receiptAuthorityHash: string; receiptOwnerId: string; caseDigest: string;
+  receiptAuthorityHash: string; receiptOwnerId: string; receiptOwnerProcessDigest?: string; caseDigest: string;
   journalGeneration: number; transitionsDigest: string; deviceId: string;
   deviceFingerprint: string; previousDigest: string; adjudicatedAt: string;
   operatorAttestation: string;
@@ -28,7 +29,7 @@ type SignedDecision = {
 type Ledger = { version: 1; decisions: SignedDecision[] };
 export type OperatorRecoveryCandidate = {
   actionId: string; actionDigest: string; receiptAuthorityHash: string;
-  receiptOwnerId: string; journalGeneration: number; transitionsDigest: string;
+  receiptOwnerId: string; receiptOwnerProcessDigest?: string; journalGeneration: number; transitionsDigest: string;
   recoveryEpoch: number; deviceId: string; deviceFingerprint: string;
   caseDigest: string;
 };
@@ -89,7 +90,9 @@ export class OperatorPreDispatchAdjudicator {
         version: 1 as const, epoch: candidate.recoveryEpoch,
         actionId: candidate.actionId, actionDigest: candidate.actionDigest,
         receiptAuthorityHash: candidate.receiptAuthorityHash,
-        receiptOwnerId: candidate.receiptOwnerId, caseDigest: candidate.caseDigest,
+        receiptOwnerId: candidate.receiptOwnerId,
+        ...(candidate.receiptOwnerProcessDigest ? { receiptOwnerProcessDigest: candidate.receiptOwnerProcessDigest } : {}),
+        caseDigest: candidate.caseDigest,
         journalGeneration: candidate.journalGeneration,
         transitionsDigest: candidate.transitionsDigest, deviceId: device.deviceId,
         deviceFingerprint: device.fingerprint,
@@ -121,21 +124,37 @@ export class OperatorPreDispatchAdjudicator {
   async #candidate(actionId: string, recoveryEpoch: number, device: NonNullable<Awaited<ReturnType<DeviceSigner['loadExisting']>>>): Promise<OperatorRecoveryCandidate> {
     const receipt = await this.#receipts.inspectOperatorReceipt(actionId);
     const journal = await this.#journal.inspect(actionId);
-    // Deliberately limited to the older UUID-only receipt class. A host-bound
-    // owner must be recovered through its own exact process identity proof.
+    // Original-device operator recovery supports the older UUID-only class
+    // and strictly validated Windows process identities. Windows filetime is
+    // NOT a transferable host proof: local operator attestation and the
+    // existing device signer remain mandatory. Refuse a live/unknown owner.
     if (!receipt || receipt.status !== 'processing' || receipt.risk !== 'external' ||
-        !receipt.ownerId || receipt.ownerProcess !== undefined ||
+        !receipt.ownerId ||
         receipt.actionHash !== journal.actionDigest || !validHash(receipt.authorityHash) ||
         journal.risk !== 'external' || journal.generation !== 1 || journal.state !== 'DEFERRED' ||
         journal.transitions.length !== 2 ||
         journal.transitions[0]?.state !== 'PREPARED' ||
         journal.transitions[1]?.state !== 'DEFERRED' ||
         journal.transitions[1]?.provider !== 'policy' || !validHash(journal.transitions[1]?.resultDigest)) {
-      throw denied('This action is not an exact original policy-deferred, legacy owner-only recovery candidate.');
+      throw denied('This action is not an exact original policy-deferred, never-dispatched recovery candidate.');
+    }
+    if (receipt.ownerProcess !== undefined) {
+      const owner = receipt.ownerProcess;
+      if (process.platform !== 'win32' || !Number.isSafeInteger(owner.pid) || owner.pid < 1 ||
+          !/^windows-filetime:[0-9]{15,20}$/.test(owner.started)) {
+        throw denied('Process-bound recovery requires the exact original Windows process identity.');
+      }
+      const observation = await observeProcessInstance(owner.pid);
+      // Never terminate a process here. Only a definite dead PID (on the
+      // operator-attested original host) permits a signed no-replay decision.
+      if (observation.status !== 'dead') {
+        throw denied('Original Windows owner is live or cannot be proven stopped; no recovery authorized.');
+      }
     }
     const base = {
       actionId, actionDigest: journal.actionDigest,
       receiptAuthorityHash: receipt.authorityHash, receiptOwnerId: receipt.ownerId,
+      ...(receipt.ownerProcess ? { receiptOwnerProcessDigest: hexDigest(receipt.ownerProcess) } : {}),
       journalGeneration: journal.generation,
       transitionsDigest: hexDigest(journal.transitions), recoveryEpoch,
       deviceId: device.deviceId, deviceFingerprint: device.fingerprint
@@ -164,7 +183,9 @@ export class OperatorPreDispatchAdjudicator {
       if (r.version !== 1 || r.epoch !== i + 1 || r.deviceId !== device.deviceId ||
           r.deviceFingerprint !== device.fingerprint || r.previousDigest !== previous ||
           !r.actionId || ids.has(r.actionId) || !validHash(r.actionDigest) ||
-          !validHash(r.receiptAuthorityHash) || !validHash(r.caseDigest) ||
+          !validHash(r.receiptAuthorityHash) ||
+          (r.receiptOwnerProcessDigest !== undefined && !validHash(r.receiptOwnerProcessDigest)) ||
+          !validHash(r.caseDigest) ||
           !validHash(r.transitionsDigest) || !r.receiptOwnerId ||
           r.journalGeneration !== 1 ||
           r.operatorAttestation !== 'I-CONFIRM-ORIGINAL-OWNER-STOPPED-AND-STATE-NOT-COPIED' ||
