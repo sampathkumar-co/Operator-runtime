@@ -41,6 +41,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 - [ ] Check clean checkout and pin exact PR/release SHA, Node/npm, browser and Windows versions; identify existing project Playwright configuration and local UI routes.
 - [ ] Run real **headed/visible Playwright** in an isolated browser profile against an explicitly authorized **local** Control Center app/test fixture, without changing external accounts or submitting live forms.
 - [ ] Capture Playwright trace, screenshots and video for navigation, login/session, onboarding, approval/recovery panels, tasks and browser/tab interactions **where implemented**, with browser console errors, request failures, and redaction of secrets.
+- [ ] **Responsive tab rail verification:** Source fix for 13-tab overflow committed as `f7cb724`, and new source regression `test/control-center-responsive-nav.test.ts` committed as `5f6900e`. Confirm the regression passes on the final branch and obtain GKKTT227 Playwright screenshots before treating this visual defect as fixed.
 - [ ] Test desktop/tablet/mobile viewports, zoom, keyboard navigation, WCAG-oriented accessibility scans, component visibility/occlusion, layouts and focus/scroll stability. Distinguish unavailable screens from failing screens.
 - [ ] Exercise synthetic negative/security paths: failed approvals, revoked access, stale identities, browser disconnect, rendering errors, and safe restart/recovery without side effects.
 - [ ] Measure Playwright workflow p50/p95/p99 across 30+ warm/cold runs where feasible and compare to the isolated Chrome CDP baseline; record model/relay/host latency **separately**.
@@ -64,6 +65,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 | 2026-10-11 | Added isolated Chrome benchmark script (commit `01d2e5a`) | Windows provider CDP benchmark completed | A completed; C Playwright audit remains open |
 | 2026-10-11 | Rechecked device connections for `LAPTOP-GKKTT227` | Historical device2 target offline; no target-machine execution possible | C connectivity remains open |
 | 2026-10-11 | Added machine-locked headed Playwright visual audit harness (commit `c4c6beb`) | GitHub source file committed, **not run** on GKKTT227; RDC connection still offline | C harness prepared; visual audit remains pending |
+| 2026-10-11 | Fixed source-level Control Center horizontal tab clipping (`f7cb724`) and added regression (`5f6900e`) | Source reviewed; exact-head CI/Playwright not yet confirmed | Responsive tab gate remains unchecked; GKKTT227 still offline |
+| 2026-10-11 | Rechecked previous checklist SHA `2500846` | All eight associated PR checks PASS (GitHub, including platform matrix) | Historic CI evidence updated; not final-head certification |
 | 2026-10-11 | Created this persistent checklist on integration branch | File committed and branch verified | Release HOLD unchanged |
 
 **Update rule:** after each code/document/test change, append a dated row, check off only independently evidenced steps, link the final artifact/CI run, and show the user the current checklist in the reply.
