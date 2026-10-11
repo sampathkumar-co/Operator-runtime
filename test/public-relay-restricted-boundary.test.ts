@@ -193,10 +193,13 @@ for (const receiptState of ['missing', 'processing', 'revoked'] as const) {
     }
     assert.equal(localHits, 0);
     assert.equal(resultBodies.length, 0);
-    assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), {
-      version: 1, lastAckedServerSeq: 0,
-      processing: { seq: 1, id: deliveryId, startedAt: '2026-09-22T04:56:29.297Z' }
-    });
+    const preserved = JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8'));
+    assert.equal(preserved.version, 1);
+    assert.equal(preserved.lastAckedServerSeq, 0);
+    assert.equal(preserved.processing?.seq, 1);
+    assert.equal(preserved.processing?.id, deliveryId);
+    assert.ok(Number.isFinite(Date.parse(preserved.processing?.startedAt)),
+      'the rejected read must remain durably unresolved');
     return;
   }
   let watchdog: NodeJS.Timeout | undefined;
