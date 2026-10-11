@@ -21,6 +21,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 - [x] **Sampath hosted Mecord browser workflow (synthetic):** one real Chromium intake → catalog search → cart → checkout → independently verified server receipt on `LAPTOP-MRNU23B2`; **1/1 passed**, 12 verified MCP browser interactions; connector action p50 371 ms, p95 397 ms, observed call round trip p50 4,055 ms, p95 5,239 ms. This is not an autonomous task success-rate estimate. [Evidence](BROWSER_WORKFLOW_SAMPATH_2026-10-11.md).
 - [x] **Sampath local full browser workflows:** **20/20** isolated real-Chrome/Playwright scenarios (server-backed independent state) passed, p50 491.74 ms/p95 558.16 ms. Trace, screenshot and report saved on laptop. This is local Playwright, not hosted Mecord or BrowserGym. [Evidence](BROWSER_WORKFLOW_SAMPATH_2026-10-11.md).
 
+- [x] **Single-host physical reservation crash at allocation→confirm (#146):** on original Sampath Windows, a distinct Node process persisted an actual scheduler reservation under a prepared exact-ID/digest compensation, then was killed with OS `SIGKILL` before confirmation. Independent restarted recovery released only the proven allocation, emptied journal, rejected deterministic request-ID replay, and did not create a mission. New test `digital-operations.test.ts` + child worker fixture; target suite 76 pass / 1 platform skip. **Does not certify cross-host recovery or independently deployed restore authority.**
+
 ## B. Highest-priority release security and reliability gates
 
 - [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
@@ -81,6 +83,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 | 2026-10-11 | Prepared ARIA tab IDs/panels, keyboard handler, static test and regenerated UI runtime | GitHub code + CI on final head pending; GKKTT227 device2 registered account still offline | Keyboard gate open |
 | 2026-10-11 | Added headed/CI synthetic Playwright keyboard interaction assertions (`5360162`) | Source committed, physical laptop has not run audit; connector account still returns OFFLINE | Keyboard and visual evidence pending |
 | 2026-10-11 | Completed Sampath hosted real-Chromium Mecord workflow and 20 local browser-backed Playwright workflows | 1/1 hosted verified, 20/20 local; p50/p95 and screenshots/traces documented in `docs/BROWSER_WORKFLOW_SAMPATH_2026-10-11.md` | A evidence passed; #247 full hosted success benchmark remains open |
+| 2026-10-11 | Physical crash injection after reservation persist/before compensation confirm, plus independent recovery | Sampath Windows real OS kill, deterministic exact digest, fail-closed request replay; 76 passed/1 skip in focused suite | #146 single-host crash window evidenced; cross-host and release artifact still open |
 | 2026-10-11 | Created this persistent checklist on integration branch | File committed and branch verified | Release HOLD unchanged |
 
 **Update rule:** after each code/document/test change, append a dated row, check off only independently evidenced steps, link the final artifact/CI run, and show the user the current checklist in the reply.
