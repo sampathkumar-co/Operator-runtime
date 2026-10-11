@@ -49,3 +49,23 @@ The 10-repetition emulation run showed p50 2,027.6 ms versus approximately 11,19
 The strict restoration assertion correctly **failed** in both 30-trial and 3-trial follow-up attempts. The disposable Chrome process was closed afterward and cannot affect a user tab. **Do not enable focus emulation on a real user's browser, even transiently.** The ~2-second result is not releasable performance improvement. A controlled managed-browser solution should use ordinary tab focus *inside an independently owned profile*; that approach has already shown p50 ~1.16s for a foreground target without altering the user's normal Chrome state.
 
 The benchmark retains an explicit emulation diagnostic only when the operator sets an opt-in test environment variable. It fails closed if the initial page focus/visibility state cannot be restored. The tested standard benchmark never changes focus emulation.
+
+## Final safe managed-browser benchmark — source dad409139837e37b491554c7e793aa83d77994a3
+
+A clean-source, headless temporary Chrome profile used **ordinary, explicit browser.tab.focus inside that same owned browser** (NOT focus emulation and NOT the user's default Chrome window). Original Sampath laptop, Windows_NT 10.0.26200, Node 22.14.0, Chrome 154.0.8037.98. The isolated loopback fixture was used, no real accounts or external writes.
+
+| Scenario (30 repetitions) | p50 ms | p95 ms |
+|---|---:|---:|
+| Five-step foreground workflow in isolated managed profile | **1,156.4** | **1,188.9** |
+| Navigation | 22.5 | 47.8 |
+| SPA interaction | 355.3 | 377.9 |
+| Tab switch inside owned profile | 12.7 | 14.9 |
+| Failed action plus safe inspect/recovery | 189.7 | 204.5 |
+| Cold-session inspect | 95.3 | 111.1 |
+| Warm-session inspect | 93.8 | 97.0 |
+
+**4,592 spans retained; 0 dropped.** Full source-matched machine-readable and Markdown reports: artifacts/pipeline-latency-2026-10-11T18-20-06-590Z/. Within that run, 270 Input.dispatchMouseEvent calls took ~481 ms **total**, versus 150 calls taking ~100,434 ms in the previous 10-background-workflow throttle-flags experiment. These are different condition/sample mixes, so do not infer a per-event causal improvement rate from their unadjusted totals.
+
+**Operational decision:** Prefer an explicitly owned separate Chrome profile with the target selected *within that Chrome instance*. A new managed-browser ownership/consent integration is still needed before default production use; the current CDP provider can attach to user-owned Chrome, so automatically activating its tabs would be intrusive. Do NOT treat this benchmark fixture as proof that the installed Mecord runtime already owns an isolated browser. No provider automatic-tab-switch behavior was changed in this branch.
+
+A separate focus emulation trial is **rejected for production**: even after disabling emulation and activating the original other tab, the hidden page retained document.hasFocus() = true, violating the initial background state. A strict assertion failed and intentionally prevented certification. That test ran only on the temporary disposable profile and did not alter user browser state.
