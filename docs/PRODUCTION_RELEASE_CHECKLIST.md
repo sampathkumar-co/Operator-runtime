@@ -26,6 +26,8 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 
 - [x] **Relay final-dispatch authority ordering regression (#157):** GitHub relay E2E found `authority lease prevents release purge from overtaking an in-flight delivery enqueue` failing (`Missing expected rejection`) on PR #298 before an idle CI job cancellation. Patch reacquires the exact account-device authority lease for the final dispatch authorization check after the durable enqueue lease; a queued removal cannot be overtaken by an unprotected read. Exact physical Windows targeted test passed 6 consecutive runs; `npm test --prefix apps/relay-server` passed 90/90 with checkout-native `OPERATOR_WINDOWS_PATH_LEASE_PATH`. **Requires new exact-head Linux CI validation; does not prove post-dispatch rollback or two-host atomicity.**
 
+- [x] **P0 #151 fail-closed local review API:** `POST /v1/organizations/:id/quarantines/review` requires agent bearer, separate recovery secret, independently authenticated scoped reviewer callback, and the existing coordinator's verified provider-signed claim; rejects body-injected operator IDs and relay-originated calls. 13/13 API and signed-adjudication tests pass. [Security contract](QUARANTINE_REVIEW_API_SECURITY.md). **Actual production signer, reviewer service, external CAS high-water anchor and verified-owned terminal provider effect remain unconfigured: issue #151 still OPEN.**
+
 ## B. Highest-priority release security and reliability gates
 
 - [ ] **P0 #251:** live same-account/device/session Chrome parity of direct `app.operate` and *fresh* `task_submit`, with no approval; then approved/same scope, cross-device, policy revocation, restarts, and task UUID replay. Save redacted real receipts. Synthetic 18/18 is insufficient.
