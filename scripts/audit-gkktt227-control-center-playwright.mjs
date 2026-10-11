@@ -121,10 +121,31 @@ try {
           await page.screenshot({ path: path.join(output, viewport.name + '-' + id + '-failure.png'), fullPage: true });
         }
       }
-      await page.keyboard.press('Tab');
-      const focused = await page.evaluate(() => document.activeElement?.tagName ?? null);
-      results.push({ viewport: viewport.name, type: 'keyboard-focus', element: focused });
-      if (!focused || focused === 'BODY') failures.push({ viewport: viewport.name, type: 'keyboard-focus-missing' });
+      // Confirm actual WAI-ARIA tab keyboard operation, not just visible static DOM.
+      try {
+        await page.locator('[role="tab"][data-tab="tasks"]').click();
+        const sequences = [['ArrowRight', 'approvals'], ['End', 'goals'],
+          ['Home', 'tasks'], ['ArrowLeft', 'goals']];
+        for (const [key, expected] of sequences) {
+          await page.keyboard.press(key);
+          const selected = page.locator('[role="tab"][aria-selected="true"]');
+          assert.equal(await selected.count(), 1);
+          assert.equal(await selected.getAttribute('data-tab'), expected);
+          assert.equal(await selected.getAttribute('tabindex'), '0');
+          assert.equal(await selected.evaluate(el => document.activeElement === el), true);
+          const tabPanel = page.locator('#' + expected);
+          assert.equal(await tabPanel.getAttribute('aria-labelledby'), 'tab-' + expected);
+          assert.equal(await tabPanel.evaluate(el => getComputedStyle(el).display !== 'none'), true);
+          results.push({ viewport: viewport.name, type: 'keyboard-navigation', key, expected, passed: true });
+        }
+        await page.keyboard.press('Tab');
+        const focused = await page.evaluate(() => document.activeElement?.tagName ?? null);
+        results.push({ viewport: viewport.name, type: 'keyboard-focus', element: focused });
+        if (!focused || focused === 'BODY') throw new Error('Focus lost after keyboard navigation');
+      } catch (error) {
+        failures.push({ viewport: viewport.name, type: 'keyboard-navigation',
+          message: String(error).slice(0, 500) });
+      }
     } finally {
       await context.tracing.stop({ path: path.join(output, viewport.name + '-trace.zip') });
       await context.close();
