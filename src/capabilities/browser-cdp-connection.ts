@@ -140,7 +140,7 @@ export class CdpConnection {
   get closed(): boolean { return this.#closed; }
 
   async send(method: string, params: JsonMap = {}, timeoutMs = DEFAULT_TIMEOUT_MS, signal?: AbortSignal): Promise<JsonMap> {
-    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1 },
+    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1, command: method },
       () => this.#send(method, params, timeoutMs, undefined, signal));
   }
 
@@ -148,7 +148,7 @@ export class CdpConnection {
     if (!sessionId || sessionId.length > 256) {
       throw new OperatorError('INVALID_CDP_SESSION', 'Flattened CDP session id must contain 1-256 characters.');
     }
-    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1 },
+    return await pipelineLatency.measure({ stage: 'browser.cdp_roundtrip', origin: 'browser', networkRoundTrips: 1, command: method },
       () => this.#send(method, params, timeoutMs, sessionId, signal));
   }
 

@@ -122,3 +122,21 @@ This writes correlated and per-stage JSON/Markdown reports; it never accesses th
 ## 2026-10-11 follow-up CI correction
 
 The original PR head failed the repository-wide network boundary audit because a latency wrapper obscured one literal bounded redirect-protected fetch call in the source. The wrapper was moved outside the helper without changing its redirect behavior, authorization, or transport semantics. The formerly failing test and the pipeline privacy/export tests passed together (21/21). The hosted client now computes its effective MCP taskId before starting the relay span, aligning trace identity across the hosted and device execution paths. Fresh full-head CI is required.
+
+## Expanded synthetic scenario matrix — source dada203688ac3cd8084eab0c994e5664a753f592
+
+Original Sampath isolated Windows/Chrome localhost fixture, 30 repetitions each, 4,589 retained spans, **0 dropped**:
+
+| Scenario | p50 ms | p95 ms |
+|---|---:|---:|
+| Navigation | 23.1 | 46.5 |
+| SPA interaction | 358.4 | 372.6 |
+| Tab switching | 13.3 | 16.0 |
+| Five-step workflow with previously backgrounded target | 11187.2 | 11213.3 |
+| Failed action plus safe inspection recovery | 189.8 | 204.2 |
+| Cold-session inspection | 108.9 | 110.7 |
+| Warm-session inspection | 94.1 | 109.0 |
+
+The five-step measurement was run after alternating tab focus 30 times, leaving the target in the background. **It is not a general foreground-operation figure.** Follow-up isolates foreground session behavior and adds an exact CDP-method allowlist to distinguish runtime evaluation from network protocol roundtrips. The run excluded hosted MCP, relay network and ChatGPT model costs; avoid promoting it to global slowest-stage status.
+
+The new code also measures actual journal transition/completion operations instead of only preparation. CDP method tracing deliberately records recognized protocol names only, never parameters, selectors, page titles, URLs, or script content.

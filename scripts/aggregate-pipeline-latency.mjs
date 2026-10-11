@@ -1,7 +1,7 @@
 /** Offline aggregation of explicitly supplied bounded host snapshots. */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { PIPELINE_STAGES, summarizePipelineSpans, pipelineReportMarkdown } from '../src/core/pipeline-latency.ts';
+import { PIPELINE_STAGES, summarizePipelineSpans, pipelineReportMarkdown, safePipelineCommand } from '../src/core/pipeline-latency.ts';
 
 const inputs=process.argv.slice(2);
 if(inputs.length<1||inputs.length>12)throw new Error('Provide 1..12 authorized pipeline snapshot JSON paths.');
@@ -26,6 +26,7 @@ function project(source){
   const value=safeInt(source[field]);if(value!==undefined)s[field]=value;
  }
  if(typeof source.warm==='boolean')s.warm=source.warm;
+ if(safePipelineCommand(source.command))s.command=safePipelineCommand(source.command);
  return s;
 }
 for(const filename of inputs){

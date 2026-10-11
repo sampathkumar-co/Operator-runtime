@@ -121,3 +121,19 @@ test('failed provider receipts are classified even when execution does not throw
  assert.equal(recorder.snapshot()[0]!.result,'timeout');
  assert.doesNotMatch(JSON.stringify(recorder.snapshot()),/secret-window-title|action-id/);
 });
+
+test('CDP attribution records only allowlisted method names without parameters',async()=>{
+ const rec=new PipelineLatencyRecorder({enabled:true,capacity:4});
+ const identity='privacy-sensitive-action';
+ await rec.measure({stage:'browser.cdp_roundtrip',origin:'browser',traceId:identity,
+   command:'Runtime.evaluate',payloadBytes:52,networkRoundTrips:1},async()=>({ok:true}));
+ await rec.measure({stage:'browser.cdp_roundtrip',origin:'browser',traceId:identity,
+   command:'Runtime.secretUserFormPassword',payloadBytes:44},async()=>({ok:true}));
+ const spans=rec.snapshot();
+ assert.equal(spans[0]?.command,'Runtime.evaluate');
+ assert.equal(spans[1]?.command,undefined);
+ const report=rec.report(metadata);
+ assert.equal(report.cdpCommands[0]?.command,'Runtime.evaluate');
+ assert.equal(report.cdpCommands[1]?.command,'CDP.other');
+ assert.doesNotMatch(JSON.stringify(report),/secretUserFormPassword|privacy-sensitive-action/);
+});

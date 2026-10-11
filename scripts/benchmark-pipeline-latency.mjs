@@ -104,6 +104,10 @@ try {
       const focused=await call('browser.tab.focus','external',{targetId:i%2===0?targetId:otherId});
       report.tabSwitch.push(focused.ms);
     }
+    // Previous diagnostic intentionally left targetId backgrounded. A production
+    // foreground workflow must explicitly focus its target before the sequence.
+    await call('browser.tab.focus','external',{targetId});
+    report.workflowTargetFocused=true;
     for(let i=0;i<repetitions;i++){
       const t=performance.now();
       await call('browser.inspect','read',{targetId});

@@ -22,12 +22,12 @@ export type PipelineResult = 'ok'|'failed'|'timeout'|'cancelled';
 export interface PipelineSpan {
  traceId:string; spanId:string; parentSpanId?:string;
  stage:PipelineStage; origin:PipelineOrigin; startTime:string; durationMs:number;
- result:PipelineResult; payloadBytes?:number; networkRoundTrips?:number;
+ result:PipelineResult; command?:string; payloadBytes?:number; networkRoundTrips?:number;
  retries?:number; reconnects?:number; warm?:boolean;
 }
 export type PipelineSpanOptions=Pick<PipelineSpan,'stage'|'origin'> & {
  traceId?:string;payloadBytes?:number;networkRoundTrips?:number;
- retries?:number;reconnects?:number;warm?:boolean;
+ retries?:number;reconnects?:number;warm?:boolean;command?:string;
 };
 export interface PipelineReport {
  schemaVersion:1; clock:'process-monotonic'; crossHostClockReconciliation:'no-subtraction';
@@ -39,12 +39,30 @@ export interface PipelineReport {
  p95Ms:number;p99Ms:number;sumMs:number;payloadBytes:number;
  networkRoundTrips:number;retries:number;reconnects:number;
  warm:number;cold:number;errors:number;timeouts:number;cancellations:number}>;
+ cdpCommands:Array<{command:string;count:number;meanMs:number;p50Ms:number;p95Ms:number;p99Ms:number;sumMs:number}>;
  unobservableStages:PipelineStage[];reconciliationNotice:string;
 }
 const context=new AsyncLocalStorage<{traceId:string;spanId:string}>();
 const stages=new Set<string>(PIPELINE_STAGES);
 const origins=new Set<string>(['hosted-mcp','relay-server','local-agent','browser','benchmark']);
 const spanUuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Exact protocol-method allowlist. Never store arbitrary command labels or arguments.
+const CDP_COMMANDS=new Set([
+ 'Runtime.evaluate','Runtime.enable','Runtime.callFunctionOn','Runtime.getProperties',
+ 'Runtime.releaseObjectGroup','Page.enable','Page.navigate','Page.getFrameTree',
+ 'Page.captureScreenshot','Page.handleJavaScriptDialog','Page.getNavigationHistory',
+ 'Input.dispatchMouseEvent','Input.dispatchKeyEvent','Input.insertText',
+ 'Accessibility.getFullAXTree','Accessibility.getPartialAXTree',
+ 'DOM.getDocument','DOM.querySelector','DOM.describeNode','DOM.resolveNode','DOM.performSearch',
+ 'Target.attachToTarget','Target.getTargets','Target.detachFromTarget',
+ 'Browser.setDownloadBehavior','Page.setDownloadBehavior',
+ 'Network.enable','Network.getResponseBody','Network.setCacheDisabled',
+ 'DOMSnapshot.captureSnapshot','Emulation.setDeviceMetricsOverride',
+ 'IO.read','IO.close','Fetch.enable','Fetch.continueRequest'
+]);
+export function safePipelineCommand(input:unknown):string|undefined{
+ return typeof input==='string' && CDP_COMMANDS.has(input)?input:undefined;
+}
 export function opaqueTraceId(identity:string):string {
  return crypto.createHash('sha256').update(identity,'utf8').digest('hex');
 }
@@ -86,6 +104,7 @@ export class PipelineLatencyRecorder {
     ...(options.networkRoundTrips===undefined?{}:{networkRoundTrips:options.networkRoundTrips}),
     ...(options.retries===undefined?{}:{retries:options.retries}),
     ...(options.reconnects===undefined?{}:{reconnects:options.reconnects}),
+    ...(options.command===undefined?{}:{command:options.command}),
     ...(options.warm===undefined?{}:{warm:options.warm})});
   }
  }
@@ -105,7 +124,8 @@ export class PipelineLatencyRecorder {
    ...(count(span.networkRoundTrips)===undefined?{}:{networkRoundTrips:count(span.networkRoundTrips)}),
    ...(count(span.retries)===undefined?{}:{retries:count(span.retries)}),
    ...(count(span.reconnects)===undefined?{}:{reconnects:count(span.reconnects)}),
-   ...(span.warm===undefined?{}:{warm:span.warm===true})};
+   ...(span.warm===undefined?{}:{warm:span.warm===true}),
+   ...(safePipelineCommand(span.command)?{command:safePipelineCommand(span.command)}:{})};
   if(this.#size===this.capacity)this.#dropped++;
   this.#slots[this.#next]=safe;this.#next=(this.#next+1)%this.capacity;
   this.#size=Math.min(this.capacity,this.#size+1);
@@ -144,10 +164,24 @@ export function summarizePipelineSpans(spans:readonly PipelineSpan[],
    cancellations:tally(s=>s.result==='cancelled')});
  }
  all.sort((a,b)=>b.sumMs-a.sumMs);
+ const commandGroups=new Map<string,number[]>();
+ for(const span of spans){
+  if(span.stage!=='browser.cdp_roundtrip')continue;
+  const command=safePipelineCommand(span.command)??'CDP.other';
+  const entries=commandGroups.get(command)??[];
+  entries.push(span.durationMs);commandGroups.set(command,entries);
+ }
+ const cdpCommands:PipelineReport['cdpCommands']=[];
+ for(const [command,durations] of commandGroups){
+  const sorted=durations.sort((a,b)=>a-b),count=sorted.length,sumMs=sorted.reduce((a,b)=>a+b,0);
+  const pct=(p:number)=>sorted[Math.min(count-1,Math.ceil(count*p)-1)]??0;
+  cdpCommands.push({command,count,meanMs:sumMs/count,p50Ms:pct(.5),p95Ms:pct(.95),p99Ms:pct(.99),sumMs});
+ }
+ cdpCommands.sort((a,b)=>b.sumMs-a.sumMs);
  const present=new Set(all.map(s=>s.stage));
  return {schemaVersion:1,clock:'process-monotonic',crossHostClockReconciliation:'no-subtraction',
   capturedAt:new Date().toISOString(),metadata:{...metadata},retainedSpans:spans.length,droppedSpans,
-  stages:all,unobservableStages:PIPELINE_STAGES.filter(s=>!present.has(s)),
+  stages:all,cdpCommands,unobservableStages:PIPELINE_STAGES.filter(s=>!present.has(s)),
   reconciliationNotice:'Nested spans overlap parents. SumMs is sampled work, not additive end-to-end duration. Cross-host wall-clock offsets, uninstrumented gaps and model overhead remain unknown.'};
 }
 export function pipelineReportMarkdown(r:PipelineReport):string{
@@ -163,6 +197,11 @@ export function pipelineReportMarkdown(r:PipelineReport):string{
   s.meanMs.toFixed(2),s.p50Ms.toFixed(2),s.p95Ms.toFixed(2),
   s.p99Ms.toFixed(2),s.sumMs.toFixed(2),s.networkRoundTrips,
   s.retries,s.reconnects,s.timeouts].join(' | ')+' |');
+ lines.push('','## CDP protocol command attribution','',
+ '| Command | N | p50 ms | p95 ms | p99 ms | Sum ms |',
+ '|---|---:|---:|---:|---:|---:|');
+ for(const c of r.cdpCommands) lines.push('| '+[c.command,c.count,c.p50Ms.toFixed(2),
+  c.p95Ms.toFixed(2),c.p99Ms.toFixed(2),c.sumMs.toFixed(2)].join(' | ')+' |');
  lines.push('','Unobserved: '+r.unobservableStages.join(', '),'',r.reconciliationNotice,'');
  return lines.join('\n');
 }

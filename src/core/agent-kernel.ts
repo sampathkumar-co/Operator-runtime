@@ -245,15 +245,17 @@ export class AgentKernel {
             quarantineArmed = true;
             retainQuarantine = true;
           }
-          await this.#journal.markDispatched(action.id, providerName);
+          await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+            () => this.#journal.markDispatched(action.id, providerName));
           await this.#trace(action, 'DISPATCH', 'OK', { provider: providerName, capability: action.capability });
           dispatched = true;
           await context.onProviderDispatch?.(providerName);
         }
       });
-      let journalEntry = !dispatched && result.error?.executionPhase === 'pre_dispatch'
-        ? await this.#journal.defer(action.id, result)
-        : await this.#journal.observe(action.id, result);
+      let journalEntry = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent',
+        traceId: action.taskId ?? action.id }, () => !dispatched && result.error?.executionPhase === 'pre_dispatch'
+        ? this.#journal.defer(action.id, result)
+        : this.#journal.observe(action.id, result));
       if (quarantineArmed) retainQuarantine = journalEntry.state === 'DISPATCHED' || journalEntry.state === 'UNCERTAIN';
 
       if (!result.ok && action.risk !== 'read' && result.error?.sideEffectState === 'uncertain'
@@ -262,7 +264,8 @@ export class AgentKernel {
           ...context,
           ...(executionSignal ? { signal: executionSignal } : {})
         });
-        journalEntry = await this.#journal.reconcile(action.id, reconciliation);
+        journalEntry = await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+          () => this.#journal.reconcile(action.id, reconciliation));
         await this.#trace(action, 'RECONCILE', reconciliationTraceOutcome(reconciliation.status), { provider: result.provider, status: reconciliation.status });
         retainQuarantine = journalEntry.state === 'UNCERTAIN';
         result = reconciledResult(action, result, reconciliation);
@@ -291,7 +294,8 @@ export class AgentKernel {
         };
       }
       result = { ...result, evidence: [...result.evidence, kernelVerificationEvidence(receipt)] };
-      await this.#journal.complete(action.id, receipt.digest, result);
+      await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.complete(action.id, receipt.digest, result));
       retainQuarantine = false;
       if (action.intent && !context.recoveryMode) {
         try {
@@ -450,7 +454,8 @@ export class AgentKernel {
         ...observedResult,
         evidence: [...observedResult.evidence, kernelVerificationEvidence(receipt)]
       };
-      await this.#journal.complete(action.id, receipt.digest, result);
+      await pipelineLatency.measure({ stage: 'local.journal_audit', origin: 'local-agent', traceId: action.taskId ?? action.id },
+        () => this.#journal.complete(action.id, receipt.digest, result));
       retainQuarantine = false;
       return {
         status: 'completed',
