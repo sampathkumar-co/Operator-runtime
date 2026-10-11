@@ -35,6 +35,10 @@ jobs:
           $deps = Join-Path $env:RUNNER_TEMP 'mecord-visual-test-deps'
           npm install --prefix $deps --ignore-scripts --no-audit --no-fund playwright@1.56.1
           if ($LASTEXITCODE -ne 0) { throw 'Test-only Playwright install failed' }
+          # Playwright needs its own FFmpeg helper when recordVideo is enabled,
+          # even when using the Windows runner's preinstalled Google Chrome.
+          node (Join-Path $deps 'node_modules\playwright\cli.js') install ffmpeg
+          if ($LASTEXITCODE -ne 0) { throw 'Playwright video helper install failed' }
           $exe = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Google Chrome is missing from runner' }
           "MECORD_VISUAL_PLAYWRIGHT_PATH=$(Join-Path $deps 'node_modules\playwright\index.mjs')" >> $env:GITHUB_ENV
