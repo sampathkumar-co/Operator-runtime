@@ -109,8 +109,32 @@ class HttpsTrustService {
     if (!Number.isFinite(length) || length > 8192) {
       throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response exceeds a safe bound.');
     }
+    // Content-Length is advisory: a chunked or dishonest upstream can omit
+    // it and stream an arbitrarily large JSON body. Enforce the limit while
+    // reading so no oversized external response is buffered or parsed.
     let data: unknown;
-    try { data = await res.json(); } catch { throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response cannot be parsed.'); }
+    const reader = res.body?.getReader();
+    if (!reader) throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response has no body.');
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > 8192) {
+          await reader.cancel();
+          throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response exceeds a safe bound.');
+        }
+        chunks.push(Buffer.from(value));
+      }
+      data = JSON.parse(Buffer.concat(chunks, total).toString('utf8'));
+    } catch (error) {
+      if (error instanceof OperatorError && error.code === 'QUARANTINE_TRUST_INVALID') throw error;
+      throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response cannot be parsed.');
+    } finally {
+      reader.releaseLock();
+    }
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       throw denied('QUARANTINE_TRUST_INVALID', 'Independent trust response is not a verified object.');
     }
