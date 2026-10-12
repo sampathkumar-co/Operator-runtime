@@ -2,7 +2,7 @@
 // CI supplies a temporary PostgreSQL service. Locally run against an isolated sandbox cluster.
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-import { PostgresControlPlaneStore } from '../src/core/control-plane-store.ts';
+import { PostgresControlPlaneStore, purgeExpiredControlPlaneRecords } from '../src/core/control-plane-store.ts';
 const driver = process.env.MECORD_TEST_PG_MODULE;
 const port = Number(process.env.MECORD_TEST_PG_PORT);
 if (!driver || !Number.isInteger(port) || port < 1024 || port > 65535) {
@@ -40,6 +40,34 @@ try {
   records = await s2.transact(mutation('expired', null, { owner: 'new' }), now);
   assert.equal(records[0].generation, 2);
   await expectCas(() => s1.transact(mutation('expired', 1, { owner: 'stale' }), now));
+
+  // #192: the separate retention path must preserve the same immutable
+  // incarnation fence as explicit deletion. A different store instance
+  // performs purge, then a third one attempts a stale-generation write.
+  const purgeNamespace = 'cas_purge_cert';
+  const purgeKey = 'expired-then-recreated';
+  const [beforePurge] = await s1.transact([{
+    namespace: purgeNamespace, key: purgeKey, expectedGeneration: null,
+    value: { owner: 'before-purge' }, expiresAt: expired
+  }], now);
+  assert.equal(beforePurge.generation, 1);
+  const removed = await purgeExpiredControlPlaneRecords(s2, purgeNamespace, now);
+  assert.equal(removed, 1, 'the expired row must actually be purged');
+  assert.equal(await s1.get(purgeNamespace, purgeKey), null);
+  const afterPurgeSnapshot = await s1.snapshot(now);
+  assert.ok(afterPurgeSnapshot.tombstones.some(fence =>
+    fence.namespace === purgeNamespace && fence.key === purgeKey && fence.generation === 1));
+  const [afterPurge] = await s2.transact([{
+    namespace: purgeNamespace, key: purgeKey, expectedGeneration: null,
+    value: { owner: 'after-purge' }
+  }], now);
+  assert.equal(afterPurge.generation, 2, 'retention purge must never recycle generation one');
+  await expectCas(() => new PostgresControlPlaneStore(pool).transact([{
+    namespace: purgeNamespace, key: purgeKey, expectedGeneration: 1,
+    value: { owner: 'stale-before-purge' }
+  }], now));
+  assert.equal((await s1.get(purgeNamespace, purgeKey)).value.owner, 'after-purge');
+
 
   const races = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
     new PostgresControlPlaneStore(pool).transact(mutation('concurrent', null, { index: i }), now)));
