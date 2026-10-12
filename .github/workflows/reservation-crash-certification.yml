@@ -1,0 +1,44 @@
+name: P0 Reservation Crash Recovery Matrix
+
+on:
+  pull_request:
+    paths:
+      - 'src/core/device-pool.ts'
+      - 'src/core/compensation-journal.ts'
+      - 'src/core/digital-operations.ts'
+      - 'src/core/durable-state-lock.ts'
+      - 'test/process-crash-reservation.test.ts'
+      - 'test/fixtures/reservation-crash-worker.mjs'
+      - '.github/workflows/reservation-crash-certification.yml'
+  push:
+    branches: [main, 'integration/p0-hardening-20261011']
+    paths:
+      - 'src/core/device-pool.ts'
+      - 'src/core/compensation-journal.ts'
+      - 'src/core/digital-operations.ts'
+      - 'src/core/durable-state-lock.ts'
+      - 'test/process-crash-reservation.test.ts'
+      - 'test/fixtures/reservation-crash-worker.mjs'
+      - '.github/workflows/reservation-crash-certification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reservation-crash-recovery:
+    name: Real reservation crash transitions (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Verify original crash state transitions using synthetic durable state
+        run: node --experimental-strip-types --test test/process-crash-reservation.test.ts
