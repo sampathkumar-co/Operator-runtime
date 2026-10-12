@@ -458,10 +458,17 @@ test('Windows native one-shot Job Object kills detached descendants when the sup
     supervisor.once('error', reject);
   });
   assert.equal(supervisor.kill(), true, 'test must kill the exact native supervisor');
-  await Promise.race([
-    exit,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('native supervisor did not exit within 10s')), 10_000))
-  ]);
+  let exitDeadline: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      exit,
+      new Promise<never>((_, reject) => {
+        exitDeadline = setTimeout(() => reject(new Error('native supervisor did not exit within 10s')), 10_000);
+      })
+    ]);
+  } finally {
+    if (exitDeadline) clearTimeout(exitDeadline);
+  }
   // The child is demonstrably alive before its job owner is killed.
   // The delayed marker catches descendants that escape KILL_ON_JOB_CLOSE.
   await new Promise(resolve => setTimeout(resolve, 2200));
