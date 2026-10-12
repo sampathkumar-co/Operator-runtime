@@ -284,8 +284,8 @@ jobs:
                       assert not any(ord(ch) < 32 or ch in '<>:"|?*' for ch in part), 'illegal Windows archive name'
                       assert not part.endswith((' ', '.')), 'trailing Windows archive alias'
                       stem = part.split('.')[0].upper()
-                      assert stem not in {'CON', 'PRN', 'AUX', 'NUL'}, 'Windows device name'
-                      assert not re.fullmatch(r'(COM|LPT)[1-9]', stem), 'Windows device name'
+                      assert stem not in {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'}, 'Windows device name'
+                      assert not re.fullmatch(r'(COM|LPT)[1-9¹²³]', stem), 'Windows device name'
                   return '/'.join(parts).casefold()
 
               file_map = {}
@@ -351,7 +351,7 @@ jobs:
                   runtime_declared.add(canonical)
               assert required_runtime <= {e['path'] for e in declared_files}, 'missing required native/runtime files'
               assert len(runtime_declared) == len(declared_files), 'duplicate runtime manifest path'
-              runtime_actual = {p[len('runtime/'):].casefold() for p in file_map if p.startswith('runtime/')}
+              runtime_actual = {p[len('runtime/'):].casefold() for p in file_map if p.casefold().startswith('runtime/')}
               assert runtime_actual == runtime_declared | {'runtime-manifest.json'}, 'runtime file set mismatch'
 
               # Independently hash every compiled JS/native runtime byte from the

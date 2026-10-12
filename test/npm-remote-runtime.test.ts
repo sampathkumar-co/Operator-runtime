@@ -224,6 +224,9 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /missing required native\/runtime files/);
   assert.match(attest, /1 <= entry\['sizeBytes'\] <= 64 \* 1024 \* 1024/);
   assert.match(attest, /member_names\.add\(canonical\)/);
+  assert.match(attest, /\(COM\|LPT\)\[1-9¹²³\]/);
+  assert.match(attest, /CONIN\$/);
+  assert.match(attest, /p\.casefold\(\)\.startswith\('runtime\/'\)/);
   assert.match(attest, /python3 -I - <<'PY'/);
   const directorySkip = attest.indexOf('if member.isdir():\n                      continue');
   assert.ok(directorySkip > attest.indexOf("member_names.add(canonical)"),
