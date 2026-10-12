@@ -8,9 +8,13 @@ import { createPairingService } from './pairing.mjs';
 const port = Number(process.env.PORT || 8090);
 const usersFile = process.env.PORTAL_USERS_FILE || '/data/users_database.yml';
 const inviteHash = (process.env.PORTAL_INVITE_SHA256 || '').trim().toLowerCase();
+const signupMode = (process.env.PORTAL_SIGNUP_MODE || 'invite').trim().toLowerCase();
+if (signupMode !== 'invite' && signupMode !== 'open') throw new Error('INVALID_SIGNUP_MODE');
+const openSignup = signupMode === 'open';
 const defaultGroup = process.env.PORTAL_DEFAULT_GROUP || 'operator-users';
 const maxBody = 16 * 1024;
 const attempts = new Map();
+const signupGlobal = { count: 0, reset: Date.now() + 15 * 60_000 };
 const pairAttempts = new Map();
 const pairing = createPairingService();
 let writeQueue = Promise.resolve();
@@ -41,14 +45,21 @@ function validInvite(value) {
 
 function rateAllowed(ip) {
   const now = Date.now();
+  if (openSignup) {
+    if (now > signupGlobal.reset) {
+      signupGlobal.count = 0;
+      signupGlobal.reset = now + 15 * 60_000;
+    }
+    signupGlobal.count += 1;
+    if (signupGlobal.count > 60) return false;
+  }
   const item = attempts.get(ip) || { count: 0, reset: now + 15 * 60_000 };
   if (now > item.reset) {
     item.count = 0;
     item.reset = now + 15 * 60_000;
   }
   item.count += 1;
-  attempts.set(ip, item);
-  return item.count <= 8;
+  return item.count <= (openSignup ? 4 : 8);
 }
 
 function pairRateAllowed(ip) {
@@ -98,7 +109,7 @@ async function createUser({ username, email, password, invite }) {
   if (password.length < 12 || password.length > 128) {
     return { status: 400, body: { ok: false, error: 'Password must be 12-128 characters.' } };
   }
-  if (!validInvite(invite)) {
+  if (!openSignup && !validInvite(invite)) {
     return { status: 403, body: { ok: false, error: 'Registration code is invalid.' } };
   }
 
@@ -181,13 +192,13 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
 <div class="switch">New here? <button id="createInstead" class="secondary" type="button">Create an account</button></div>
 </div>
 <div id="signUpPane" class="pane">
-<h2>Create account</h2><p class="help">Choose your own username and password. You only need the registration code once.</p>
+<h2>Create account</h2><p class="help">Choose your username, email address, and a strong password.${openSignup ? "" : " A registration code is required for this private signup."}</p>
 <form id="signUpForm">
 <label for="signupUsername">Username</label><input id="signupUsername" autocomplete="username" required placeholder="sampath">
 <label for="signupEmail">Email</label><input id="signupEmail" type="email" autocomplete="email" required placeholder="you@example.com">
 <label for="signupPassword">Password</label><input id="signupPassword" type="password" autocomplete="new-password" required minlength="12">
 <label for="signupConfirm">Confirm password</label><input id="signupConfirm" type="password" autocomplete="new-password" required minlength="12">
-<label for="signupInvite">Registration code</label><input id="signupInvite" type="password" autocomplete="one-time-code" required>
+${openSignup ? "" : '<label for="signupInvite">Registration code</label><input id="signupInvite" type="password" autocomplete="one-time-code" required>'}
 <button id="signUpButton" class="primary" type="submit">Create account</button>
 <div id="signupMsg" class="msg"></div>
 </form>
@@ -321,11 +332,14 @@ input:focus{border-color:#7aa2ff;box-shadow:0 0 0 4px rgba(37,99,235,.10)}
     if(password!==byId('signupConfirm').value){msg.className='msg bad';msg.textContent='Passwords do not match.';return;}
     msg.className='msg';msg.textContent='Creating account...';btn.disabled=true;
     try{
-      const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:username,email:byId('signupEmail').value,password:password,invite:byId('signupInvite').value})});
+      const payload={username:username,email:byId('signupEmail').value,password:password};
+      const inviteField=byId('signupInvite');
+      if(inviteField)payload.invite=inviteField.value;
+      const r=await fetch('/signup/api',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
       const j=await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(j.error||'Could not create account.');
       byId('loginUsername').value=username;
-      byId('signupPassword').value='';byId('signupConfirm').value='';byId('signupInvite').value='';
+      byId('signupPassword').value='';byId('signupConfirm').value='';if(inviteField)inviteField.value='';
       show('signin'); const lm=byId('loginMsg'); lm.className='msg ok'; lm.textContent='Account created. Sign in to continue.';
     }catch(err){msg.className='msg bad';msg.textContent=(err&&err.message)||'Could not create account.';}
     finally{btn.disabled=false;}
@@ -395,7 +409,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, pairPage, 'text/html; charset=utf-8');
     }
     if (req.method === 'GET' && requestURL.pathname === '/health') {
-      return send(res, 200, { ok: true, configured: Boolean(inviteHash), pairing: true });
+      return send(res, 200, { ok: true, configured: openSignup || Boolean(inviteHash), signupMode, pairing: true });
     }
     if (req.method === 'POST' && requestURL.pathname === '/pair/start') {
       const forwardedIp = String(req.headers['x-real-ip'] || '').trim();
