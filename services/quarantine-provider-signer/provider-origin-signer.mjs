@@ -42,16 +42,18 @@ export function authenticateToken(provided,expected) {
     || provided.length !== expected.length || provided.length > 512
     || !crypto.timingSafeEqual(Buffer.from(provided),Buffer.from(expected))) fail('REQUEST_UNAUTHORIZED');
 }
-export function signFromVerifiedObservation({query,originResponse,originPublicKey,signerPrivateKey,issuer,now=new Date()}) {
+export function signFromVerifiedObservation({query,challenge,originResponse,originPublicKey,signerPrivateKey,issuer,now=new Date()}) {
   const request=validateQuery(query);
+  value(challenge,HEX,'ORIGIN_CHALLENGE_INVALID');
   const response=originResponse;
   if (!exactKeys(response,['receipt','signature']) || !response.receipt) fail('ORIGIN_INVALID');
   const r=response.receipt;
-  const fields=['schemaVersion','issuer','intentId','programId','targetKey','expectedMissionId',
+  const fields=['schemaVersion','issuer','challenge','intentId','programId','targetKey','expectedMissionId',
     'returnedMissionId','classification','evidenceDigest','providerDeviceId','providerProcessId',
     'providerSessionId','authorityGeneration','observedAt','validUntil'];
   if (!exactKeys(r,fields) || r.schemaVersion !== 1) fail('ORIGIN_INVALID');
   if (!issuer || r.issuer !== issuer) fail('ORIGIN_ISSUER_MISMATCH');
+  if (r.challenge !== challenge) fail('ORIGIN_CHALLENGE_MISMATCH');
   if (r.programId !== request.programId || r.targetKey !== request.targetKey
     || r.returnedMissionId !== request.returnedMissionId
     || r.expectedMissionId !== stableMissionId(request.programId,request.targetKey)
@@ -90,7 +92,9 @@ export function createSigner({requestToken,lookup,originPublicKey,signerPrivateK
     authenticateToken(token,requestToken);
     const query=validateQuery(input);
     // Require a fresh independently signed lookup on every request: no caller-supplied origin, fallback or cached proof.
-    const originResponse=await lookup(query);
-    return signFromVerifiedObservation({query,originResponse,originPublicKey,signerPrivateKey,issuer,now:clock()});
+    // Unpredictable per-call challenge prevents reuse of a still-fresh provider receipt.
+    const challenge=crypto.randomBytes(32).toString('hex');
+    const originResponse=await lookup({...query,challenge});
+    return signFromVerifiedObservation({query,challenge,originResponse,originPublicKey,signerPrivateKey,issuer,now:clock()});
   };
 }
