@@ -246,6 +246,15 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /'binding\.gyp' not in/);
   assert.match(attest, /parse_constant=reject_non_json_constant/g);
   assert.match(attest, /Nonstandard JSON constant/);
+
+  const strictCalls = attest.match(/parse_constant=reject_non_json_constant/g) ?? [];
+  assert.equal(strictCalls.length, 2, 'both embedded JSON parsers must reject nonstandard constants');
+  assert.match(attest, /GH_READ_TOKEN/);
+  assert.match(attest, /get_source_json\('\/git\/commits\/' \+ expected\)/);
+  assert.match(attest, /not source_tree\['truncated'\]/);
+  assert.match(attest, /set\(source_files\) == packaged_static/);
+  assert.match(attest, /source_bytes == packaged_bytes/);
+  assert.match(attest, /unexpected npm package payload path/);
   assert.match(attest, /approved_scripts = \{/);
   assert.match(attest, /prepublishOnly/);
   assert.match(attest, /unexpected npm dependency\/install authority/);

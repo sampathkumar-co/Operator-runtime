@@ -241,15 +241,18 @@ jobs:
         env:
           CANDIDATE_DIR: ${{ runner.temp }}/candidate
           EXPECTED_SOURCE: ${{ github.sha }}
+          GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 -I - <<'PY'
+          import base64
           import hashlib
           import json
           import os
           import pathlib
           import re
           import tarfile
+          import urllib.request
 
           folder = pathlib.Path(os.environ['CANDIDATE_DIR']).resolve(strict=True)
           expected = os.environ['EXPECTED_SOURCE'].lower()
@@ -413,6 +416,55 @@ jobs:
                   assert archived.size == entry['sizeBytes'], 'runtime file size mismatch'
                   content = archive.extractfile(archived).read()
                   assert hashlib.sha256(content).hexdigest() == entry['sha256'], 'runtime file digest mismatch'
+
+              # Bind every shipped non-generated file to immutable GitHub
+              # source bytes at this exact reviewed commit. Read source as data;
+              # never checkout or execute repository code with write authority.
+              def get_source_json(endpoint):
+                  request = urllib.request.Request(
+                      'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + endpoint,
+                      headers={
+                          'Authorization': 'Bearer ' + os.environ['GH_READ_TOKEN'],
+                          'Accept': 'application/vnd.github+json',
+                          'X-GitHub-Api-Version': '2022-11-28'
+                      }
+                  )
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      return json.loads(response.read().decode('utf-8'))
+
+              commit_data = get_source_json('/git/commits/' + expected)
+              assert commit_data['sha'].lower() == expected, 'GitHub source commit mismatch'
+              tree_sha = commit_data['tree']['sha']
+              assert re.fullmatch(r'[0-9a-f]{40}', tree_sha), 'invalid Git tree digest'
+              source_tree = get_source_json('/git/trees/' + tree_sha + '?recursive=1')
+              assert source_tree['sha'] == tree_sha and not source_tree['truncated'], 'incomplete Git source tree'
+              package_prefix = 'packages/mecord-connect/'
+              approved_root_files = {'package.json', 'README.md', 'LICENSE', 'DISCLOSURE'}
+              source_files = {}
+              for item in source_tree['tree']:
+                  if not item['path'].startswith(package_prefix) or item['type'] != 'blob':
+                      continue
+                  relative = item['path'][len(package_prefix):]
+                  if relative in approved_root_files or relative.startswith(('src/', 'bin/')):
+                      assert item['mode'] in ('100644', '100755'), 'non-regular source tree entry'
+                      assert relative not in source_files, 'duplicate committed source entry'
+                      source_files[relative] = item['sha']
+
+              packaged_static = {
+                  path for path in file_map
+                  if path in approved_root_files or path.startswith(('src/', 'bin/'))
+              }
+              assert set(source_files) == packaged_static, 'packaged source file set differs from Git commit'
+              assert set(file_map) == packaged_static | {
+                  path for path in file_map if path.casefold().startswith('runtime/')
+              }, 'unexpected npm package payload path'
+              for relative, blob_sha in source_files.items():
+                  assert re.fullmatch(r'[0-9a-f]{40}', blob_sha), 'invalid source blob digest'
+                  blob = get_source_json('/git/blobs/' + blob_sha)
+                  assert blob['sha'] == blob_sha and blob['encoding'] == 'base64', 'untrusted source blob metadata'
+                  source_bytes = base64.b64decode(blob['content'])
+                  packaged_bytes = archive.extractfile(file_map[relative]).read()
+                  assert source_bytes == packaged_bytes, 'shipped JS/package bytes differ from reviewed Git commit'
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write('subject_path=' + str(tarball) + chr(10))
           print('EXACT_SOURCE_NPM_CANDIDATE_VERIFIED', expected, digest)
