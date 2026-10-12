@@ -265,7 +265,7 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
 
 test('npm workflow runs on Git line-ending attribute changes', async () => {
   const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
-  assert.match(workflow, /      - '\\.gitattributes'/);
+  assert.ok(workflow.includes("      - '.gitattributes'"), 'attribute changes must trigger npm candidate CI');
 });
 
 test('npm source files preserve canonical Git blob bytes on Windows checkout', async () => {
