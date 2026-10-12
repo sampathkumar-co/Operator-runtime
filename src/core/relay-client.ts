@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { DeviceIdentityStore } from './device-identity.ts';
 import { OperatorError } from './errors.ts';
+import { capabilityRiskRule } from './capability-policy.ts';
 import { readDurableStateText, writeDurableStateText } from './durable-state.ts';
 import {
   createRelayCapabilitySessionBinding,
@@ -704,7 +705,11 @@ function boundedReadConcurrency(value: unknown): number {
 function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
   if (delivery.kind !== 'action') return false;
   const action = delivery.payload.action;
-  return Boolean(action && typeof action === 'object' && !Array.isArray(action) && (action as Record<string, unknown>).risk === 'read');
+  if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
+  const candidate = action as Record<string, unknown>;
+  if (candidate.risk !== 'read' || typeof candidate.capability !== 'string') return false;
+  try { return capabilityRiskRule(candidate.capability) === 'read'; }
+  catch { return false; }
 }
 
 function validateResourceProfile(input: RelayResourceProfile): RelayResourceProfile {
