@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -72,4 +74,67 @@ test('stage9 receipt idempotency prevents crash retries from double-counting one
   assert.ok(entry);
   assert.equal(entry!.verified, 1);
   assert.equal(entry!.samples, 1);
+});
+
+test('cross-process optimizer receipts preserve independent writes and idempotent retries', async (t) => {
+  const stateDir = await tempDir(t);
+  const workerSource = `
+    import crypto from 'node:crypto';
+    import { ExecutionOptimizerStore } from ${JSON.stringify(new URL('../src/core/execution-optimizer.ts', import.meta.url).href)};
+    const [stateDir, writerId] = process.argv.slice(1);
+    const store = new ExecutionOptimizerStore(stateDir);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const receipt = crypto.createHash('sha256').update(writerId + ':' + attempt).digest('hex');
+      await store.record('cross-process-writer', 'bounded-aggregate', {
+        verified: true, durationMs: 100, retries: 0, costUnits: 1
+      }, receipt);
+    }
+  `;
+
+  async function runWriter(writerId: string): Promise<void> {
+    const child = spawn(process.execPath,
+      ['--experimental-strip-types', '--input-type=module', '--eval', workerSource, stateDir, writerId],
+      { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (part) => { stderr = (stderr + String(part)).slice(-3000); });
+    await new Promise<void>((resolve, reject) => {
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, 30_000);
+      child.once('error', (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.once('close', (code, signal) => {
+        clearTimeout(timeout);
+        if (code === 0 && !timedOut) resolve();
+        else reject(new Error(
+          `Optimizer writer ${writerId} failed (${code}/${signal}, timeout=${timedOut}): ${stderr}`
+        ));
+      });
+    });
+  }
+
+  const writers = Array.from({ length: 4 }, (_, i) => 'writer-' + i);
+  // Four independent operating-system processes write the SAME durable file.
+  await Promise.all(writers.map(runWriter));
+  const fresh = new ExecutionOptimizerStore(stateDir);
+  const records = (await fresh.inspect()).filter(
+    (entry) => entry.context === 'cross-process-writer' && entry.strategy === 'bounded-aggregate'
+  );
+  assert.equal(records.length, 1, 'no shared-writer updates may be lost or duplicated');
+  assert.equal(records[0]?.verified, 24);
+  assert.equal(records[0]?.samples, 24);
+  assert.equal(records[0]?.failed, 0);
+
+  // A fresh process after restart cannot count identical recovery receipts twice.
+  await Promise.all(writers.map(runWriter));
+  const afterRetry = (await new ExecutionOptimizerStore(stateDir).inspect()).find(
+    (entry) => entry.context === 'cross-process-writer' && entry.strategy === 'bounded-aggregate'
+  );
+  assert.equal(afterRetry?.samples, 24);
+  assert.equal(afterRetry?.verified, 24);
 });
