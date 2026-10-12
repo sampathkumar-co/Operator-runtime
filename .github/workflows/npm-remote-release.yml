@@ -296,3 +296,188 @@ jobs:
           npm stage publish "$env:PACKAGE_PATH" --access public --tag "$env:NPM_TAG" --provenance --ignore-scripts=false
           if ($LASTEXITCODE -ne 0) { throw 'npm stage publish failed' }
           "Package staged successfully. Approve the exact staged version with human 2FA from npmjs.com or npm stage approve." >> $env:GITHUB_STEP_SUMMARY
+
+
+  stage-rc1:
+    name: Stage source-matched signed 2.0.6-rc.1 (next only)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release/npm-206-rc1-preparation-20261012' && github.repository == 'sampathkumar-co/Operator-runtime' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      attestations: read
+      id-token: write
+    env:
+      RC_REPO: sampathkumar-co/Operator-runtime
+      RC_VERSION: 2.0.6-rc.1
+      RC_REVIEWER: kinthalasamuelsampathkumar23cse-code
+      NPM_TAG: next
+      OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Validate approved exact-source RC and all CI evidence
+        id: evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$RC_REPO/pulls/316" > "$RUNNER_TEMP/source-pr.json"
+          gh api "/repos/$RC_REPO/pulls/316/reviews?per_page=100" > "$RUNNER_TEMP/source-reviews.json"
+          gh api "/repos/$RC_REPO/actions/runs?head_sha=$OPERATOR_SOURCE_COMMIT&per_page=100" > "$RUNNER_TEMP/source-runs.json"
+          python3 -I - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          read = lambda name: json.loads((root / name).read_text())
+          pr, reviews, runs = (read(x) for x in ('source-pr.json','source-reviews.json','source-runs.json'))
+          commit, repo = os.environ['OPERATOR_SOURCE_COMMIT'], os.environ['RC_REPO']
+          assert len(commit) == 40 and all(c in '0123456789abcdef' for c in commit), 'source SHA malformed'
+          assert pr['number'] == 316 and pr['head']['sha'] == commit, 'source PR is not at this workflow commit'
+          assert pr['base']['ref'] == 'integration/p0-hardening-20261011', 'source PR base mismatch'
+          assert pr['head']['repo']['full_name'] == repo and pr['state'] == 'open', 'source PR must remain reviewable'
+          latest = {}
+          for review in sorted(reviews, key=lambda r: (str(r.get('submitted_at') or ''), r['id'])):
+              if review.get('state') in ('APPROVED','CHANGES_REQUESTED','DISMISSED'):
+                  latest[review['user']['login']] = review
+          assert not any(r['state'] == 'CHANGES_REQUESTED' for r in latest.values()), 'current changes-requested review'
+          reviewer = latest.get(os.environ['RC_REVIEWER'])
+          assert reviewer and reviewer['state'] == 'APPROVED' and reviewer['commit_id'] == commit, 'exact-source review no longer approved'
+          required = {
+              'CI': '.github/workflows/ci.yml',
+              'Platform Matrix': '.github/workflows/platform-matrix.yml',
+              'Windows Signing Smoke': '.github/workflows/windows-signing-smoke.yml',
+              'NPM Remote Runtime CI': '.github/workflows/npm-remote-ci.yml',
+              'R1 Canonical Runtime': '.github/workflows/r1-canonical-runtime.yml',
+              'R2 Adaptive Planning Runtime': '.github/workflows/r2-adaptive-planning-runtime.yml',
+          }
+          all_runs = runs['workflow_runs']
+          for name, path in required.items():
+              matched = [r for r in all_runs if r['name'] == name
+                  and r['path'] == path and r['event'] == 'pull_request'
+                  and r['head_sha'] == commit and r['status'] == 'completed'
+                  and r['conclusion'] == 'success'
+                  and any(p['number'] == 316 for p in r.get('pull_requests', []))]
+              assert matched, 'missing exact PR successful run: ' + name + ' ' + path
+          signed_runs = [r for r in all_runs
+              if r['name'] == 'NPM Remote Runtime CI'
+              and r['path'] == '.github/workflows/npm-remote-ci.yml'
+              and r['event'] == 'push'
+              and r['head_sha'] == commit
+              and r['head_branch'] == 'release/npm-206-rc1-preparation-20261012'
+              and r['status'] == 'completed' and r['conclusion'] == 'success']
+          assert signed_runs, 'missing signed exact-source push build'
+          builder = max(signed_runs, key=lambda r: int(r['id']))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('builder_run_id=' + str(builder['id']) + '\n')
+          print('APPROVED exact-source RC1, six path+PR bound checks green, builder run:', builder['id'])
+          PY
+
+      - name: Download candidate signed by same-source push CI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-connect-2.0.6-rc.1-${{ github.sha }}
+          repository: sampathkumar-co/Operator-runtime
+          run-id: ${{ steps.evidence.outputs.builder_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Check exact archived source, metadata and each runtime digest
+        shell: bash
+        env:
+          RC_DIR: ${{ runner.temp }}/candidate
+          EXPECTED_RUN: ${{ steps.evidence.outputs.builder_run_id }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import hashlib, json, os, pathlib, tarfile
+          root = pathlib.Path(os.environ['RC_DIR']).resolve(strict=True)
+          sha, version = os.environ['OPERATOR_SOURCE_COMMIT'], os.environ['RC_VERSION']
+          filename = 'mecord-connect-' + version + '.tgz'
+          assert {p.name for p in root.iterdir()} == {filename, filename + '.sha256', 'artifact-inventory.json'}, 'unexpected files in candidate'
+          archive_file = root / filename
+          digest = hashlib.sha256(archive_file.read_bytes()).hexdigest()
+          inv = json.loads((root / 'artifact-inventory.json').read_text(encoding='utf-8-sig'))
+          assert inv['source']['repository'] == os.environ['RC_REPO']
+          assert inv['source']['commit'] == sha and str(inv['source']['runId']) == os.environ['EXPECTED_RUN']
+          assert inv['package']['name'] == 'mecord-connect' and inv['package']['version'] == version
+          assert inv['package']['sha256'] == digest and inv['package']['filename'] == filename
+          assert (root / (filename + '.sha256')).read_text().strip() == digest + '  ' + filename
+          with tarfile.open(archive_file, 'r:gz') as tar:
+              members = tar.getmembers()
+              assert all(m.isfile() or m.isdir() for m in members), 'non-regular entry'
+              assert all(m.name == 'package' or m.name.startswith('package/') for m in members), 'unexpected archive root'
+              names = [m.name for m in members]
+              assert len(names) == len(set(n.casefold() for n in names)), 'duplicate archive path'
+              pkg = json.load(tar.extractfile('package/package.json'))
+              manifest_bytes = tar.extractfile('package/runtime/runtime-manifest.json').read()
+              manifest = json.loads(manifest_bytes)
+              assert pkg['name'] == 'mecord-connect' and pkg['version'] == version
+              assert pkg['license'] == 'SEE LICENSE IN LICENSE'
+              assert pkg['contentPolicy'] == {'class': 'dual-use'}
+              assert pkg['repository']['url'] == 'git+https://github.com/' + os.environ['RC_REPO'] + '.git'
+              assert pkg['bin'] == {'mecord-connect': 'bin/operator.mjs'}
+              assert manifest['package'] == 'mecord-connect' and manifest['version'] == version
+              assert manifest['platform'] == 'win32' and manifest['arch'] == 'x64'
+              assert manifest['sourceCommit'] == sha
+              assert hashlib.sha256(manifest_bytes).hexdigest() == inv['runtimeManifest']['sha256']
+              for entry in manifest['files']:
+                  payload = tar.extractfile('package/runtime/' + entry['path']).read()
+                  assert len(payload) == entry['sizeBytes'] and hashlib.sha256(payload).hexdigest() == entry['sha256']
+          print('candidate content, identity, runtime integrity and source: PASS SHA-256=' + digest)
+          PY
+
+      - name: Cryptographically verify independent GitHub builder attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_DIR: ${{ runner.temp }}/candidate
+        run: |
+          set -euo pipefail
+          gh attestation verify "$RC_DIR/mecord-connect-$RC_VERSION.tgz" \
+            --repo "$RC_REPO" \
+            --signer-workflow "$RC_REPO/.github/workflows/npm-remote-ci.yml" \
+            --source-digest "$OPERATOR_SOURCE_COMMIT" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Require npm latest still 2.0.5 and prerelease version unused
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.21.0 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = 11.21.0
+          python3 -I - <<'PY'
+          import json, urllib.request
+          with urllib.request.urlopen('https://registry.npmjs.org/mecord-connect', timeout=15) as response:
+              p = json.load(response)
+          assert p['name'] == 'mecord-connect' and p['dist-tags']['latest'] == '2.0.5'
+          assert '2.0.6-rc.1' not in p['versions'], 'RC1 already public'
+          assert p['dist-tags'].get('next') is None, 'npm next has another version'
+          print('registry verified: latest=2.0.5, next unassigned, prerelease absent')
+          PY
+
+      - name: Stage verified RC through npm Trusted Publisher OIDC (not public until owner 2FA)
+        shell: bash
+        env:
+          RC_DIR: ${{ runner.temp }}/candidate
+          NPM_CONFIG_IGNORE_SCRIPTS: 'false'
+        run: |
+          set -euo pipefail
+          test "$RC_VERSION" = 2.0.6-rc.1
+          test "$NPM_TAG" = next
+          npm stage publish "$RC_DIR/mecord-connect-$RC_VERSION.tgz" \
+            --access public --tag next --provenance --ignore-scripts=false
+          {
+            echo '## npm RC1 staged (human 2FA approval still required)'
+            echo 'Version: mecord-connect@2.0.6-rc.1; dist-tag: next; latest unaffected'
+            echo "Source and provenance commit: $OPERATOR_SOURCE_COMMIT"
+            echo "Builder run: ${{ steps.evidence.outputs.builder_run_id }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
