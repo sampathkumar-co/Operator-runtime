@@ -263,6 +263,24 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.doesNotMatch(attest, /actions\/checkout|cargo build\b|npm install\b|npm pack\b/);
 });
 
+test('npm PR CI covers all generated-runtime TypeScript source trees', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  const build = await fs.readFile(path.resolve('packages/mecord-connect/scripts/build-runtime-payload.mjs'), 'utf8');
+  const roots = [...build.matchAll(/compileTrackedTree\('([^']+)'/g)].map(match => match[1]);
+  assert.deepEqual(roots.sort(), [
+    'src',
+    'apps/local-agent/src',
+    'packages/adaptive-intelligence/src',
+    'packages/verified-plan-runtime/src'
+  ].sort(), 'source roots changed: update npm PR CI coverage and review the build contract');
+  const prPaths = workflow.split('  pull_request:\n    paths:\n')[1]?.split('\npermissions:')[0] ?? '';
+  for (const root of roots) {
+    assert.ok(prPaths.includes("      - '" + root + "/**'") ||
+      (root === 'apps/local-agent/src' && prPaths.includes("      - 'apps/local-agent/**'")),
+      'npm PR CI must cover generated-runtime source root: ' + root);
+  }
+});
+
 test('npm workflow runs on Git line-ending attribute changes', async () => {
   const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
   assert.ok(workflow.includes("      - '.gitattributes'"), 'attribute changes must trigger npm candidate CI');
