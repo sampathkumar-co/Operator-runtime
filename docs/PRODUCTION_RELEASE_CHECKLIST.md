@@ -7,6 +7,11 @@
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
 
+### 2026-10-12 independent witness implementation checkpoint
+
+- [x] Exact source `6bdbc7bedff8d401e3f80fe983394e6b7c0d5cc7`: both GitHub Actions Windows-build jobs passed, independent JS+normalized-PE comparison passed for both push and PR, and push-only [npm provenance #54925408](https://github.com/sampathkumar-co/Operator-runtime/attestations/54925408) was signed after the comparison succeeded. Inner tarball SHA-256: `5d011881a298eff36146c2b0ed0e790fc8129d70b67dd52f6ea6bedc87f77d73`; artifact ID `11726337877`. **Historical evidence only** after subsequent changes.
+- [x] P2 workflow coverage: `.gitattributes` changes now trigger the official npm remote workflow and a direct regression assertion checks this.
+- [ ] Current final candidate `50a18e6cd6f0e40b722c15bf5bfc7e7b7fcfa213`: exact-head npm push+PR/independent witness/signed provenance, complete CI and all three platform jobs must still be checked to terminal success. Do not reuse any predecessor's SHA/digest.
 ### 2026-10-12 fixed-scope Track A generated-runtime witness
 
 **No more open-ended audit loops; these are the concrete acceptance criteria for PR #311.**
@@ -15,7 +20,7 @@ This is a *live execution tracker*, not a claim that any missing tests passed. M
 - [x] A read-only comparison job requires exact file-set equality, byte-identical generated JS, and byte-identical PE executables after *only* COFF/debug timestamps and RSDS PDB GUID normalization. Every other native byte must match.
 - [x] The separate push-only provenance job requires SUCCESS from both the primary Windows builder and the independent witness comparison. PR runs have no OIDC/provenance-write authority.
 - [x] Tamper-negative local tests: modified generated JS and a changed non-metadata PE byte are rejected; two actual GitHub-built executables with timestamp/debug-identifier-only drift compare successfully.
-- [ ] Exact-head CI for PR #311 source `6bdbc7bedff8d401e3f80fe983394e6b7c0d5cc7`: npm push and PR, witness comparison, signed push-only provenance, native Windows checks, Node 22/24/26, general CI, R1, R2, Windows signing, and all three Platform Matrix operating systems must each be terminal SUCCESS.
+- [ ] Exact-head CI for PR #311 source `50a18e6cd6f0e40b722c15bf5bfc7e7b7fcfa213`: npm push and PR, witness comparison, signed push-only provenance, native Windows checks, Node 22/24/26, general CI, R1, R2, Windows signing, and all three Platform Matrix operating systems must each be terminal SUCCESS.
 - [ ] Independent HUMAN security reviewer approves PR #311's final head and PR #309, specifically reviewing witness verification, narrowly masked native metadata, workflow trust/permissions, and source binding.
 - [ ] Controlled merge of approved #311 and #309 into draft PR #295; certify the NEW integrated SHA. Older PR-head tarball/attestation evidence cannot substitute for final integrated/main evidence.
 - [ ] Track B independently administered signer/reviewer/external CAS/off-domain recovery witness, physical cross-host and installed authorization parity, recovery/rollback, and npm owner-approved staging remain separate production release gates.
