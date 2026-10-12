@@ -296,9 +296,11 @@ test('pathless Docker daemon inspection has a real identity but pathless Docker 
     () => resourceKeysForAction({ ...inspect, id: 'unsafe-manage', capability: 'docker.manage', risk: 'system' }),
     (error: any) => error?.code === 'RESOURCE_TARGET_REQUIRED'
   );
+  const project = path.resolve(os.tmpdir(), 'docker-project').replace(/\\/g, '/');
+  const normalized = process.platform === 'win32' ? project.toLowerCase() : project;
   assert.deepEqual(resourceKeysForAction({
-    ...inspect, id: 'project-inspect', input: { path: path.resolve(os.tmpdir(), 'docker-project') }
-  }), [`docker:${path.resolve(os.tmpdir(), 'docker-project').replace(/\\/g, '/').toLowerCase()}`].map((key) => process.platform === 'win32' ? key : key.replace(/docker:(.*)/, (_, p) => 'docker:' + path.resolve(os.tmpdir(), 'docker-project').replace(/\\/g, '/'))));
+    ...inspect, id: 'project-inspect', input: { path: project }
+  }), [`docker:${normalized}`]);
 });
 
 test('terminal declarations bind external mutation paths without parsing argv', async (t) => {
