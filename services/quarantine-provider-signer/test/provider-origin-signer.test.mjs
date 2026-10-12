@@ -43,7 +43,8 @@ test('requester cannot supply origin, signature, arbitrary classification or ope
   let lookups=0;
   const sign=createSigner({requestToken:token,originPublicKey:publicPem(origin.publicKey),
     signerPrivateKey:privatePem(signer.privateKey),issuer,clock:()=>now,
-    lookup:async request=>{lookups++;assert.deepEqual(({challenge,...identity})=>identity)(request),query);
+    lookup:async request=>{lookups++;const {challenge:nonce,...identity}=request;
+      assert.deepEqual(identity,query);
       assert.match(request.challenge,/^[0-9a-f]{64}$/);
       return source({...record,challenge:request.challenge});}});
   await assert.rejects(sign(token,{...query,classification:'verified-owned'}),/REQUEST_INVALID/);
