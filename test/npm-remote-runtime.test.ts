@@ -201,7 +201,7 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.doesNotMatch(windows, /(?:id-token|attestations): write/);
   assert.doesNotMatch(windows, /actions\/attest-build-provenance/);
   assert.match(attest, /if: github\.event_name == 'push'/);
-  assert.match(attest, /needs: windows-runtime/);
+  assert.match(attest, /needs: \[windows-runtime, compare-generated-witness\]/);
   assert.match(attest, /attestations: write/);
   assert.match(attest, /id-token: write/);
   assert.match(attest, /actions\/download-artifact@[0-9a-f]{40}/);
@@ -266,6 +266,33 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
 test('npm source files preserve canonical Git blob bytes on Windows checkout', async () => {
   const attributes = await fs.readFile(path.resolve('.gitattributes'), 'utf8');
   assert.ok(attributes.split('\n').map(line => line.trim()).includes('packages/mecord-connect/** text=auto eol=lf'));
+});
+
+test('independent Windows generated-runtime witness gates all push provenance', async () => {
+  const workflow = (await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8')).replace(/\r\n/g, '\n');
+  const witness = workflow.split('  windows-generated-witness:\n')[1]?.split('  compare-generated-witness:\n')[0];
+  const comparison = workflow.split('  compare-generated-witness:\n')[1]?.split('  attest-candidate:\n')[0];
+  const attestation = workflow.split('  attest-candidate:\n')[1]?.split('  node-compatibility:\n')[0];
+  const script = await fs.readFile(path.resolve('scripts/verify_npm_generated_witness.py'), 'utf8');
+  assert.ok(witness && comparison && attestation, 'independent witness and attestation jobs required');
+  assert.match(witness, /runs-on: windows-latest/);
+  assert.match(witness, /permissions:\n      contents: read/);
+  assert.doesNotMatch(witness, /(?:id-token|attestations): write/);
+  assert.match(witness, /rustup default 1\.98\.1/);
+  assert.match(witness, /cargo build --locked/);
+  assert.match(witness, /build-runtime-payload\.mjs/);
+  assert.match(comparison, /needs: \[windows-runtime, windows-generated-witness\]/);
+  assert.match(comparison, /verify_npm_generated_witness\.py/);
+  assert.match(comparison, /permissions:\n      contents: read/);
+  assert.doesNotMatch(comparison, /(?:id-token|attestations): write/);
+  assert.match(attestation, /needs: \[windows-runtime, compare-generated-witness\]/);
+  assert.match(script, /GENERATED_RUNTIME_INDEPENDENT_WITNESS_VERIFIED/);
+  assert.match(script, /archive_bytes != witness_bytes/);
+  assert.match(script, /normalize_pe\(archive_bytes\) != normalize_pe\(witness_bytes\)/);
+  assert.match(script, /independent runtime file-set mismatch/);
+  assert.match(script, /independent native PE code mismatch/);
+  assert.match(script, /normalized\[pe \+ 8:pe \+ 12\]/);
+  assert.match(script, /normalized\[pointer \+ 4:pointer \+ 20\]/);
 });
 
 test('runtime launcher allows only supported Windows x64 Node lines', () => {

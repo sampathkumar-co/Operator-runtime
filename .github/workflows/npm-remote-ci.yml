@@ -13,6 +13,7 @@ on:
       - 'native/windows-uia/**'
       - 'native/windows-path-lease/**'
       - 'test/npm-remote-runtime.test.ts'
+      - 'scripts/verify_npm_generated_witness.py'
       - 'test/npm-policy-continuity.test.ts'
       - 'scripts/verify-npm-policy-continuity.mjs'
       - '.github/workflows/npm-remote-ci.yml'
@@ -216,12 +217,91 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+
+  # Rebuild in a physically separate GitHub Windows worker with read-only
+  # permissions. This runner never receives an OIDC or attestation token.
+  windows-generated-witness:
+    name: Independent Windows native and JavaScript runtime rebuild
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+
+      - name: Install pinned Rust compiler
+        shell: pwsh
+        run: |
+          rustup default 1.98.1
+          rustc --version
+          cargo --version
+
+      - name: Rebuild native helpers and generated runtime from exact source
+        shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --locked --manifest-path native/windows-dpapi/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'independent DPAPI compilation failed' }
+          cargo build --locked --manifest-path native/windows-uia/Cargo.toml --release
+          if ($LASTEXITCODE -ne 0) { throw 'independent UIA compilation failed' }
+          ./native/windows-path-lease/build.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'independent path-lease compilation failed' }
+          node packages/mecord-connect/scripts/build-runtime-payload.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'independent runtime payload generation failed' }
+
+      - name: Upload independent runtime build witness
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mecord-runtime-witness-${{ github.sha }}
+          path: packages/mecord-connect/runtime/
+          if-no-files-found: error
+          retention-days: 14
+
+  # All comparisons execute read-only. Two disjoint Windows jobs must pass
+  # before the separate push-only OIDC job may sign the candidate.
+  compare-generated-witness:
+    name: Certify independently reproduced generated runtime
+    needs: [windows-runtime, windows-generated-witness]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download original npm candidate from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-connect-2.0.6-${{ github.sha }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Download independent rebuilt runtime from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-runtime-witness-${{ github.sha }}
+          path: ${{ runner.temp }}/witness
+
+      - name: Compare all generated JavaScript and normalized native PE bytes
+        shell: bash
+        run: |
+          python3 -I scripts/verify_npm_generated_witness.py \
+            --candidate-tarball "${{ runner.temp }}/candidate/mecord-connect-2.0.6.tgz" \
+            --witness-runtime "${{ runner.temp }}/witness" \
+            --expected-source "${{ github.sha }}"
+
   # A separate push-only job has OIDC/attestation authority; the PR-controlled
   # Windows build and its installation/security tests remain read-only.
   attest-candidate:
     name: Attest exact-source npm candidate (push only)
     if: github.event_name == 'push'
-    needs: windows-runtime
+    needs: [windows-runtime, compare-generated-witness]
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:
