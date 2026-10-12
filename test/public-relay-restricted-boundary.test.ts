@@ -178,6 +178,60 @@ test('missing crash-window result replays a read through the normal bounded exec
 });
 
 
+test('HTTP 409 reconciliation response is not ACKed without durable completed receipt', async (t) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-409-reconciliation-'));
+  t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
+  const identity = new DeviceIdentityStore(stateDir, { platform: 'linux' });
+  await identity.loadOrCreate('Read Recovery PC');
+  const deliveryId = crypto.randomUUID();
+  let localHits = 0;
+  const authoritative = { ok: true, capability: 'git.diff', provider: 'git.native',
+    output: { files: ['authoritative'] }, evidence: [], durationMs: 1 };
+  let receiptLookups = 0;
+  const localBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    if (req.url === '/v1/action-receipt') {
+      receiptLookups += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, receipt: { status: 'completed', actionId: 'read-reconciled' }, result: authoritative }));
+      return;
+    }
+    localHits += 1;
+    res.writeHead(409, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: { code: 'ACTION_EXECUTION_RECONCILIATION_REQUIRED',
+      message: 'Durable completion was interrupted' } }));
+  });
+  const resultBase = await listen(t, async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const sessionTokenFile = path.join(stateDir, 'relay-session.token');
+  await fs.writeFile(sessionTokenFile, 'sessiontoken123456.signature123456', 'utf8');
+  const delivery = {
+    type: 'delivery', seq: 1, id: deliveryId, kind: 'action',
+    payload: { publicBoundary: true, approvalAuthority: { accountId: crypto.randomUUID(), deviceId: crypto.randomUUID(), generation: 1 }, action: {
+      id: crypto.randomUUID(), capability: 'git.diff', risk: 'read', input: {}, provenance: { kind: 'chatgpt' }
+    } }
+  };
+  let resolveAck!: () => void;
+  const acked = new Promise<void>((resolve) => { resolveAck = resolve; });
+  const runner = new LocalAgentRelayRunner({
+    stateDir, relayUrl: 'ws://127.0.0.1:65433/device', resultUrl: `${resultBase}/v1/device-result`,
+    sessionTokenFile, identity, localAgentBaseUrl: localBase, agentToken: 'c'.repeat(64),
+    relayInternalToken: 'r'.repeat(64),
+    allowLoopbackInsecure: true, socketFactory: (url) => new ScriptedRelaySocket(url, delivery, resolveAck)
+  });
+  const running = runner.run();
+  await Promise.race([acked, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('relay ack timeout')), 3_000))]);
+  runner.stop();
+  await running;
+  assert.equal(localHits, 1);
+  assert.equal(receiptLookups, 1, 'receipt is consulted before error response can be ACKed');
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, 'relay-client.json'), 'utf8')), { version: 1, lastAckedServerSeq: 1 });
+});
+
+
 test('read-only processing receipt is safely retried following an interrupted relay session', async (t) => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'operator-public-processing-read-recovery-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
