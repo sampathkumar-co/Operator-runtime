@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ActionRequest, ActionResult } from '../../../src/core/types.ts';
 import { actionHash, canonicalJson } from '../../../src/core/action-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { readDurableStateText, writeDurableStateText } from '../../../src/core/durable-state.ts';
 import { withDurableStateLock } from '../../../src/core/durable-state-lock.ts';
 import {
@@ -73,7 +74,7 @@ export class LocalActionExecutionStore {
       const existing = state.records.find((entry) => entry.actionId === action.id);
       if (existing) {
         assertIdentity(existing, identity);
-        if (existing.risk === 'read') {
+        if (existing.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
           if (existing.status === 'processing' && existing.ownerId === this.#ownerId) {
             return { status: 'processing', record: clone(existing) };
           }
@@ -160,7 +161,7 @@ export class LocalActionExecutionStore {
     | { status: 'completed'; record: LocalActionExecutionRecord; result: ActionResult }
   > {
     const local = await this.lookup(action, authority);
-    if (local.status === 'missing' || action.risk === 'read') return local;
+    if (local.status === 'missing' || (action.risk === 'read' && capabilityRiskRule(action.capability) === 'read')) return local;
 
     let entry;
     try {
