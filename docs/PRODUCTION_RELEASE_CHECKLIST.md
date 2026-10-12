@@ -1,11 +1,19 @@
 # Mecord Connect — Production Release Checklist
 
-**Last reviewed:** 2026-10-11 (Asia/Kolkata)  
+**Last reviewed:** 2026-10-12 (Asia/Kolkata)  
 **Release candidate:** [PR #295](https://github.com/sampathkumar-co/Operator-runtime/pull/295), branch `integration/p0-hardening-20261011`  
 **Candidate source after PR #307 integration:** `d6d3749e6bde9e55be736f95b88709708ff6c22d` (merge into #295; full exact-head CI must be checked independently; this documentation commit creates a newer head)  
 **Release decision:** **HOLD**. No production deployment, npm publication, or replacement of protected local runtimes until all required gates are checked against a single final source commit.
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
+
+### 2026-10-12 PR #311 security hardening (current Track A state)
+
+- [x] **Code-level source/package integrity remediation submitted, without merging or changing production**: [PR #311](https://github.com/sampathkumar-co/Operator-runtime/pull/311) exact branch head `9164b5961f747f9e88e76444a4d1d379b9f2b160` now isolates push-only OIDC/attestation credentials from PR code, prevents npm push evidence cancellation, checks complete installed runtime manifest schema, enforces required native files and every packaged file size/hash, rejects special/GNU-sparse tar entries and Windows-equivalent duplicate paths, including superscript device names and case-folded `Runtime/` aliases. The separate PR npm attestation job must be skipped on PR events.
+- [x] **Prior exact-head signed candidate evidence, historical only**: PR #311 predecessor `5d1ab7f1744c9321ef5ec0b311e707b3980f126e` [push npm run 38199972405](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38199972405) and [PR npm run 38199975559](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38199975559) SUCCESS, signed provenance [attestation 54915932](https://github.com/sampathkumar-co/Operator-runtime/attestations/54915932), package SHA-256 `14572d718be3189253b6142b1a47f5e2999026e46c204d5657a0134c5dccc48f`. **Superseded by the newer head and not usable as final-main release evidence.**
+- [ ] **Exact final PR #311 head validation**: run all CI, Windows native build/install, cross-platform matrix, negative P1 package-verification regressions, and Sigstore source/provenance checks on `9164b5961f747f9e88e76444a4d1d379b9f2b160`. Do not substitute an older SHA or a PR merge-ref for the branch source.
+- [ ] **Independent approval and controlled integration**: human security review and approval of PR #311 and PR #309; merge each into draft PR #295 only after gates pass; certify the combined source, then explicitly authorize promotion into `main` against the exact new SHA.
+- [ ] **Track B physical/production gates**: independent reviewer, signer, external durable CAS ledger and off-domain recovery witness; cross-host authority/restore, installed hosted browser approval parity and recovery, verifiable Docker-volume snapshot/rollback, and npm owner-approved staging. Never substitute same-VPS replicas or local simulation for independent trust.
 
 ### 2026-10-11 post-merge npm 2.0.6 readiness delta (supersedes older incident snapshots below)
 
