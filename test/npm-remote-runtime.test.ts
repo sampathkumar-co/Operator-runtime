@@ -239,7 +239,7 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /embedded dual-use disclosure mismatch/);
   assert.match(attest, /source\['runId'\]/);
   assert.match(attest, /steps\.verify\.outputs\.subject_path/);
-  assert.doesNotMatch(attest, /actions\/checkout|cargo build|npm install|npm pack/);
+  assert.doesNotMatch(attest, /actions\/checkout|cargo build\b|npm install\b|npm pack\b/);
 });
 
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
