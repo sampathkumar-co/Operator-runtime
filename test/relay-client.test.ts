@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
+import { OperatorError } from '../src/core/errors.ts';
 import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
 import { createRelayCapabilitySessionBinding, relayCapabilitySessionDigest } from '../src/core/relay-capability-binding.ts';
 
