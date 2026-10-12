@@ -59,6 +59,7 @@ function rateAllowed(ip) {
     item.reset = now + 15 * 60_000;
   }
   item.count += 1;
+  attempts.set(ip, item);
   return item.count <= (openSignup ? 4 : 8);
 }
 
