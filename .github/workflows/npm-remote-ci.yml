@@ -16,6 +16,7 @@ on:
       - 'scripts/verify_npm_generated_witness.py'
       - 'test/npm-policy-continuity.test.ts'
       - 'scripts/verify-npm-policy-continuity.mjs'
+      - '.gitattributes'
       - '.github/workflows/npm-remote-ci.yml'
 
 permissions:
