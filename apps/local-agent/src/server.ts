@@ -2477,7 +2477,7 @@ export function createLocalAgentServer(options: {
         }
         if (options.actionExecutions) {
           await options.beforeActionReceiptCompletion?.({ action, result });
-          if (options.agentKernel && action.risk !== 'read' && result.ok) {
+          if (options.agentKernel && !(action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') && result.ok) {
             const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
             if (reconciled.status !== 'completed') {
               throw new OperatorError('ACTION_EXECUTION_RECONCILIATION_REQUIRED', 'Kernel reported success without a durable completed mutation result.', { retryable: false });
