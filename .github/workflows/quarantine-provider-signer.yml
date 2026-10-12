@@ -1,0 +1,32 @@
+name: Independent Provider-Origin Signer Contract
+
+on:
+  pull_request:
+    paths:
+      - 'services/quarantine-provider-signer/**'
+      - '.github/workflows/quarantine-provider-signer.yml'
+  push:
+    paths:
+      - 'services/quarantine-provider-signer/**'
+      - '.github/workflows/quarantine-provider-signer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  provider-origin-signer:
+    name: Signer ${{ matrix.os }} Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --check services/quarantine-provider-signer/provider-origin-signer.mjs
+      - run: node --check services/quarantine-provider-signer/server.mjs
+      - run: node --test services/quarantine-provider-signer/test/provider-origin-signer.test.mjs
