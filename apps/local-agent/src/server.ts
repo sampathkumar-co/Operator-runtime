@@ -2385,7 +2385,29 @@ export function createLocalAgentServer(options: {
             return;
           }
         }
-        let result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
+        let result: ActionResult;
+        try {
+          result = await executeActionWithCurrentApproval(action, approvalAuthority, undefined, requestPermissions);
+        } catch (error) {
+          // A failed read has no side effect to reconcile. Persist its structured
+          // failure so the relay can acknowledge it instead of leaving a durable
+          // 'processing' receipt and reconnecting on every HTTP 400 response.
+          // Mutations retain their existing fail-closed uncertain-execution path.
+          if (action.risk !== 'read') throw error;
+          result = {
+            ok: false,
+            capability: action.capability,
+            provider: 'operator.local',
+            evidence: [],
+            error: {
+              code: error instanceof OperatorError ? error.code : 'LOCAL_READ_EXECUTION_FAILED',
+              message: error instanceof OperatorError ? error.message : 'Local read execution failed.',
+              retryable: false,
+              sideEffectState: 'none'
+            },
+            durationMs: 0
+          };
+        }
         let autoResumedAfterApproval = false;
         if (result.provider === 'policy' && result.error?.code === 'APPROVAL_REQUIRED' && options.approvals) {
           const pending = await options.approvals.register(action, approvalAuthority);
