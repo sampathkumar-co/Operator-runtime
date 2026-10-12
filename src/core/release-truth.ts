@@ -9,7 +9,7 @@ export const RELEASE_TRUTH = Object.freeze({
   }),
   source: Object.freeze({
     repository: 'sampathkumar-co/Operator-runtime',
-    runtimePackageVersion: '2.0.6',
+    runtimePackageVersion: '2.0.6-rc.1',
     bootstrapPackageVersion: '1.0.0'
   }),
   production: Object.freeze({
