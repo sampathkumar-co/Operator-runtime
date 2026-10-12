@@ -340,7 +340,7 @@ jobs:
               'Windows Signing Smoke': '.github/workflows/windows-signing-smoke.yml',
               'NPM Remote Runtime CI': '.github/workflows/npm-remote-ci.yml',
               'R1 Canonical Runtime': '.github/workflows/r1-canonical-runtime.yml',
-              'R2 Adaptive Planning Runtime': '.github/workflows/r2-adaptive-planning-runtime.yml',
+              'R2 Adaptive Planning Runtime': '.github/workflows/r2-adaptive-planning.yml',
           }
           all_runs = runs['workflow_runs']
           for name, path in required.items():
