@@ -119,6 +119,10 @@ export function resourceKeysForAction(action: ActionRequest): string[] {
     add('repo', input.path ?? input.cwd, keys);
   } else if (action.capability.startsWith('docker.')) {
     add('docker', input.path, keys);
+    // docker.inspect supports an intentionally pathless, read-only daemon inspection.
+    // Only that operation gets a host-scoped identity; docker.manage still requires
+    // an explicit authorized project path, and receives no global fallback.
+    if (action.capability === 'docker.inspect' && keys.size === 0) keys.add('docker:daemon');
   } else if (action.capability === 'compute.run') {
     keys.add('compute:sandbox');
   } else if (action.capability.startsWith('postgres.')) {
