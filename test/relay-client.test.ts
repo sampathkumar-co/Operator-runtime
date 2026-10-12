@@ -682,6 +682,45 @@ test('handler uncertainty persists processing state and refuses blind replay wit
   assert.ok(sockets.length >= 2);
 });
 
+test('quick welcome-success / uncertain-execution loops still increase reconnect backoff', async (t) => {
+  const state = await stateDir(t, 'operator-relay-uncertain-backoff-');
+  const identity = new DeviceIdentityStore(state, { platform: 'linux' });
+  await identity.loadOrCreate('Read Failure Backoff PC');
+  const delays: number[] = [];
+  let client!: RelayClient;
+  let opens = 0;
+  const factory = () => {
+    const socket = new FakeSocket();
+    socket.onSend = (frame) => {
+      if (frame.type === 'hello') {
+        opens += 1;
+        socket.server({ type: 'welcome', protocol: 1, connectionId: `uncertain-${opens}`, resumeFromSeq: 0, heartbeatMs: 60_000 });
+        socket.server({ type: 'delivery', seq: 1, id: 'uncertain-read-1', kind: 'action',
+          payload: { action: { id: 'uncertain-read-1', capability: 'docker.inspect', risk: 'read', input: {} } } });
+      }
+    };
+    queueMicrotask(() => socket.open());
+    return socket;
+  };
+  client = new RelayClient({
+    stateDir: state,
+    url: 'ws://127.0.0.1:9999/relay',
+    allowLoopbackInsecureWs: true,
+    identity, socketFactory: factory,
+    getSessionToken: async () => 'session',
+    onDelivery: async () => { throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', 'read did not complete', { retryable: true }); },
+    onRecovery: async () => 'retry',
+    random: () => 0.5,
+    sleep: async (ms) => {
+      delays.push(ms);
+      if (delays.length >= 3) client.stop();
+    }
+  });
+  await client.run();
+  assert.equal(opens, 3);
+  assert.deepEqual(delays, [250, 500, 1000]);
+});
+
 test('relay URL policy requires TLS except explicit loopback development and backoff stays bounded', () => {
   assert.match(validateRelayUrl('wss://relay.example.com/operator'), /^wss:/);
   assert.match(validateRelayUrl('ws://127.0.0.1:9000/operator', true), /^ws:/);
