@@ -36,6 +36,7 @@ test('auth signup portal protects account creation and writes only normal users'
   assert.match(source, /!openSignup && !validInvite\(invite\)/);
   assert.match(source, /timingSafeEqual/);
   assert.match(source, /signupGlobal\.count > 60/);
+  assert.match(source, /attempts\.set\(ip, item\)/);
   assert.match(source, /return item\.count <= \(openSignup \? 4 : 8\)/);
   assert.match(source, /Password must be 12-128 characters/);
   assert.match(source, /Enter a valid email address/);
