@@ -265,6 +265,27 @@ export class LocalAgentRelayRunner {
           retryable: true, details: { actionId: action.id, sideEffectState: 'uncertain' }
         });
     }
+    // Some read-only validations reject a request before a durable receipt is
+    // even created. Confirm the receipt is genuinely missing before returning
+    // a bounded error, rather than interpreting that HTTP 400 as uncertain
+    // execution and reconnecting forever. Never apply this rule to mutations.
+    if (response.status === 400 && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read'
+      && body?.ok === false && typeof body?.error?.code === 'string'
+      && !body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      if (recovered.state === 'missing') {
+        return boundedResult({
+          ok: false, capability: action.capability, provider: 'operator.local',
+          error: {
+            code: /^[A-Z][A-Z0-9_]{0,127}$/.test(body.error.code) ? body.error.code : 'LOCAL_READ_REJECTED',
+            message: 'Local read request was rejected before execution.',
+            retryable: false, sideEffectState: 'none'
+          },
+          evidence: [], durationMs: 0
+        });
+      }
+    }
     if (publicBoundary && containsRestrictedPublicActionResult(action.capability, body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
       throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: true });
