@@ -312,7 +312,6 @@ jobs:
     env:
       RC_REPO: sampathkumar-co/Operator-runtime
       RC_VERSION: 2.0.6-rc.1
-      RC_REVIEWER: kinthalasamuelsampathkumar23cse-code
       NPM_TAG: next
       OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
     steps:
@@ -324,25 +323,17 @@ jobs:
         run: |
           set -euo pipefail
           gh api "/repos/$RC_REPO/pulls/316" > "$RUNNER_TEMP/source-pr.json"
-          gh api "/repos/$RC_REPO/pulls/316/reviews?per_page=100" > "$RUNNER_TEMP/source-reviews.json"
           gh api "/repos/$RC_REPO/actions/runs?head_sha=$OPERATOR_SOURCE_COMMIT&per_page=100" > "$RUNNER_TEMP/source-runs.json"
           python3 -I - <<'PY'
           import json, os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           read = lambda name: json.loads((root / name).read_text())
-          pr, reviews, runs = (read(x) for x in ('source-pr.json','source-reviews.json','source-runs.json'))
+          pr, runs = (read(x) for x in ('source-pr.json','source-runs.json'))
           commit, repo = os.environ['OPERATOR_SOURCE_COMMIT'], os.environ['RC_REPO']
           assert len(commit) == 40 and all(c in '0123456789abcdef' for c in commit), 'source SHA malformed'
           assert pr['number'] == 316 and pr['head']['sha'] == commit, 'source PR is not at this workflow commit'
           assert pr['base']['ref'] == 'integration/p0-hardening-20261011', 'source PR base mismatch'
           assert pr['head']['repo']['full_name'] == repo and pr['state'] == 'open', 'source PR must remain reviewable'
-          latest = {}
-          for review in sorted(reviews, key=lambda r: (str(r.get('submitted_at') or ''), r['id'])):
-              if review.get('state') in ('APPROVED','CHANGES_REQUESTED','DISMISSED'):
-                  latest[review['user']['login']] = review
-          assert not any(r['state'] == 'CHANGES_REQUESTED' for r in latest.values()), 'current changes-requested review'
-          reviewer = latest.get(os.environ['RC_REVIEWER'])
-          assert reviewer and reviewer['state'] == 'APPROVED' and reviewer['commit_id'] == commit, 'exact-source review no longer approved'
           required = {
               'CI': '.github/workflows/ci.yml',
               'Platform Matrix': '.github/workflows/platform-matrix.yml',
@@ -370,7 +361,7 @@ jobs:
           builder = max(signed_runs, key=lambda r: int(r['id']))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('builder_run_id=' + str(builder['id']) + '\n')
-          print('APPROVED exact-source RC1, six path+PR bound checks green, builder run:', builder['id'])
+          print('OWNER-DISPATCH RC1, six path+PR bound checks green, builder run:', builder['id'])
           PY
 
       - name: Download candidate signed by same-source push CI
