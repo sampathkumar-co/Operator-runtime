@@ -14,7 +14,8 @@ const publicPem=key=>key.export({format:'pem',type:'spki'}).toString();
 const privatePem=key=>key.export({format:'pem',type:'pkcs8'}).toString();
 const issuer='origin:separate-provider';
 const token='signer-api:'+crypto.randomBytes(32).toString('hex');
-const record={schemaVersion:1,issuer,intentId:quarantineIntentId(programId,returnedMissionId),
+const challenge='a'.repeat(64);
+const record={schemaVersion:1,issuer,challenge,intentId:quarantineIntentId(programId,returnedMissionId),
   programId,targetKey,expectedMissionId:stableMissionId(programId,targetKey),
   returnedMissionId,classification:'verified-unrelated',
   evidenceDigest:crypto.randomBytes(32).toString('hex'),providerDeviceId:crypto.randomUUID(),
@@ -24,7 +25,7 @@ const record={schemaVersion:1,issuer,intentId:quarantineIntentId(programId,retur
 const source=(receipt=record,key=origin.privateKey)=>({
   receipt,signature:crypto.sign(null,Buffer.from(JSON.stringify(receipt),'utf8'),key).toString('base64url')});
 const exercise=(originResponse=source(),q=query,options={})=>signFromVerifiedObservation({
-  query:q,originResponse,originPublicKey:publicPem(origin.publicKey),
+  query:q,challenge,originResponse,originPublicKey:publicPem(origin.publicKey),
   signerPrivateKey:privatePem(signer.privateKey),issuer,now,...options});
 test('separately signed authentic provider origin becomes a downstream-compatible Ed25519 claim',()=>{
   const {claim,signature}=exercise();
@@ -42,7 +43,9 @@ test('requester cannot supply origin, signature, arbitrary classification or ope
   let lookups=0;
   const sign=createSigner({requestToken:token,originPublicKey:publicPem(origin.publicKey),
     signerPrivateKey:privatePem(signer.privateKey),issuer,clock:()=>now,
-    lookup:async request=>{lookups++;assert.deepEqual(request,query);return source();}});
+    lookup:async request=>{lookups++;assert.deepEqual(({challenge,...identity})=>identity)(request),query);
+      assert.match(request.challenge,/^[0-9a-f]{64}$/);
+      return source({...record,challenge:request.challenge});}});
   await assert.rejects(sign(token,{...query,classification:'verified-owned'}),/REQUEST_INVALID/);
   await assert.rejects(sign(token,{...query,signature:'spoof'}),/REQUEST_INVALID/);
   await assert.rejects(sign('unauthorized',query),/REQUEST_UNAUTHORIZED/);
@@ -65,6 +68,9 @@ test('rejects cross-program, cross-mission, cross-target and incorrect signer au
     {authorityGeneration:0},{providerSessionId:'fake'}])
     assert.throws(()=>exercise(source({...record,...edit})),/ORIGIN_INVALID|ORIGIN_CLASSIFICATION_INVALID/);
   assert.throws(()=>exercise(source({...record,extra:'claim'})),/ORIGIN_INVALID/);
+});
+test('replayed but still fresh signed receipt cannot satisfy a different request challenge',()=>{
+  assert.throws(()=>exercise(source(),query,{challenge:'b'.repeat(64)}),/ORIGIN_CHALLENGE_MISMATCH/);
 });
 test('rejects expired, future, stale and unbounded lifetime authority',()=>{
   const t=ms=>new Date(now.getTime()+ms).toISOString();
