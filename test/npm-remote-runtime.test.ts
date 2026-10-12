@@ -477,6 +477,13 @@ test('runtime payload builder copies only tracked clean sources bound to HEAD', 
   assert.doesNotMatch(source, /copyTree\(path\.join\(repoRoot/);
 });
 
+test('bounded numbered release-candidate versions are accepted without widening stable manifest validation', () => {
+  assert.equal(validateRuntimeManifest(manifest({ version: '2.0.6-rc.1' })).version, '2.0.6-rc.1');
+  for (const version of ['2.0.6-rc.0', '2.0.6-rc.01', '2.0.6-beta.1', '2.0.6-rc.1+build', '2.0.6-rc.1.2']) {
+    assert.throws(() => validateRuntimeManifest(manifest({ version })), /version is invalid/);
+  }
+});
+
 test('runtime manifest requires the complete hardened native boundary', () => {
   const parsed = validateRuntimeManifest(manifest());
   assert.equal(parsed.files.length, 5);

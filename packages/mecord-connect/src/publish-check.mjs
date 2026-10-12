@@ -6,7 +6,7 @@ import { verifyRuntimePayload } from './cli.mjs';
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(await fs.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
 if (pkg.name !== 'mecord-connect') throw new Error('Unexpected npm package name.');
-if (!/^\d+\.\d+\.\d+$/.test(pkg.version)) throw new Error('Mecord Connect npm version must use stable semantic versioning.');
+if (!/^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$/.test(pkg.version)) throw new Error('Mecord Connect npm version must be stable or numbered RC semantic versioning.');
 
 const manifest = await verifyRuntimePayload();
 if (manifest.version !== pkg.version) {
