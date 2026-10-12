@@ -146,3 +146,48 @@ test('caller-mislabeled write cannot be treated as side-effect-free read failure
   assert.equal((await duplicate.json() as any).error.code, 'ACTION_EXECUTION_IN_PROGRESS');
   assert.equal(executions, 1);
 });
+
+test('post-dispatch read completion failure is durably finalized rather than stranded', async (t) => {
+  const root = await temp(t);
+  const state = await temp(t);
+  const token = 'd'.repeat(64);
+  let hits = 0;
+  const runtime = {
+    execute: async () => {
+      hits += 1;
+      return {
+        ok: true, capability: 'file.read', provider: 'filesystem.native',
+        output: { content: 'read-only-result' }, evidence: [], durationMs: 1
+      };
+    }
+  } as unknown as OperatorRuntime;
+  const store = new LocalActionExecutionStore(state);
+  const agent = createLocalAgentServer({
+    runtime, token, actionExecutions: store,
+    permissions: { allowedCapabilities: ['file.read'], allowedRoots: [root] },
+    beforeActionReceiptCompletion: () => { throw new OperatorError('READ_COMPLETION_HOOK_FAILED', 'Injected read completion failure'); }
+  });
+  t.after(() => agent.close());
+  const address = await agent.listen();
+  const action = {
+    id: 'read-postdispatch-failure', capability: 'file.read',
+    risk: 'read', input: { path: path.join(root, 'read.txt') },
+    provenance: { kind: 'chatgpt' }
+  };
+  const request = (endpoint: string) => fetch(`http://127.0.0.1:${address.port}${endpoint}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ action })
+  });
+  const response = await request('/v1/execute');
+  assert.equal(response.status, 409);
+  const failed = await response.json() as any;
+  assert.equal(failed.error.code, 'READ_COMPLETION_HOOK_FAILED');
+  assert.equal(failed.error.sideEffectState, 'none');
+  const receipt = await request('/v1/action-receipt');
+  assert.equal(receipt.status, 200);
+  const persisted = await receipt.json() as any;
+  assert.equal(persisted.receipt.status, 'completed');
+  assert.equal(persisted.result.error.code, 'READ_COMPLETION_HOOK_FAILED');
+  assert.equal(hits, 1);
+});
