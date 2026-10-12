@@ -29,6 +29,7 @@ import type { LocalPrivacyDataStore, PrivacyCategory } from './privacy-data.ts';
 import type { LocalDeviceResetResult } from './device-reset.ts';
 import { renderControlCenter } from './control-center.ts';
 import { resourceKeysForAction } from '../../../src/core/resource-identity.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import type { EnterpriseAuthorizationContext, EnterprisePolicyStore } from '../../../src/core/enterprise-policy.ts';
 import type { TeachModeStore } from '../../../src/core/studio-teach.ts';
 import type { DesiredStateController } from '../../../src/core/desired-state.ts';
@@ -2393,7 +2394,9 @@ export function createLocalAgentServer(options: {
           // failure so the relay can acknowledge it instead of leaving a durable
           // 'processing' receipt and reconnecting on every HTTP 400 response.
           // Mutations retain their existing fail-closed uncertain-execution path.
-          if (action.risk !== 'read') throw error;
+          // Do not trust the caller's risk label: only canonically read-only
+          // capabilities may be finalized without an execution proof.
+          if (action.risk !== 'read' || capabilityRiskRule(action.capability) !== 'read') throw error;
           result = {
             ok: false,
             capability: action.capability,
