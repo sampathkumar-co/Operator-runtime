@@ -237,6 +237,12 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /embedded_pkg\.get\('name'\) == 'mecord-connect'/);
   assert.match(attest, /embedded_pkg\.get\('bin', \{\}\)\.get\('mecord-connect'\)/);
   assert.match(attest, /embedded dual-use disclosure mismatch/);
+  assert.match(attest, /manifest_bytes\.decode\('utf-8', errors='strict'\)/);
+  assert.match(attest, /pkg_json_bytes\.decode\('utf-8', errors='strict'\)/);
+  assert.match(attest, /unexpected npm lifecycle scripts/);
+  assert.match(attest, /approved_scripts = \{/);
+  assert.match(attest, /prepublishOnly/);
+  assert.match(attest, /unexpected npm dependency\/install authority/);
   assert.match(attest, /source\['runId'\]/);
   assert.match(attest, /steps\.verify\.outputs\.subject_path/);
   assert.doesNotMatch(attest, /actions\/checkout|cargo build\b|npm install\b|npm pack\b/);

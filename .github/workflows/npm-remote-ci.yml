@@ -323,13 +323,33 @@ jobs:
               }
               assert required_package <= set(file_map), 'missing required npm package files'
               assert all(file_map[path].size > 0 for path in required_package), 'empty required npm file'
-              embedded_pkg = json.loads(archive.extractfile(file_map['package.json']).read())
+              pkg_json_bytes = archive.extractfile(file_map['package.json']).read()
+              pkg_json_text = pkg_json_bytes.decode('utf-8', errors='strict')
+              assert not pkg_json_text.startswith('\ufeff'), 'npm package JSON UTF-8 BOM'
+              embedded_pkg = json.loads(pkg_json_text)
               assert isinstance(embedded_pkg, dict), 'invalid embedded npm package metadata'
               assert embedded_pkg.get('name') == 'mecord-connect', 'embedded npm package identity'
               assert embedded_pkg.get('version') == package['version'], 'embedded npm version mismatch'
               assert embedded_pkg.get('license') == 'SEE LICENSE IN LICENSE', 'embedded npm license mismatch'
               assert embedded_pkg.get('contentPolicy') == {'class': 'dual-use'}, 'embedded dual-use disclosure mismatch'
               assert embedded_pkg.get('bin', {}).get('mecord-connect') == 'bin/operator.mjs', 'embedded npm CLI entrypoint mismatch'
+              # npm install/npx execute lifecycle hooks unless prevented.
+              # Match the actual approved source package's inert script set.
+              approved_scripts = {
+                  'build:runtime': 'node ./scripts/build-runtime-payload.mjs',
+                  'prepublishOnly': 'node ./src/publish-check.mjs'
+              }
+              assert embedded_pkg.get('scripts') == approved_scripts, 'unexpected npm lifecycle scripts'
+              assert embedded_pkg.get('type') == 'module', 'unexpected package module type'
+              assert embedded_pkg.get('os') == ['win32'] and embedded_pkg.get('cpu') == ['x64'], 'npm OS/CPU contract mismatch'
+              assert embedded_pkg.get('engines') == {
+                  'node': '>=22.14.0 <23 || >=24.0.0 <25 || >=26.0.0 <27'
+              }, 'npm supported Node contract mismatch'
+              for dependency_key in (
+                  'dependencies', 'devDependencies', 'optionalDependencies',
+                  'peerDependencies', 'bundledDependencies', 'bundleDependencies'
+              ):
+                  assert dependency_key not in embedded_pkg, 'unexpected npm dependency/install authority'
 
               inventory_files = inventory['contents']
               assert len(inventory_files) == len(file_map), 'packed inventory count mismatch'
@@ -340,7 +360,9 @@ jobs:
               manifest_member = file_map.get('runtime/runtime-manifest.json')
               assert manifest_member is not None, 'packed runtime manifest missing'
               manifest_bytes = archive.extractfile(manifest_member).read()
-              manifest = json.loads(manifest_bytes)
+              manifest_text = manifest_bytes.decode('utf-8', errors='strict')
+              assert not manifest_text.startswith('\ufeff'), 'runtime manifest UTF-8 BOM'
+              manifest = json.loads(manifest_text)
               # Enforce the installed CLI's validateRuntimeManifest contract,
               # not just the untrusted tarball's self-consistent inventory.
               assert isinstance(manifest, dict), 'runtime manifest not an object'
