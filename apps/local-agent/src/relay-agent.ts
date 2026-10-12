@@ -247,6 +247,19 @@ export class LocalAgentRelayRunner {
         details: { actionId: action.id, sideEffectState: 'uncertain' }
       });
     }
+    // An ACTION_EXECUTION_* HTTP 409 may mean the local receipt was not
+    // durably finalized (including a post-dispatch reconciliation failure).
+    // It is NOT a normal completed tool error: recover exact receipt before
+    // acknowledging, especially for actions that could have changed state.
+    if (response.status === 409 && typeof body?.error?.code === 'string'
+      && body.error.code.startsWith('ACTION_EXECUTION_')) {
+      const recovered = await this.#recoverLocalActionReceipt(payload);
+      if (recovered.state === 'completed') return recovered.result;
+      throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN',
+        'Local execution returned a receipt-reconciliation error; action outcome is not confirmed.', {
+          retryable: true, details: { actionId: action.id, sideEffectState: 'uncertain' }
+        });
+    }
     if (publicBoundary && containsRestrictedPublicActionResult(action.capability, body)) return restrictedDataBlockedResult(action.capability);
     if (![200, 409, 423].includes(response.status)) {
       throw new OperatorError('RELAY_LOCAL_EXECUTION_UNCERTAIN', `Local agent returned HTTP ${response.status}; execution state cannot be safely inferred.`, { retryable: true });
