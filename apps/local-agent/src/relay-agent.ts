@@ -2,6 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DeviceIdentityStore } from '../../../src/core/device-identity.ts';
 import { OperatorError } from '../../../src/core/errors.ts';
+import { capabilityRiskRule } from '../../../src/core/capability-policy.ts';
 import { RelayClient, type RelayClientStatus, type RelayConnectionState, type RelayDelivery, type RelayExpiredRecoveryDecision, type RelayRecoveryDecision, type RelaySocketFactory } from '../../../src/core/relay-client.ts';
 import { RelayResultStore } from '../../../src/core/relay-result-store.ts';
 import type { ActionRequest } from '../../../src/core/types.ts';
@@ -500,7 +501,10 @@ export function canRetryUncertainRelayDelivery(delivery: RelayDelivery): boolean
       return request.operation !== 'submit' || typeof request.request.requestId === 'string';
     }
     if (delivery.kind === 'knowledge') { validateRelayKnowledgeQuery(delivery.payload.query); return true; }
-    if (delivery.kind === 'action') return validateRemoteAction(delivery.payload.action).risk === 'read';
+    if (delivery.kind === 'action') {
+      const action = validateRemoteAction(delivery.payload.action);
+      return action.risk === 'read' && capabilityRiskRule(action.capability) === 'read';
+    }
     return false;
   } catch {
     return false;
