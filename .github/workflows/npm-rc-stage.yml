@@ -1,0 +1,185 @@
+name: Stage verified Mecord npm RC1 (next only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mecord-connect-rc1-staging
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    name: Verify approved signed RC1 and stage to npm next
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'sampathkumar-co/Operator-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      attestations: read
+      id-token: write
+    env:
+      EXPECTED_REPO: sampathkumar-co/Operator-runtime
+      EXPECTED_SHA: 13a390b786e947738f11cec7542dd60200997d8b
+      EXPECTED_VERSION: 2.0.6-rc.1
+      EXPECTED_TARBALL_SHA256: 76fdfc0fac7a1cb3073738a03923cfe1bd8224ca9440f2fdd387fbfe44c1039e
+      EXPECTED_RUN_ID: '38220049321'
+      EXPECTED_REVIEWER: kinthalasamuelsampathkumar23cse-code
+      NPM_TAG: next
+    steps:
+      - name: Check exact approved RC source and fully green GitHub CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "/repos/$EXPECTED_REPO/pulls/316" > "$RUNNER_TEMP/rc-pr.json"
+          gh api "/repos/$EXPECTED_REPO/pulls/316/reviews?per_page=100" > "$RUNNER_TEMP/rc-reviews.json"
+          gh api "/repos/$EXPECTED_REPO/actions/runs/$EXPECTED_RUN_ID" > "$RUNNER_TEMP/rc-run.json"
+          gh api "/repos/$EXPECTED_REPO/actions/runs?head_sha=$EXPECTED_SHA&per_page=100" > "$RUNNER_TEMP/rc-runs.json"
+          gh api "/repos/$EXPECTED_REPO/actions/runs/$EXPECTED_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/rc-artifacts.json"
+          python3 -I - <<'PY'
+          import json, os, pathlib
+          folder = pathlib.Path(os.environ['RUNNER_TEMP'])
+          read = lambda n: json.loads((folder / n).read_text())
+          sha = os.environ['EXPECTED_SHA']
+          repo = os.environ['EXPECTED_REPO']
+          pr, reviews, run, runs, artifacts = (read(n) for n in (
+              'rc-pr.json', 'rc-reviews.json', 'rc-run.json', 'rc-runs.json', 'rc-artifacts.json'))
+          assert pr['number'] == 316 and pr['head']['sha'] == sha, 'source PR head changed'
+          assert pr['base']['ref'] == 'integration/p0-hardening-20261011', 'unexpected source PR base'
+          assert pr['head']['repo']['full_name'] == repo, 'foreign source PR repository'
+          reviewer = os.environ['EXPECTED_REVIEWER']
+          assert any(r.get('state') == 'APPROVED' and r.get('commit_id') == sha
+                     and r.get('user', {}).get('login') == reviewer for r in reviews), 'exact-source human review missing'
+          assert run['id'] == int(os.environ['EXPECTED_RUN_ID'])
+          assert run['head_sha'] == sha and run['head_repository']['full_name'] == repo
+          assert run['name'] == 'NPM Remote Runtime CI' and run['event'] == 'push'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'signed builder not green'
+          required = {'CI', 'Platform Matrix', 'Windows Signing Smoke',
+                      'NPM Remote Runtime CI', 'R1 Canonical Runtime',
+                      'R2 Adaptive Planning Runtime'}
+          approved = {r['name'] for r in runs['workflow_runs']
+                      if r.get('event') == 'pull_request' and r.get('head_sha') == sha
+                      and r.get('status') == 'completed' and r.get('conclusion') == 'success'}
+          assert required <= approved, f'RC source CI not green: {required - approved}'
+          matches = [a for a in artifacts['artifacts'] if a['id'] == 11734370696]
+          assert len(matches) == 1 and not matches[0]['expired'], 'signed artifact unavailable'
+          assert matches[0]['name'] == 'mecord-connect-2.0.6-rc.1-' + sha, 'artifact identity mismatch'
+          print('source approved; GitHub CI and immutable artifact origin verified')
+          PY
+
+      - name: Download immutable artifact from certified push run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mecord-connect-2.0.6-rc.1-13a390b786e947738f11cec7542dd60200997d8b
+          repository: sampathkumar-co/Operator-runtime
+          run-id: 38220049321
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/rc1
+
+      - name: Verify tarball bytes, inventory, embedded policy and exact source
+        shell: bash
+        env:
+          RC_DIR: ${{ runner.temp }}/rc1
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import hashlib, json, os, pathlib, tarfile
+          folder = pathlib.Path(os.environ['RC_DIR']).resolve(strict=True)
+          sha, version = os.environ['EXPECTED_SHA'], os.environ['EXPECTED_VERSION']
+          filename = 'mecord-connect-' + version + '.tgz'
+          assert {p.name for p in folder.iterdir()} == {filename, filename + '.sha256', 'artifact-inventory.json'}, 'unapproved artifact files'
+          tarball = folder / filename
+          digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
+          assert digest == os.environ['EXPECTED_TARBALL_SHA256'], 'signed RC1 tarball SHA-256 mismatch'
+          inv = json.loads((folder / 'artifact-inventory.json').read_text(encoding='utf-8-sig'))
+          assert inv['package']['name'] == 'mecord-connect' and inv['package']['version'] == version
+          assert inv['package']['filename'] == filename and inv['package']['sha256'] == digest
+          assert inv['source']['commit'] == sha and str(inv['source']['runId']) == os.environ['EXPECTED_RUN_ID']
+          assert inv['source']['repository'] == os.environ['EXPECTED_REPO']
+          assert (folder / (filename + '.sha256')).read_text().strip() == digest + '  ' + filename
+          with tarfile.open(tarball, 'r:gz') as archive:
+              members = archive.getmembers()
+              assert all(m.isfile() or m.isdir() for m in members), 'unexpected tar entry type'
+              assert all(m.name == 'package' or m.name.startswith('package/') for m in members), 'unexpected tar root'
+              names = [m.name for m in members if m.isfile()]
+              assert len(names) == len(set(n.lower() for n in names)), 'duplicate archived path'
+              package = json.load(archive.extractfile('package/package.json'))
+              assert package['name'] == 'mecord-connect' and package['version'] == version
+              assert package['license'] == 'SEE LICENSE IN LICENSE'
+              assert package['contentPolicy'] == {'class': 'dual-use'}
+              assert package['repository']['url'] == 'git+https://github.com/' + os.environ['EXPECTED_REPO'] + '.git'
+              assert package['bin'] == {'mecord-connect': 'bin/operator.mjs'}
+              manifest = json.load(archive.extractfile('package/runtime/runtime-manifest.json'))
+              assert manifest['package'] == 'mecord-connect' and manifest['version'] == version
+              assert manifest['sourceCommit'] == sha and manifest['platform'] == 'win32' and manifest['arch'] == 'x64'
+              for entry in manifest['files']:
+                  path = 'package/runtime/' + entry['path']
+                  data = archive.extractfile(path).read()
+                  assert len(data) == entry['sizeBytes'], 'runtime size drift'
+                  assert hashlib.sha256(data).hexdigest() == entry['sha256'], 'runtime content drift'
+          print('exact signed artifact SHA-256, embedded manifest, native/JS bytes and policy: PASS')
+          PY
+
+      - name: Verify GitHub SLSA attestation from pinned push-only signer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_DIR: ${{ runner.temp }}/rc1
+        run: |
+          set -euo pipefail
+          gh attestation verify "$RC_DIR/mecord-connect-$EXPECTED_VERSION.tgz" \
+            --repo "$EXPECTED_REPO" \
+            --signer-workflow "$EXPECTED_REPO/.github/workflows/npm-remote-ci.yml" \
+            --source-digest "$EXPECTED_SHA" \
+            --source-ref "refs/heads/release/npm-206-rc1-preparation-20261012" \
+            --deny-self-hosted-runners
+
+      - name: Install supported npm CLI (no publisher token)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.23.2'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Require pristine dist-tags and unpublished RC1
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.21.0 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = 11.21.0
+          python3 -I - <<'PY'
+          import json, os, urllib.request
+          with urllib.request.urlopen('https://registry.npmjs.org/mecord-connect', timeout=15) as response:
+              packument = json.load(response)
+          assert packument['name'] == 'mecord-connect'
+          assert packument['dist-tags']['latest'] == '2.0.5', 'stable npm latest changed'
+          assert os.environ['EXPECTED_VERSION'] not in packument['versions'], 'RC version already published'
+          assert packument['dist-tags'].get('next') is None, 'unexpected existing npm next channel'
+          print('npm latest=2.0.5; RC1 absent; next unassigned')
+          PY
+
+      - name: Stage signed RC1 with GitHub OIDC and provenance (never promote latest)
+        shell: bash
+        env:
+          RC_DIR: ${{ runner.temp }}/rc1
+          NPM_CONFIG_IGNORE_SCRIPTS: 'false'
+        run: |
+          set -euo pipefail
+          test "$NPM_TAG" = next
+          test "$EXPECTED_VERSION" = 2.0.6-rc.1
+          npm stage publish "$RC_DIR/mecord-connect-$EXPECTED_VERSION.tgz" \
+            --access public --tag next --provenance --ignore-scripts=false
+          {
+            echo '## RC1 staged to npm for human 2FA approval'
+            echo 'Package: mecord-connect@2.0.6-rc.1'
+            echo 'Dist-tag on approval: next (never latest)'
+            echo 'Source: 13a390b786e947738f11cec7542dd60200997d8b'
+            echo 'Tarball SHA-256: 76fdfc0fac7a1cb3073738a03923cfe1bd8224ca9440f2fdd387fbfe44c1039e'
+            echo 'Staging does not publish a public version. Npm owner must approve with 2FA.'
+          } >> "$GITHUB_STEP_SUMMARY"
