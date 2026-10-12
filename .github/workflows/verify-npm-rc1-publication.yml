@@ -1,0 +1,61 @@
+name: Verify public npm RC1 registry (read only)
+
+on:
+  push:
+    branches:
+      - release/verify-npm-rc1-20261012
+    paths:
+      - '.github/workflows/verify-npm-rc1-publication.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify registry dist-tags and exact signed tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check public npm metadata and exact published bytes
+        shell: bash
+        env:
+          EXPECTED_VERSION: 2.0.6-rc.1
+          EXPECTED_SHA256: 00e7c24b6fbd1e52768a8373f1182e918da0aeaece57a336aebebe462f796070
+          EXPECTED_SHA1: 0542afa02bfb41687abdf6af4258cbaba90c2d4c
+          EXPECTED_SHA512: sha512-3OHpxXFW8pyYm5Y6c9UEQ2LcJzfpdyGmkpeTDEm0Qju+jlS20vM9VMtGWoFBlnmkzqhve9QXfg5isvJa/QSWyQ==
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import base64,hashlib,json,os,pathlib,urllib.request
+          url='https://registry.npmjs.org/mecord-connect'
+          request=urllib.request.Request(url, headers={'Accept':'application/vnd.npm.install-v1+json','Cache-Control':'no-cache'})
+          with urllib.request.urlopen(request,timeout=25) as response:
+              metadata=json.load(response)
+          assert metadata.get('name')=='mecord-connect', 'wrong npm registry package'
+          tags=metadata.get('dist-tags',{})
+          print('PUBLIC_DIST_TAGS',json.dumps(tags,sort_keys=True),flush=True)
+          assert tags.get('latest')=='2.0.5', 'latest dist-tag changed unexpectedly'
+          assert tags.get('next')==os.environ['EXPECTED_VERSION'], 'RC1 not approved/public under next'
+          version=metadata.get('versions',{}).get(os.environ['EXPECTED_VERSION'])
+          assert version and version['name']=='mecord-connect', 'RC1 not public in registry'
+          dist=version['dist']
+          assert dist['shasum']==os.environ['EXPECTED_SHA1'], 'published SHA1 differs from approved build'
+          assert dist['integrity']==os.environ['EXPECTED_SHA512'], 'published SHA512 differs from approved build'
+          assert dist['tarball']=='https://registry.npmjs.org/mecord-connect/-/mecord-connect-2.0.6-rc.1.tgz','tarball URL unexpectedly changed'
+          tarball_request=urllib.request.Request(dist['tarball'],headers={'Cache-Control':'no-cache'})
+          with urllib.request.urlopen(tarball_request,timeout=35) as response:
+              tarball=response.read(8000000)
+              assert not response.read(1), 'oversized tarball'
+          digest=hashlib.sha256(tarball).hexdigest()
+          assert digest==os.environ['EXPECTED_SHA256'], 'public npm tarball differs from signed GitHub build'
+          assert hashlib.sha1(tarball).hexdigest()==os.environ['EXPECTED_SHA1'], 'SHA1 mismatch'
+          integrity='sha512-'+base64.b64encode(hashlib.sha512(tarball).digest()).decode()
+          assert integrity==os.environ['EXPECTED_SHA512'], 'SHA512 mismatch'
+          print('REGISTRY_VERIFIED mecord-connect@next=2.0.6-rc.1 latest=2.0.5')
+          print('PUBLIC_TARBALL_SHA256 '+digest)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+              f.write('## Public npm RC1 verified\n')
+              f.write('- Published: mecord-connect@2.0.6-rc.1 under next\n')
+              f.write('- Stable latest remains 2.0.5\n')
+              f.write('- Tarball matches original GitHub attested build SHA-256 '+digest+'\n')
+          PY
