@@ -116,6 +116,8 @@ test('uncertain relay recovery retries only a validated read action when no stor
   };
   assert.equal(canRetryUncertainRelayDelivery(base), true);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, risk: 'write' } } }), false);
+  assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, capability: 'file.write', risk: 'read' } } }), false,
+    'a caller-supplied read label must not authorize retry of a canonically mutating capability');
   assert.equal(canRetryUncertainRelayDelivery({ ...base, payload: { action: { ...base.payload.action, provenance: { kind: 'observed' } } } }), false);
   assert.equal(canRetryUncertainRelayDelivery({ ...base, kind: 'task.dispatch' }), false);
   const taskId = crypto.randomUUID();
