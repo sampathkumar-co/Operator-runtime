@@ -240,6 +240,12 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /manifest_bytes\.decode\('utf-8', errors='strict'\)/);
   assert.match(attest, /pkg_json_bytes\.decode\('utf-8', errors='strict'\)/);
   assert.match(attest, /unexpected npm lifecycle scripts/);
+
+  assert.match(attest, /implicit npm native build hook/);
+  assert.match(attest, /unapproved npm node-gyp metadata/);
+  assert.match(attest, /'binding\.gyp' not in/);
+  assert.match(attest, /parse_constant=reject_non_json_constant/g);
+  assert.match(attest, /Nonstandard JSON constant/);
   assert.match(attest, /approved_scripts = \{/);
   assert.match(attest, /prepublishOnly/);
   assert.match(attest, /unexpected npm dependency\/install authority/);
