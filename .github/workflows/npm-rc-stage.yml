@@ -140,8 +140,7 @@ jobs:
             --source-ref "refs/heads/release/npm-206-rc1-preparation-20261012" \
             --deny-self-hosted-runners
 
-      - name: Install supported npm CLI (no publisher token)
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22.23.2'
           registry-url: https://registry.npmjs.org
@@ -169,6 +168,7 @@ jobs:
         env:
           RC_DIR: ${{ runner.temp }}/rc1
           NPM_CONFIG_IGNORE_SCRIPTS: 'false'
+          OPERATOR_SOURCE_COMMIT: 13a390b786e947738f11cec7542dd60200997d8b
         run: |
           set -euo pipefail
           test "$NPM_TAG" = next
