@@ -105,3 +105,44 @@ test('thrown mutation does not get a fabricated completion receipt or duplicate 
   assert.equal(body.error.code, 'ACTION_EXECUTION_IN_PROGRESS');
   assert.equal(executions, 1, 'write is never replayed without reconciliation');
 });
+
+test('caller-mislabeled write cannot be treated as side-effect-free read failure', async (t) => {
+  const root = await temp(t);
+  const state = await temp(t);
+  const token = 'c'.repeat(64);
+  let executions = 0;
+  const runtime = {
+    execute: async () => {
+      executions += 1;
+      throw new OperatorError('ACTION_RISK_MISMATCH', 'Write capability was falsely labeled read.');
+    }
+  } as unknown as OperatorRuntime;
+  const store = new LocalActionExecutionStore(state);
+  const agent = createLocalAgentServer({
+    runtime, token,
+    permissions: { allowedCapabilities: ['file.write'], allowedRoots: [root] },
+    actionExecutions: store
+  });
+  t.after(() => agent.close());
+  const bound = await agent.listen();
+  const action = {
+    id: 'misclassified-write',
+    capability: 'file.write',
+    risk: 'read',
+    input: { path: path.join(root, 'blocked.txt'), content: 'never-write' },
+    provenance: { kind: 'chatgpt' }
+  };
+  const req = () => fetch(`http://127.0.0.1:${bound.port}/v1/execute`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ action })
+  });
+  const first = await req();
+  assert.equal(first.status, 400);
+  const record = await store.lookup(action as any);
+  assert.equal(record.status, 'processing', 'untrusted risk cannot finalize a potential mutation');
+  const duplicate = await req();
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json() as any).error.code, 'ACTION_EXECUTION_IN_PROGRESS');
+  assert.equal(executions, 1);
+});
