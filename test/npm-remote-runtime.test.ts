@@ -211,11 +211,22 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /runtime_actual == runtime_declared \| \{'runtime-manifest.json'\}/);
   assert.match(attest, /hashlib\.sha256\(content\)\.hexdigest\(\) == entry\['sha256'\]/);
   assert.match(attest, /archived\.size == entry\['sizeBytes'\]/);
-  assert.match(attest, /duplicate archive member/);
-  assert.match(attest, /member_names\.add\(name\)/);
+  assert.match(attest, /duplicate Windows-canonical archive path/);
+  assert.match(attest, /member\.type in \(tarfile\.REGTYPE, tarfile\.AREGTYPE, tarfile\.DIRTYPE\)/);
+  assert.match(attest, /GNU sparse archive member/);
+  assert.match(attest, /sparse PAX archive metadata/);
+  assert.match(attest, /Windows alias separator in archive/);
+  assert.match(attest, /trailing Windows archive alias/);
+  assert.match(attest, /return '\/'\.join\(parts\)\.casefold\(\)/);
+  assert.match(attest, /manifest\.get\('schemaVersion'\)/);
+  assert.match(attest, /manifest\.get\('platform'\) == 'win32'/);
+  assert.match(attest, /5 <= len\(declared_files\) <= 4096/);
+  assert.match(attest, /missing required native\/runtime files/);
+  assert.match(attest, /1 <= entry\['sizeBytes'\] <= 64 \* 1024 \* 1024/);
+  assert.match(attest, /member_names\.add\(canonical\)/);
   assert.match(attest, /python3 -I - <<'PY'/);
   const directorySkip = attest.indexOf('if member.isdir():\n                      continue');
-  assert.ok(directorySkip > attest.indexOf("member_names.add(name)"),
+  assert.ok(directorySkip > attest.indexOf("member_names.add(canonical)"),
     'every tar entry must be path-validated and deduplicated before directories are skipped');
   assert.match(attest, /packed inventory paths mismatch/);
   assert.match(attest, /source\['runId'\]/);

@@ -273,22 +273,38 @@ jobs:
           with tarfile.open(tarball, 'r:gz') as archive:
               # Never execute any bytes from the untrusted build artifact.
               # Reject duplicate, special, or path-traversing tar entries.
+              # Reject archive paths that Windows/npm could interpret as aliases.
+              # Preserve a single canonical key for case-insensitive extraction.
+              def windows_key(name):
+                  assert isinstance(name, str) and name, 'empty archive path'
+                  assert '\\' not in name, 'Windows alias separator in archive'
+                  parts = name.split('/')
+                  assert all(part not in ('', '.', '..') for part in parts), 'unsafe archive path'
+                  for part in parts:
+                      assert not any(ord(ch) < 32 or ch in '<>:"|?*' for ch in part), 'illegal Windows archive name'
+                      assert not part.endswith((' ', '.')), 'trailing Windows archive alias'
+                      stem = part.split('.')[0].upper()
+                      assert stem not in {'CON', 'PRN', 'AUX', 'NUL'}, 'Windows device name'
+                      assert not re.fullmatch(r'(COM|LPT)[1-9]', stem), 'Windows device name'
+                  return '/'.join(parts).casefold()
+
               file_map = {}
               member_names = set()
               for member in archive.getmembers():
-                  # Directories are validated too: an unsafe or duplicate
-                  # directory must never bypass the tarball integrity fence.
+                  # GNU sparse S is treated as a file by TarInfo.isfile(),
+                  # but npm Windows tar extraction does not share its meaning.
+                  assert member.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE), 'special archive member'
+                  assert not getattr(member, 'sparse', None), 'GNU sparse archive member'
+                  assert not any(k.startswith('GNU.sparse') for k in member.pax_headers), 'sparse PAX archive metadata'
                   name = member.name.rstrip('/') if member.isdir() else member.name
                   assert name == 'package' or name.startswith('package/'), 'unexpected archive root'
-                  relative = name[len('package/'):] if name != 'package' else ''
-                  assert (name == 'package' and member.isdir()) or (
-                      relative and all(part not in ('', '.', '..') for part in relative.split('/'))
-                  ), 'unsafe archive path'
-                  assert name not in member_names, 'duplicate archive member'
-                  member_names.add(name)
+                  canonical = windows_key(name)
+                  assert canonical not in member_names, 'duplicate Windows-canonical archive path'
+                  member_names.add(canonical)
                   if member.isdir():
                       continue
-                  assert member.isfile(), 'packed candidate contains a non-regular file'
+                  assert member.type in (tarfile.REGTYPE, tarfile.AREGTYPE), 'non-regular file'
+                  relative = name[len('package/'):]
                   file_map[relative] = member
 
               inventory_files = inventory['contents']
@@ -301,15 +317,41 @@ jobs:
               assert manifest_member is not None, 'packed runtime manifest missing'
               manifest_bytes = archive.extractfile(manifest_member).read()
               manifest = json.loads(manifest_bytes)
+              # Enforce the installed CLI's validateRuntimeManifest contract,
+              # not just the untrusted tarball's self-consistent inventory.
+              assert isinstance(manifest, dict), 'runtime manifest not an object'
+              assert type(manifest.get('schemaVersion')) is int and manifest['schemaVersion'] == 1, 'manifest schema version'
+              assert manifest.get('package') == 'mecord-connect', 'manifest package identity'
+              assert manifest.get('platform') == 'win32' and manifest.get('arch') == 'x64', 'manifest platform identity'
               assert manifest['version'] == package['version'], 'packed version mismatch'
+              assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', manifest['version']), 'invalid runtime version'
               assert manifest['sourceCommit'] == expected, 'packed source SHA mismatch'
               assert inventory['runtimeManifest']['sourceCommit'] == expected
               assert inventory['runtimeManifest']['sha256'] == hashlib.sha256(manifest_bytes).hexdigest()
               declared_files = manifest['files']
+              assert isinstance(declared_files, list) and 5 <= len(declared_files) <= 4096, 'runtime manifest list limits'
               assert inventory['runtimeManifest']['fileCount'] == len(declared_files)
-              runtime_declared = {entry['path'] for entry in declared_files}
+              required_runtime = {
+                  'app/apps/local-agent/src/remote.js',
+                  'app/apps/local-agent/src/benchmark-runner.js',
+                  'native/operator-windows-dpapi.exe',
+                  'native/operator-windows-uia.exe',
+                  'native/operator-windows-path-lease.exe'
+              }
+              runtime_declared = set()
+              for entry in declared_files:
+                  assert isinstance(entry, dict), 'invalid runtime manifest entry'
+                  relative = entry['path']
+                  assert isinstance(relative, str) and relative, 'invalid runtime manifest path'
+                  assert windows_key('package/runtime/' + relative) == ('package/runtime/' + relative).casefold(), 'unsafe runtime manifest path'
+                  assert type(entry['sizeBytes']) is int and 1 <= entry['sizeBytes'] <= 64 * 1024 * 1024, 'runtime manifest size limit'
+                  assert isinstance(entry['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', entry['sha256']), 'runtime manifest digest'
+                  canonical = relative.casefold()
+                  assert canonical not in runtime_declared, 'duplicate Windows-canonical runtime path'
+                  runtime_declared.add(canonical)
+              assert required_runtime <= {e['path'] for e in declared_files}, 'missing required native/runtime files'
               assert len(runtime_declared) == len(declared_files), 'duplicate runtime manifest path'
-              runtime_actual = {p[len('runtime/'):] for p in file_map if p.startswith('runtime/')}
+              runtime_actual = {p[len('runtime/'):].casefold() for p in file_map if p.startswith('runtime/')}
               assert runtime_actual == runtime_declared | {'runtime-manifest.json'}, 'runtime file set mismatch'
 
               # Independently hash every compiled JS/native runtime byte from the
