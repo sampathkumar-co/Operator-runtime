@@ -171,4 +171,15 @@ await fs.writeFile(reportFile, JSON.stringify(report, null, 2) + '\n');
 process.stdout.write('MECORD_GKKTT227_VISUAL_AUDIT=' + JSON.stringify({
   sourceCommit, reportFile, ...report.counts
 }) + '\n');
+if (failures.length) {
+  // Synthetic audit only: concise, bounded CI diagnostics reveal the exact
+  // failing viewport/tab without requiring artifact ZIP download. The full
+  // evidence report and screenshots remain authoritative.
+  const diagnostics = failures.slice(0, 20).map(failure => ({
+    viewport: failure.viewport, type: failure.type,
+    ...(failure.id ? { id: failure.id } : {}),
+    ...(failure.message ? { message: String(failure.message).slice(0, 300) } : {})
+  }));
+  process.stdout.write('MECORD_GKKTT227_VISUAL_FAILURES=' + JSON.stringify(diagnostics) + '\n');
+}
 if (failures.length || consoles.length) process.exitCode = 1;
