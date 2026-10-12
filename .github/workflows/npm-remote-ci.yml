@@ -18,9 +18,7 @@ on:
       - '.github/workflows/npm-remote-ci.yml'
 
 permissions:
-  attestations: write
   contents: read
-  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -31,6 +29,10 @@ jobs:
     name: Windows npm runtime certification
     runs-on: windows-latest
     timeout-minutes: 20
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
