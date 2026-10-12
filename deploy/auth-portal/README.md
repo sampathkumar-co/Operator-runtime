@@ -30,8 +30,20 @@ directory.
   Open mode ignores this value, so rolling back to `invite` does not require
   resetting existing users.
 - `PORTAL_USERS_FILE`: shared Authelia user database path.
-- `PORTAL_DEFAULT_GROUP`: normal signup group; production uses
-  `operator-users`.
+- `PORTAL_DEFAULT_GROUP`: normal signup group. Open mode fails closed unless this
+  is exactly `operator-users`.
+- `PORTAL_CHALLENGE_SECRET`: at least 32 random characters. Required in open
+  mode to authenticate client-bound, three-second browser signup challenges. Keep
+  this value stable across portal restarts and replicas; it is not an Authelia
+  credential.
+- `PORTAL_TRUSTED_PROXY_IPS`: comma-separated exact proxy addresses allowed to
+  supply `X-Real-IP`. Production uses the shared Caddy address. Requests from
+  any other peer ignore the header.
+- `PORTAL_SECURITY_STATE_FILE`: persistent signup limiter/quota state. Defaults
+  to `<PORTAL_USERS_FILE>.portal-security.json` and must be on the same durable
+  writable volume.
+- `PORTAL_MAX_USERS`: hard ceiling for all file-backed users. Required in open
+  mode and must be set above the verified existing account count.
 - Reverse proxy `/signup`, `/signup/*`, `/recover`, `/pair`, `/pair/*`, and the
   active root/consent OAuth entry (`/?flow=openid_connect&flow_id=...`) to this service.
 - Configure the dedicated public PKCE client `mecord-device-pairing-v1` with only
@@ -47,13 +59,20 @@ directory.
 - Authelia must mount the same user database read-only and enable its file
   watcher so atomic portal updates reload without restarts.
 
-Open signup keeps per-IP throttling (4 attempts per 15 minutes) and adds a
-process-wide ceiling of 60 attempts per 15 minutes; invite signup keeps its
-existing 8-attempt per-IP limit. These in-memory limits are only defense in depth,
-not a substitute for an ingress-layer distributed rate limit, anti-bot challenge,
-email verification, or monitoring. In multi-replica deployments, enforce shared
-limits before enabling `open`. Registration creates only `operator-users` and
-never entitles the new account to Developer MCP access.
+Open signup uses a persistent four-attempt-per-client, 15-minute limit and a
+signed, client-bound, time-gated browser challenge. Invite signup uses a persistent eight-attempt
+limit. The portal stores only an HMAC of each client address, trusts forwarded
+addresses only from configured proxy peers, and has no attacker-exhaustible
+global attempt counter. The persistent total-user quota bounds file-store growth.
+Production must run exactly one auth-portal replica/writer; neither the users
+file nor the limiter JSON provides cross-process transactions. Ingress-layer
+distributed limiting and monitoring remain recommended.
+
+Email ownership verification is not currently enforced. This is an explicitly
+accepted residual risk for the initial open-signup deployment: an account may
+assert an email address it does not own. Do not treat the OIDC `email` claim as
+verified until a later verification flow is deployed. Registration creates only
+`operator-users` and never entitles the new account to Developer MCP access.
 
 Passwords are hashed in-process with Argon2id using the production Authelia
 parameters: 64 MiB memory, 3 iterations, parallelism 4, 32-byte output.
