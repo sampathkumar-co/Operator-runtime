@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - 'packages/mecord-connect/**'
+      - 'packages/adaptive-intelligence/src/**'
+      - 'packages/verified-plan-runtime/src/**'
       - 'apps/local-agent/**'
       - 'src/**'
       - 'native/windows-dpapi/**'
