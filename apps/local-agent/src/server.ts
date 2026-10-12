@@ -2340,6 +2340,7 @@ export function createLocalAgentServer(options: {
     }
 
     if (pathname === '/v1/execute' && req.method === 'POST') {
+      let unfinishedRead: { action: ActionRequest; authority?: ApprovalAuthorityContext } | undefined;
       try {
         if (options.emergencyStop && (await options.emergencyStop.status()).engaged) {
           await options.audit?.append({
@@ -2361,6 +2362,9 @@ export function createLocalAgentServer(options: {
         assertEnterpriseApprovalBinding(relayRequest, requestEnterpriseContext, approvalAuthority);
         if (options.actionExecutions) {
           let receipt = await options.actionExecutions.begin(action, approvalAuthority);
+          if (receipt.status === 'started' && action.risk === 'read' && capabilityRiskRule(action.capability) === 'read') {
+            unfinishedRead = { action, authority: approvalAuthority };
+          }
           if (options.agentKernel && receipt.status !== 'started') {
             const reconciled = await options.actionExecutions.reconcileWithKernel(action, approvalAuthority, options.agentKernel.journal);
             if (reconciled.status === 'missing') {
@@ -2482,8 +2486,36 @@ export function createLocalAgentServer(options: {
             await options.actionExecutions.complete(action, result, approvalAuthority);
           }
         }
+        unfinishedRead = undefined;
         send(res, result.ok ? 200 : 409, result);
       } catch (error) {
+        // Any exception after a canonically read-only receipt starts (including
+        // approval, verification or post-execution hooks) must not leave it
+        // permanently processing. A failed read has no mutating outcome to replay.
+        // Receipt persistence failure still fails closed; never fabricate a write
+        // or a successful outcome when durable completion cannot be proven.
+        if (unfinishedRead && options.actionExecutions) {
+          const failure: ActionResult = {
+            ok: false,
+            capability: unfinishedRead.action.capability,
+            provider: 'operator.local',
+            evidence: [],
+            error: {
+              code: error instanceof OperatorError ? error.code : 'LOCAL_READ_EXECUTION_FAILED',
+              message: error instanceof OperatorError ? error.message : 'Local read request failed.',
+              retryable: false,
+              sideEffectState: 'none'
+            },
+            durationMs: 0
+          };
+          try {
+            await options.actionExecutions.complete(unfinishedRead.action, failure, unfinishedRead.authority);
+            send(res, 409, failure);
+            return;
+          } catch {
+            // Durable receipt could not be completed; preserve uncertain state.
+          }
+        }
         const message = error instanceof Error ? error.message : String(error);
         const explicitCode = typeof (error as any)?.code === 'string' ? String((error as any).code) : undefined;
         const code = message === 'REQUEST_TOO_LARGE' ? 'REQUEST_TOO_LARGE' : explicitCode ?? 'BAD_REQUEST';
