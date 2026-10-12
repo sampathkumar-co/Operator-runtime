@@ -419,3 +419,15 @@ test('legacy result-first crash window is upgraded only with embedded kernel ver
   assert.equal(recovered.transitions.at(-1)?.verificationDigest, verificationDigest);
   assert.deepEqual(await new ActionTransitionJournal(state).replayCompleted(request.id), output);
 });
+
+test('mislabeled write may not reclaim a processing receipt as if it were a harmless read', async (t) => {
+  const state = await temp(t);
+  const spoofed = {
+    ...action('spoofed-read-label'),
+    risk: 'read' as const
+  };
+  const first = new LocalActionExecutionStore(state);
+  assert.equal((await first.begin(spoofed, authority)).status, 'started');
+  const restarted = new LocalActionExecutionStore(state);
+  assert.equal((await restarted.begin(spoofed, authority)).status, 'processing');
+});
