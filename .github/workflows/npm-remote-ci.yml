@@ -18,7 +18,9 @@ on:
       - '.github/workflows/npm-remote-ci.yml'
 
 permissions:
+  attestations: write
   contents: read
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
@@ -97,7 +99,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'required relay fail-closed test failed' }
 
       - name: Certify packed npm artifact
+        id: candidate
         shell: pwsh
+        env:
+          OPERATOR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           $packDir = Join-Path $env:RUNNER_TEMP 'mecrod-pack'
@@ -128,6 +133,46 @@ jobs:
             throw "packed artifact must not contain TypeScript runtime files: $($typescriptRuntime -join ', ')"
           }
           $tgz = Join-Path $packDir $pack[0].filename
+          $runtimeManifestPath = 'packages/mecord-connect/runtime/runtime-manifest.json'
+          $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw | ConvertFrom-Json
+          if ($runtimeManifest.sourceCommit -ne $env:OPERATOR_SOURCE_COMMIT) {
+            throw "runtime manifest source $($runtimeManifest.sourceCommit) does not match workflow source $env:OPERATOR_SOURCE_COMMIT"
+          }
+          if ($runtimeManifest.version -ne $pkg.version) {
+            throw "runtime manifest version $($runtimeManifest.version) does not match package version $($pkg.version)"
+          }
+          $tgzHash = (Get-FileHash -LiteralPath $tgz -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumPath = "$tgz.sha256"
+          Set-Content -LiteralPath $checksumPath -Value "$tgzHash  $($pack[0].filename)" -NoNewline -Encoding ascii
+          $manifestHash = (Get-FileHash -LiteralPath $runtimeManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $inventoryPath = Join-Path $packDir 'artifact-inventory.json'
+          $inventory = [ordered]@{
+            schemaVersion = 1
+            package = [ordered]@{
+              name = $pkg.name
+              version = $pkg.version
+              filename = $pack[0].filename
+              sizeBytes = (Get-Item -LiteralPath $tgz).Length
+              sha256 = $tgzHash
+              integrity = $pack[0].integrity
+            }
+            source = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              commit = $env:OPERATOR_SOURCE_COMMIT
+              workflow = $env:GITHUB_WORKFLOW
+              runId = $env:GITHUB_RUN_ID
+              runAttempt = $env:GITHUB_RUN_ATTEMPT
+            }
+            runtimeManifest = [ordered]@{
+              sourceCommit = $runtimeManifest.sourceCommit
+              sha256 = $manifestHash
+              fileCount = @($runtimeManifest.files).Count
+            }
+            contents = @($pack[0].files | Sort-Object path | ForEach-Object {
+              [ordered]@{ path = $_.path; sizeBytes = $_.size; mode = $_.mode }
+            })
+          }
+          Set-Content -LiteralPath $inventoryPath -Value ($inventory | ConvertTo-Json -Depth 8) -Encoding utf8
           npm install --prefix $installDir --ignore-scripts $tgz
           if ($LASTEXITCODE -ne 0) { throw 'packed artifact install failed' }
           node (Join-Path $installDir 'node_modules/mecord-connect/bin/operator.mjs') doctor
@@ -151,6 +196,29 @@ jobs:
             throw "installed runtime did not execute from node_modules to the secure launcher guard: $($remoteGuard -join ' | ')"
           }
           $global:LASTEXITCODE = 0
+          "package_version=$($pkg.version)" >> $env:GITHUB_OUTPUT
+          "package_path=$tgz" >> $env:GITHUB_OUTPUT
+          "package_sha256=$tgzHash" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+          "inventory_path=$inventoryPath" >> $env:GITHUB_OUTPUT
+
+      - name: Attest exact-source npm candidate provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: ${{ steps.candidate.outputs.package_path }}
+
+      - name: Upload exact-source npm candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mecord-connect-${{ steps.candidate.outputs.package_version }}-${{ github.sha }}
+          path: |
+            ${{ steps.candidate.outputs.package_path }}
+            ${{ steps.candidate.outputs.checksum_path }}
+            ${{ steps.candidate.outputs.inventory_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
 
   node-compatibility:
     name: Node ${{ matrix.node }} launcher compatibility

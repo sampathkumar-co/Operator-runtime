@@ -171,6 +171,14 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /previousErrorActionPreference/);
   assert.match(workflow, /\$ErrorActionPreference = 'Continue'/);
   assert.match(workflow, /\$global:LASTEXITCODE = 0/);
+  assert.match(workflow, /Get-FileHash -LiteralPath \$tgz -Algorithm SHA256/);
+  assert.match(workflow, /artifact-inventory\.json/);
+  assert.match(workflow, /runtime manifest source .* does not match workflow source/);
+  assert.match(workflow, /actions\/attest-build-provenance@[0-9a-f]{40}/);
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(workflow, /mecord-connect-\$\{\{ steps\.candidate\.outputs\.package_version \}\}-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /compression-level: 0/);
+  assert.match(workflow, /retention-days: 14/);
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
