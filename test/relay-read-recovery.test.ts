@@ -6,6 +6,7 @@ import test from 'node:test';
 import { createLocalAgentServer } from '../apps/local-agent/src/server.ts';
 import { LocalActionExecutionStore } from '../apps/local-agent/src/action-execution-store.ts';
 import { OperatorError } from '../src/core/errors.ts';
+import { CAPABILITY_RISK_RULES } from '../src/core/capability-policy.ts';
 import type { OperatorRuntime } from '../src/core/runtime.ts';
 
 async function temp(t: test.TestContext): Promise<string> {
@@ -190,4 +191,39 @@ test('post-dispatch read completion failure is durably finalized rather than str
   assert.equal(persisted.receipt.status, 'completed');
   assert.equal(persisted.result.error.code, 'READ_COMPLETION_HOOK_FAILED');
   assert.equal(hits, 1);
+});
+
+test('all canonically read-only capability failures finish durable receipts', async (t) => {
+  const root = await temp(t);
+  const state = await temp(t);
+  const capabilities = Object.entries(CAPABILITY_RISK_RULES)
+    .filter(([, risk]) => risk === 'read')
+    .map(([capability]) => capability);
+  assert.ok(capabilities.length >= 15, 'exercise the full registered read-only capability family');
+  const token = 'e'.repeat(64);
+  const runtime = {
+    execute: async () => {
+      throw new OperatorError('RESOURCE_TARGET_REQUIRED', 'Synthetic resource identity failure');
+    }
+  } as unknown as OperatorRuntime;
+  const store = new LocalActionExecutionStore(state);
+  const agent = createLocalAgentServer({
+    runtime, token, actionExecutions: store,
+    permissions: { allowedCapabilities: capabilities, allowedRoots: [root] }
+  });
+  t.after(() => agent.close());
+  const bound = await agent.listen();
+  for (const [index, capability] of capabilities.entries()) {
+    const action = {
+      id: `read-capability-${index}`, capability, risk: 'read',
+      input: {}, provenance: { kind: 'chatgpt' }
+    };
+    const response = await fetch(`http://127.0.0.1:${bound.port}/v1/execute`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    assert.equal(response.status, 409, capability);
+    assert.equal((await response.json() as any).error.code, 'RESOURCE_TARGET_REQUIRED', capability);
+    assert.equal((await store.lookup(action as any)).status, 'completed', capability);
+  }
 });
