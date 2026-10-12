@@ -243,7 +243,7 @@ jobs:
           EXPECTED_SOURCE: ${{ github.sha }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import hashlib
           import json
           import os
@@ -274,14 +274,21 @@ jobs:
               # Never execute any bytes from the untrusted build artifact.
               # Reject duplicate, special, or path-traversing tar entries.
               file_map = {}
+              member_names = set()
               for member in archive.getmembers():
+                  # Directories are validated too: an unsafe or duplicate
+                  # directory must never bypass the tarball integrity fence.
+                  name = member.name.rstrip('/') if member.isdir() else member.name
+                  assert name == 'package' or name.startswith('package/'), 'unexpected archive root'
+                  relative = name[len('package/'):] if name != 'package' else ''
+                  assert (name == 'package' and member.isdir()) or (
+                      relative and all(part not in ('', '.', '..') for part in relative.split('/'))
+                  ), 'unsafe archive path'
+                  assert name not in member_names, 'duplicate archive member'
+                  member_names.add(name)
                   if member.isdir():
                       continue
                   assert member.isfile(), 'packed candidate contains a non-regular file'
-                  assert member.name.startswith('package/'), 'unexpected archive root'
-                  relative = member.name[len('package/'):]
-                  assert relative and all(part not in ('', '.', '..') for part in relative.split('/')), 'unsafe archive path'
-                  assert relative not in file_map, 'duplicate archive member'
                   file_map[relative] = member
 
               inventory_files = inventory['contents']

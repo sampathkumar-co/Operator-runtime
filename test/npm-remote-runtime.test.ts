@@ -212,6 +212,11 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.match(attest, /hashlib\.sha256\(content\)\.hexdigest\(\) == entry\['sha256'\]/);
   assert.match(attest, /archived\.size == entry\['sizeBytes'\]/);
   assert.match(attest, /duplicate archive member/);
+  assert.match(attest, /member_names\.add\(name\)/);
+  assert.match(attest, /python3 -I - <<'PY'/);
+  const directorySkip = attest.indexOf('if member.isdir():\n                      continue');
+  assert.ok(directorySkip > attest.indexOf("member_names.add(name)"),
+    'every tar entry must be path-validated and deduplicated before directories are skipped');
   assert.match(attest, /packed inventory paths mismatch/);
   assert.match(attest, /source\['runId'\]/);
   assert.match(attest, /steps\.verify\.outputs\.subject_path/);
