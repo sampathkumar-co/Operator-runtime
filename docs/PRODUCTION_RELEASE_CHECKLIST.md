@@ -7,6 +7,13 @@
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
 
+### 2026-10-12 fixed Track A npm witness and provenance CERTIFIED (final head)
+
+- [x] Final source head `50a18e6cd6f0e40b722c15bf5bfc7e7b7fcfa213`: [npm push CI 38204360069](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38204360069) and [npm PR CI 38204364610](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38204364610) **SUCCESS**. Both independently compiled separate Windows runtime payloads and matched all 287 generated runtime files under the explicit PE metadata-only normalization contract.
+- [x] [Final source-bound signed attestation 54926419](https://github.com/sampathkumar-co/Operator-runtime/attestations/54926419) created **after** independent comparison passed, with artifact `mecord-connect-2.0.6-50a18e6cd6f0e40b722c15bf5bfc7e7b7fcfa213`, GitHub ID `11727070657`, inner .tgz SHA-256 `997c5a8fe2b96401c4d27f805f16a7aeac0f7b4d8e4bc5e2f3a66a19554963a4`. In PR npm run, the privileged attestation job was correctly SKIPPED.
+- [x] Workflow protects release-critical `.gitattributes` updates via PR path filter and source regression test; source byte checkout and static Git blob checks remain enforced.
+- [ ] Other exact-head workflows (general CI, R1, R2, Windows Signing Smoke, full Ubuntu/Windows/macOS matrix) must be terminal green; any queued/running jobs are not assumed to pass.
+- [ ] Independent human security approval of PR #311 and PR #309; controlled integration into #295 and new combined-head certification remain required. This is **not** authorization to publish npm.
 ### 2026-10-12 independent witness implementation checkpoint
 
 - [x] Exact source `6bdbc7bedff8d401e3f80fe983394e6b7c0d5cc7`: both GitHub Actions Windows-build jobs passed, independent JS+normalized-PE comparison passed for both push and PR, and push-only [npm provenance #54925408](https://github.com/sampathkumar-co/Operator-runtime/attestations/54925408) was signed after the comparison succeeded. Inner tarball SHA-256: `5d011881a298eff36146c2b0ed0e790fc8129d70b67dd52f6ea6bedc87f77d73`; artifact ID `11726337877`. **Historical evidence only** after subsequent changes.
