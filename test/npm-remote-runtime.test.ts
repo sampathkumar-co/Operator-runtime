@@ -182,6 +182,36 @@ test('npm runtime CI emits push evidence for every branch SHA', async () => {
   assert.match(workflow, /--test test\/npm-remote-runtime\.test\.ts test\/npm-policy-continuity\.test\.ts/);
 });
 
+
+test('every push SHA retains independent CI evidence even if a new push or PR starts', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  assert.match(workflow, /group: .*github\.workflow.*github\.event_name.*github\.run_id.*github\.event\.pull_request\.number/);
+  assert.match(workflow, /cancel-in-progress: .*github\.event_name == 'pull_request'/);
+  assert.doesNotMatch(workflow, /group: .*github\.head_ref \|\| github\.ref_name/);
+  assert.doesNotMatch(workflow, /cancel-in-progress: true/);
+});
+
+test('PR npm builds cannot obtain attestation credentials; push-only job checks tarball bytes', async () => {
+  const workflow = await fs.readFile(path.resolve('.github/workflows/npm-remote-ci.yml'), 'utf8');
+  const windows = workflow.split('  windows-runtime:\n')[1]?.split('  attest-candidate:\n')[0];
+  const attest = workflow.split('  attest-candidate:\n')[1]?.split('  node-compatibility:\n')[0];
+  assert.ok(windows && attest, 'independent Windows build and attestation jobs required');
+  assert.match(windows, /permissions:\n      contents: read/);
+  assert.doesNotMatch(windows, /(?:id-token|attestations): write/);
+  assert.doesNotMatch(windows, /actions\/attest-build-provenance/);
+  assert.match(attest, /if: github\.event_name == 'push'/);
+  assert.match(attest, /needs: windows-runtime/);
+  assert.match(attest, /attestations: write/);
+  assert.match(attest, /id-token: write/);
+  assert.match(attest, /actions\/download-artifact@[0-9a-f]{40}/);
+  assert.match(attest, /actions\/attest-build-provenance@[0-9a-f]{40}/);
+  assert.match(attest, /hashlib\.sha256\(tarball\.read_bytes\(\)\)/);
+  assert.match(attest, /manifest\['sourceCommit'\] == expected/);
+  assert.match(attest, /source\['runId'\]/);
+  assert.match(attest, /steps\.verify\.outputs\.subject_path/);
+  assert.doesNotMatch(attest, /actions\/checkout|cargo build|npm install|npm pack/);
+});
+
 test('runtime launcher allows only supported Windows x64 Node lines', () => {
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.14.0'));
   assert.doesNotThrow(() => assertSupportedRuntime('win32', 'x64', '22.23.2'));
