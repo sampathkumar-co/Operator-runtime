@@ -7,6 +7,20 @@
 
 This is a *live execution tracker*, not a claim that any missing tests passed. Mark items `[x]` **only** after collecting reproducible evidence (commit SHA, exact command/run, machine, test outcome, time). Every subsequent project change should update this checklist and report the changed lines/checkmarks to the user. An already-green CI run on a predecessor commit is not certification of a newer head.
 
+### 2026-10-12 fixed-scope Track A generated-runtime witness
+
+**No more open-ended audit loops; these are the concrete acceptance criteria for PR #311.**
+
+- [x] A second, read-only Windows GitHub runner independently builds all generated JS and three native helpers from the exact source SHA with pinned Node 22.23.2 and Rust 1.98.1.
+- [x] A read-only comparison job requires exact file-set equality, byte-identical generated JS, and byte-identical PE executables after *only* COFF/debug timestamps and RSDS PDB GUID normalization. Every other native byte must match.
+- [x] The separate push-only provenance job requires SUCCESS from both the primary Windows builder and the independent witness comparison. PR runs have no OIDC/provenance-write authority.
+- [x] Tamper-negative local tests: modified generated JS and a changed non-metadata PE byte are rejected; two actual GitHub-built executables with timestamp/debug-identifier-only drift compare successfully.
+- [ ] Exact-head CI for PR #311 source `6bdbc7bedff8d401e3f80fe983394e6b7c0d5cc7`: npm push and PR, witness comparison, signed push-only provenance, native Windows checks, Node 22/24/26, general CI, R1, R2, Windows signing, and all three Platform Matrix operating systems must each be terminal SUCCESS.
+- [ ] Independent HUMAN security reviewer approves PR #311's final head and PR #309, specifically reviewing witness verification, narrowly masked native metadata, workflow trust/permissions, and source binding.
+- [ ] Controlled merge of approved #311 and #309 into draft PR #295; certify the NEW integrated SHA. Older PR-head tarball/attestation evidence cannot substitute for final integrated/main evidence.
+- [ ] Track B independently administered signer/reviewer/external CAS/off-domain recovery witness, physical cross-host and installed authorization parity, recovery/rollback, and npm owner-approved staging remain separate production release gates.
+
+**Exit rule:** Once exact-head CI, signed witness/provenance and independent review are green, stop speculative re-reviews and proceed to controlled integration. New blocks require concrete reproducible violations of this fixed contract. No deployment, package publication or changes to protected runtime until all release gates clear.
 ### 2026-10-12 canonical source-byte attestation checkpoint (latest)
 
 - [x] **Latest signed 2.0.6 candidate**: [PR #311](https://github.com/sampathkumar-co/Operator-runtime/pull/311) exact head `3bcd5235ce9fe4f7547753d73a5903199e9b1f09`, [push npm CI #38202553386](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38202553386) **SUCCESS**, [PR npm CI #38202557434](https://github.com/sampathkumar-co/Operator-runtime/actions/runs/38202557434) **SUCCESS**, push-only [signed attestation #54921749](https://github.com/sampathkumar-co/Operator-runtime/attestations/54921749). Artifact ID `11726153191`, inner tarball SHA-256 `3bfa79e5dd8418b1e45de6f37d2db55ebf8137a7d3c1d0fbd18553e43e1be621`. Attestation independently downloaded every committed static package blob and verified packed bytes, metadata, runtime manifest/hashes and exact source identity.
