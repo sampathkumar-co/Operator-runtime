@@ -151,7 +151,12 @@ export class LocalAgentRelayRunner {
         await this.#submitResultWithRetry(seq, deliveryId, safe);
         return 'ack';
       }
-      if (recovered.state === 'processing') return 'stop';
+      if (recovered.state === 'processing') {
+        // A canonically read-only action can be revalidated and retried without
+        // replaying a mutation. The local receipt owner will still refuse a
+        // concurrent in-flight read; backoff prevents a rapid reconnect loop.
+        return canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
+      }
     }
     return delivery && canRetryUncertainRelayDelivery(delivery) ? 'retry' : 'stop';
   }
