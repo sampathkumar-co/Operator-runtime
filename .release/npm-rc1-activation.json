@@ -5,5 +5,6 @@
   "targetTag": "next",
   "publicationMode": "stage",
   "enabled": true,
-  "ownerInstruction": "Stage signed RC1 via GitHub with laptop offline; no stable promotion"
+  "ownerInstruction": "Stage signed RC1 via GitHub with laptop offline; no stable promotion",
+  "activationAttempt": 2
 }

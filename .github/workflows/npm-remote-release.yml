@@ -302,7 +302,7 @@ jobs:
 
   stage-rc1:
     name: Stage source-matched signed 2.0.6-rc.1 (next only)
-    if: github.ref == 'refs/heads/release/npm-206-rc1-preparation-20261012' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && contains(github.event.head_commit.added, '.release/npm-rc1-activation.json')))
+    if: github.ref == 'refs/heads/release/npm-206-rc1-preparation-20261012' && github.repository == 'sampathkumar-co/Operator-runtime' && ((github.event_name == 'workflow_dispatch' && inputs.npm_tag == 'next' && inputs.publication_mode == 'stage') || (github.event_name == 'push' && github.actor == 'sampathkumar-co'))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -325,6 +325,7 @@ jobs:
         run: |
           set -euo pipefail
           gh api "/repos/$RC_REPO/contents/.release/npm-rc1-activation.json?ref=$GITHUB_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/rc-activation.json"
+          gh api "/repos/$RC_REPO/commits/$GITHUB_SHA" > "$RUNNER_TEMP/rc-activation-commit.json"
           python3 -I - <<'PY'
           import json, os, pathlib
           actual = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation.json').read_text())
@@ -332,11 +333,13 @@ jobs:
               'schemaVersion': 1, 'package': 'mecord-connect', 'version': '2.0.6-rc.1',
               'targetTag': 'next', 'publicationMode': 'stage', 'enabled': True,
               'ownerInstruction': 'Stage signed RC1 via GitHub with laptop offline; no stable promotion',
+              'activationAttempt': 2,
           }
           assert actual == expected, 'activation content not exactly authorized'
+          commit = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'rc-activation-commit.json').read_text())
+          assert commit['sha'] == os.environ['GITHUB_SHA'], 'activation commit identity mismatch'
+          assert any(f['filename'] == '.release/npm-rc1-activation.json' and f['status'] in ('added', 'modified') for f in commit['files']), 'activation was not committed in this push'
           event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
-          assert event['head_commit']['id'] == os.environ['GITHUB_SHA'], 'activation commit identity mismatch'
-          assert '.release/npm-rc1-activation.json' in event['head_commit']['added'], 'not a one-time activation push'
           assert event['repository']['full_name'] == os.environ['RC_REPO'], 'unexpected repository'
           print('one-time RC1 stage-only activation verified')
           PY
