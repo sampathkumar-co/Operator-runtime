@@ -23,7 +23,7 @@ if (!Number.isSafeInteger(maxUsers) || maxUsers < 1) throw new Error('INVALID_PO
 const rawTrustedProxyIps = String(process.env.PORTAL_TRUSTED_PROXY_IPS || '').split(',').map((value) => value.trim()).filter(Boolean);
 const normalizedTrustedProxyIps = rawTrustedProxyIps.map((value) => normalizeIp(value));
 if (normalizedTrustedProxyIps.some((value) => !value)) throw new Error('INVALID_PORTAL_TRUSTED_PROXY_IPS');
-if (openSignup && normalizedTrustedProxyIps.length === 0) throw new Error('OPEN_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS');
+if (normalizedTrustedProxyIps.length === 0) throw new Error(openSignup ? 'OPEN_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS' : 'INVITE_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS');
 const trustedProxyIps = new Set(normalizedTrustedProxyIps);
 const challengeMinAgeMs = process.env.NODE_ENV === 'test' ? Number(process.env.PORTAL_CHALLENGE_MIN_AGE_MS || 0) : 3000;
 const maxRateBuckets = 10_000;
@@ -111,7 +111,7 @@ function issueSignupChallenge(ip) {
   const client = createHmac('sha256', challengeSecret).update(ip).digest('base64url');
   const value = Buffer.from(JSON.stringify({ nonce: randomBytes(18).toString('base64url'), client, issuedAt, expiresAt: issuedAt + 15 * 60_000 })).toString('base64url');
   const signature = createHmac('sha256', challengeSecret).update(value).digest('base64url');
-  return { token: value + '.' + signature, readyAt: issuedAt + challengeMinAgeMs, expiresAt: issuedAt + 15 * 60_000 };
+  return { token: value + '.' + signature, minAgeMs: challengeMinAgeMs, readyAt: issuedAt + challengeMinAgeMs, expiresAt: issuedAt + 15 * 60_000 };
 }
 
 function verifySignupChallenge(token, ip) {
@@ -306,7 +306,7 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     const r=await fetch('/signup/challenge',{credentials:'same-origin'});
     const j=await r.json().catch(()=>({}));
     if(!r.ok||!j.token)throw new Error('Secure signup could not be prepared.');
-    signupChallenge=j;
+    signupChallenge={...j, receivedAt:performance.now()};
   }
   function show(which){
     const login=which==='signin';
@@ -422,9 +422,10 @@ ${openSignup ? "" : '<label for="signupInvite">Registration code</label><input i
     msg.className='msg';msg.textContent='Creating account...';btn.disabled=true;
     try{
       if(${openSignup}&&!signupChallenge)await loadSignupChallenge();
-      if(signupChallenge&&Date.now()<signupChallenge.readyAt){
+      const challengeRemainingMs=signupChallenge?Math.max(0,signupChallenge.minAgeMs-(performance.now()-signupChallenge.receivedAt)):0;
+      if(challengeRemainingMs>0){
         msg.textContent='Preparing secure signup...';
-        await new Promise((resolve)=>setTimeout(resolve,signupChallenge.readyAt-Date.now()));
+        await new Promise((resolve)=>setTimeout(resolve,challengeRemainingMs+100));
       }
       const payload={username:username,email:byId('signupEmail').value,password:password,challenge:signupChallenge&&signupChallenge.token};
       const inviteField=byId('signupInvite');

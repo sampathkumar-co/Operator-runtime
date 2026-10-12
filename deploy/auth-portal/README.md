@@ -36,9 +36,13 @@ directory.
   mode to authenticate client-bound, three-second browser signup challenges. Keep
   this value stable across portal restarts and replicas; it is not an Authelia
   credential.
-- `PORTAL_TRUSTED_PROXY_IPS`: comma-separated exact proxy addresses allowed to
-  supply `X-Real-IP`. Production uses the shared Caddy address. Requests from
-  any other peer ignore the header.
+- `PORTAL_TRUSTED_PROXY_IPS`: **required in both `invite` and `open` modes**;
+  comma-separated exact proxy addresses allowed to supply `X-Real-IP`.
+  Before upgrading the existing invite portal image, configure the effective
+  Caddy peer address or the portal intentionally refuses to start, preventing
+  invite and device-pairing clients from being incorrectly rate-limited under
+  a shared proxy address. Production uses the shared Caddy address. Requests
+  from any other peer ignore the header.
 - `PORTAL_SECURITY_STATE_FILE`: persistent signup limiter/quota state. Defaults
   to `<PORTAL_USERS_FILE>.portal-security.json` and must be on the same durable
   writable volume.
@@ -60,7 +64,9 @@ directory.
   watcher so atomic portal updates reload without restarts.
 
 Open signup uses a persistent four-attempt-per-client, 15-minute limit and a
-signed, client-bound, time-gated browser challenge. Invite signup uses a persistent eight-attempt
+signed, client-bound, time-gated browser challenge. The browser waits using a
+relative delay measured with `performance.now()` rather than comparing client
+and server wall clocks. Invite signup uses a persistent eight-attempt
 limit. The portal stores only an HMAC of each client address, trusts forwarded
 addresses only from configured proxy peers, and has no attacker-exhaustible
 global attempt counter. The persistent total-user quota bounds file-store growth.

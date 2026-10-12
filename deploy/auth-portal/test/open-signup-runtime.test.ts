@@ -184,3 +184,40 @@ test('the authoritative user cap admits only one concurrent final-slot signup', 
   }
 });
 
+
+
+test('invite mode fails closed without explicit trusted proxy configuration', async () => {
+  const dir = await fixture();
+  const port = await freePort();
+  const env = { ...process.env };
+  delete env.PORTAL_TRUSTED_PROXY_IPS;
+  const child = spawn(process.execPath, ['server.mjs'], {
+    cwd: portalRoot,
+    env: { ...env, PORT: String(port), PORTAL_SIGNUP_MODE: 'invite', PORTAL_USERS_FILE: join(dir, 'users.yml') },
+    stdio: ['ignore', 'ignore', 'pipe']
+  });
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+  const [code] = await once(child, 'exit');
+  assert.notEqual(code, 0);
+  assert.match(stderr, /INVITE_SIGNUP_REQUIRES_TRUSTED_PROXY_IPS/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('open signup challenge exposes relative delay for clients with skewed clocks', async () => {
+  const dir = await fixture();
+  const { child, origin } = await startPortal({ dir });
+  try {
+    const response = await fetch(`${origin}/signup/challenge`);
+    assert.equal(response.status, 200);
+    const data = await response.json() as { minAgeMs?: number; readyAt?: number; token?: string };
+    assert.equal(data.minAgeMs, 0);
+    assert.ok(data.token);
+    const page = await (await fetch(`${origin}/signup`)).text();
+    assert.match(page, /performance\\.now\\(\\)/);
+    assert.doesNotMatch(page, /Date\\.now\\(\\)<signupChallenge\\.readyAt/);
+  } finally {
+    await stopPortal(child);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
