@@ -702,7 +702,7 @@ function boundedReadConcurrency(value: unknown): number {
   return parsed;
 }
 
-function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
+export function isConcurrentReadDelivery(delivery: RelayDelivery): boolean {
   if (delivery.kind !== 'action') return false;
   const action = delivery.payload.action;
   if (!action || typeof action !== 'object' || Array.isArray(action)) return false;
