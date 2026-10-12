@@ -232,6 +232,11 @@ test('PR npm builds cannot obtain attestation credentials; push-only job checks 
   assert.ok(directorySkip > attest.indexOf("member_names.add(canonical)"),
     'every tar entry must be path-validated and deduplicated before directories are skipped');
   assert.match(attest, /packed inventory paths mismatch/);
+  assert.match(attest, /file ancestor collision/);
+  assert.match(attest, /required_package <= set\(file_map\)/);
+  assert.match(attest, /embedded_pkg\.get\('name'\) == 'mecord-connect'/);
+  assert.match(attest, /embedded_pkg\.get\('bin', \{\}\)\.get\('mecord-connect'\)/);
+  assert.match(attest, /embedded dual-use disclosure mismatch/);
   assert.match(attest, /source\['runId'\]/);
   assert.match(attest, /steps\.verify\.outputs\.subject_path/);
   assert.doesNotMatch(attest, /actions\/checkout|cargo build|npm install|npm pack/);

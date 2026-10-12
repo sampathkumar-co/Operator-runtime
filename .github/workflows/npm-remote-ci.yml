@@ -307,6 +307,30 @@ jobs:
                   relative = name[len('package/'):]
                   file_map[relative] = member
 
+              # No file may also be an ancestor directory of another member,
+              # even if npm's tar omitted explicit directory headers.
+              file_members = {windows_key('package/' + path) for path in file_map}
+              for member_path in member_names:
+                  segments = member_path.split('/')
+                  for depth in range(1, len(segments)):
+                      assert '/'.join(segments[:depth]) not in file_members, 'file ancestor collision'
+
+              # Do not trust a self-consistent inventory to prove this is a
+              # usable npm package. Independently require the install contract.
+              required_package = {
+                  'package.json', 'bin/operator.mjs', 'LICENSE',
+                  'DISCLOSURE', 'runtime/runtime-manifest.json'
+              }
+              assert required_package <= set(file_map), 'missing required npm package files'
+              assert all(file_map[path].size > 0 for path in required_package), 'empty required npm file'
+              embedded_pkg = json.loads(archive.extractfile(file_map['package.json']).read())
+              assert isinstance(embedded_pkg, dict), 'invalid embedded npm package metadata'
+              assert embedded_pkg.get('name') == 'mecord-connect', 'embedded npm package identity'
+              assert embedded_pkg.get('version') == package['version'], 'embedded npm version mismatch'
+              assert embedded_pkg.get('license') == 'SEE LICENSE IN LICENSE', 'embedded npm license mismatch'
+              assert embedded_pkg.get('contentPolicy') == {'class': 'dual-use'}, 'embedded dual-use disclosure mismatch'
+              assert embedded_pkg.get('bin', {}).get('mecord-connect') == 'bin/operator.mjs', 'embedded npm CLI entrypoint mismatch'
+
               inventory_files = inventory['contents']
               assert len(inventory_files) == len(file_map), 'packed inventory count mismatch'
               assert {entry['path'] for entry in inventory_files} == set(file_map), 'packed inventory paths mismatch'
