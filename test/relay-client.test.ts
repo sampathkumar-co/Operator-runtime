@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { DeviceIdentityStore } from '../src/core/device-identity.ts';
 import { OperatorError } from '../src/core/errors.ts';
-import { RelayClient, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
+import { RelayClient, isConcurrentReadDelivery, reconnectDelay, validateRelayUrl, type RelayClientStatus, type RelayConnectionState, type RelaySocketLike } from '../src/core/relay-client.ts';
 import { createRelayCapabilitySessionBinding, relayCapabilitySessionDigest } from '../src/core/relay-capability-binding.ts';
 
 const TEST_ACCOUNT_ID = '11111111-1111-4111-8111-111111111111';
@@ -1205,4 +1205,16 @@ test('stage7 relay rejects invalid resource profile before opening authority', a
     resourceProfile: { cpuSlots: 0, memoryMb: 16384, gpu: false, tags: [], maxConcurrentJobs: 1 },
     onDelivery: async () => {}
   }), (error: any) => error?.code === 'RELAY_RESOURCE_PROFILE_INVALID');
+});
+
+test('concurrent read scheduling refuses caller-labeled write or unknown capability', () => {
+  const frame = (capability: string, risk = 'read') => ({
+    seq: 1, id: 'concurrency-risk-test', kind: 'action',
+    payload: { action: { id: 'concurrency-risk-test', capability, risk, input: {}, provenance: { kind: 'chatgpt' } } }
+  });
+  assert.equal(isConcurrentReadDelivery(frame('docker.inspect')), true);
+  assert.equal(isConcurrentReadDelivery(frame('file.write')), false);
+  assert.equal(isConcurrentReadDelivery(frame('docker.manage')), false);
+  assert.equal(isConcurrentReadDelivery(frame('not.a.registered.capability')), false);
+  assert.equal(isConcurrentReadDelivery(frame('file.read', 'write')), false);
 });
